@@ -8,7 +8,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |+
@@ -1184,7 +1184,6 @@ local_system:
       pub mod grammar;
       pub mod items;
       pub mod parser;
-      pub mod stats;
       mod tests;
       pub mod analyze;
     src/glr/parser.rs: |
@@ -2007,150 +2006,6 @@ local_system:
               }
           }
       }
-    src/glr/stats.rs: |
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
-      use std::collections::BTreeMap;
-      use std::fmt;
-
-      /// Statistics for a single state in the parse table.
-      #[derive(Debug, Clone, PartialEq, Eq, Default)]
-      pub struct StateStats {
-          /// Total number of terminal lookups (actions).
-          pub total_actions: usize,
-          /// Number of actions that are pure shifts.
-          pub num_shifts: usize,
-          /// Number of actions that are pure reduces.
-          pub num_reduces: usize,
-          /// Number of actions that are splits (conflicts).
-          pub num_splits: usize,
-          /// Number of goto transitions on non-terminals.
-          pub num_gotos: usize,
-          /// Counts occurrences of each unique action type in the state.
-          pub unique_actions: BTreeMap<Stage7ShiftsAndReduces, usize>,
-      }
-
-      /// Contains statistics about a generated GLR parser.
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct GLRStats {
-          /// Total number of productions in the final grammar used by the parser.
-          pub num_productions: usize,
-          /// Total number of terminals.
-          pub num_terminals: usize,
-          /// Total number of non-terminals.
-          pub num_non_terminals: usize,
-          /// Total number of states in the LR(0) automaton.
-          pub num_states: usize,
-          /// Number of (state, terminal) pairs with shift-reduce conflicts.
-          pub num_shift_reduce_conflicts: usize,
-          /// Number of (state, terminal) pairs with reduce-reduce conflicts.
-          pub num_reduce_reduce_conflicts: usize,
-          /// Detailed statistics for each state.
-          pub state_stats: BTreeMap<StateID, StateStats>,
-      }
-
-      impl fmt::Display for GLRStats {
-          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-              writeln!(f, "--- GLR Parser Stats ---")?;
-              writeln!(f, "Grammar: {} productions, {} terminals, {} non-terminals", self.num_productions, self.num_terminals, self.num_non_terminals)?;
-              writeln!(f, "Parse Table: {} states, {} S/R conflicts, {} R/R conflicts", self.num_states, self.num_shift_reduce_conflicts, self.num_reduce_reduce_conflicts)?;
-
-              writeln!(f, "\n--- State Details ---")?;
-              for (state_id, stats) in &self.state_stats {
-                  writeln!(
-                      f,
-                      "State {:<3} │ Actions: {:<3} (S:{}, R:{}, Sp:{}) │ Gotos: {:<2} │ Unique Actions: {}",
-                      state_id.0,
-                      stats.total_actions,
-                      stats.num_shifts,
-                      stats.num_reduces,
-                      stats.num_splits,
-                      stats.num_gotos,
-                      stats.unique_actions.len()
-                  )?;
-
-                  const MAX_UNIQUE_TO_DISPLAY: usize = 5;
-                  if !stats.unique_actions.is_empty() && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY {
-                      for (action, count) in &stats.unique_actions {
-                          let compact_action = match action {
-                              Stage7ShiftsAndReduces::Shift(s) => format!("S→{}", s.0),
-                              Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
-                                  format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
-                              }
-                              Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                                  let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
-                                  let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
-                                      let nt_count = nts.len();
-                                      let p_count: usize = nts.values().map(|pids| pids.len()).sum();
-                                      format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
-                                  }).collect();
-
-                                  if s_part.is_empty() {
-                                      format!("Split[{}]", r_parts.join(", "))
-                                  } else {
-                                      format!("Split[{}, {}]", s_part, r_parts.join(", "))
-                                  }
-                              }
-                          };
-                          writeln!(f, "          └─ (x{:<2}) {}", count, compact_action)?;
-                      }
-                  }
-              }
-              writeln!(f, "---------------------")?;
-              Ok(())
-          }
-      }
-
-      /// Computes various statistics about the generated GLR parser table.
-      pub fn get_stats(parser: &GLRParser) -> GLRStats {
-          let mut num_shift_reduce_conflicts = 0;
-          let mut num_reduce_reduce_conflicts = 0;
-          let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
-
-          for (state_id, row) in &parser.stage_7_table {
-              let mut current_state_stats = StateStats::default();
-              current_state_stats.num_gotos = row.gotos.len();
-              current_state_stats.total_actions = row.shifts_and_reduces.len();
-
-              for (_, action) in &row.shifts_and_reduces {
-                  // Update unique actions count
-                  *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
-
-                  match action {
-                      Stage7ShiftsAndReduces::Shift(_) => {
-                          current_state_stats.num_shifts += 1;
-                      }
-                      Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
-                          current_state_stats.num_reduces += 1;
-                          if production_ids.len() > 1 {
-                              num_reduce_reduce_conflicts += 1;
-                          }
-                      }
-                      Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                          current_state_stats.num_splits += 1;
-                          if shift.is_some() {
-                              num_shift_reduce_conflicts += 1;
-                          }
-                          let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-                          if total_reduce_productions > 1 {
-                              num_reduce_reduce_conflicts += 1;
-                          }
-                      }
-                  }
-              }
-              all_state_stats.insert(*state_id, current_state_stats);
-          }
-
-          GLRStats {
-              num_productions: parser.productions.len(),
-              num_terminals: parser.terminal_map.len(),
-              num_non_terminals: parser.non_terminal_map.len(),
-              num_states: parser.item_set_map.len(),
-              num_shift_reduce_conflicts,
-              num_reduce_reduce_conflicts,
-              state_stats: all_state_stats,
-          }
-      }
     src/glr/table.rs: |
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
       use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
@@ -2208,7 +2063,7 @@ local_system:
           reduces: BTreeSet<ProductionID>,
       }
 
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      #[derive(Debug, Clone, PartialEq, Eq)]
       pub enum Stage7ShiftsAndReduces {
           Shift(StateID),
           Reduce {
@@ -2769,12 +2624,11 @@ local_system:
           }
           non_terminal_map
       }
-    src/glr/tests.rs: |
+    src/glr/tests.rs: |+
       use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
-      use crate::glr::stats;
       use bimap::BiBTreeMap;
       use std::collections::BTreeSet;
       use crate::interface::display_productions;
@@ -3562,7 +3416,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), t("a")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
 
           // --- Test Case 2: No Right-Recursion (should not change) ---
@@ -3571,7 +3425,7 @@ local_system:
               prod("S", vec![t("b")]),
           ];
           let expected2 = prods2.clone();
-          analyze::resolve_direct_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
 
           // --- Test Case 3: Indirect Right-Recursion ---
@@ -3596,7 +3450,7 @@ local_system:
               prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
               prod("B_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
 
           // --- Test Case 4: Hidden Direct Right-Recursion ---
@@ -3611,7 +3465,7 @@ local_system:
               prod("S_prime", vec![]),
               prod("N", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
 
           // --- Test Case 5: Multiple Non-Recursive Choices ---
@@ -3626,7 +3480,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), t("a")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
 
           // --- Test Case 6: Multiple Recursive Choices ---
@@ -3641,7 +3495,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), t("b")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
 
           // --- Test Case 7: Both Left and Right Recursive ---
@@ -3656,7 +3510,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), nt("S")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
       }
 
@@ -3699,43 +3553,6 @@ local_system:
           assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
           assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
       }
-
-      #[test]
-      fn test_parser_stats_conflicts() {
-          // --- Test Reduce/Reduce Conflict ---
-          // Grammar: S -> A | B, A -> x, B -> x
-          // This has a reduce/reduce conflict on 'x'.
-          let rr_productions = vec![
-              prod("S'", vec![nt("S"), t("$")]),
-              prod("S", vec![nt("A")]),
-              prod("S", vec![nt("B")]),
-              prod("A", vec![t("x")]),
-              prod("B", vec![t("x")]),
-          ];
-          let rr_parser = generate_glr_parser(&rr_productions, 0, None);
-          let rr_stats = stats::get_stats(&rr_parser);
-
-          println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
-          assert_eq!(rr_stats.num_shift_reduce_conflicts, 0);
-          assert_eq!(rr_stats.num_reduce_reduce_conflicts, 1, "Expected one R/R conflict");
-
-          // --- Test Shift/Reduce Conflict ---
-          // Grammar: Stmt -> if E then S | if E then S else S | other
-          // This has a shift/reduce conflict on 'else'.
-          let sr_productions = vec![
-              prod("S'", vec![nt("Stmt"), t("$")]),
-              prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
-              prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-              prod("Stmt", vec![t("other")]),
-              prod("Expr", vec![t("id")]),
-          ];
-          let sr_parser = generate_glr_parser(&sr_productions, 0, None);
-          let sr_stats = stats::get_stats(&sr_parser);
-
-          println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
-          assert_eq!(sr_stats.num_shift_reduce_conflicts, 1, "Expected one S/R conflict");
-          assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
-      }
       // --- Notes on Limitations Not Easily Tested Here ---
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
@@ -3748,6 +3565,112 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+    src/glr/stats.rs: |
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
+      use std::collections::BTreeMap;
+      use std::fmt;
+
+      /// Contains statistics about a generated GLR parser.
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct GLRStats {
+          /// Total number of productions in the final grammar used by the parser.
+          pub num_productions: usize,
+          /// Total number of terminals.
+          pub num_terminals: usize,
+          /// Total number of non-terminals.
+          pub num_non_terminals: usize,
+          /// Total number of states in the LR(0) automaton.
+          pub num_states: usize,
+          /// Number of (state, terminal) pairs with shift-reduce conflicts.
+          pub num_shift_reduce_conflicts: usize,
+          /// Number of (state, terminal) pairs with reduce-reduce conflicts.
+          pub num_reduce_reduce_conflicts: usize,
+          /// Maps state ID to the number of (S/R, R/R) conflicts originating from that state.
+          pub conflicts_by_state: BTreeMap<StateID, (usize, usize)>,
+      }
+
+      impl fmt::Display for GLRStats {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              writeln!(f, "--- GLR Parser Stats ---")?;
+              writeln!(f, "Grammar:")?;
+              writeln!(f, "  - Productions: {}", self.num_productions)?;
+              writeln!(f, "  - Terminals: {}", self.num_terminals)?;
+              writeln!(f, "  - Non-Terminals: {}", self.num_non_terminals)?;
+              writeln!(f, "Parse Table:")?;
+              writeln!(f, "  - States: {}", self.num_states)?;
+              writeln!(f, "  - Shift-Reduce Conflicts (by state/terminal): {}", self.num_shift_reduce_conflicts)?;
+              writeln!(f, "  - Reduce-Reduce Conflicts (by state/terminal): {}", self.num_reduce_reduce_conflicts)?;
+              if !self.conflicts_by_state.is_empty() {
+                  writeln!(f, "Conflicts by State (StateID: (S/R, R/R)):")?;
+                  for (state_id, (sr, rr)) in &self.conflicts_by_state {
+                      if *sr > 0 || *rr > 0 {
+                          writeln!(f, "  - State {}: ({}, {})", state_id.0, sr, rr)?;
+                      }
+                  }
+              }
+              writeln!(f, "------------------------")?;
+              Ok(())
+          }
+      }
+
+      /// Computes various statistics about the generated GLR parser table.
+      ///
+      /// This function analyzes the final parse table to count states, conflicts, etc.
+      ///
+      /// # Arguments
+      /// * `parser` - A reference to the `GLRParser` to be analyzed.
+      ///
+      /// # Returns
+      /// A `GLRStats` struct containing the computed statistics.
+      pub fn get_stats(parser: &GLRParser) -> GLRStats {
+          let mut num_shift_reduce_conflicts = 0;
+          let mut num_reduce_reduce_conflicts = 0;
+          let mut conflicts_by_state: BTreeMap<StateID, (usize, usize)> = BTreeMap::new();
+
+          for (state_id, row) in &parser.stage_7_table {
+              let mut sr_conflicts_in_state = 0;
+              let mut rr_conflicts_in_state = 0;
+
+              for (_, action) in &row.shifts_and_reduces {
+                  match action {
+                      Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
+                          if production_ids.len() > 1 {
+                              num_reduce_reduce_conflicts += 1;
+                              rr_conflicts_in_state += 1;
+                          }
+                      }
+                      Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                          if shift.is_some() {
+                              num_shift_reduce_conflicts += 1;
+                              sr_conflicts_in_state += 1;
+                          }
+                          let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+                          if total_reduce_productions > 1 {
+                              num_reduce_reduce_conflicts += 1;
+                              rr_conflicts_in_state += 1;
+                          }
+                      }
+                      _ => {}
+                  }
+              }
+
+              if sr_conflicts_in_state > 0 || rr_conflicts_in_state > 0 {
+                  conflicts_by_state.insert(*state_id, (sr_conflicts_in_state, rr_conflicts_in_state));
+              }
+          }
+
+          GLRStats {
+              num_productions: parser.productions.len(),
+              num_terminals: parser.terminal_map.len(),
+              num_non_terminals: parser.non_terminal_map.len(),
+              num_states: parser.item_set_map.len(),
+              num_shift_reduce_conflicts,
+              num_reduce_reduce_conflicts,
+              conflicts_by_state,
+          }
+      }
   prev_file_contents:
     src/glr/analyze.rs: |+
       use std::cmp::PartialEq;
@@ -4922,7 +4845,6 @@ local_system:
       pub mod grammar;
       pub mod items;
       pub mod parser;
-      pub mod stats;
       mod tests;
       pub mod analyze;
     src/glr/parser.rs: |
@@ -5745,150 +5667,6 @@ local_system:
               }
           }
       }
-    src/glr/stats.rs: |
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
-      use std::collections::BTreeMap;
-      use std::fmt;
-
-      /// Statistics for a single state in the parse table.
-      #[derive(Debug, Clone, PartialEq, Eq, Default)]
-      pub struct StateStats {
-          /// Total number of terminal lookups (actions).
-          pub total_actions: usize,
-          /// Number of actions that are pure shifts.
-          pub num_shifts: usize,
-          /// Number of actions that are pure reduces.
-          pub num_reduces: usize,
-          /// Number of actions that are splits (conflicts).
-          pub num_splits: usize,
-          /// Number of goto transitions on non-terminals.
-          pub num_gotos: usize,
-          /// Counts occurrences of each unique action type in the state.
-          pub unique_actions: BTreeMap<Stage7ShiftsAndReduces, usize>,
-      }
-
-      /// Contains statistics about a generated GLR parser.
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct GLRStats {
-          /// Total number of productions in the final grammar used by the parser.
-          pub num_productions: usize,
-          /// Total number of terminals.
-          pub num_terminals: usize,
-          /// Total number of non-terminals.
-          pub num_non_terminals: usize,
-          /// Total number of states in the LR(0) automaton.
-          pub num_states: usize,
-          /// Number of (state, terminal) pairs with shift-reduce conflicts.
-          pub num_shift_reduce_conflicts: usize,
-          /// Number of (state, terminal) pairs with reduce-reduce conflicts.
-          pub num_reduce_reduce_conflicts: usize,
-          /// Detailed statistics for each state.
-          pub state_stats: BTreeMap<StateID, StateStats>,
-      }
-
-      impl fmt::Display for GLRStats {
-          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-              writeln!(f, "--- GLR Parser Stats ---")?;
-              writeln!(f, "Grammar: {} productions, {} terminals, {} non-terminals", self.num_productions, self.num_terminals, self.num_non_terminals)?;
-              writeln!(f, "Parse Table: {} states, {} S/R conflicts, {} R/R conflicts", self.num_states, self.num_shift_reduce_conflicts, self.num_reduce_reduce_conflicts)?;
-
-              writeln!(f, "\n--- State Details ---")?;
-              for (state_id, stats) in &self.state_stats {
-                  writeln!(
-                      f,
-                      "State {:<3} │ Actions: {:<3} (S:{}, R:{}, Sp:{}) │ Gotos: {:<2} │ Unique Actions: {}",
-                      state_id.0,
-                      stats.total_actions,
-                      stats.num_shifts,
-                      stats.num_reduces,
-                      stats.num_splits,
-                      stats.num_gotos,
-                      stats.unique_actions.len()
-                  )?;
-
-                  const MAX_UNIQUE_TO_DISPLAY: usize = 5;
-                  if !stats.unique_actions.is_empty() && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY {
-                      for (action, count) in &stats.unique_actions {
-                          let compact_action = match action {
-                              Stage7ShiftsAndReduces::Shift(s) => format!("S→{}", s.0),
-                              Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
-                                  format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
-                              }
-                              Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                                  let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
-                                  let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
-                                      let nt_count = nts.len();
-                                      let p_count: usize = nts.values().map(|pids| pids.len()).sum();
-                                      format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
-                                  }).collect();
-
-                                  if s_part.is_empty() {
-                                      format!("Split[{}]", r_parts.join(", "))
-                                  } else {
-                                      format!("Split[{}, {}]", s_part, r_parts.join(", "))
-                                  }
-                              }
-                          };
-                          writeln!(f, "          └─ (x{:<2}) {}", count, compact_action)?;
-                      }
-                  }
-              }
-              writeln!(f, "---------------------")?;
-              Ok(())
-          }
-      }
-
-      /// Computes various statistics about the generated GLR parser table.
-      pub fn get_stats(parser: &GLRParser) -> GLRStats {
-          let mut num_shift_reduce_conflicts = 0;
-          let mut num_reduce_reduce_conflicts = 0;
-          let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
-
-          for (state_id, row) in &parser.stage_7_table {
-              let mut current_state_stats = StateStats::default();
-              current_state_stats.num_gotos = row.gotos.len();
-              current_state_stats.total_actions = row.shifts_and_reduces.len();
-
-              for (_, action) in &row.shifts_and_reduces {
-                  // Update unique actions count
-                  *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
-
-                  match action {
-                      Stage7ShiftsAndReduces::Shift(_) => {
-                          current_state_stats.num_shifts += 1;
-                      }
-                      Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
-                          current_state_stats.num_reduces += 1;
-                          if production_ids.len() > 1 {
-                              num_reduce_reduce_conflicts += 1;
-                          }
-                      }
-                      Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                          current_state_stats.num_splits += 1;
-                          if shift.is_some() {
-                              num_shift_reduce_conflicts += 1;
-                          }
-                          let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-                          if total_reduce_productions > 1 {
-                              num_reduce_reduce_conflicts += 1;
-                          }
-                      }
-                  }
-              }
-              all_state_stats.insert(*state_id, current_state_stats);
-          }
-
-          GLRStats {
-              num_productions: parser.productions.len(),
-              num_terminals: parser.terminal_map.len(),
-              num_non_terminals: parser.non_terminal_map.len(),
-              num_states: parser.item_set_map.len(),
-              num_shift_reduce_conflicts,
-              num_reduce_reduce_conflicts,
-              state_stats: all_state_stats,
-          }
-      }
     src/glr/table.rs: |
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
       use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
@@ -5946,7 +5724,7 @@ local_system:
           reduces: BTreeSet<ProductionID>,
       }
 
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      #[derive(Debug, Clone, PartialEq, Eq)]
       pub enum Stage7ShiftsAndReduces {
           Shift(StateID),
           Reduce {
@@ -6507,12 +6285,11 @@ local_system:
           }
           non_terminal_map
       }
-    src/glr/tests.rs: |
+    src/glr/tests.rs: |+
       use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
-      use crate::glr::stats;
       use bimap::BiBTreeMap;
       use std::collections::BTreeSet;
       use crate::interface::display_productions;
@@ -7300,7 +7077,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), t("a")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
 
           // --- Test Case 2: No Right-Recursion (should not change) ---
@@ -7309,7 +7086,7 @@ local_system:
               prod("S", vec![t("b")]),
           ];
           let expected2 = prods2.clone();
-          analyze::resolve_direct_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
 
           // --- Test Case 3: Indirect Right-Recursion ---
@@ -7334,7 +7111,7 @@ local_system:
               prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
               prod("B_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
 
           // --- Test Case 4: Hidden Direct Right-Recursion ---
@@ -7349,7 +7126,7 @@ local_system:
               prod("S_prime", vec![]),
               prod("N", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
 
           // --- Test Case 5: Multiple Non-Recursive Choices ---
@@ -7364,7 +7141,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), t("a")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
 
           // --- Test Case 6: Multiple Recursive Choices ---
@@ -7379,7 +7156,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), t("b")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
 
           // --- Test Case 7: Both Left and Right Recursive ---
@@ -7394,7 +7171,7 @@ local_system:
               prod("S_prime", vec![nt("S_prime"), nt("S")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
       }
 
@@ -7437,43 +7214,6 @@ local_system:
           assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
           assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
       }
-
-      #[test]
-      fn test_parser_stats_conflicts() {
-          // --- Test Reduce/Reduce Conflict ---
-          // Grammar: S -> A | B, A -> x, B -> x
-          // This has a reduce/reduce conflict on 'x'.
-          let rr_productions = vec![
-              prod("S'", vec![nt("S"), t("$")]),
-              prod("S", vec![nt("A")]),
-              prod("S", vec![nt("B")]),
-              prod("A", vec![t("x")]),
-              prod("B", vec![t("x")]),
-          ];
-          let rr_parser = generate_glr_parser(&rr_productions, 0, None);
-          let rr_stats = stats::get_stats(&rr_parser);
-
-          println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
-          assert_eq!(rr_stats.num_shift_reduce_conflicts, 0);
-          assert_eq!(rr_stats.num_reduce_reduce_conflicts, 1, "Expected one R/R conflict");
-
-          // --- Test Shift/Reduce Conflict ---
-          // Grammar: Stmt -> if E then S | if E then S else S | other
-          // This has a shift/reduce conflict on 'else'.
-          let sr_productions = vec![
-              prod("S'", vec![nt("Stmt"), t("$")]),
-              prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
-              prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-              prod("Stmt", vec![t("other")]),
-              prod("Expr", vec![t("id")]),
-          ];
-          let sr_parser = generate_glr_parser(&sr_productions, 0, None);
-          let sr_stats = stats::get_stats(&sr_parser);
-
-          println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
-          assert_eq!(sr_stats.num_shift_reduce_conflicts, 1, "Expected one S/R conflict");
-          assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
-      }
       // --- Notes on Limitations Not Easily Tested Here ---
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
@@ -7486,6 +7226,112 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+    src/glr/stats.rs: |
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
+      use std::collections::BTreeMap;
+      use std::fmt;
+
+      /// Contains statistics about a generated GLR parser.
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct GLRStats {
+          /// Total number of productions in the final grammar used by the parser.
+          pub num_productions: usize,
+          /// Total number of terminals.
+          pub num_terminals: usize,
+          /// Total number of non-terminals.
+          pub num_non_terminals: usize,
+          /// Total number of states in the LR(0) automaton.
+          pub num_states: usize,
+          /// Number of (state, terminal) pairs with shift-reduce conflicts.
+          pub num_shift_reduce_conflicts: usize,
+          /// Number of (state, terminal) pairs with reduce-reduce conflicts.
+          pub num_reduce_reduce_conflicts: usize,
+          /// Maps state ID to the number of (S/R, R/R) conflicts originating from that state.
+          pub conflicts_by_state: BTreeMap<StateID, (usize, usize)>,
+      }
+
+      impl fmt::Display for GLRStats {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              writeln!(f, "--- GLR Parser Stats ---")?;
+              writeln!(f, "Grammar:")?;
+              writeln!(f, "  - Productions: {}", self.num_productions)?;
+              writeln!(f, "  - Terminals: {}", self.num_terminals)?;
+              writeln!(f, "  - Non-Terminals: {}", self.num_non_terminals)?;
+              writeln!(f, "Parse Table:")?;
+              writeln!(f, "  - States: {}", self.num_states)?;
+              writeln!(f, "  - Shift-Reduce Conflicts (by state/terminal): {}", self.num_shift_reduce_conflicts)?;
+              writeln!(f, "  - Reduce-Reduce Conflicts (by state/terminal): {}", self.num_reduce_reduce_conflicts)?;
+              if !self.conflicts_by_state.is_empty() {
+                  writeln!(f, "Conflicts by State (StateID: (S/R, R/R)):")?;
+                  for (state_id, (sr, rr)) in &self.conflicts_by_state {
+                      if *sr > 0 || *rr > 0 {
+                          writeln!(f, "  - State {}: ({}, {})", state_id.0, sr, rr)?;
+                      }
+                  }
+              }
+              writeln!(f, "------------------------")?;
+              Ok(())
+          }
+      }
+
+      /// Computes various statistics about the generated GLR parser table.
+      ///
+      /// This function analyzes the final parse table to count states, conflicts, etc.
+      ///
+      /// # Arguments
+      /// * `parser` - A reference to the `GLRParser` to be analyzed.
+      ///
+      /// # Returns
+      /// A `GLRStats` struct containing the computed statistics.
+      pub fn get_stats(parser: &GLRParser) -> GLRStats {
+          let mut num_shift_reduce_conflicts = 0;
+          let mut num_reduce_reduce_conflicts = 0;
+          let mut conflicts_by_state: BTreeMap<StateID, (usize, usize)> = BTreeMap::new();
+
+          for (state_id, row) in &parser.stage_7_table {
+              let mut sr_conflicts_in_state = 0;
+              let mut rr_conflicts_in_state = 0;
+
+              for (_, action) in &row.shifts_and_reduces {
+                  match action {
+                      Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
+                          if production_ids.len() > 1 {
+                              num_reduce_reduce_conflicts += 1;
+                              rr_conflicts_in_state += 1;
+                          }
+                      }
+                      Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                          if shift.is_some() {
+                              num_shift_reduce_conflicts += 1;
+                              sr_conflicts_in_state += 1;
+                          }
+                          let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+                          if total_reduce_productions > 1 {
+                              num_reduce_reduce_conflicts += 1;
+                              rr_conflicts_in_state += 1;
+                          }
+                      }
+                      _ => {}
+                  }
+              }
+
+              if sr_conflicts_in_state > 0 || rr_conflicts_in_state > 0 {
+                  conflicts_by_state.insert(*state_id, (sr_conflicts_in_state, rr_conflicts_in_state));
+              }
+          }
+
+          GLRStats {
+              num_productions: parser.productions.len(),
+              num_terminals: parser.terminal_map.len(),
+              num_non_terminals: parser.non_terminal_map.len(),
+              num_states: parser.item_set_map.len(),
+              num_shift_reduce_conflicts,
+              num_reduce_reduce_conflicts,
+              conflicts_by_state,
+          }
+      }
   diffs_applied_this_send: true
 system:
   message: |2
@@ -8698,7 +8544,6 @@ messages:
       pub mod grammar;
       pub mod items;
       pub mod parser;
-      pub mod stats;
       mod tests;
       pub mod analyze;
 
@@ -9531,155 +9376,6 @@ messages:
     metadata:
       filename: src/glr/parser.rs
   - user: |-
-      ```rust 'src/glr/stats.rs'
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
-      use std::collections::BTreeMap;
-      use std::fmt;
-
-      /// Statistics for a single state in the parse table.
-      #[derive(Debug, Clone, PartialEq, Eq, Default)]
-      pub struct StateStats {
-          /// Total number of terminal lookups (actions).
-          pub total_actions: usize,
-          /// Number of actions that are pure shifts.
-          pub num_shifts: usize,
-          /// Number of actions that are pure reduces.
-          pub num_reduces: usize,
-          /// Number of actions that are splits (conflicts).
-          pub num_splits: usize,
-          /// Number of goto transitions on non-terminals.
-          pub num_gotos: usize,
-          /// Counts occurrences of each unique action type in the state.
-          pub unique_actions: BTreeMap<Stage7ShiftsAndReduces, usize>,
-      }
-
-      /// Contains statistics about a generated GLR parser.
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct GLRStats {
-          /// Total number of productions in the final grammar used by the parser.
-          pub num_productions: usize,
-          /// Total number of terminals.
-          pub num_terminals: usize,
-          /// Total number of non-terminals.
-          pub num_non_terminals: usize,
-          /// Total number of states in the LR(0) automaton.
-          pub num_states: usize,
-          /// Number of (state, terminal) pairs with shift-reduce conflicts.
-          pub num_shift_reduce_conflicts: usize,
-          /// Number of (state, terminal) pairs with reduce-reduce conflicts.
-          pub num_reduce_reduce_conflicts: usize,
-          /// Detailed statistics for each state.
-          pub state_stats: BTreeMap<StateID, StateStats>,
-      }
-
-      impl fmt::Display for GLRStats {
-          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-              writeln!(f, "--- GLR Parser Stats ---")?;
-              writeln!(f, "Grammar: {} productions, {} terminals, {} non-terminals", self.num_productions, self.num_terminals, self.num_non_terminals)?;
-              writeln!(f, "Parse Table: {} states, {} S/R conflicts, {} R/R conflicts", self.num_states, self.num_shift_reduce_conflicts, self.num_reduce_reduce_conflicts)?;
-
-              writeln!(f, "\n--- State Details ---")?;
-              for (state_id, stats) in &self.state_stats {
-                  writeln!(
-                      f,
-                      "State {:<3} │ Actions: {:<3} (S:{}, R:{}, Sp:{}) │ Gotos: {:<2} │ Unique Actions: {}",
-                      state_id.0,
-                      stats.total_actions,
-                      stats.num_shifts,
-                      stats.num_reduces,
-                      stats.num_splits,
-                      stats.num_gotos,
-                      stats.unique_actions.len()
-                  )?;
-
-                  const MAX_UNIQUE_TO_DISPLAY: usize = 5;
-                  if !stats.unique_actions.is_empty() && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY {
-                      for (action, count) in &stats.unique_actions {
-                          let compact_action = match action {
-                              Stage7ShiftsAndReduces::Shift(s) => format!("S→{}", s.0),
-                              Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
-                                  format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
-                              }
-                              Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                                  let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
-                                  let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
-                                      let nt_count = nts.len();
-                                      let p_count: usize = nts.values().map(|pids| pids.len()).sum();
-                                      format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
-                                  }).collect();
-
-                                  if s_part.is_empty() {
-                                      format!("Split[{}]", r_parts.join(", "))
-                                  } else {
-                                      format!("Split[{}, {}]", s_part, r_parts.join(", "))
-                                  }
-                              }
-                          };
-                          writeln!(f, "          └─ (x{:<2}) {}", count, compact_action)?;
-                      }
-                  }
-              }
-              writeln!(f, "---------------------")?;
-              Ok(())
-          }
-      }
-
-      /// Computes various statistics about the generated GLR parser table.
-      pub fn get_stats(parser: &GLRParser) -> GLRStats {
-          let mut num_shift_reduce_conflicts = 0;
-          let mut num_reduce_reduce_conflicts = 0;
-          let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
-
-          for (state_id, row) in &parser.stage_7_table {
-              let mut current_state_stats = StateStats::default();
-              current_state_stats.num_gotos = row.gotos.len();
-              current_state_stats.total_actions = row.shifts_and_reduces.len();
-
-              for (_, action) in &row.shifts_and_reduces {
-                  // Update unique actions count
-                  *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
-
-                  match action {
-                      Stage7ShiftsAndReduces::Shift(_) => {
-                          current_state_stats.num_shifts += 1;
-                      }
-                      Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
-                          current_state_stats.num_reduces += 1;
-                          if production_ids.len() > 1 {
-                              num_reduce_reduce_conflicts += 1;
-                          }
-                      }
-                      Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                          current_state_stats.num_splits += 1;
-                          if shift.is_some() {
-                              num_shift_reduce_conflicts += 1;
-                          }
-                          let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-                          if total_reduce_productions > 1 {
-                              num_reduce_reduce_conflicts += 1;
-                          }
-                      }
-                  }
-              }
-              all_state_stats.insert(*state_id, current_state_stats);
-          }
-
-          GLRStats {
-              num_productions: parser.productions.len(),
-              num_terminals: parser.terminal_map.len(),
-              num_non_terminals: parser.non_terminal_map.len(),
-              num_states: parser.item_set_map.len(),
-              num_shift_reduce_conflicts,
-              num_reduce_reduce_conflicts,
-              state_stats: all_state_stats,
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/glr/stats.rs
-  - user: |-
       ```rust 'src/glr/table.rs'
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
       use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
@@ -9737,7 +9433,7 @@ messages:
           reduces: BTreeSet<ProductionID>,
       }
 
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      #[derive(Debug, Clone, PartialEq, Eq)]
       pub enum Stage7ShiftsAndReduces {
           Shift(StateID),
           Reduce {
@@ -10308,7 +10004,6 @@ messages:
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
-      use crate::glr::stats;
       use bimap::BiBTreeMap;
       use std::collections::BTreeSet;
       use crate::interface::display_productions;
@@ -11096,7 +10791,7 @@ messages:
               prod("S_prime", vec![nt("S_prime"), t("a")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
 
           // --- Test Case 2: No Right-Recursion (should not change) ---
@@ -11105,7 +10800,7 @@ messages:
               prod("S", vec![t("b")]),
           ];
           let expected2 = prods2.clone();
-          analyze::resolve_direct_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
 
           // --- Test Case 3: Indirect Right-Recursion ---
@@ -11130,7 +10825,7 @@ messages:
               prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
               prod("B_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
 
           // --- Test Case 4: Hidden Direct Right-Recursion ---
@@ -11145,7 +10840,7 @@ messages:
               prod("S_prime", vec![]),
               prod("N", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
 
           // --- Test Case 5: Multiple Non-Recursive Choices ---
@@ -11160,7 +10855,7 @@ messages:
               prod("S_prime", vec![nt("S_prime"), t("a")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
 
           // --- Test Case 6: Multiple Recursive Choices ---
@@ -11175,7 +10870,7 @@ messages:
               prod("S_prime", vec![nt("S_prime"), t("b")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
 
           // --- Test Case 7: Both Left and Right Recursive ---
@@ -11190,7 +10885,7 @@ messages:
               prod("S_prime", vec![nt("S_prime"), nt("S")]),
               prod("S_prime", vec![]),
           ];
-          analyze::resolve_direct_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+          resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
           assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
       }
 
@@ -11233,43 +10928,6 @@ messages:
           assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
           assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
       }
-
-      #[test]
-      fn test_parser_stats_conflicts() {
-          // --- Test Reduce/Reduce Conflict ---
-          // Grammar: S -> A | B, A -> x, B -> x
-          // This has a reduce/reduce conflict on 'x'.
-          let rr_productions = vec![
-              prod("S'", vec![nt("S"), t("$")]),
-              prod("S", vec![nt("A")]),
-              prod("S", vec![nt("B")]),
-              prod("A", vec![t("x")]),
-              prod("B", vec![t("x")]),
-          ];
-          let rr_parser = generate_glr_parser(&rr_productions, 0, None);
-          let rr_stats = stats::get_stats(&rr_parser);
-
-          println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
-          assert_eq!(rr_stats.num_shift_reduce_conflicts, 0);
-          assert_eq!(rr_stats.num_reduce_reduce_conflicts, 1, "Expected one R/R conflict");
-
-          // --- Test Shift/Reduce Conflict ---
-          // Grammar: Stmt -> if E then S | if E then S else S | other
-          // This has a shift/reduce conflict on 'else'.
-          let sr_productions = vec![
-              prod("S'", vec![nt("Stmt"), t("$")]),
-              prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
-              prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-              prod("Stmt", vec![t("other")]),
-              prod("Expr", vec![t("id")]),
-          ];
-          let sr_parser = generate_glr_parser(&sr_productions, 0, None);
-          let sr_stats = stats::get_stats(&sr_parser);
-
-          println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
-          assert_eq!(sr_stats.num_shift_reduce_conflicts, 1, "Expected one S/R conflict");
-          assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
-      }
       // --- Notes on Limitations Not Easily Tested Here ---
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
@@ -11283,488 +10941,119 @@ messages:
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
 
+
       ```
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Modify this so we have
-      ```rust
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]  
-      pub enum Stage7ShiftsAndReducesLookaheadValue {  
-          Shift(StateID),  
-          Reduce {  
-              nonterminal_id: NonTerminalID,  
-              len: usize,  
-              production_ids: BTreeSet<ProductionID>,  
-          },  
-          Split {  
-              shift: Option<StateID>,  
-              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,  
-          },  
-      }
-
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]  
-      pub enum Stage7ShiftsAndReduces {
-          Lookahead(BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>),
-          DefaultReduce {
-              nonterminal_id: NonTerminalID,  
-              len: usize,  
-              production_ids: BTreeSet<ProductionID>,  
-          },
-      }
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct Stage7Row {
-          pub shifts_and_reduces: Stage7ShiftsAndReduces,
-          pub gotos: BTreeMap<NonTerminalID, Goto>,
-      }
-      ```
-      For now, leave the `DefaultReduce` unused. If it is encountered in `GLRParser::step`, use `todo!()`.
+      I want to add some code that gets useful stats for a GLR parser.
+      Create a new file called src/glr/stats.rs
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the `git diff` patches for the requested changes.
+      Hello! As a helpful assistant, I'd be happy to help you add functionality to gather statistics for your GLR parser. Creating a dedicated module for this is a great idea for keeping the code organized.
 
-      I've refactored `Stage7ShiftsAndReduces` as you specified, introducing `Stage7ShiftsAndReducesLookaheadValue` to hold the per-terminal actions and updating `Stage7Row` accordingly. The changes have been propagated through the table generation, parser logic, and statistics collection.
+      Here are the changes to add the `stats` module, including the new file, modifications to `mod.rs`, and a new test case to verify the functionality.
 
-      Here are the patches for each modified file:
+      ### New File: `src/glr/stats.rs`
+
+      This new file will contain the data structure for the parser statistics and the function to compute them.
 
       ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -3,7 +3,7 @@
-       use crate::datastructures::gss::{print_gss_forest};
-       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      -use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
-      +use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
-       use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
-       
-       use bimap::BiBTreeMap;
-      @@ -318,40 +318,47 @@
-       
-                   // Get and print actions
-                   if let Some(row) = self.stage_7_table.get(&state_id) {
-      -                writeln!(&mut result, "  Actions:").unwrap();
-      -                if row.shifts_and_reduces.is_empty() {
-      -                    writeln!(&mut result, "    (No shift/reduce actions)").unwrap();
-      -                } else {
-      -                    // Sort by terminal name for consistent output
-      -                    let mut sorted_actions: Vec<_> = row.shifts_and_reduces.iter().collect();
-      -                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
-      -
-      -                    for (terminal_id, action) in sorted_actions {
-      -                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
-      -                        write!(&mut result, "    - On '{}': ", terminal).unwrap();
-      -                        match action {
-      -                            Stage7ShiftsAndReduces::Shift(next_state_id) => {
-      -                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
-      -                            }
-      -                            Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
-      -                                if production_ids.len() == 1 {
-      -                                    let prod_id = production_ids.iter().next().unwrap();
-      -                                    let prod = &self.productions[prod_id.0];
-      -                                    writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-      -                                } else {
-      -                                    let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
-      -                                    writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
-      -                                }
-      -                            }
-      -                            Stage7ShiftsAndReduces::Split { shift, reduces } => {
-      -                                writeln!(&mut result, "Conflict:").unwrap();
-      -                                if let Some(shift_state) = shift {
-      -                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
-      -                                }
-      -                                for (_len, nts) in reduces {
-      -                                    for (_nt_id, prod_ids) in nts {
-      -                                        for prod_id in prod_ids {
-      -                                            let prod = &self.productions[prod_id.0];
-      -                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-      +                writeln!(&mut result, "  Actions:").unwrap();
-      +                match &row.shifts_and_reduces {
-      +                    Stage7ShiftsAndReduces::Lookahead(actions) => {
-      +                        if actions.is_empty() {
-      +                            writeln!(&mut result, "    (No shift/reduce actions)").unwrap();
-      +                        } else {
-      +                            // Sort by terminal name for consistent output
-      +                            let mut sorted_actions: Vec<_> = actions.iter().collect();
-      +                            sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
-      +
-      +                            for (terminal_id, action) in sorted_actions {
-      +                                let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
-      +                                write!(&mut result, "    - On '{}': ", terminal).unwrap();
-      +                                match action {
-      +                                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-      +                                        writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
-      +                                    }
-      +                                    Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
-      +                                        if production_ids.len() == 1 {
-      +                                            let prod_id = production_ids.iter().next().unwrap();
-      +                                            let prod = &self.productions[prod_id.0];
-      +                                            writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-      +                                        } else {
-      +                                            let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
-      +                                            writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
-      +                                        }
-      +                                    }
-      +                                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      +                                        writeln!(&mut result, "Conflict:").unwrap();
-      +                                        if let Some(shift_state) = shift {
-      +                                            writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
-      +                                        }
-      +                                        for (_len, nts) in reduces {
-      +                                            for (_nt_id, prod_ids) in nts {
-      +                                                for prod_id in prod_ids {
-      +                                                    let prod = &self.productions[prod_id.0];
-      +                                                    writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-      +                                                }
-      +                                            }
-                                               }
-                                           }
-                                       }
-      @@ -359,6 +366,9 @@
-                                   }
-                               }
-                           }
-      +                    Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-      +                        writeln!(&mut result, "    - Default Reduce").unwrap();
-      +                    }
-                       }
-       
-                       writeln!(&mut result, "  Gotos:").unwrap();
-      @@ -440,33 +450,38 @@
-                   }
-       
-                   writeln!(f, "    Actions:")?;
-      -            for (&terminal_id, action) in &row.shifts_and_reduces {
-      -                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-      -                match action {
-      -                    Stage7ShiftsAndReduces::Shift(next_state_id) => {
-      -                        writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
-      -                    }
-      -                    Stage7ShiftsAndReduces::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-      -                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-      -                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-      -                        writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
-      -                    }
-      -                    Stage7ShiftsAndReduces::Split { shift, reduces } => {
-      -                        writeln!(f, "      - {} -> Conflict:", terminal)?;
-      -                        if let Some(shift_state) = shift {
-      -                            writeln!(f, "        - Shift {}", shift_state.0)?;
-      -                        }
-      -                        for (len, nts) in reduces {
-      -                            writeln!(f, "        - Reduce (len {}):", len)?;
-      -                            for (nt_id, prod_ids) in nts {
-      -                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-      -                                for prod_id_val in prod_ids {
-      -                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-      -                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-      +            match &row.shifts_and_reduces {
-      +                Stage7ShiftsAndReduces::Lookahead(actions) => {
-      +                    for (&terminal_id, action) in actions {
-      +                        let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-      +                        match action {
-      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-      +                                writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
-      +                            }
-      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-      +                                let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-      +                                let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-      +                                writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
-      +                            }
-      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      +                                writeln!(f, "      - {} -> Conflict:", terminal)?;
-      +                                if let Some(shift_state) = shift {
-      +                                    writeln!(f, "        - Shift {}", shift_state.0)?;
-      +                                }
-      +                                for (len, nts) in reduces {
-      +                                    writeln!(f, "        - Reduce (len {}):", len)?;
-      +                                    for (nt_id, prod_ids) in nts {
-      +                                        let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-      +                                        for prod_id_val in prod_ids {
-      +                                            let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-      +                                            writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-      +                                        }
-      +                                    }
-                                       }
-                                   }
-      -
-                               }
-                           }
-                       }
-      +                Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-      +                    writeln!(f, "      - Default Reduce")?;
-      +                }
-                   }
-       
-                   writeln!(f, "    Gotos:")?;
-      @@ -600,69 +604,78 @@
-                   crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-                   for peek in state.stack.peek_iter() {
-                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-      -
-      -                match row.shifts_and_reduces.get(&token_id) {
-      -                    Some(Stage7ShiftsAndReduces::Shift(to)) => {
-      -                        timeit!("GLRParserState::step::shift", {
-      -                        crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-      -                        let stack_for_push = peek.to_arc_node();
-      -                        let new_content = ParseStateEdgeContent { state_id: *to };
-      -                        crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
-      -                        let new_parse_state = self.push_state(&stack_for_push, new_content);
-      -                        crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-      -                        crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-      -                        next.merge(new_parse_state);
-      -                        crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-      -                        })
-      -                    }
-      -
-      -                    Some(Stage7ShiftsAndReduces::Reduce {
-      -                             nonterminal_id: nt,
-      -                             len,
-      -                            production_ids,
-      -                         }) => {
-      -                        let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
-      -                        // timeit!("GLRParserState::step::reduce", {
-      -                        let productions_strs: Vec<String> = production_ids.iter()
-      -                            .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
-      -                            .collect();
-      -                        let productions_str = if productions_strs.len() == 1 {
-      -                            productions_strs[0].clone()
-      -                        } else {
-      -                            format!("[{}]", productions_strs.join(", "))
-      -                        };
-      -                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-      -                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
-      -                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      -                        if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
-      -                           todo.push(ParseState { stack: s_new_arc });
-      -                        }
-      -                        })
-      -                    }
-      -
-      -                    Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-      -                        timeit!("GLRParserState::step::split", {
-      -                        crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
-      -                        if let Some(to) = shift {
-      -                            timeit!("GLRParserState::step::split::shift", {
-      -                            crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-      -                            let stack_for_push = peek.to_arc_node();
-      -                            let new_content = ParseStateEdgeContent { state_id: *to };
-      -                            let new_parse_state = self.push_state(&stack_for_push, new_content);
-      -                            next.merge(new_parse_state);
-      -                            })
-      -                        }
-      -                        for (len, nts) in reduces {
-      -                            let nts_mapped = nts.iter()
-      -                                .map(|(nt, pids)| (self.parser.non_terminal_map.get_by_right(nt).unwrap().clone().0, pids.iter()
-      -                                    .map(|pid| pid.0)
-      -                                    .collect::<BTreeSet<_>>()))
-      -                                .collect::<BTreeMap<_, _>>();
-      -                            // timeit!("GLRParserState::step::split::reduce", {
-      -                            timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts_mapped, len), {
-      -                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts_mapped);
-      -                            for (nt, _prod_ids) in nts {
-      -                                crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-      -                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      -                                if !s_new_arc.is_empty() {
-      -                                    todo.push(ParseState { stack: s_new_arc });
-      +                match &row.shifts_and_reduces {
-      +                    Stage7ShiftsAndReduces::Lookahead(actions) => {
-      +                        match actions.get(&token_id) {
-      +                            Some(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
-      +                                timeit!("GLRParserState::step::shift", {
-      +                                crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-      +                                let stack_for_push = peek.to_arc_node();
-      +                                let new_content = ParseStateEdgeContent { state_id: *to };
-      +                                crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
-      +                                let new_parse_state = self.push_state(&stack_for_push, new_content);
-      +                                crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-      +                                crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-      +                                next.merge(new_parse_state);
-      +                                crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-      +                                })
-      +                            }
-      +
-      +                            Some(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-      +                                     nonterminal_id: nt,
-      +                                     len,
-      +                                    production_ids,
-      +                                 }) => {
-      +                                let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
-      +                                // timeit!("GLRParserState::step::reduce", {
-      +                                let productions_strs: Vec<String> = production_ids.iter()
-      +                                    .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
-      +                                    .collect();
-      +                                let productions_str = if productions_strs.len() == 1 {
-      +                                    productions_strs[0].clone()
-      +                                } else {
-      +                                    format!("[{}]", productions_strs.join(", "))
-      +                                };
-      +                                timeit!(format!("GLRParserState::step::reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-      +                                crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
-      +                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      +                                if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
-      +                                   todo.push(ParseState { stack: s_new_arc });
-                                       }
-      -                            }
-      -                            })
-      -                        }
-      -                        })
-      -                    }
-      -
-      -                    None => {
-      -                        crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
-      -                        // Reconstruct the ParseState for this specific path and add to not_found.
-      -                        // not_found.merge(ParseState { stack: peek.to_arc_node() });
-      -                    },
-      +                                })
-      +                            }
-      +
-      +                            Some(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
-      +                                timeit!("GLRParserState::step::split", {
-      +                                crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
-      +                                if let Some(to) = shift {
-      +                                    timeit!("GLRParserState::step::split::shift", {
-      +                                    crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-      +                                    let stack_for_push = peek.to_arc_node();
-      +                                    let new_content = ParseStateEdgeContent { state_id: *to };
-      +                                    let new_parse_state = self.push_state(&stack_for_push, new_content);
-      +                                    next.merge(new_parse_state);
-      +                                    })
-      +                                }
-      +                                for (len, nts) in reduces {
-      +                                    let nts_mapped = nts.iter()
-      +                                        .map(|(nt, pids)| (self.parser.non_terminal_map.get_by_right(nt).unwrap().clone().0, pids.iter()
-      +                                            .map(|pid| pid.0)
-      +                                            .collect::<BTreeSet<_>>()))
-      +                                        .collect::<BTreeMap<_, _>>();
-      +                                    // timeit!("GLRParserState::step::split::reduce", {
-      +                                    timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts_mapped, len), {
-      +                                    crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts_mapped);
-      +                                    for (nt, _prod_ids) in nts {
-      +                                        crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-      +                                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      +                                        if !s_new_arc.is_empty() {
-      +                                            todo.push(ParseState { stack: s_new_arc });
-      +                                        }
-      +                                    }
-      +                                    })
-      +                                }
-      +                                })
-      +                            }
-      +
-      +                            None => {
-      +                                crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
-      +                                // Reconstruct the ParseState for this specific path and add to not_found.
-      +                                // not_found.merge(ParseState { stack: peek.to_arc_node() });
-      +                            },
-      +                        }
-      +                    }
-      +                    Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-      +                        todo!();
-      +                    }
-                       }
-                   }
-               }
-
-      ``````diff
-      --- a/src/glr/stats.rs
+      --- /dev/null
       +++ b/src/glr/stats.rs
-      @@ -1,5 +1,5 @@
-       use crate::glr::parser::GLRParser;
-      -use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
-      +use crate::glr::table::{Stage7ShiftsAndReduces, Stage7ShiftsAndReducesLookaheadValue, StateID};
-       use std::collections::BTreeMap;
-       use std::fmt;
-       
-      @@ -15,7 +15,7 @@
-           /// Number of goto transitions on non-terminals.
-           pub num_gotos: usize,
-           /// Counts occurrences of each unique action type in the state.
-      -    pub unique_actions: BTreeMap<Stage7ShiftsAndReduces, usize>,
-      +    pub unique_actions: BTreeMap<Stage7ShiftsAndReducesLookaheadValue, usize>,
-       }
-       
-       /// Contains statistics about a generated GLR parser.
-      @@ -53,13 +53,13 @@
-                   if !stats.unique_actions.is_empty() && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY {
-                       for (action, count) in &stats.unique_actions {
-                           let compact_action = match action {
-      -                        Stage7ShiftsAndReduces::Shift(s) => format!("S→{}", s.0),
-      -                        Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
-      +                        Stage7ShiftsAndReducesLookaheadValue::Shift(s) => format!("S→{}", s.0),
-      +                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                                   format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
-                               }
-      -                        Stage7ShiftsAndReduces::Split { shift, reduces } => {
-      +                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                   let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
-                                   let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
-                                       let nt_count = nts.len();
-      @@ -88,32 +88,40 @@
-           for (state_id, row) in &parser.stage_7_table {
-               let mut current_state_stats = StateStats::default();
-               current_state_stats.num_gotos = row.gotos.len();
-      -        current_state_stats.total_actions = row.shifts_and_reduces.len();
-      -
-      -        for (_, action) in &row.shifts_and_reduces {
-      -            // Update unique actions count
-      -            *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
-      -
-      -            match action {
-      -                Stage7ShiftsAndReduces::Shift(_) => {
-      -                    current_state_stats.num_shifts += 1;
-      -                }
-      -                Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
-      -                    current_state_stats.num_reduces += 1;
-      -                    if production_ids.len() > 1 {
-      -                        num_reduce_reduce_conflicts += 1;
-      -                    }
-      -                }
-      -                Stage7ShiftsAndReduces::Split { shift, reduces } => {
-      -                    current_state_stats.num_splits += 1;
-      -                    if shift.is_some() {
-      -                        num_shift_reduce_conflicts += 1;
-      -                    }
-      -                    let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-      -                    if total_reduce_productions > 1 {
-      -                        num_reduce_reduce_conflicts += 1;
-      -                    }
+      @@ -0,0 +1,93 @@
+      +use crate::glr::parser::GLRParser;
+      +use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
+      +use std::collections::BTreeMap;
+      +use std::fmt;
       +
-      +        match &row.shifts_and_reduces {
-      +            Stage7ShiftsAndReduces::Lookahead(actions) => {
-      +                current_state_stats.total_actions = actions.len();
-      +                for (_, action) in actions {
-      +                    // Update unique actions count
-      +                    *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
+      +/// Contains statistics about a generated GLR parser.
+      +#[derive(Debug, Clone, PartialEq, Eq)]
+      +pub struct GLRStats {
+      +    /// Total number of productions in the final grammar used by the parser.
+      +    pub num_productions: usize,
+      +    /// Total number of terminals.
+      +    pub num_terminals: usize,
+      +    /// Total number of non-terminals.
+      +    pub num_non_terminals: usize,
+      +    /// Total number of states in the LR(0) automaton.
+      +    pub num_states: usize,
+      +    /// Number of (state, terminal) pairs with shift-reduce conflicts.
+      +    pub num_shift_reduce_conflicts: usize,
+      +    /// Number of (state, terminal) pairs with reduce-reduce conflicts.
+      +    pub num_reduce_reduce_conflicts: usize,
+      +    /// Maps state ID to the number of (S/R, R/R) conflicts originating from that state.
+      +    pub conflicts_by_state: BTreeMap<StateID, (usize, usize)>,
+      +}
       +
-      +                    match action {
-      +                        Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
-      +                            current_state_stats.num_shifts += 1;
-      +                        }
-      +                        Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
-      +                            current_state_stats.num_reduces += 1;
-      +                            if production_ids.len() > 1 {
-      +                                num_reduce_reduce_conflicts += 1;
-      +                            }
-      +                        }
-      +                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      +                            current_state_stats.num_splits += 1;
-      +                            if shift.is_some() {
-      +                                num_shift_reduce_conflicts += 1;
-      +                            }
-      +                            let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-      +                            if total_reduce_productions > 1 {
-      +                                num_reduce_reduce_conflicts += 1;
-      +                            }
-      +                        }
-      +                    }
+      +impl fmt::Display for GLRStats {
+      +    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      +        writeln!(f, "--- GLR Parser Stats ---")?;
+      +        writeln!(f, "Grammar:")?;
+      +        writeln!(f, "  - Productions: {}", self.num_productions)?;
+      +        writeln!(f, "  - Terminals: {}", self.num_terminals)?;
+      +        writeln!(f, "  - Non-Terminals: {}", self.num_non_terminals)?;
+      +        writeln!(f, "Parse Table:")?;
+      +        writeln!(f, "  - States: {}", self.num_states)?;
+      +        writeln!(f, "  - Shift-Reduce Conflicts (by state/terminal): {}", self.num_shift_reduce_conflicts)?;
+      +        writeln!(f, "  - Reduce-Reduce Conflicts (by state/terminal): {}", self.num_reduce_reduce_conflicts)?;
+      +        if !self.conflicts_by_state.is_empty() {
+      +            writeln!(f, "Conflicts by State (StateID: (S/R, R/R)):")?;
+      +            for (state_id, (sr, rr)) in &self.conflicts_by_state {
+      +                if *sr > 0 || *rr > 0 {
+      +                    writeln!(f, "  - State {}: ({}, {})", state_id.0, sr, rr)?;
       +                }
-      +            }
-      +            Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-      +                current_state_stats.total_actions = 1;
-      +                current_state_stats.num_reduces += 1;
       +            }
       +        }
-      +        all_state_stats.insert(*state_id, current_state_stats);
+      +        writeln!(f, "------------------------")?;
+      +        Ok(())
+      +    }
+      +}
+      +
+      +/// Computes various statistics about the generated GLR parser table.
+      +///
+      +/// This function analyzes the final parse table to count states, conflicts, etc.
+      +///
+      +/// # Arguments
+      +/// * `parser` - A reference to the `GLRParser` to be analyzed.
+      +///
+      +/// # Returns
+      +/// A `GLRStats` struct containing the computed statistics.
+      +pub fn get_stats(parser: &GLRParser) -> GLRStats {
+      +    let mut num_shift_reduce_conflicts = 0;
+      +    let mut num_reduce_reduce_conflicts = 0;
+      +    let mut conflicts_by_state: BTreeMap<StateID, (usize, usize)> = BTreeMap::new();
+      +
+      +    for (state_id, row) in &parser.stage_7_table {
+      +        let mut sr_conflicts_in_state = 0;
+      +        let mut rr_conflicts_in_state = 0;
+      +
+      +        for (_, action) in &row.shifts_and_reduces {
+      +            match action {
+      +                Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
+      +                    if production_ids.len() > 1 {
+      +                        num_reduce_reduce_conflicts += 1;
+      +                        rr_conflicts_in_state += 1;
+      +                    }
+      +                }
+      +                Stage7ShiftsAndReduces::Split { shift, reduces } => {
+      +                    if shift.is_some() {
+      +                        num_shift_reduce_conflicts += 1;
+      +                        sr_conflicts_in_state += 1;
+      +                    }
+      +                    let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+      +                    if total_reduce_productions > 1 {
+      +                        num_reduce_reduce_conflicts += 1;
+      +                        rr_conflicts_in_state += 1;
+      +                    }
+      +                }
+      +                _ => {}
+      +            }
+      +        }
+      +
+      +        if sr_conflicts_in_state > 0 || rr_conflicts_in_state > 0 {
+      +            conflicts_by_state.insert(*state_id, (sr_conflicts_in_state, rr_conflicts_in_state));
+      +        }
       +    }
       +
       +    GLRStats {
@@ -11774,232 +11063,635 @@ messages:
       +        num_states: parser.item_set_map.len(),
       +        num_shift_reduce_conflicts,
       +        num_reduce_reduce_conflicts,
-      +        state_stats: all_state_stats,
+      +        conflicts_by_state,
       +    }
       +}
 
-      ``````diff
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -40,7 +40,7 @@
-       }
-       
-       #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-      -pub enum Stage7ShiftsAndReduces {
-      +pub enum Stage7ShiftsAndReducesLookaheadValue {
-           Shift(StateID),
-           Reduce {
-               nonterminal_id: NonTerminalID,
-      @@ -53,25 +53,25 @@
-           },
-       }
-       
-      -impl JSONConvertible for Stage7ShiftsAndReduces {
-      +impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
-           fn to_json(&self) -> JSONNode {
-               let mut obj = StdMap::new();
-               match self {
-      -            Stage7ShiftsAndReduces::Shift(state_id) => {
-      +            Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                       obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
-                       obj.insert("state_id".to_string(), state_id.to_json());
-                   }
-      -            Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
-      +            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                       obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
-                       obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
-                       obj.insert("len".to_string(), len.to_json());
-                       obj.insert("production_ids".to_string(), production_ids.to_json());
-                   }
-      -            Stage7ShiftsAndReduces::Split { shift, reduces } => {
-      +            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                       obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                       obj.insert("shift".to_string(), shift.to_json());
-                       obj.insert("reduces".to_string(), reduces.to_json());
-                   }
-               }
-               JSONNode::Object(obj)
-           }
-      @@ -79,12 +79,12 @@
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-               match node {
-                   JSONNode::Object(mut obj) => {
-      -                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
-      +                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string())
-                                          .and_then(String::from_json)?;
-                       match variant.as_str() {
-                           "Shift" => {
-                               let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
-                                                 .and_then(StateID::from_json)?;
-      -                        Ok(Stage7ShiftsAndReduces::Shift(state_id))
-      +                        Ok(Stage7ShiftsAndReducesLookaheadValue::Shift(state_id))
-                           }
-                           "Reduce" => {
-                               let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
-      @@ -93,19 +93,61 @@
-                                            .and_then(usize::from_json)?;
-                               let production_ids = obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())
-                                                       .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
-      -                        Ok(Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids })
-      +                        Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids })
-                           }
-                           "Split" => {
-                               let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
-                                              .and_then(Option::<StateID>::from_json)?;
-                               let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
-                                                .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
-      -                        Ok(Stage7ShiftsAndReduces::Split { shift, reduces })
-      -                    }
-      -                    _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
-      -                }
-      -            }
-      -            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReduces".to_string()),
-      +                        Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
-      +                    }
-      +                    _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReducesLookaheadValue", variant)),
-      +                }
-      +            }
-      +            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
-      +        }
-      +    }
-      +}
-      +
-      +#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-      +pub enum Stage7ShiftsAndReduces {
-      +    Lookahead(BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>),
-      +    DefaultReduce {
-      +        nonterminal_id: NonTerminalID,
-      +        len: usize,
-      +        production_ids: BTreeSet<ProductionID>,
-      +    },
-      +}
-      +
-      +impl JSONConvertible for Stage7ShiftsAndReduces {
-      +    fn to_json(&self) -> JSONNode {
-      +        let mut obj = StdMap::new();
-      +        match self {
-      +            Stage7ShiftsAndReduces::Lookahead(actions) => {
-      +                obj.insert("variant".to_string(), JSONNode::String("Lookahead".to_string()));
-      +                obj.insert("actions".to_string(), actions.to_json());
-      +            }
-      +            Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
-      +                obj.insert("variant".to_string(), JSONNode::String("DefaultReduce".to_string()));
-      +                obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
-      +                obj.insert("len".to_string(), len.to_json());
-      +                obj.insert("production_ids".to_string(), production_ids.to_json());
-      +            }
-      +        }
-      +        JSONNode::Object(obj)
-      +    }
-      +
-      +    fn from_json(node: JSONNode) -> Result<Self, String> {
-      +        match node {
-      +            JSONNode::Object(mut obj) => {
-      +                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
-      +                    .and_then(String::from_json)?;
-      +                match variant.as_str() {
-      +                    "Lookahead" => BTreeMap::<TerminalID, Stage7ShiftsAndReducesLookaheadValue>::from_json(obj.remove("actions").ok_or_else(|| "Missing field actions for Lookahead".to_string())?).map(Stage7ShiftsAndReduces::Lookahead),
-      +                    "DefaultReduce" => Ok(Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id: NonTerminalID::from_json(obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for DefaultReduce".to_string())?)?, len: usize::from_json(obj.remove("len").ok_or_else(|| "Missing field len for DefaultReduce".to_string())?)?, production_ids: BTreeSet::<ProductionID>::from_json(obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for DefaultReduce".to_string())?)? }),
-      +                    _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
-      +                }
-      +            }
-      +            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReduces".to_string()),
-               }
-           }
-       }
-      @@ -153,7 +195,7 @@
-       
-       #[derive(Debug, Clone, PartialEq, Eq)]
-       pub struct Stage7Row {
-      -    pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
-      +    pub shifts_and_reduces: Stage7ShiftsAndReduces,
-           pub gotos: BTreeMap<NonTerminalID, Goto>,
-       }
-       
-      @@ -168,7 +210,7 @@
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-               match node {
-                   JSONNode::Object(mut obj) => {
-      -                let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
-      -                                            .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?;
-      +                let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
-      +                                            .and_then(Stage7ShiftsAndReduces::from_json)?;
-                       let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
-                                      .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
-                       Ok(Stage7Row { shifts_and_reduces, gotos })
-      @@ -411,7 +453,7 @@
-       
-           for (item_set, row) in stage_6_table {
-               let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-      -        let mut shifts_and_reduces = BTreeMap::new();
-      +        let mut shifts_and_reduces_lookahead = BTreeMap::new();
-               let mut gotos = BTreeMap::new();
-       
-               for (terminal, action) in row.shifts_and_reduces {
-      @@ -434,34 +476,35 @@
-       
-                   let converted_action = if let Some(shift_id) = shift_state_id {
-                       if reduces_by_len_and_nt.is_empty() {
-                           // Shift only
-      -                    Stage7ShiftsAndReduces::Shift(shift_id)
-      +                    Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id)
-                       } else {
-                           // Shift-Reduce conflict
-      -                    Stage7ShiftsAndReduces::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
-      +                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
-                       }
-                   } else { // No shift
-                       if reduces_by_len_and_nt.is_empty() {
-                           panic!("Action without shift or reduce for terminal {:?}", terminal);
-                       } else if reduces_by_len_and_nt.len() == 1 {
-                           let (len, mut nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
-                           if nts.len() == 1 {
-                               // Single reduce action (possibly with multiple productions for same NT/len)
-                               let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
-      -                        Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids }
-      +                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }
-                           } else {
-                               // Reduce-Reduce conflict (different NTs, same length)
-      -                        Stage7ShiftsAndReduces::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
-      +                        Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
-                           }
-                       } else {
-                           // Reduce-Reduce conflict (different lengths)
-      -                    Stage7ShiftsAndReduces::Split { shift: None, reduces: reduces_by_len_and_nt }
-      +                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: reduces_by_len_and_nt }
-                       }
-                   };
-      -            shifts_and_reduces.insert(terminal_id, converted_action);
-      -        }
-      -
-      +            shifts_and_reduces_lookahead.insert(terminal_id, converted_action);
-      +        }
-      +
-      +        let shifts_and_reduces = Stage7ShiftsAndReduces::Lookahead(shifts_and_reduces_lookahead);
-      +        
-               for (nonterminal, next_item_set) in row.gotos {
-                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-                   let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
+      ```
 
-      ``````diff
+      ### Modified: `src/glr/mod.rs`
+
+      I'll declare the new `stats` module here to make it accessible to the rest of the crate.
+
+      ```diff
+      diff --git a/src/glr/mod.rs b/src/glr/mod.rs
+      index 833714e..071841c 100644
+      --- a/src/glr/mod.rs
+      +++ b/src/glr/mod.rs
+      @@ -2,5 +2,6 @@
+       pub mod grammar;
+       pub mod items;
+       pub mod parser;
+      +pub mod stats;
+       mod tests;
+       pub mod analyze;
+       
+
+      ```
+
+      ### Modified: `src/glr/tests.rs`
+
+      Here, I'll add a new test to ensure the stats collection works correctly for grammars with known shift/reduce and reduce/reduce conflicts.
+
+      ```diff
+      diff --git a/src/glr/tests.rs b/src/glr/tests.rs
+      index 9111111..1111111 100644
       --- a/src/glr/tests.rs
       +++ b/src/glr/tests.rs
-      @@ -880,9 +880,15 @@
-           let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
-           
-           let start_row = &parser.stage_7_table[&start_state];
-      -    let shift_action = &start_row.shifts_and_reduces[&b_token_id];
-      +    let shift_action = match &start_row.shifts_and_reduces {
-      +        crate::glr::table::Stage7ShiftsAndReduces::Lookahead(actions) => &actions[&b_token_id],
-      +        _ => panic!("Expected lookahead actions in start state"),
-      +    };
+      @@ -1,7 +1,8 @@
+       use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::stats;
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
+       use crate::interface::display_productions;
+      @@ -621,6 +622,43 @@
+           assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
+           assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+       }
       +
-           let state_after_b = match shift_action {
-      -        crate::glr::table::Stage7ShiftsAndReduces::Shift(id) => *id,
-      +        crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
-               _ => panic!("Expected shift on 'b' from start state"),
-           };
+      +#[test]
+      +fn test_parser_stats_conflicts() {
+      +    // --- Test Reduce/Reduce Conflict ---
+      +    // Grammar: S -> A | B, A -> x, B -> x
+      +    // This has a reduce/reduce conflict on 'x'.
+      +    let rr_productions = vec![
+      +        prod("S'", vec![nt("S"), t("$")]),
+      +        prod("S", vec![nt("A")]),
+      +        prod("S", vec![nt("B")]),
+      +        prod("A", vec![t("x")]),
+      +        prod("B", vec![t("x")]),
+      +    ];
+      +    let rr_parser = generate_glr_parser(&rr_productions, 0, None);
+      +    let rr_stats = stats::get_stats(&rr_parser);
+      +
+      +    println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
+      +    assert_eq!(rr_stats.num_shift_reduce_conflicts, 0);
+      +    assert_eq!(rr_stats.num_reduce_reduce_conflicts, 1, "Expected one R/R conflict");
+      +
+      +    // --- Test Shift/Reduce Conflict ---
+      +    // Grammar: Stmt -> if E then S | if E then S else S | other
+      +    // This has a shift/reduce conflict on 'else'.
+      +    let sr_productions = vec![
+      +        prod("S'", vec![nt("Stmt"), t("$")]),
+      +        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
+      +        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
+      +        prod("Stmt", vec![t("other")]),
+      +        prod("Expr", vec![t("id")]),
+      +    ];
+      +    let sr_parser = generate_glr_parser(&sr_productions, 0, None);
+      +    let sr_stats = stats::get_stats(&sr_parser);
+      +
+      +    println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
+      +    assert_eq!(sr_stats.num_shift_reduce_conflicts, 1, "Expected one S/R conflict");
+      +    assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
+      +}
+       // --- Notes on Limitations Not Easily Tested Here ---
+       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
+       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
+
+      ```
+
+      These changes introduce the new `stats` module and integrate it into your project structure. Let me know if you have any other questions
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/stats.rs
+      Detected new file (--- /dev/null or missing --- line).
+      Applying patch to 'src/glr/stats.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/stats.rs.
+      Confirmed creation of src/glr/stats.rs.
+      Added newly created file src/glr/stats.rs to attached files state.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/mod.rs
+      Applying patch to 'src/glr/mod.rs' using custom patcher...
+      Error applying patch to src/glr/mod.rs:
+      Hunk #1 (header: @@ -2,5 +2,6 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      pub mod grammar;
+      pub mod items;
+      pub mod parser;
+      mod tests;
+      pub mod analyze;
+
+      --- Expected Context (from patch, after normalization): ---
+      pub mod grammar;
+      pub mod items;
+      pub mod parser;
+      mod tests;
+      pub mod analyze;
+
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + pub mod table;
+        pub mod grammar;
+        pub mod items;
+        pub mod parser;
+        mod tests;
+        pub mod analyze;
+      - 
+      Problematic diff content:
+      ---
+      diff --git a/src/glr/mod.rs b/src/glr/mod.rs
+      index 833714e..071841c 100644
+      --- a/src/glr/mod.rs
+      +++ b/src/glr/mod.rs
+      @@ -2,5 +2,6 @@
+       pub mod grammar;
+       pub mod items;
+       pub mod parser;
+      +pub mod stats;
+       mod tests;
+       pub mod analyze;
        
+
+      ---
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/tests.rs.
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/stats.rs
+      Detected new file (--- /dev/null or missing --- line).
+      Applying patch to 'src/glr/stats.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/stats.rs.
+      Confirmed creation of src/glr/stats.rs.
+      Added newly created file src/glr/stats.rs to attached files state.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/mod.rs
+      Applying patch to 'src/glr/mod.rs' using custom patcher...
+      Error applying patch to src/glr/mod.rs:
+      Hunk #1 (header: @@ -2,5 +2,6 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      pub mod grammar;
+      pub mod items;
+      pub mod parser;
+      mod tests;
+      pub mod analyze;
+
+      --- Expected Context (from patch, after normalization): ---
+      pub mod grammar;
+      pub mod items;
+      pub mod parser;
+      mod tests;
+      pub mod analyze;
+
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + pub mod table;
+        pub mod grammar;
+        pub mod items;
+        pub mod parser;
+        mod tests;
+        pub mod analyze;
+      - 
+      Problematic diff content:
+      ---
+      diff --git a/src/glr/mod.rs b/src/glr/mod.rs
+      index 833714e..071841c 100644
+      --- a/src/glr/mod.rs
+      +++ b/src/glr/mod.rs
+      @@ -2,5 +2,6 @@
+       pub mod grammar;
+       pub mod items;
+       pub mod parser;
+      +pub mod stats;
+       mod tests;
+       pub mod analyze;
+       
+
+      ---
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/tests.rs.
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "create",
+          "filepath": "src/glr/stats.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/mod.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/tests.rs"
+        }
+      ]
+      Found 3 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/stats.rs
+      Received code for required file: src/glr/mod.rs
+      Received code for required file: src/glr/tests.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully created file: src/glr/stats.rs
+      Successfully replaced file: src/glr/tests.rs
+      Successfully replaced file: src/glr/mod.rs
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+      --- original version of src/glr/mod.rs+++ current version of src/glr/mod.rs@@ -2,5 +2,6 @@ pub mod grammar;
+       pub mod items;
+       pub mod parser;
+      +pub mod stats;
+       mod tests;
+       pub mod analyze;
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+      --- original version of src/glr/tests.rs+++ current version of src/glr/tests.rs@@ -2,6 +2,7 @@ use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::stats;
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
+       use crate::interface::display_productions;
+      @@ -789,7 +790,7 @@         prod("S_prime", vec![nt("S_prime"), t("a")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
+       
+           // --- Test Case 2: No Right-Recursion (should not change) ---
+      @@ -798,7 +799,7 @@         prod("S", vec![t("b")]),
+           ];
+           let expected2 = prods2.clone();
+      -    resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
+       
+           // --- Test Case 3: Indirect Right-Recursion ---
+      @@ -823,7 +824,7 @@         prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
+               prod("B_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
+       
+           // --- Test Case 4: Hidden Direct Right-Recursion ---
+      @@ -838,7 +839,7 @@         prod("S_prime", vec![]),
+               prod("N", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
+       
+           // --- Test Case 5: Multiple Non-Recursive Choices ---
+      @@ -853,7 +854,7 @@         prod("S_prime", vec![nt("S_prime"), t("a")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
+       
+           // --- Test Case 6: Multiple Recursive Choices ---
+      @@ -868,7 +869,7 @@         prod("S_prime", vec![nt("S_prime"), t("b")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
+       
+           // --- Test Case 7: Both Left and Right Recursive ---
+      @@ -883,7 +884,7 @@         prod("S_prime", vec![nt("S_prime"), nt("S")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+      +    analyze::resolve_direct_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+           assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
+       }
+       
+      @@ -926,6 +927,43 @@     assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
+           assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+       }
+      +
+      +#[test]
+      +fn test_parser_stats_conflicts() {
+      +    // --- Test Reduce/Reduce Conflict ---
+      +    // Grammar: S -> A | B, A -> x, B -> x
+      +    // This has a reduce/reduce conflict on 'x'.
+      +    let rr_productions = vec![
+      +        prod("S'", vec![nt("S"), t("$")]),
+      +        prod("S", vec![nt("A")]),
+      +        prod("S", vec![nt("B")]),
+      +        prod("A", vec![t("x")]),
+      +        prod("B", vec![t("x")]),
+      +    ];
+      +    let rr_parser = generate_glr_parser(&rr_productions, 0, None);
+      +    let rr_stats = stats::get_stats(&rr_parser);
+      +
+      +    println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
+      +    assert_eq!(rr_stats.num_shift_reduce_conflicts, 0);
+      +    assert_eq!(rr_stats.num_reduce_reduce_conflicts, 1, "Expected one R/R conflict");
+      +
+      +    // --- Test Shift/Reduce Conflict ---
+      +    // Grammar: Stmt -> if E then S | if E then S else S | other
+      +    // This has a shift/reduce conflict on 'else'.
+      +    let sr_productions = vec![
+      +        prod("S'", vec![nt("Stmt"), t("$")]),
+      +        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
+      +        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
+      +        prod("Stmt", vec![t("other")]),
+      +        prod("Expr", vec![t("id")]),
+      +    ];
+      +    let sr_parser = generate_glr_parser(&sr_productions, 0, None);
+      +    let sr_stats = stats::get_stats(&sr_parser);
+      +
+      +    println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
+      +    assert_eq!(sr_stats.num_shift_reduce_conflicts, 1, "Expected one S/R conflict");
+      +    assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
+      +}
+       // --- Notes on Limitations Not Easily Tested Here ---
+       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
+       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
+      @@ -938,4 +976,3 @@ // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+      -
+
+      ```
+    metadata:
+  - user: |-
+      I'm interested in what the states look like.
+      I want to know, for each state individually
+      - how many terminal lookups there are
+      - how many of these terminal lookups are shift, how many are reduce, how many are splits
+      - if it's a split, the stats for that, shift, reduces, etc.
+      - across all lookups, how many unique 'shifts-and-reduces' enum instances there are. And if there are only a small number, exactly what those are.
+      - how many gotos there are
+      I want all this info in a compact, dense, readable, simple yet elegant and beautiful format.
+    metadata:
+  - assistant: |-
+      Of course! I can certainly enhance the statistics module to provide that detailed, per-state breakdown. A compact and elegant representation of complex data is a great goal.
+
+      Here are the modifications for `src/glr/stats.rs` to gather and display the detailed state information you requested.
+
+      ### Modified: `src/glr/stats.rs`
+
+      I'll update the data structures to hold per-state statistics and overhaul the `Display` implementation to present the information in a dense, readable format.
+
+      ```diff
+      diff --git a/src/glr/stats.rs b/src/glr/stats.rs
+      index 2222222..3333333 100644
+      --- a/src/glr/stats.rs
+      +++ b/src/glr/stats.rs
+      @@ -1,10 +1,24 @@
+       use crate::glr::parser::GLRParser;
+       use crate::glr::table::{Stage7ShiftsAndReduces, StateID};
+       use std::collections::BTreeMap;
+       use std::fmt;
+       
+      +/// Statistics for a single state in the parse table.
+      +#[derive(Debug, Clone, PartialEq, Eq, Default)]
+      +pub struct StateStats {
+      +    /// Total number of terminal lookups (actions).
+      +    pub total_actions: usize,
+      +    /// Number of actions that are pure shifts.
+      +    pub num_shifts: usize,
+      +    /// Number of actions that are pure reduces.
+      +    pub num_reduces: usize,
+      +    /// Number of actions that are splits (conflicts).
+      +    pub num_splits: usize,
+      +    /// Number of goto transitions on non-terminals.
+      +    pub num_gotos: usize,
+      +    /// Counts occurrences of each unique action type in the state.
+      +    pub unique_actions: BTreeMap<Stage7ShiftsAndReduces, usize>,
+      +}
+      +
+       /// Contains statistics about a generated GLR parser.
+       #[derive(Debug, Clone, PartialEq, Eq)]
+       pub struct GLRStats {
+      @@ -17,58 +31,83 @@
+           pub num_states: usize,
+           /// Number of (state, terminal) pairs with shift-reduce conflicts.
+           pub num_shift_reduce_conflicts: usize,
+           /// Number of (state, terminal) pairs with reduce-reduce conflicts.
+           pub num_reduce_reduce_conflicts: usize,
+      -    /// Maps state ID to the number of (S/R, R/R) conflicts originating from that state.
+      -    pub conflicts_by_state: BTreeMap<StateID, (usize, usize)>,
+      +    /// Detailed statistics for each state.
+      +    pub state_stats: BTreeMap<StateID, StateStats>,
+       }
+       
+       impl fmt::Display for GLRStats {
+           fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+               writeln!(f, "--- GLR Parser Stats ---")?;
+      -        writeln!(f, "Grammar:")?;
+      -        writeln!(f, "  - Productions: {}", self.num_productions)?;
+      -        writeln!(f, "  - Terminals: {}", self.num_terminals)?;
+      -        writeln!(f, "  - Non-Terminals: {}", self.num_non_terminals)?;
+      -        writeln!(f, "Parse Table:")?;
+      -        writeln!(f, "  - States: {}", self.num_states)?;
+      -        writeln!(f, "  - Shift-Reduce Conflicts (by state/terminal): {}", self.num_shift_reduce_conflicts)?;
+      -        writeln!(f, "  - Reduce-Reduce Conflicts (by state/terminal): {}", self.num_reduce_reduce_conflicts)?;
+      -        if !self.conflicts_by_state.is_empty() {
+      -            writeln!(f, "Conflicts by State (StateID: (S/R, R/R)):")?;
+      -            for (state_id, (sr, rr)) in &self.conflicts_by_state {
+      -                if *sr > 0 || *rr > 0 {
+      -                    writeln!(f, "  - State {}: ({}, {})", state_id.0, sr, rr)?;
+      +        writeln!(f, "Grammar: {} productions, {} terminals, {} non-terminals", self.num_productions, self.num_terminals, self.num_non_terminals)?;
+      +        writeln!(f, "Parse Table: {} states, {} S/R conflicts, {} R/R conflicts", self.num_states, self.num_shift_reduce_conflicts, self.num_reduce_reduce_conflicts)?;
+      +
+      +        writeln!(f, "\n--- State Details ---")?;
+      +        for (state_id, stats) in &self.state_stats {
+      +            writeln!(
+      +                f,
+      +                "State {:<3} │ Actions: {:<3} (S:{}, R:{}, Sp:{}) │ Gotos: {:<2} │ Unique Actions: {}",
+      +                state_id.0,
+      +                stats.total_actions,
+      +                stats.num_shifts,
+      +                stats.num_reduces,
+      +                stats.num_splits,
+      +                stats.num_gotos,
+      +                stats.unique_actions.len()
+      +            )?;
+      +
+      +            const MAX_UNIQUE_TO_DISPLAY: usize = 5;
+      +            if !stats.unique_actions.is_empty() && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY {
+      +                for (action, count) in &stats.unique_actions {
+      +                    let compact_action = match action {
+      +                        Stage7ShiftsAndReduces::Shift(s) => format!("S→{}", s.0),
+      +                        Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
+      +                            format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
+      +                        }
+      +                        Stage7ShiftsAndReduces::Split { shift, reduces } => {
+      +                            let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
+      +                            let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
+      +                                let nt_count = nts.len();
+      +                                let p_count: usize = nts.values().map(|pids| pids.len()).sum();
+      +                                format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
+      +                            }).collect();
+      +
+      +                            if s_part.is_empty() {
+      +                                format!("Split[{}]", r_parts.join(", "))
+      +                            } else {
+      +                                format!("Split[{}, {}]", s_part, r_parts.join(", "))
+      +                            }
+      +                        }
+      +                    };
+      +                    writeln!(f, "          └─ (x{:<2}) {}", count, compact_action)?;
+                       }
+                   }
+               }
+      -        writeln!(f, "------------------------")?;
+      +        writeln!(f, "---------------------")?;
+               Ok(())
+           }
+       }
+       
+       /// Computes various statistics about the generated GLR parser table.
+      -///
+      -/// This function analyzes the final parse table to count states, conflicts, etc.
+      -///
+      -/// # Arguments
+      -/// * `parser` - A reference to the `GLRParser` to be analyzed.
+      -///
+      -/// # Returns
+      -/// A `GLRStats` struct containing the computed statistics.
+       pub fn get_stats(parser: &GLRParser) -> GLRStats {
+           let mut num_shift_reduce_conflicts = 0;
+           let mut num_reduce_reduce_conflicts = 0;
+      -    let mut conflicts_by_state: BTreeMap<StateID, (usize, usize)> = BTreeMap::new();
+      +    let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
+       
+           for (state_id, row) in &parser.stage_7_table {
+      -        let mut sr_conflicts_in_state = 0;
+      -        let mut rr_conflicts_in_state = 0;
+      +        let mut current_state_stats = StateStats::default();
+      +        current_state_stats.num_gotos = row.gotos.len();
+      +        current_state_stats.total_actions = row.shifts_and_reduces.len();
+       
+               for (_, action) in &row.shifts_and_reduces {
+      +            // Update unique actions count
+      +            *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
+      +
+                   match action {
+      +                Stage7ShiftsAndReduces::Shift(_) => {
+      +                    current_state_stats.num_shifts += 1;
+      +                }
+                       Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
+      +                    current_state_stats.num_reduces += 1;
+                           if production_ids.len() > 1 {
+                               num_reduce_reduce_conflicts += 1;
+      -                        rr_conflicts_in_state += 1;
+                           }
+                       }
+                       Stage7ShiftsAndReduces::Split { shift, reduces } => {
+      +                    current_state_stats.num_splits += 1;
+                           if shift.is_some() {
+                               num_shift_reduce_conflicts += 1;
+      -                        sr_conflicts_in_state += 1;
+                           }
+                           let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+                           if total_reduce_productions > 1 {
+                               num_reduce_reduce_conflicts += 1;
+      -                        rr_conflicts_in_state += 1;
+                           }
+                       }
+      -                _ => {}
+                   }
+               }
+      -
+      -        if sr_conflicts_in_state > 0 || rr_conflicts_in_state > 0 {
+      -            conflicts_by_state.insert(*state_id, (sr_conflicts_in_state, rr_conflicts_in_state));
+      -        }
+      +        all_state_stats.insert(*state_id, current_state_stats);
+           }
+       
+           GLRStats {
+      @@ -78,7 +117,7 @@
+               num_states: parser.item_set_map.len(),
+               num_shift_reduce_conflicts,
+               num_reduce_reduce_conflicts,
+      -        conflicts_by_state,
+      +        state_stats: all_state_stats,
+           }
+       }
 
       ```
     metadata:
@@ -12008,8 +11700,8 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/glr/stats.rs
+      Applying patch to 'src/glr/stats.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/stats.rs.
     metadata:
 ...
