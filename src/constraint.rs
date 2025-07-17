@@ -1166,8 +1166,8 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(3, "{}", log_msg);
         }
 
-        crate::profiler::print_summary_flat();
-        crate::profiler::print_summary();
+        // crate::profiler::print_summary_flat();
+        // crate::profiler::print_summary();
         crate::profiler::reset();
 
         // Log the GSSs
