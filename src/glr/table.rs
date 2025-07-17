@@ -601,7 +601,7 @@ fn optimize_with_default_reductions(table: &mut Stage7Table) {
                     row.shifts_and_reduces = Stage7ShiftsAndReduces::DefaultReduce {
                         nonterminal_id: *nonterminal_id,
                         len: *len,
-                        production_ids: production_ids.clone(),
+                        production_ids: all_production_ids,
                     };
                 }
             }

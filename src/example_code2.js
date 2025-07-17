@@ -1,3 +1,6 @@
+aaaaaa
+
+><><
 // =================================================================
 //  JavaScript Parser Test Suite - "The Kitchen Sink"
 //  This file contains a wide variety of JS syntax constructs
