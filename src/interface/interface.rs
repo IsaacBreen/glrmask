@@ -513,25 +513,45 @@ impl GrammarDefinition {
 
                 let mut u8set = U8Set::none();
                 let mut it = content.chars().peekable();
-                while let Some(c) = it.next() {
-                    if c == '\\' {
-                        if let Some(escaped) = it.next() {
-                            u8set.insert(escaped as u8);
+
+                let mut parse_char = |it: &mut std::iter::Peekable<std::str::Chars>| -> Result<Option<char>, String> {
+                    if let Some(c) = it.next() {
+                        if c == '\\' {
+                            if let Some(escaped_char) = it.next() {
+                                Ok(Some(match escaped_char {
+                                    'n' => '\n',
+                                    't' => '\t',
+                                    'r' => '\r',
+                                    'b' => '\u{0008}',
+                                    'f' => '\u{000C}',
+                                    'v' => '\u{000B}',
+                                    '\\' => '\\',
+                                    other => other,
+                                }))
+                            } else {
+                                Err(format!("Dangling escape in char class: {}", class_def))
+                            }
                         } else {
-                            return Err(format!("Dangling escape in char class: {}", class_def));
+                            Ok(Some(c))
                         }
-                    } else if it.peek() == Some(&'-') {
+                    } else {
+                        Ok(None)
+                    }
+                };
+
+                while let Some(start_char) = parse_char(&mut it)? {
+                    if it.peek() == Some(&'-') {
                         it.next(); // consume '-'
-                        if let Some(end) = it.next() {
-                            for i in (c as u8)..=(end as u8) {
+                        if let Some(end_char) = parse_char(&mut it)? {
+                            for i in (start_char as u8)..=(end_char as u8) {
                                 u8set.insert(i);
                             }
                         } else { // trailing dash
-                            u8set.insert(c as u8);
+                            u8set.insert(start_char as u8);
                             u8set.insert(b'-');
                         }
                     } else {
-                        u8set.insert(c as u8);
+                        u8set.insert(start_char as u8);
                     }
                 }
                 println!("Converted char class '{}' to U8Set: {:?}", class_def, Expr::U8Class(if negated { u8set.complement() } else { u8set }));
