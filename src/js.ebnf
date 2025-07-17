@@ -38,7 +38,7 @@ declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list 
 
 variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-variable_declaration ::= identifier ( '=' expression )? ;
+variable_declaration ::= IDENTIFIER ( '=' expression )? ;
 
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
@@ -55,16 +55,16 @@ case_clause ::= 'case' expression ':' statement_list? ;
 default_clause ::= 'default' ':' statement_list? ;
 
 try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-catch_clause ::= 'catch' '(' identifier ')' block ;
+catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
 finally_clause ::= 'finally' block ;
 
-function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
+function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
 
-parameter_list ::= identifier ( ',' identifier )* ;
+parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
 
 return_statement ::= 'return' expression? ';'? ;
-break_statement ::= 'break' identifier? ';'? ;
-continue_statement ::= 'continue' identifier? ';'? ;
+break_statement ::= 'break' IDENTIFIER? ';'? ;
+continue_statement ::= 'continue' IDENTIFIER? ';'? ;
 throw_statement ::= 'throw' expression ';'? ;
 debugger_statement ::= 'debugger' ';'? ;
 
@@ -78,7 +78,7 @@ assignment_expression ::=
   ;
 
 arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-arrow_parameters ::= identifier | '(' parameter_list? ')' ;
+arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
 
 conditional_expression ::=
     logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
@@ -127,7 +127,7 @@ call_expression ::=
     member_expression arguments
   | call_expression arguments
   | call_expression '[' expression ']' 
-  | call_expression '.' identifier
+  | call_expression '.' IDENTIFIER
   ;
 
 arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
@@ -135,13 +135,13 @@ arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' 
 member_expression ::=
     primary_expression
   | member_expression '[' expression ']' 
-  | member_expression '.' identifier
+  | member_expression '.' IDENTIFIER
   | 'new' member_expression arguments
   ;
 
 primary_expression ::=
     'this' 
-  | identifier
+  | IDENTIFIER
   | literal
   | array_literal
   | object_literal
@@ -149,7 +149,7 @@ primary_expression ::=
   | '(' expression ')'
   ;
 
-function_expression ::= 'function' identifier? '(' parameter_list? ')' block ;
+function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
 
 array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
 ELISION ::= ','+ ;
@@ -158,9 +158,9 @@ object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','
 property_assignment ::=
     property_name ':' assignment_expression
   | 'get' property_name '(' ')' block
-  | 'set' property_name '(' identifier ')' block
+  | 'set' property_name '(' IDENTIFIER ')' block
   ;
-property_name ::= identifier | STRING_LITERAL | NUMERIC_LITERAL ;
+property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
 
 // Literals
 literal ::=
@@ -198,7 +198,6 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or
 TEMPLATE_SUBSTITUTION ::= '${' expression '}' ;
 
 // Identifiers
-identifier ::= IDENTIFIER ;
 IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
 IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
 IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
