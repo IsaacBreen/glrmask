@@ -7,7 +7,7 @@ program ::= statement_list? ;
 IGNORE ::= WS | COMMENT ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
-SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* [\n\r] ; // Non-greedy match
 MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ; // Non-greedy match
 
 // Statements
