@@ -443,6 +443,7 @@ impl GSSNode {
                 // Check for dead paths *after* accumulation.
                 let new_full_union = new_pred_node.acc_manager.union.accumulate_seq(&new_local_acc);
                 if new_full_union.is_dead() {
+                    crate::debug!(6, "Dead path after accumulating\n{:?}\nwith local\n{:?}resulting in\n{:?}", new_pred_node, parent_local_acc, new_full_union);
                     continue;
                 }
 
