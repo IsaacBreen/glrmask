@@ -638,7 +638,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                          }) => {
                         let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
                         // timeit!("GLRParserState::step::reduce", {
-                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (pids {:?})", nonterminal.0, len, production_ids), {
+                        let productions_strs: Vec<String> = production_ids.iter()
+                            .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
+                            .collect();
+                        let productions_str = if productions_strs.len() == 1 {
+                            productions_strs[0].clone()
+                        } else {
+                            format!("[{}]", productions_strs.join(", "))
+                        };
+                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (productions: {:?})", nonterminal.0, len, productions_str), {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
