@@ -183,7 +183,7 @@ impl JSONConvertible for Stage7Phase3DefaultReduce {
 pub struct Stage7Row {
     pub phase1_shifts_and_reduces: Stage7Phase1ShiftsAndReduces,
     pub phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces,
-    pub phase3_default_reduces: Stage7Phase3DefaultReduce,
+    pub phase3_default_reduce: Stage7Phase3DefaultReduce,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
@@ -193,7 +193,7 @@ impl JSONConvertible for Stage7Row {
         let mut obj = StdMap::new();
         obj.insert("phase1_shifts_and_reduces".to_string(), self.phase1_shifts_and_reduces.to_json());
         obj.insert("phase2_shifts_and_reduces".to_string(), self.phase2_shifts_and_reduces.to_json());
-        obj.insert("phase3_default_reduces".to_string(), self.phase3_default_reduces.to_json());
+        obj.insert("phase3_default_reduce".to_string(), self.phase3_default_reduce.to_json());
         obj.insert("gotos".to_string(), self.gotos.to_json());
         JSONNode::Object(obj)
     }
@@ -202,7 +202,7 @@ impl JSONConvertible for Stage7Row {
             JSONNode::Object(mut obj) => Ok(Stage7Row {
                 phase1_shifts_and_reduces: Stage7Phase1ShiftsAndReduces::from_json(obj.remove("phase1_shifts_and_reduces").ok_or_else(|| "Missing field phase1_shifts_and_reduces for Stage7Row".to_string())?)?,
                 phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces::from_json(obj.remove("phase2_shifts_and_reduces").ok_or_else(|| "Missing field phase2_shifts_and_reduces for Stage7Row".to_string())?)?,
-                phase3_default_reduces: Stage7Phase3DefaultReduce::from_json(obj.remove("phase3_default_reduces").ok_or_else(|| "Missing field phase3_default_reduces for Stage7Row".to_string())?)?,
+                phase3_default_reduce: Stage7Phase3DefaultReduce::from_json(obj.remove("phase3_default_reduce").ok_or_else(|| "Missing field phase3_default_reduce for Stage7Row".to_string())?)?,
                 gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())?)?,
             }),
             _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
@@ -558,7 +558,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
 
-        let phase3_default_reduces = if let Some((nonterminal_id, len)) = promoted_reduce_key {
+        let phase3_default_reduce = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
             Stage7Phase3DefaultReduce {
                 clone_and_merge: false,
@@ -571,7 +571,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             }
         };
 
-        let phase1_shifts_and_reduces = if let Some(ref promoted) = phase3_default_reduces.reduce {
+        let phase1_shifts_and_reduces = if let Some(ref promoted) = phase3_default_reduce.reduce {
             phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
                 match action {
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } if *nonterminal_id == promoted.nonterminal_id && *len == promoted.len => {
@@ -595,7 +595,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         stage_7_table.insert(state_id, Stage7Row {
             phase1_shifts_and_reduces,
             phase2_shifts_and_reduces,
-            phase3_default_reduces,
+            phase3_default_reduce,
             gotos,
         });
     }

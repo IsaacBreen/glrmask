@@ -281,7 +281,7 @@ impl GLRParser {
             let mut has_default_reduce = false;
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
-                if let Some(ref r) = row.phase3_default_reduces.reduce {
+                if let Some(ref r) = row.phase3_default_reduce.reduce {
                     has_default_reduce = true;
                     let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                     if !new_stack.is_empty() {
@@ -312,7 +312,7 @@ impl GLRParser {
             let mut has_default_reduce = false;
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
-                if let Some(ref r) = row.phase3_default_reduces.reduce {
+                if let Some(ref r) = row.phase3_default_reduce.reduce {
                     has_default_reduce = true;
                     let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                     if !new_stack.is_empty() {
@@ -427,7 +427,7 @@ impl GLRParser {
                 }
 
                 writeln!(&mut result, "  Phase 3 Default Action:").unwrap();
-                if let Some(reduce_action) = &row.phase3_default_reduces.reduce {
+                if let Some(reduce_action) = &row.phase3_default_reduce.reduce {
                     let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
                     let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
                     writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
@@ -554,7 +554,7 @@ impl Display for GLRParser {
             }
 
             writeln!(f, "    Default Action (Phase 3):")?;
-            if let Some(reduce) = &row.phase3_default_reduces.reduce {
+            if let Some(reduce) = &row.phase3_default_reduce.reduce {
                 let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
                 let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
                 writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
@@ -722,7 +722,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut has_default_reduce = false;
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                if let Some(ref r) = row.phase3_default_reduces.reduce {
+                if let Some(ref r) = row.phase3_default_reduce.reduce {
                     has_default_reduce = true;
                     let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                     if !new_stack.is_empty() {
