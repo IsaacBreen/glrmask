@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 
 /// Set this to `false` to completely disable profiling at runtime.
-pub const PROFILING_ENABLED: bool = true;
+pub const PROFILING_ENABLED: bool = false;
 
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
