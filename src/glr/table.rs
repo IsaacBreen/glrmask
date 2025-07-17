@@ -54,7 +54,7 @@ struct Stage6ShiftsAndReduces {
     reduces: BTreeSet<ProductionID>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Stage7ShiftsAndReduces {
     Shift(StateID),
     Reduce {
