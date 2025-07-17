@@ -16,6 +16,7 @@ use std::fs;
 use std::collections::BTreeMap as StdMap;
 use crate::glr::analyze::{simplify_grammar};
 use crate::glr::grammar::terminal;
+use crate::datastructures::u8set::U8Set;
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -29,6 +30,7 @@ pub enum GrammarExpr {
     Optional(Box<GrammarExpr>),
     Repeat(Box<GrammarExpr>), // Zero or more repetition
     Literal(Vec<u8>),
+    CharClass(String),
 }
 
 impl JSONConvertible for GrammarExpr {
@@ -58,6 +60,10 @@ impl JSONConvertible for GrammarExpr {
             GrammarExpr::Literal(bytes) => {
                 obj.insert("variant".to_string(), JSONNode::String("Literal".to_string()));
                 obj.insert("bytes".to_string(), bytes.to_json());
+            }
+            GrammarExpr::CharClass(s) => {
+                obj.insert("variant".to_string(), JSONNode::String("CharClass".to_string()));
+                obj.insert("def".to_string(), s.to_json());
             }
         }
         JSONNode::Object(obj)
@@ -96,6 +102,11 @@ impl JSONConvertible for GrammarExpr {
                         let bytes = obj.remove("bytes").ok_or_else(|| "Missing field bytes for Literal".to_string())
                                        .and_then(Vec::<u8>::from_json)?;
                         Ok(GrammarExpr::Literal(bytes))
+                    }
+                    "CharClass" => {
+                        let s = obj.remove("def").ok_or_else(|| "Missing field def for CharClass".to_string())
+                                       .and_then(String::from_json)?;
+                        Ok(GrammarExpr::CharClass(s))
                     }
                     _ => Err(format!("Unknown variant {} for GrammarExpr", variant)),
                 }
@@ -482,6 +493,39 @@ impl GrammarDefinition {
     ) -> Result<Expr, String> {
         match grammar_expr {
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
+            GrammarExpr::CharClass(class_def) => {
+                let content = &class_def[1..class_def.len() - 1];
+                let (negated, content) = if content.starts_with('^') {
+                    (true, &content[1..])
+                } else {
+                    (false, content)
+                };
+
+                let mut u8set = U8Set::none();
+                let mut it = content.chars().peekable();
+                while let Some(c) = it.next() {
+                    if c == '\\' {
+                        if let Some(escaped) = it.next() {
+                            u8set.insert(escaped as u8);
+                        } else {
+                            return Err(format!("Dangling escape in char class: {}", class_def));
+                        }
+                    } else if it.peek() == Some(&'-') {
+                        it.next(); // consume '-'
+                        if let Some(end) = it.next() {
+                            for i in (c as u8)..=(end as u8) {
+                                u8set.insert(i);
+                            }
+                        } else { // trailing dash
+                            u8set.insert(c as u8);
+                            u8set.insert(b'-');
+                        }
+                    } else {
+                        u8set.insert(c as u8);
+                    }
+                }
+                Ok(Expr::U8Class(if negated { u8set.complement() } else { u8set }))
+            }
             GrammarExpr::Ref(name) => {
                 if let Some(resolved_expr) = memo.get(name) {
                     return Ok(resolved_expr.clone());

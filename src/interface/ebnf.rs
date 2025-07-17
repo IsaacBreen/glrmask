@@ -1,10 +1,11 @@
-use crate::interface::{choice, choice_fast, literal, optional, r#ref, repeat, sequence, GrammarExpr};
+use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::sync::OnceLock;
 use std::vec::IntoIter;
 use crate::finite_automata::{Expr, QuantifierType};
+use crate::interface::GrammarExpr::CharClass;
 
 #[derive(Debug, Clone, PartialEq)]
 enum EbnfToken {
@@ -20,8 +21,9 @@ fn get_token_regex() -> &'static Regex {
             r#"(?x)
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
+        (?P<charclass>\[([^\]\\]|\\.)*\]) |
         (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
-        (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
+        (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
         (?P<ws>\s+) |
         (?P<error>.)
         "#,
@@ -64,6 +66,8 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
                 }
             }
             tokens.push(EbnfToken::Literal(unescaped));
+        } else if let Some(cc) = cap.name("charclass") {
+            tokens.push(EbnfToken::CharClass(cc.as_str().to_string()));
         } else if let Some(op) = cap.name("op") {
             tokens.push(EbnfToken::Op(op.as_str().to_string()));
         } else if let Some(e) = cap.name("error") {
@@ -190,6 +194,9 @@ impl EbnfParser {
         } else if let Some(EbnfToken::Literal(lit)) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(literal(lit.into_bytes()))
+        } else if let Some(EbnfToken::CharClass(cc)) = self.tokens.peek().cloned() {
+            self.tokens.next();
+            Ok(CharClass(cc))
         } else if self.peek_grammar_op("(") {
             self.consume_grammar_op("(")?;
             let expr = self.parse_grammar_expression()?;
