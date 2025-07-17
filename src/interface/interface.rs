@@ -877,8 +877,6 @@ impl GrammarDefinition {
             }
         }
 
-        dbg!(&referenced_terminals);
-
         let non_terminal_rules: Vec<(String, GrammarExpr)> = grammar_exprs.into_iter()
             .filter(|(name, _)| !is_terminal_name(name))
             .collect();
