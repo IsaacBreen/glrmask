@@ -7,7 +7,7 @@ use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduce
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -625,6 +625,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut todo: Vec<ParseState> = Vec::new();
         todo.push(ParseState { stack: self.active_state.stack.clone() });
 
+        // States obtainable through *shift* actions.  We will process any
+        // cascading `DefaultReduce` actions on these after the initial loop.
+        let mut post_shift_todo: VecDeque<ParseState> = VecDeque::new();
+
         let mut next = ParseState::from_existing(self.active_state.clone());
         // let mut not_found = ParseState::new(llm_vocab.clone());
 
@@ -642,10 +646,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_content = ParseStateEdgeContent { state_id: *to };
                                 crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
                                 let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-                                crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
-                                next.merge(new_parse_state);
-                                crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                // Do *not* merge into `next` yet.  We first have to
+                                // process any automatic `DefaultReduce` steps that
+                                // may apply *after* the shift.
+                                post_shift_todo.push_back(new_parse_state);
                                 })
                             }
 
@@ -739,6 +743,35 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
 
+        // ------------------------------------------------------------------
+        // SECOND PASS: follow cascades of DefaultReduce actions that may
+        // trigger *immediately* after a shift.
+        // ------------------------------------------------------------------
+        while let Some(state) = post_shift_todo.pop_front() {
+            let mut performed_default_reduce = false;
+
+            for peek in state.stack.peek_iter() {
+                let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, .. } = &row.shifts_and_reduces {
+                    performed_default_reduce = true;
+                    let new_stack = self.reduce_and_goto(&peek, *nonterminal_id, *len);
+                    if !new_stack.is_empty() {
+                        post_shift_todo.push_back(ParseState { stack: new_stack });
+                    }
+                }
+            }
+
+            // If no default reduction was applicable for *any* peek in this
+            // parse state, it is a final state for this token: merge it into
+            // `next`.
+            if !performed_default_reduce {
+                next.merge(state);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Commit results
+        // ------------------------------------------------------------------
         self.active_state = next;
         // self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
 

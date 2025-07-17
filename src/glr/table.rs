@@ -580,7 +580,7 @@ fn optimize_with_default_reductions(table: &mut Stage7Table) {
 
             // Check if it's a pure Reduce action.
             if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
-                // If it is a pure Reduce action, check if all other actions in this state are identical.
+                // If it is a pure Reduce action, check if all other actions in this state are identical (.
                 if actions.values().all(|a| a == first_action) {
                     // All conditions met, replace with DefaultReduce.
                     crate::debug!(3, "Optimizing state {:?} to DefaultReduce", state_id);
