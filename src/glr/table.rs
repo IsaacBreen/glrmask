@@ -55,7 +55,7 @@ struct Stage6ShiftsAndReduces {
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Stage7ShiftsAndReduces {
+pub enum Stage7ShiftsAndReducesLookaheadValue {
     Shift(StateID),
     Reduce {
         nonterminal_id: NonTerminalID,
@@ -68,21 +68,21 @@ pub enum Stage7ShiftsAndReduces {
     },
 }
 
-impl JSONConvertible for Stage7ShiftsAndReduces {
+impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         match self {
-            Stage7ShiftsAndReduces::Shift(state_id) => {
+            Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
                 obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
                 obj.insert("state_id".to_string(), state_id.to_json());
             }
-            Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                 obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
                 obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
                 obj.insert("len".to_string(), len.to_json());
                 obj.insert("production_ids".to_string(), production_ids.to_json());
             }
-            Stage7ShiftsAndReduces::Split { shift, reduces } => {
+            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                 obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
                 obj.insert("shift".to_string(), shift.to_json());
                 obj.insert("reduces".to_string(), reduces.to_json());
@@ -94,13 +94,13 @@ impl JSONConvertible for Stage7ShiftsAndReduces {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
+                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string())
                                    .and_then(String::from_json)?;
                 match variant.as_str() {
                     "Shift" => {
                         let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
                                           .and_then(StateID::from_json)?;
-                        Ok(Stage7ShiftsAndReduces::Shift(state_id))
+                        Ok(Stage7ShiftsAndReducesLookaheadValue::Shift(state_id))
                     }
                     "Reduce" => {
                         let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
@@ -109,15 +109,59 @@ impl JSONConvertible for Stage7ShiftsAndReduces {
                                      .and_then(usize::from_json)?;
                         let production_ids = obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())
                                                 .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
-                        Ok(Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids })
+                        Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids })
                     }
                     "Split" => {
                         let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
                                        .and_then(Option::<StateID>::from_json)?;
                         let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
                                          .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
-                        Ok(Stage7ShiftsAndReduces::Split { shift, reduces })
+                        Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
                     }
+                    _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReducesLookaheadValue", variant)),
+                }
+            }
+            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Stage7ShiftsAndReduces {
+    Lookahead(BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>),
+    DefaultReduce {
+        nonterminal_id: NonTerminalID,
+        len: usize,
+        production_ids: BTreeSet<ProductionID>,
+    },
+}
+
+impl JSONConvertible for Stage7ShiftsAndReduces {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        match self {
+            Stage7ShiftsAndReduces::Lookahead(actions) => {
+                obj.insert("variant".to_string(), JSONNode::String("Lookahead".to_string()));
+                obj.insert("actions".to_string(), actions.to_json());
+            }
+            Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
+                obj.insert("variant".to_string(), JSONNode::String("DefaultReduce".to_string()));
+                obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
+                obj.insert("len".to_string(), len.to_json());
+                obj.insert("production_ids".to_string(), production_ids.to_json());
+            }
+        }
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
+                    .and_then(String::from_json)?;
+                match variant.as_str() {
+                    "Lookahead" => BTreeMap::<TerminalID, Stage7ShiftsAndReducesLookaheadValue>::from_json(obj.remove("actions").ok_or_else(|| "Missing field actions for Lookahead".to_string())?).map(Stage7ShiftsAndReduces::Lookahead),
+                    "DefaultReduce" => Ok(Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id: NonTerminalID::from_json(obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for DefaultReduce".to_string())?)?, len: usize::from_json(obj.remove("len").ok_or_else(|| "Missing field len for DefaultReduce".to_string())?)?, production_ids: BTreeSet::<ProductionID>::from_json(obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for DefaultReduce".to_string())?)? }),
                     _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
                 }
             }
@@ -169,7 +213,7 @@ impl JSONConvertible for Goto {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage7Row {
-    pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+    pub shifts_and_reduces: Stage7ShiftsAndReduces,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
@@ -185,7 +229,7 @@ impl JSONConvertible for Stage7Row {
         match node {
             JSONNode::Object(mut obj) => {
                 let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
-                                            .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?;
+                                            .and_then(Stage7ShiftsAndReduces::from_json)?;
                 let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
                                .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
                 Ok(Stage7Row { shifts_and_reduces, gotos })
@@ -448,7 +492,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
     for (item_set, row) in stage_6_table {
         let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-        let mut shifts_and_reduces = BTreeMap::new();
+        let mut shifts_and_reduces_lookahead = BTreeMap::new();
         let mut gotos = BTreeMap::new();
 
         for (terminal, action) in row.shifts_and_reduces {
@@ -473,10 +517,10 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             let converted_action = if let Some(shift_id) = shift_state_id {
                 if reduces_by_len_and_nt.is_empty() {
                     // Shift only
-                    Stage7ShiftsAndReduces::Shift(shift_id)
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id)
                 } else {
                     // Shift-Reduce conflict
-                    Stage7ShiftsAndReduces::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
                 }
             } else { // No shift
                 if reduces_by_len_and_nt.is_empty() {
@@ -486,19 +530,21 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                     if nts.len() == 1 {
                         // Single reduce action (possibly with multiple productions for same NT/len)
                         let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
-                        Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids }
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }
                     } else {
                         // Reduce-Reduce conflict (different NTs, same length)
-                        Stage7ShiftsAndReduces::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
                     }
                 } else {
                     // Reduce-Reduce conflict (different lengths)
-                    Stage7ShiftsAndReduces::Split { shift: None, reduces: reduces_by_len_and_nt }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: reduces_by_len_and_nt }
                 }
             };
-            shifts_and_reduces.insert(terminal_id, converted_action);
+            shifts_and_reduces_lookahead.insert(terminal_id, converted_action);
         }
 
+        let shifts_and_reduces = Stage7ShiftsAndReduces::Lookahead(shifts_and_reduces_lookahead);
+        
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
             let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
