@@ -128,6 +128,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
 
 pub type Stage7Phase1ShiftsAndReduces = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 pub type Stage7Phase2ShiftsAndReduces = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
+
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Reduce {
     pub nonterminal_id: NonTerminalID,
@@ -558,35 +559,34 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
 
-        let phase3_default_reduce = if let Some((nonterminal_id, len)) = promoted_reduce_key {
+        let (phase1_shifts_and_reduces, phase3_default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
-            Stage7Phase3DefaultReduce {
-                clone_and_merge: false,
-                reduce: Some(Reduce { nonterminal_id, len, production_ids }),
-            }
-        } else {
-            Stage7Phase3DefaultReduce {
-                clone_and_merge: true,
-                reduce: None,
-            }
-        };
-
-        let phase1_shifts_and_reduces = if let Some(ref promoted) = phase3_default_reduce.reduce {
-            phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
+            
+            let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
                 match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } if *nonterminal_id == promoted.nonterminal_id && *len == promoted.len => {
-                        None // Filter out the action that was promoted
-                    },
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } 
+                        if *action_nt_id == nonterminal_id && *action_len == len => None,
                     _ => Some((tid, action.clone()))
                 }
-            }).collect()
+            }).collect::<Stage7Phase1ShiftsAndReduces>();
+
+            let phase3 = Stage7Phase3DefaultReduce {
+                clone_and_merge: !phase1.is_empty(),
+                reduce: Some(Reduce { nonterminal_id, len, production_ids }),
+            };
+            (phase1, phase3)
         } else {
-            phase2_shifts_and_reduces.clone()
+            let phase1 = phase2_shifts_and_reduces.clone();
+            let phase3 = Stage7Phase3DefaultReduce {
+                clone_and_merge: true,
+                reduce: None,
+            };
+            (phase1, phase3)
         };
 
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
-            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
             let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
             if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
             gotos.insert(non_terminal_id, goto);
