@@ -377,6 +377,50 @@ impl GLRParser {
 
             // Get and print actions
             if let Some(row) = self.stage_7_table.get(&state_id) {
+                writeln!(&mut result, "  Phase 1 Actions (Full Lookahead):").unwrap();
+                let actions = &row.phase1_shifts_and_reduces;
+                if actions.is_empty() {
+                    writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                } else {
+                    // Sort by terminal name for consistent output
+                    let mut sorted_actions: Vec<_> = actions.iter().collect();
+                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                    for (terminal_id, action) in sorted_actions {
+                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                        write!(&mut result, "    - On '{}': ", terminal).unwrap();
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                if production_ids.len() == 1 {
+                                    let prod_id = production_ids.iter().next().unwrap();
+                                    let prod = &self.productions[prod_id.0];
+                                    writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                } else {
+                                    let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                    writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                }
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                writeln!(&mut result, "Conflict:").unwrap();
+                                if let Some(shift_state) = shift {
+                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                }
+                                for (_len, nts) in reduces {
+                                    for (_nt_id, prod_ids) in nts {
+                                        for prod_id in prod_ids {
+                                            let prod = &self.productions[prod_id.0];
+                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 writeln!(&mut result, "  Phase 2 Actions (Full Lookahead):").unwrap();
                 let actions = &row.phase2_shifts_and_reduces;
                 if actions.is_empty() {
@@ -513,6 +557,38 @@ impl Display for GLRParser {
                         write!(f, " •")?;
                     }
                     writeln!(f)?;
+                }
+            }
+
+            writeln!(f, "    Actions (Phase 1):")?;
+            let actions = &row.phase1_shifts_and_reduces;
+            for (&terminal_id, action) in actions {
+                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                        writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                        writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                        writeln!(f, "      - {} -> Conflict:", terminal)?;
+                        if let Some(shift_state) = shift {
+                            writeln!(f, "        - Shift {}", shift_state.0)?;
+                        }
+                        for (len, nts) in reduces {
+                            writeln!(f, "        - Reduce (len {}):", len)?;
+                            for (nt_id, prod_ids) in nts {
+                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                for prod_id_val in prod_ids {
+                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
