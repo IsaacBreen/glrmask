@@ -280,13 +280,14 @@ impl GLRParser {
         while let Some(state) = default_reduce_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
+                if row.phase3_default_reduce.clone_and_merge {
+                    next.merge(ParseState { stack: peek.to_arc_node() });
+                }
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
                     let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                     if !new_stack.is_empty() {
                         default_reduce_todo.push_back(ParseState { stack: new_stack });
                     }
-                } else {
-                    next.merge(ParseState { stack: peek.to_arc_node() });
                 }
             }
         }
