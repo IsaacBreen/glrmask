@@ -112,8 +112,8 @@ impl Acc {
         }
     }
 
-    pub fn new_fresh_from_existing(acc: &Acc) -> Self {
-        Self::new_fresh(acc.llm_tokens().llm_vocab.clone())
+    pub fn new_fresh_from_existing(stack: &GSSNode) -> Self {
+        Self::new_fresh(stack.llm_tokens().llm_vocab.clone())
     }
 
     pub fn new_fresh_from_existing_stack(stack: &GSSNode) -> Self {
@@ -125,7 +125,7 @@ impl Acc {
     fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
     fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo { &mut self.disallowed_terminals }
 
-    fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
+    pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
         self.llm_token_info.llm_vocab.clone()
     }
 
@@ -403,11 +403,6 @@ impl GSSNode {
         inner_map.insert(edge_value, predecessor_arc.clone());
         predecessors_map.insert(predecessor_arc.max_depth, inner_map);
         Self::new_with_map(Arc::new(local_acc), predecessors_map)
-    }
-
-    pub fn fresh_from_existing(node: &GSSNode) -> Self {
-        let local_acc = Acc::new_fresh_from_existing(&node.full_union_acc());
-        Self::new_with_map(Arc::new(local_acc), node.predecessors.clone())
     }
 
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
