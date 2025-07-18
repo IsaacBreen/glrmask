@@ -246,7 +246,7 @@ impl Acc {
 
 /// Manages the local and aggregated path accumulators for a GSS node.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AccManager {
+struct AccManager {
     /// Constraints applied locally at this node/edge.
     pub local: Arc<Acc>,
     /// The union of constraints over all paths from a root to this node (excluding local).
