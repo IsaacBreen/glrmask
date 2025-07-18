@@ -564,7 +564,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             
             let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
                 match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } 
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
                         if *action_nt_id == nonterminal_id && *action_len == len => None,
                     Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
                         let mut reduces = reduces.clone();
