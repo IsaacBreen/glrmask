@@ -115,8 +115,8 @@ impl Acc {
         }
     }
 
-    pub fn new_fresh_from_existing(stack: &GSSNode) -> Self {
-        Self::new_fresh(stack.llm_tokens().llm_vocab.clone())
+    pub fn new_fresh_from_existing(acc: &Acc) -> Self {
+        Self::new_fresh(acc.llm_tokens().llm_vocab.clone())
     }
 
     fn llm_tokens(&self) -> &LLMTokenInfo { &self.llm_token_info }
@@ -124,7 +124,7 @@ impl Acc {
     fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
     fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo { &mut self.disallowed_terminals }
 
-    pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
+    fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
         self.llm_token_info.llm_vocab.clone()
     }
 
@@ -404,8 +404,13 @@ impl GSSNode {
         Self::new_with_map(Arc::new(local_acc), predecessors_map)
     }
 
+    pub fn fresh_from_existing(node: &GSSNode) -> Self {
+        let local_acc = Acc::new_fresh_from_existing(&node.acc_manager.local);
+        Self::new_with_map(Arc::new(local_acc), node.predecessors.clone())
+    }
+
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
-    fn acc_manager(&self) -> &AccManager { &self.acc_manager }
+    pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
     // #[time_it]
