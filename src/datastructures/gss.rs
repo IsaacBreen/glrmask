@@ -660,7 +660,7 @@ fn prune_and_transform_recursive(
     }
 }
 
-// #[time_it]
+#[time_it]
 pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
@@ -674,7 +674,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     );
 }
 
-// #[time_it]
+#[time_it]
 pub fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
