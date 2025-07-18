@@ -124,10 +124,6 @@ impl Acc {
         Self::new_fresh(stack.llm_tokens().llm_vocab.clone())
     }
 
-    pub fn new_fresh_from_existing_stack2(stack: &GSSNode) -> Self {
-        Self::new_fresh(stack.acc_manager.local.llm_tokens().llm_vocab.clone())
-    }
-
     fn llm_tokens(&self) -> &LLMTokenInfo { &self.llm_token_info }
     fn llm_tokens_mut(&mut self) -> &mut LLMTokenInfo { &mut self.llm_token_info }
     fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }

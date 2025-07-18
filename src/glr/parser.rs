@@ -344,7 +344,7 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack(&initial_acc))); // root has empty acc
+        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing(&initial_acc))); // root has empty acc
         let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
     }
@@ -693,7 +693,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh_from_existing_stack2(stack));
+        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh_from_existing_stack(stack));
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -735,7 +735,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
         timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
-            Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack2(&peek.predecessor_node)))
+            Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack(&peek.predecessor_node)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {
