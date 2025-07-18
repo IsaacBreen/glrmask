@@ -887,6 +887,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         });
 
+        // Merge before Phase 3
+        if !phase3_todo.is_empty() {
+            crate::debug!(4, "Merging phase3_todo before Phase 3");
+            // Merge all states in phase3_todo into next
+            let mut merged_phase3 = phase3_todo.pop_front().unwrap();
+            for state in std::mem::take(&mut phase3_todo) {
+                merged_phase3.merge(state);
+            }
+            phase3_todo.push_back(merged_phase3);
+        }
+
         crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
         // --- Phase 3: Process default reductions on post-shift states ---
         timeit!("GLRParserState::step::phase3", {
