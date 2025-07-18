@@ -824,47 +824,6 @@ pub fn map_allowed_terminals_tokenizer_states(
     }
 }
 
-
-// --- Simplification ---
-
-fn simplify_node_recursive(
-    node_arc: &Arc<GSSNode>,
-    memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
-    cache: &mut NodeCache,
-) -> Arc<GSSNode> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(simplified_arc) = memo.get(&node_ptr) {
-        return simplified_arc.clone();
-    }
-
-    let simplified_predecessors_set: NodeSet = node_arc.predecessors.values().flat_map(|m| m.iter())
-        .map(|(edge_val, pred_arc)| {
-            let simplified_pred_arc = simplify_node_recursive(pred_arc, memo, cache);
-            (simplified_pred_arc, edge_val.clone())
-        })
-        .collect();
-
-    let simplified_predecessors_map = process_predecessors(&simplified_predecessors_set);
-
-    let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
-        .or_insert_with(|| {
-            let llm_vocab = node_arc.llm_tokens().llm_vocab().clone();
-            let canonical_local_acc = Arc::new(Acc::new_fresh(llm_vocab));
-            Arc::new(GSSNode::new_with_map(canonical_local_acc, simplified_predecessors_map))
-        });
-
-    // Create the final simplified node. It has the canonical structure, but with the original local accumulator.
-    // The union/intersection accumulators are re-calculated based on the simplified predecessors.
-    let final_node = GSSNode::new_with_map(
-        node_arc.acc_manager.local.clone(),
-        cached_structural_node.predecessors.clone(),
-    );
-
-    let result_arc = Arc::new(final_node);
-    memo.insert(node_ptr, result_arc.clone());
-    result_arc
-}
-
 impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
     /// This can simplify the GSS by reducing path diversity. The fusion process is applied
