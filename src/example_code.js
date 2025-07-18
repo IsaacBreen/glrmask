@@ -1,4 +1,4 @@
-aaaaaa = 1;
+aaaaaa;
 if (true) {}; if (true) {};
 if (true) {};
 if (true) {};

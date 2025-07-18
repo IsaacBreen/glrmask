@@ -831,7 +831,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
 
         // Merge before Phase 2
-        if !phase3_todo.is_empty() {
+        if !phase2_todo.is_empty() {
             crate::debug!(4, "Merging phase2_todo before Phase 2");
             let mut merged_phase2 = phase2_todo.pop_front().unwrap();
             for state in std::mem::take(&mut phase2_todo) {
