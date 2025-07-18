@@ -272,8 +272,8 @@ pub struct GSSPeek<'a> {
 
 // Helper functions for GSSNode construction
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    // predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
-    0
+    predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    // 0
 }
 
 fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
@@ -619,7 +619,7 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
-// #[time_it]
+#[time_it]
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
