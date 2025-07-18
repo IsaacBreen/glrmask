@@ -410,8 +410,7 @@ impl GSSNode {
     }
 
     pub fn fresh_from_existing(node: &GSSNode) -> Self {
-        let local_acc = Acc::new_fresh_from_existing2(&node.full_union_acc());
-        Self::new_with_map(Arc::new(local_acc), node.predecessors.clone())
+        Self::new(Acc::new_fresh_from_existing(&node))
     }
 
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
