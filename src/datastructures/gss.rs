@@ -401,8 +401,6 @@ impl GSSNode {
     }
 
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
-    pub fn num_predecessors(&self) -> usize { self.predecessors.values().map(|inner_map| inner_map.len()).sum() }
-    pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
     fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
@@ -417,21 +415,12 @@ impl GSSNode {
         self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
 
-    pub fn llm_tokens(&self) -> LLMTokenInfo {
-        self.full_union_acc().llm_token_info
-    }
-
-    pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-        self.full_union_acc().llm_tokens().allowed()
-    }
-
-    pub fn disallowed_terminals(&self) -> TerminalInfo {
-        self.full_union_acc().disallowed_terminals
-    }
-
-    pub fn is_alive(&self) -> bool {
-        self.full_union_acc().is_alive()
-    }
+    pub fn num_predecessors(&self) -> usize { self.predecessors.values().map(|inner_map| inner_map.len()).sum() }
+    pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
+    pub fn llm_tokens(&self) -> LLMTokenInfo { self.full_union_acc().llm_token_info }
+    pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.full_union_acc().llm_tokens().allowed() }
+    pub fn disallowed_terminals(&self) -> TerminalInfo { self.full_union_acc().disallowed_terminals }
+    pub fn is_alive(&self) -> bool { self.full_union_acc().is_alive() }
 }
 
 // Core GSS operations
