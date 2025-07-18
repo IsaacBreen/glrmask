@@ -39,27 +39,24 @@ impl LLMTokenInfo {
     }
     fn all(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let mut this = Self::none(llm_vocab.clone());
-        this.llm_tokens = Some(LLMTokenBV::ones(this.max_num_llm_tokens()));
+        this.llm_tokens = Some(LLMTokenBV::max_ones());
         this
     }
     fn disallowed(&self) -> LLMTokenBV {
         self.llm_tokens.clone().unwrap_or_else(LLMTokenBV::zeros)
     }
     fn allowed(&self) -> LLMTokenBV {
-        let all_tokens = LLMTokenBV::ones(self.max_num_llm_tokens());
+        let all_tokens = LLMTokenBV::max_ones();
         all_tokens - self.disallowed()
     }
     fn is_empty(&self) -> bool {
         self.llm_tokens.is_none() || self.llm_tokens.as_ref().unwrap().is_empty()
     }
     fn is_all(&self) -> bool {
-        self.disallowed() == LLMTokenBV::ones(self.max_num_llm_tokens())
+        self.disallowed() == LLMTokenBV::max_ones()
     }
     fn llm_vocab(&self) -> &Option<Arc<LLMVocab>> {
         &self.llm_vocab
-    }
-    fn max_num_llm_tokens(&self) -> usize {
-        self.llm_vocab.as_ref().map_or(usize::MAX, |vocab| vocab.internal_max_llm_token.saturating_add(1))
     }
 }
 
@@ -686,7 +683,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     allowed_tokens: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
-    let newly_disallowed = LLMTokenBV::ones(root_arc.llm_tokens().max_num_llm_tokens()) - allowed_tokens.clone();
+    let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
     disallow_llm_tokens_and_prune_arc(
         root_arc,
         &newly_disallowed,

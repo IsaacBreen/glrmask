@@ -381,7 +381,7 @@ impl GrammarConstraint {
 
     #[time_it]
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-        let internal_bv = internal_bv & &LLMTokenBV::ones(self.llm_vocab.internal_max_llm_token + 1);
+        let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
         for internal_id_val in internal_bv.iter() {
             let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV from internal BV: {:?}", internal_id_val, internal_bv).as_str());
@@ -391,7 +391,7 @@ impl GrammarConstraint {
     }
 
     pub(crate) fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-        HybridBitset::ones(self.llm_vocab.internal_max_llm_token + 1)
+        HybridBitset::max_ones()
     }
 
     fn compute_possible_matches_for_vocab_node(
@@ -508,7 +508,7 @@ impl<'r> Precomputer<'r> {
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
-            all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
+            all_llm_tokens: HybridBitset::max_ones(),
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
@@ -1038,7 +1038,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1);
+                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::max_ones();
                 let disallowed_terminals_for_gss = glr_state.active_state.stack.disallowed_terminals();
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss.iter() {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
@@ -1050,7 +1050,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 let mut glr_state = glr_state.clone();
-                if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1)) {
+                if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::max_ones()) {
                     // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
                     disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                     // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
