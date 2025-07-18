@@ -741,7 +741,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut out_iter = out.into_iter();
             let mut out_node = out_iter.next().unwrap();
             for next_node in out_iter {
-                out_node.merge(&next_node);
+                out_node.merge(Arc::new(next_node));
             }
             Arc::new(out_node)
         }
@@ -1022,7 +1022,7 @@ pub struct ParseStateKey {
 
 impl ParseState { // No longer generic
     pub fn merge(&mut self, other: ParseState) {
-        Arc::make_mut(&mut self.stack).merge(&other.stack);
+        Arc::make_mut(&mut self.stack).merge(other.stack);
     }
 }
 

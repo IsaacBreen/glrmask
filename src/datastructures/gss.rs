@@ -320,7 +320,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
             } else {
                 let mut merged_node = (*first).clone();
                 for other_arc in iter {
-                    merged_node.merge(&other_arc);
+                    merged_node.merge(other_arc);
                 }
                 result_for_depth.insert(edge_val, Arc::new(merged_node));
             }
@@ -343,7 +343,7 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
                     entry.insert(source_pred_arc);
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    Arc::make_mut(entry.get_mut()).merge(&source_pred_arc);
+                    Arc::make_mut(entry.get_mut()).merge(source_pred_arc);
                 }
             }
         }
@@ -478,13 +478,13 @@ impl GSSNode {
 
     /// Merges another `GSSNode` into this one.
     // #[time_it]
-    pub fn merge(&mut self, other: &Self) {
+    pub fn merge(&mut self, other: Arc<Self>) {
         // timeit!("GSSNode::merge", {
-        if self == other { return; }
+        if *self == *other { return; }
 
         if other.predecessors.is_empty() && other.acc_manager.local.is_empty() { return; }
         if self.predecessors.is_empty() && self.acc_manager.local.is_empty() {
-            *self = other.clone();
+            &*self == other.as_ref();
             return;
         }
 
@@ -502,7 +502,7 @@ impl GSSNode {
     }
 
     pub fn merged(mut self, other: Self) -> Self {
-        self.merge(&other);
+        self.merge(Arc::new(other));
         self
     }
 
@@ -875,7 +875,7 @@ pub fn fuse_predecessors_recursive(
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge(&other_arc);
+                merged_node.merge(other_arc);
             }
             Arc::new(merged_node)
         };
@@ -1328,7 +1328,7 @@ mod tests {
 
         // Merge n1 and n2
         let mut merged = (*n1).clone();
-        merged.merge(&n2);
+        merged.merge(n2.clone());
 
         // Merged local acc should be the parallel merge (intersection of disallowed)
         let expected_local = Acc::merge_parallel([n1.acc_manager.local.as_ref(), n2.acc_manager.local.as_ref()]);
