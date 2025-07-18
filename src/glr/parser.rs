@@ -674,12 +674,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut next = ParseState::from_existing(self.active_state.clone());
 
         // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
+        crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
         while let Some(state) = phase1_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
                 // We use phase1 actions here, which exclude the default reduce action,
                 // as that should have been handled at the end of the previous step.
                 if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                             let stack_for_push = peek.to_arc_node();
@@ -710,17 +713,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                         }
                     }
+                } else {
+                    crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                 }
             }
         }
 
+        crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
         // --- Phase 2: Process lookahead-based actions ---
         while let Some(state) = phase2_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                // We use phase1 actions here, which exclude the default reduce action,
-                // as that should have been handled at the end of the previous step.
+                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+                // We use phase2 actions here, which include all lookahead-specific actions.
                 if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                             let stack_for_push = peek.to_arc_node();
@@ -751,23 +758,30 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                         }
                     }
+                } else {
+                    crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                 }
             }
         }
 
+        crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
         // --- Phase 3: Process default reductions on post-shift states ---
         while let Some(state) = phase3_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
+                    crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
                     // This peek has a default reduce.
                     // The result of the reduction goes back on the todo list for this phase.
                     let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                     if !new_stack.is_empty() {
+                        crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
                         phase3_todo.push_back(ParseState { stack: new_stack });
                     }
                 }
                 if row.phase3_default_reduce.clone_and_merge {
+                    crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
                     next.merge(ParseState { stack: peek.to_arc_node() });
                 }
             }
