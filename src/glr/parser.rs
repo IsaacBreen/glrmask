@@ -473,7 +473,11 @@ impl GLRParser {
                 } else {
                     writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
                 }
-
+                if row.phase3_default_reduce.clone_and_merge {
+                    writeln!(&mut result, "    (State will be merged after shift)").unwrap();
+                } else {
+                    writeln!(&mut result, "    (State will not be merged after shift)").unwrap();
+                }
 
                 writeln!(&mut result, "  Gotos:").unwrap();
                 if row.gotos.is_empty() {
@@ -631,6 +635,11 @@ impl Display for GLRParser {
                 writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
             } else {
                 writeln!(f, "      - None (Merge state)")?;
+            }
+            if row.phase3_default_reduce.clone_and_merge {
+                writeln!(f, "      - Clone and merge after shift")?;
+            } else {
+                writeln!(f, "      - No clone and merge")?;
             }
 
             writeln!(f, "    Gotos:")?;
