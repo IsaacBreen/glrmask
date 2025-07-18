@@ -733,7 +733,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
         // });
-        timeit!("GLRParserState::reduce_and_goto::merge_results", {
+        // timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
             Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack(&peek.predecessor_node)))
         } else if out.len() == 1 {
@@ -746,7 +746,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
             Arc::new(out_node)
         }
-        })
+        // })
     }
 
     #[time_it("GLRParserState::step")]

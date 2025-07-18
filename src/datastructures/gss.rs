@@ -293,7 +293,7 @@ fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
 
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
-#[time_it]
+// #[time_it]
 fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -664,7 +664,7 @@ fn prune_and_transform_recursive(
     }
 }
 
-#[time_it]
+// #[time_it]
 pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
