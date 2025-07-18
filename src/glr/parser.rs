@@ -830,15 +830,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         });
 
-        // Merge before Phase 2
-        if !phase2_todo.is_empty() {
-            crate::debug!(4, "Merging phase2_todo before Phase 2");
-            let mut merged_phase2 = phase2_todo.pop_front().unwrap();
-            for state in std::mem::take(&mut phase2_todo) {
-                merged_phase2.merge(state);
-            }
-            phase2_todo.push_back(merged_phase2);
-        }
+        // // Merge before Phase 2
+        // if !phase2_todo.is_empty() {
+        //     crate::debug!(4, "Merging phase2_todo before Phase 2");
+        //     let mut merged_phase2 = phase2_todo.pop_front().unwrap();
+        //     for state in std::mem::take(&mut phase2_todo) {
+        //         merged_phase2.merge(state);
+        //     }
+        //     phase2_todo.push_back(merged_phase2);
+        // }
 
         crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
         // --- Phase 2: Process lookahead-based actions ---
