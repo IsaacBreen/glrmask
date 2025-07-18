@@ -427,7 +427,7 @@ impl GSSNode {
 
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The accumulators of predecessors are adjusted to include this node's local constraints.
-    #[time_it("GSSNode::pop")]
+    // #[time_it("GSSNode::pop")]
     pub fn pop(&self) -> GSSPop {
         let mut new_node_map = NodeMap::new();
         let parent_local_acc = &self.acc_manager.local;
@@ -462,7 +462,7 @@ impl GSSNode {
     }
 
     /// Pops `n` levels from the GSS.
-    #[time_it("GSSNode::popn")]
+    // #[time_it("GSSNode::popn")]
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
             return self.clone();
@@ -533,7 +533,7 @@ impl GSSPop<'_> {
         GSSPop { parent_node: self.parent_node, node_map }
     }
 
-    #[time_it("GSSPop::popn")]
+    // #[time_it("GSSPop::popn")]
     pub fn popn(&self, n: usize) -> GSSPop {
         if n == 0 {
             return self.clone();
@@ -546,7 +546,7 @@ impl GSSPop<'_> {
     }
 
     /// Converts the `GSSPop` into a single `GSSNode`.
-    #[time_it("GSSPop::to_node")]
+    // #[time_it("GSSPop::to_node")]
     pub fn to_node(&self) -> GSSNode {
         let llm_vocab = self.parent_node.llm_tokens().llm_vocab().clone();
         // The new node is an aggregation point, so it has no local constraints of its own.
@@ -559,7 +559,7 @@ impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
     pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
-    #[time_it]
+    // #[time_it]
     pub fn to_node(&self) -> GSSNode {
         let local_acc = self.parent_node.acc_manager.local.accumulate_seq(&self.predecessor_node.full_union_acc());
         GSSNode::new_with_single_predecessor(
@@ -573,7 +573,7 @@ impl<'a> GSSPeek<'a> {
         Arc::new(self.to_node())
     }
 
-    #[time_it("GSSPeek::popn")]
+    // #[time_it("GSSPeek::popn")]
     pub fn popn(&self, n: usize) -> Arc<GSSNode> {
         Arc::new(self.to_arc_node().popn(n))
     }
