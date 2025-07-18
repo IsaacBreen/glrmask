@@ -281,13 +281,17 @@ impl GLRParser {
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
                 if row.phase3_default_reduce.clone_and_merge {
-                    next.merge(ParseState { stack: peek.to_arc_node() });
+                    timeit!("GLRParser::init::mini_phase3::merge", {
+                        next.merge(ParseState { stack: peek.to_arc_node() });
+                    });
                 }
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                    if !new_stack.is_empty() {
-                        default_reduce_todo.push_back(ParseState { stack: new_stack });
-                    }
+                    timeit!("GLRParser::init::mini_phase3::reduce", {
+                        let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                        if !new_stack.is_empty() {
+                            default_reduce_todo.push_back(ParseState { stack: new_stack });
+                        }
+                    });
                 }
             }
         }
@@ -310,13 +314,17 @@ impl GLRParser {
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
                 if row.phase3_default_reduce.clone_and_merge {
-                    next.merge(ParseState { stack: peek.to_arc_node() });
+                    timeit!("GLRParser::init_from_state::mini_phase3::merge", {
+                        next.merge(ParseState { stack: peek.to_arc_node() });
+                    });
                 }
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                    if !new_stack.is_empty() {
-                        default_reduce_todo.push_back(ParseState { stack: new_stack });
-                    }
+                    timeit!("GLRParser::init_from_state::mini_phase3::reduce", {
+                        let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                        if !new_stack.is_empty() {
+                            default_reduce_todo.push_back(ParseState { stack: new_stack });
+                        }
+                    });
                 }
             }
         }
@@ -827,32 +835,42 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     crate::debug!(4, "Phase 2: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                            let stack_for_push = peek.to_arc_node();
-                            let new_content = ParseStateEdgeContent { state_id: *to };
-                            let new_parse_state = self.push_state(&stack_for_push, new_content);
-                            phase3_todo.push_back(new_parse_state);
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                            if !s_new_arc.is_empty() {
-                                phase2_todo.push_back(ParseState { stack: s_new_arc });
-                            }
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                            if let Some(to) = shift {
+                            timeit!("GLRParserState::step::phase2::shift", {
                                 let stack_for_push = peek.to_arc_node();
                                 let new_content = ParseStateEdgeContent { state_id: *to };
                                 let new_parse_state = self.push_state(&stack_for_push, new_content);
                                 phase3_todo.push_back(new_parse_state);
-                            }
-                            for (len, nts) in reduces {
-                                for (nt, _prod_ids) in nts {
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                    if !s_new_arc.is_empty() {
-                                        phase2_todo.push_back(ParseState { stack: s_new_arc });
+                            });
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+                            timeit!("GLRParserState::step::phase2::reduce", {
+                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                if !s_new_arc.is_empty() {
+                                    phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                }
+                            });
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            timeit!("GLRParserState::step::phase2::split", {
+                                if let Some(to) = shift {
+                                    timeit!("GLRParserState::step::phase2::split::shift", {
+                                        let stack_for_push = peek.to_arc_node();
+                                        let new_content = ParseStateEdgeContent { state_id: *to };
+                                        let new_parse_state = self.push_state(&stack_for_push, new_content);
+                                        phase3_todo.push_back(new_parse_state);
+                                    });
+                                }
+                                for (len, nts) in reduces {
+                                    for (nt, _prod_ids) in nts {
+                                        timeit!("GLRParserState::step::phase2::split::reduce", {
+                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                            if !s_new_arc.is_empty() {
+                                                phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                            }
+                                        });
                                     }
                                 }
-                            }
+                            });
                         }
                     }
                 } else {
@@ -868,18 +886,22 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                 crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
-                    // This peek has a default reduce.
-                    // The result of the reduction goes back on the todo list for this phase.
-                    let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                    if !new_stack.is_empty() {
-                        crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
-                        phase3_todo.push_back(ParseState { stack: new_stack });
-                    }
+                    timeit!("GLRParserState::step::phase3::reduce", {
+                        crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
+                        // This peek has a default reduce.
+                        // The result of the reduction goes back on the todo list for this phase.
+                        let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                        if !new_stack.is_empty() {
+                            crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
+                            phase3_todo.push_back(ParseState { stack: new_stack });
+                        }
+                    });
                 }
                 if row.phase3_default_reduce.clone_and_merge {
-                    crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
-                    next.merge(ParseState { stack: peek.to_arc_node() });
+                    timeit!("GLRParserState::step::phase3::merge", {
+                        crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
+                        next.merge(ParseState { stack: peek.to_arc_node() });
+                    });
                 }
             }
         }
