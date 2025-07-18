@@ -277,6 +277,7 @@ impl GLRParser {
         default_reduce_todo.push_back(parser_state.active_state.clone());
         let mut next = ParseState::new(parser_state.active_state.stack.llm_tokens().llm_vocab().clone());
 
+        timeit!("GLRParserState::init_glr_parser::mini_phase3", {
         while let Some(state) = default_reduce_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
@@ -295,6 +296,7 @@ impl GLRParser {
                 }
             }
         }
+        });
         parser_state.active_state = next;
         parser_state
     }
@@ -310,6 +312,7 @@ impl GLRParser {
         default_reduce_todo.push_back(parser_state.active_state.clone());
         let mut next = ParseState::new(parser_state.active_state.stack.llm_tokens().llm_vocab().clone());
 
+        timeit!("GLRParserState::init_glr_parser_from_parse_state::mini_phase3", {
         while let Some(state) = default_reduce_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
@@ -328,6 +331,7 @@ impl GLRParser {
                 }
             }
         }
+        });
         parser_state.active_state = next;
         parser_state
     }
@@ -770,6 +774,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
         crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
+        timeit!("GLRParserState::step::phase1", {
         while let Some(state) = phase1_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
@@ -823,9 +828,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
+        });
 
         crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
         // --- Phase 2: Process lookahead-based actions ---
+        timeit!("GLRParserState::step::phase2", {
         while let Some(state) = phase2_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
@@ -878,9 +885,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
+        });
 
         crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
         // --- Phase 3: Process default reductions on post-shift states ---
+        timeit!("GLRParserState::step::phase3", {
         while let Some(state) = phase3_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
@@ -905,6 +914,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
+        });
 
         self.active_state = next;
 
