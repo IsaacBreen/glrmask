@@ -330,7 +330,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 }
 
 /// Merges the `source` NodeMap into the `target` NodeMap.
-// #[time_it]
+#[time_it]
 fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
     for (depth, source_preds_for_depth) in source {
         let target_preds_for_depth = target.entry(depth).or_default();
@@ -473,6 +473,7 @@ impl GSSNode {
     /// Merges another `GSSNode` into this one.
     #[time_it]
     pub fn merge(&mut self, other: &Self) {
+        timeit!("GSSNode::merge", {
         if self == other { return; }
 
         if other.predecessors.is_empty() && other.acc_manager.local.is_empty() { return; }
@@ -492,6 +493,7 @@ impl GSSNode {
         // Create a new node with the merged properties.
         let new_node = GSSNode::new_with_map(Arc::new(merged_local), new_predecessors);
         *self = new_node;
+        });
     }
 
     pub fn merged(mut self, other: Self) -> Self {
