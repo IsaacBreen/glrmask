@@ -1093,9 +1093,9 @@ impl<'a> GrammarConstraintState<'a> {
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                         if let Some(gtid) = grammar_token_opt {
-                            if Some(*gtid) == self.parent.parser.ignore_terminal_id {
-                                continue;
-                            }
+                            // if Some(*gtid) == self.parent.parser.ignore_terminal_id {
+                            //     continue;
+                            // }
                             let mut counts_guard = step_counts_clone1.lock().unwrap();
                             let entry = counts_guard.entry(*gtid).or_default();
                             entry.total += 1;

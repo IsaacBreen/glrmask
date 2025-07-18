@@ -3,7 +3,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The measured overhead of a single timing block, used for correction.
-const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
+// const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
+const PROFILER_CORRECTION: Duration = Duration::from_nanos(0);
 
 /// Set this to `false` to completely disable profiling at runtime.
 pub const PROFILING_ENABLED: bool = true;

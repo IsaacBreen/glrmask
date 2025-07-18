@@ -973,8 +973,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
         self.active_state.merge(other.active_state);
-        self.action_not_found_states.merge(other.action_not_found_states);
-        self.cycled_states.merge(other.cycled_states);
+        // self.action_not_found_states.merge(other.action_not_found_states);
+        // self.cycled_states.merge(other.cycled_states);
     }
 
     pub fn is_ok(&self) -> bool {
