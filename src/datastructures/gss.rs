@@ -866,24 +866,6 @@ fn simplify_node_recursive(
 }
 
 impl GSSNode {
-    pub fn simplify(&mut self) {
-        let temp_arc = Arc::new(self.clone());
-        let mut memo = HashMap::new();
-        let mut cache = NodeCache::new();
-        let simplified_arc = simplify_node_recursive(&temp_arc, &mut memo, &mut cache);
-        *self = Arc::try_unwrap(simplified_arc).unwrap_or_else(|arc| (*arc).clone());
-    }
-
-    pub fn simplify_together(nodes: &mut [&mut Arc<Self>]) {
-        let mut memo = HashMap::new();
-        let mut cache = NodeCache::new();
-        for node_arc_ref_mut in nodes {
-            let current_arc = (*node_arc_ref_mut).clone();
-            let simplified_arc = simplify_node_recursive(&current_arc, &mut memo, &mut cache);
-            **node_arc_ref_mut = simplified_arc;
-        }
-    }
-
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
     /// This can simplify the GSS by reducing path diversity. The fusion process is applied
     /// recursively for `levels` number of levels down from this node.
@@ -1451,41 +1433,6 @@ mod tests {
         // Full union of a1 is the parallel merge of its predecessors' full unions.
         // merge_parallel of Disallowed{0} and Disallowed{1} is Disallowed{}.
         assert!(a1_orig.full_union_acc().is_empty());
-
-        // --- Simplify ---
-        let mut roots_to_simplify = vec![&mut a1_orig];
-        GSSNode::simplify_together(&mut roots_to_simplify);
-        let s_a1 = roots_to_simplify[0].clone();
-
-        // --- Verification after simplification ---
-        assert!(s_a1.full_union_acc().is_empty(), "A1 full union should be empty");
-        assert_eq!(s_a1.predecessors.len(), 2, "A1 should have 2 predecessor maps for different depths");
-
-        // Check path from B1
-        let preds_at_depth_3 = s_a1.predecessors.get(&3).expect("No predecessors at depth 3");
-        let s_b1 = preds_at_depth_3.get(&mock_edge(10)).expect("Edge 10 not found for depth 3 pred");
-        assert_eq!(s_b1.full_union_acc(), acc_base, "Simplified B1 full union mismatch");
-
-        // Check path from D2
-        let preds_at_depth_1 = s_a1.predecessors.get(&1).expect("No predecessors at depth 1");
-        let s_d2 = preds_at_depth_1.get(&mock_edge(10)).expect("Edge 10 not found for depth 1 pred");
-        assert_eq!(s_d2.full_union_acc(), acc_other, "Simplified D2 full union mismatch");
-
-        // Check leaf nodes
-        let s_c1 = s_b1.predecessors.get(&2).unwrap().get(&mock_edge(20)).unwrap();
-        let s_d1 = s_c1.predecessors.get(&1).unwrap().get(&mock_edge(30)).unwrap();
-        let s_n4_from_d1 = s_d1.predecessors.get(&0).unwrap().get(&mock_edge(40)).unwrap();
-        assert_eq!(s_n4_from_d1.full_union_acc(), acc_base);
-
-        let s_n4_from_d2 = s_d2.predecessors.get(&0).unwrap().get(&mock_edge(40)).unwrap();
-        assert_eq!(s_n4_from_d2.full_union_acc(), acc_other);
-
-        // The two N4 leaf nodes should be different because their accumulators are different.
-        assert_ne!(s_n4_from_d1, s_n4_from_d2);
-        assert!(!Arc::ptr_eq(s_n4_from_d1, s_n4_from_d2));
-        
-        // The structures leading to the leaves should be distinct, not shared.
-        assert!(!Arc::ptr_eq(s_d1, s_d2));
     }
 
     #[test]
