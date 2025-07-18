@@ -103,7 +103,7 @@ impl ParseState {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(None))) }
     }
     pub fn from_existing(existing: &Self) -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh_from_existing(&existing.stack))) }
+        ParseState { stack: Arc::new(GSSNode::fresh_from_existing(&existing.stack)) }
     }
 }
 
@@ -344,8 +344,7 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let llm_vocab = initial_acc.llm_vocab().clone();
-        let root = Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))); // root has empty acc
+        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing2(&initial_acc))); // root has empty acc
         let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
     }
