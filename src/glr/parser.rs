@@ -103,7 +103,10 @@ impl ParseState {
     pub fn new(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))) }
     }
-    pub fn from_existing(existing: Self) -> Self {
+    pub fn new_without_vocab() -> Self {
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(None))) }
+    }
+    pub fn from_existing(existing: &Self) -> Self {
         ParseState::new(existing.stack.llm_tokens().llm_vocab().clone())
     }
 }
@@ -258,9 +261,9 @@ impl GLRParser {
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
-            active_state: ParseState::new(None),
-            action_not_found_states: ParseState::new(None),
-            cycled_states: ParseState::new(None),
+            active_state: ParseState::new_without_vocab(),
+            action_not_found_states: ParseState::new_without_vocab(),
+            cycled_states: ParseState::new_without_vocab(),
         }
     }
 
@@ -269,13 +272,13 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
-            action_not_found_states: ParseState::new(None),
-            cycled_states: ParseState::new(None),
+            action_not_found_states: ParseState::new_without_vocab(),
+            cycled_states: ParseState::new_without_vocab(),
         };
         // Mini phase 3 on initialization
         let mut default_reduce_todo: VecDeque<ParseState> = VecDeque::new();
         default_reduce_todo.push_back(parser_state.active_state.clone());
-        let mut next = ParseState::new(parser_state.active_state.stack.llm_tokens().llm_vocab().clone());
+        let mut next = ParseState::from_existing(&parser_state.active_state);
 
         timeit!("GLRParserState::init_glr_parser::mini_phase3", {
         while let Some(state) = default_reduce_todo.pop_front() {
@@ -304,13 +307,13 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
-            action_not_found_states: ParseState::new(None),
-            cycled_states: ParseState::new(None),
+            action_not_found_states: ParseState::new_without_vocab(),
+            cycled_states: ParseState::new_without_vocab(),
         };
         // Mini phase 3 on initialization
         let mut default_reduce_todo: VecDeque<ParseState> = VecDeque::new();
         default_reduce_todo.push_back(parser_state.active_state.clone());
-        let mut next = ParseState::new(parser_state.active_state.stack.llm_tokens().llm_vocab().clone());
+        let mut next = ParseState::from_existing(&parser_state.active_state);
 
         timeit!("GLRParserState::init_glr_parser_from_parse_state::mini_phase3", {
         while let Some(state) = default_reduce_todo.pop_front() {
@@ -694,9 +697,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
-        let llm_vocab = stack.llm_tokens().llm_vocab().clone();
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh(llm_vocab));
+        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh(stack.llm_tokens().llm_vocab().clone()));
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -738,8 +740,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
         timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
-            let llm_vocab = self.active_state.stack.llm_tokens().llm_vocab().clone();
-            Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab)))
+            Arc::new(GSSNode::new(Acc::new_fresh(self.active_state.stack.llm_tokens().llm_vocab().clone())))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {
@@ -770,7 +771,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
 
         let mut phase3_todo: VecDeque<ParseState> = VecDeque::new();
-        let mut next = ParseState::from_existing(self.active_state.clone());
+        let mut next = ParseState::from_existing(&self.active_state);
 
         // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
         crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
