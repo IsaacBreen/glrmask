@@ -1567,6 +1567,50 @@ local_system:
 
                   // Get and print actions
                   if let Some(row) = self.stage_7_table.get(&state_id) {
+                      writeln!(&mut result, "  Phase 1 Actions (Full Lookahead):").unwrap();
+                      let actions = &row.phase1_shifts_and_reduces;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                          let mut sorted_actions: Vec<_> = actions.iter().collect();
+                          sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                          for (terminal_id, action) in sorted_actions {
+                              let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                              write!(&mut result, "    - On '{}': ", terminal).unwrap();
+                              match action {
+                                  Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                      writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
                       writeln!(&mut result, "  Phase 2 Actions (Full Lookahead):").unwrap();
                       let actions = &row.phase2_shifts_and_reduces;
                       if actions.is_empty() {
@@ -1703,6 +1747,38 @@ local_system:
                               write!(f, " •")?;
                           }
                           writeln!(f)?;
+                      }
+                  }
+
+                  writeln!(f, "    Actions (Phase 1):")?;
+                  let actions = &row.phase1_shifts_and_reduces;
+                  for (&terminal_id, action) in actions {
+                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                      match action {
+                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                              writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                              writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                              writeln!(f, "      - {} -> Conflict:", terminal)?;
+                              if let Some(shift_state) = shift {
+                                  writeln!(f, "        - Shift {}", shift_state.0)?;
+                              }
+                              for (len, nts) in reduces {
+                                  writeln!(f, "        - Reduce (len {}):", len)?;
+                                  for (nt_id, prod_ids) in nts {
+                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                      for prod_id_val in prod_ids {
+                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                      }
+                                  }
+                              }
+                          }
                       }
                   }
 
@@ -1864,12 +1940,15 @@ local_system:
               let mut next = ParseState::from_existing(self.active_state.clone());
 
               // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
+              crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
               while let Some(state) = phase1_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                      crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
                       // We use phase1 actions here, which exclude the default reduce action,
                       // as that should have been handled at the end of the previous step.
                       if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+                          crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                           match action {
                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                   let stack_for_push = peek.to_arc_node();
@@ -1900,17 +1979,21 @@ local_system:
                                   }
                               }
                           }
+                      } else {
+                          crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                       }
                   }
               }
 
+              crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
               // --- Phase 2: Process lookahead-based actions ---
               while let Some(state) = phase2_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                      // We use phase1 actions here, which exclude the default reduce action,
-                      // as that should have been handled at the end of the previous step.
+                      crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+                      // We use phase2 actions here, which include all lookahead-specific actions.
                       if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+                          crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                           match action {
                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                   let stack_for_push = peek.to_arc_node();
@@ -1941,23 +2024,30 @@ local_system:
                                   }
                               }
                           }
+                      } else {
+                          crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                       }
                   }
               }
 
+              crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
               // --- Phase 3: Process default reductions on post-shift states ---
               while let Some(state) = phase3_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                      crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
                       if let Some(ref r) = row.phase3_default_reduce.reduce {
+                          crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
                           // This peek has a default reduce.
                           // The result of the reduction goes back on the todo list for this phase.
                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                           if !new_stack.is_empty() {
+                              crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
                               phase3_todo.push_back(ParseState { stack: new_stack });
                           }
                       }
                       if row.phase3_default_reduce.clone_and_merge {
+                          crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
                           next.merge(ParseState { stack: peek.to_arc_node() });
                       }
                   }
@@ -2795,7 +2885,7 @@ local_system:
                   
                   let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
                       match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } 
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
                               if *action_nt_id == nonterminal_id && *action_len == len => None,
                           Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
                               let mut reduces = reduces.clone();
@@ -3440,9 +3530,9 @@ local_system:
           let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
           let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
           
-          let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
-          state.step(eof);
-          assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
+          // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+          // state.step(eof);
+          // assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           state.parse(&tokens);
@@ -5502,6 +5592,50 @@ local_system:
 
                   // Get and print actions
                   if let Some(row) = self.stage_7_table.get(&state_id) {
+                      writeln!(&mut result, "  Phase 1 Actions (Full Lookahead):").unwrap();
+                      let actions = &row.phase1_shifts_and_reduces;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                          let mut sorted_actions: Vec<_> = actions.iter().collect();
+                          sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                          for (terminal_id, action) in sorted_actions {
+                              let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                              write!(&mut result, "    - On '{}': ", terminal).unwrap();
+                              match action {
+                                  Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                      writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
                       writeln!(&mut result, "  Phase 2 Actions (Full Lookahead):").unwrap();
                       let actions = &row.phase2_shifts_and_reduces;
                       if actions.is_empty() {
@@ -5638,6 +5772,38 @@ local_system:
                               write!(f, " •")?;
                           }
                           writeln!(f)?;
+                      }
+                  }
+
+                  writeln!(f, "    Actions (Phase 1):")?;
+                  let actions = &row.phase1_shifts_and_reduces;
+                  for (&terminal_id, action) in actions {
+                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                      match action {
+                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                              writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                              writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                              writeln!(f, "      - {} -> Conflict:", terminal)?;
+                              if let Some(shift_state) = shift {
+                                  writeln!(f, "        - Shift {}", shift_state.0)?;
+                              }
+                              for (len, nts) in reduces {
+                                  writeln!(f, "        - Reduce (len {}):", len)?;
+                                  for (nt_id, prod_ids) in nts {
+                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                      for prod_id_val in prod_ids {
+                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                      }
+                                  }
+                              }
+                          }
                       }
                   }
 
@@ -5799,12 +5965,15 @@ local_system:
               let mut next = ParseState::from_existing(self.active_state.clone());
 
               // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
+              crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
               while let Some(state) = phase1_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                      crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
                       // We use phase1 actions here, which exclude the default reduce action,
                       // as that should have been handled at the end of the previous step.
                       if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+                          crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                           match action {
                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                   let stack_for_push = peek.to_arc_node();
@@ -5835,17 +6004,21 @@ local_system:
                                   }
                               }
                           }
+                      } else {
+                          crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                       }
                   }
               }
 
+              crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
               // --- Phase 2: Process lookahead-based actions ---
               while let Some(state) = phase2_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                      // We use phase1 actions here, which exclude the default reduce action,
-                      // as that should have been handled at the end of the previous step.
+                      crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+                      // We use phase2 actions here, which include all lookahead-specific actions.
                       if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+                          crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                           match action {
                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                   let stack_for_push = peek.to_arc_node();
@@ -5876,23 +6049,30 @@ local_system:
                                   }
                               }
                           }
+                      } else {
+                          crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                       }
                   }
               }
 
+              crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
               // --- Phase 3: Process default reductions on post-shift states ---
               while let Some(state) = phase3_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                      crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
                       if let Some(ref r) = row.phase3_default_reduce.reduce {
+                          crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
                           // This peek has a default reduce.
                           // The result of the reduction goes back on the todo list for this phase.
                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                           if !new_stack.is_empty() {
+                              crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
                               phase3_todo.push_back(ParseState { stack: new_stack });
                           }
                       }
                       if row.phase3_default_reduce.clone_and_merge {
+                          crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
                           next.merge(ParseState { stack: peek.to_arc_node() });
                       }
                   }
@@ -6730,7 +6910,7 @@ local_system:
                   
                   let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
                       match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } 
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
                               if *action_nt_id == nonterminal_id && *action_len == len => None,
                           Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
                               let mut reduces = reduces.clone();
@@ -7375,9 +7555,9 @@ local_system:
           let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
           let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
           
-          let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
-          state.step(eof);
-          assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
+          // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+          // state.step(eof);
+          // assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           state.parse(&tokens);
@@ -9480,6 +9660,50 @@ messages:
 
                   // Get and print actions
                   if let Some(row) = self.stage_7_table.get(&state_id) {
+                      writeln!(&mut result, "  Phase 1 Actions (Full Lookahead):").unwrap();
+                      let actions = &row.phase1_shifts_and_reduces;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                          let mut sorted_actions: Vec<_> = actions.iter().collect();
+                          sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                          for (terminal_id, action) in sorted_actions {
+                              let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                              write!(&mut result, "    - On '{}': ", terminal).unwrap();
+                              match action {
+                                  Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                      writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
                       writeln!(&mut result, "  Phase 2 Actions (Full Lookahead):").unwrap();
                       let actions = &row.phase2_shifts_and_reduces;
                       if actions.is_empty() {
@@ -9616,6 +9840,38 @@ messages:
                               write!(f, " •")?;
                           }
                           writeln!(f)?;
+                      }
+                  }
+
+                  writeln!(f, "    Actions (Phase 1):")?;
+                  let actions = &row.phase1_shifts_and_reduces;
+                  for (&terminal_id, action) in actions {
+                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                      match action {
+                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                              writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                              writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                              writeln!(f, "      - {} -> Conflict:", terminal)?;
+                              if let Some(shift_state) = shift {
+                                  writeln!(f, "        - Shift {}", shift_state.0)?;
+                              }
+                              for (len, nts) in reduces {
+                                  writeln!(f, "        - Reduce (len {}):", len)?;
+                                  for (nt_id, prod_ids) in nts {
+                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                      for prod_id_val in prod_ids {
+                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                      }
+                                  }
+                              }
+                          }
                       }
                   }
 
@@ -9777,12 +10033,15 @@ messages:
               let mut next = ParseState::from_existing(self.active_state.clone());
 
               // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
+              crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
               while let Some(state) = phase1_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                      crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
                       // We use phase1 actions here, which exclude the default reduce action,
                       // as that should have been handled at the end of the previous step.
                       if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+                          crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                           match action {
                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                   let stack_for_push = peek.to_arc_node();
@@ -9813,17 +10072,21 @@ messages:
                                   }
                               }
                           }
+                      } else {
+                          crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                       }
                   }
               }
 
+              crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
               // --- Phase 2: Process lookahead-based actions ---
               while let Some(state) = phase2_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                      // We use phase1 actions here, which exclude the default reduce action,
-                      // as that should have been handled at the end of the previous step.
+                      crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+                      // We use phase2 actions here, which include all lookahead-specific actions.
                       if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+                          crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
                           match action {
                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                   let stack_for_push = peek.to_arc_node();
@@ -9854,23 +10117,30 @@ messages:
                                   }
                               }
                           }
+                      } else {
+                          crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
                       }
                   }
               }
 
+              crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
               // --- Phase 3: Process default reductions on post-shift states ---
               while let Some(state) = phase3_todo.pop_front() {
                   for peek in state.stack.peek_iter() {
                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                      crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
                       if let Some(ref r) = row.phase3_default_reduce.reduce {
+                          crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
                           // This peek has a default reduce.
                           // The result of the reduction goes back on the todo list for this phase.
                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                           if !new_stack.is_empty() {
+                              crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
                               phase3_todo.push_back(ParseState { stack: new_stack });
                           }
                       }
                       if row.phase3_default_reduce.clone_and_merge {
+                          crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
                           next.merge(ParseState { stack: peek.to_arc_node() });
                       }
                   }
@@ -10718,7 +10988,7 @@ messages:
                   
                   let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
                       match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } 
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
                               if *action_nt_id == nonterminal_id && *action_len == len => None,
                           Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
                               let mut reduces = reduces.clone();
@@ -11368,9 +11638,9 @@ messages:
           let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
           let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
           
-          let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
-          state.step(eof);
-          assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
+          // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+          // state.step(eof);
+          // assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           state.parse(&tokens);
@@ -11877,105 +12147,97 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: Add crate::debug statements to `GLRParser::step` at debug level 4 (or higher)
-      so we can see what's going on in the parser.
+  - user: |-
+      There are a bunch of print/debug statements like `"...token {}"`, e.g.
+      ```rust
+      crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+      ```
+      Currently most of these just show the token ID. But this is very annoying. We have to refer to the token ID table and it's just...
+      Instead, show the token Display output. eg get the `Terminal` from `terminal_map` and just display it.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Adding debug statements is a great way to get more insight into the parser's behavior. Here are the changes for `src/glr/parser.rs` to add more logging to the `step` function.
+      Of course! Dealing with opaque IDs in debug logs can be frustrating. Here are the changes to make the debug output more readable by showing the terminal's display name instead of just its ID.
 
-      I've added `crate::debug!` statements at various points within the `GLRParserState::step` function to trace the execution flow through its different phases. This should give you a clearer picture of which actions are being taken for each token.
+      I'll modify `src/glr/parser.rs` to look up the terminal from the `terminal_map` and use its `Display` implementation in the debug messages.
 
-      Here is the diff for the modified file:
+      Here is the patch for `src/glr/parser.rs`:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -677,11 +677,14 @@
-               let mut next = ParseState::from_existing(self.active_state.clone());
+      @@ -710,10 +710,11 @@
+           #[time_it("GLRParserState::step")]
+           pub fn step(&mut self, token_id: TerminalID) {
+               if Some(token_id) == self.parser.ignore_terminal_id {
+      -            crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
+      +            crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
+                   return;
+               }
        
-               // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
-      +        crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
+      +        let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+               crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+               self.log_gss("Step-start", token_id);
+       
+      @@ -729,11 +730,11 @@
                while let Some(state) = phase1_todo.pop_front() {
                    for peek in state.stack.peek_iter() {
                        let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-      +                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+      -                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+      +                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token '{}'", peek.edge_value().state_id.0, token_display);
                        // We use phase1 actions here, which exclude the default reduce action,
                        // as that should have been handled at the end of the previous step.
                        if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
-      +                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
+      -                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
+      +                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
                            match action {
                                Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                    let stack_for_push = peek.to_arc_node();
-      @@ -712,20 +715,25 @@
-                                   }
+      @@ -761,7 +762,7 @@
                                }
                            }
-      -                }
-      -            }
-      -        }
-      -
-      +                } else {
-      +                    crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
-      +                }
-      +            }
-      +        }
-      +
-      +        crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
-               // --- Phase 2: Process lookahead-based actions ---
+                       } else {
+      -                    crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
+      +                    crate::debug!(5, "Phase 1: No specific action for state {}, token '{}'. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_display);
+                       }
+                   }
+               }
+      @@ -771,11 +772,11 @@
                while let Some(state) = phase2_todo.pop_front() {
                    for peek in state.stack.peek_iter() {
                        let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-      -                // We use phase1 actions here, which exclude the default reduce action,
-      -                // as that should have been handled at the end of the previous step.
-      +                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
-      +                // We use phase2 actions here, which include all lookahead-specific actions.
+      -                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+      +                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token '{}'", peek.edge_value().state_id.0, token_display);
+                       // We use phase2 actions here, which include all lookahead-specific actions.
                        if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
-      +                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
+      -                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
+      +                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
                            match action {
                                Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                                    let stack_for_push = peek.to_arc_node();
-                                   let new_content = ParseStateEdgeContent { state_id: *to };
-                                   let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                   phase3_todo.push_back(new_parse_state);
-                               }
-      @@ -756,23 +764,30 @@
-                                   }
+      @@ -803,7 +804,7 @@
                                }
                            }
-      -                }
-      -            }
-      -        }
-      -
-      +                } else {
-      +                    crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
-      +                }
-      +            }
-      +        }
-      +
-      +        crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
-               // --- Phase 3: Process default reductions on post-shift states ---
-               while let Some(state) = phase3_todo.pop_front() {
-                   for peek in state.stack.peek_iter() {
-                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-      +                crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
-                       if let Some(ref r) = row.phase3_default_reduce.reduce {
-      +                    crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
-                           // This peek has a default reduce.
-                           // The result of the reduction goes back on the todo list for this phase.
-                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                           if !new_stack.is_empty() {
-      +                        crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
-                               phase3_todo.push_back(ParseState { stack: new_stack });
-                           }
-                       }
-                       if row.phase3_default_reduce.clone_and_merge {
-      +                    crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
-                           next.merge(ParseState { stack: peek.to_arc_node() });
+                       } else {
+      -                    crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
+      +                    crate::debug!(5, "Phase 2: No specific action for state {}, token '{}'. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_display);
                        }
                    }
+               }
+      @@ -851,8 +852,8 @@
+       
+               let roots: Vec<_> = vec![self.active_state.stack.clone()];
+               let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
+      -        crate::debug!(4, "{} - token {} ({:?}) - nodes: {:?}",
+      -                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| t), stats);
+      +        crate::debug!(4, "{} - token '{}' ({}) - nodes: {:?}",
+      +                      phase, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+       
+               let make_msg = |print_full_forest, max_nodes_to_print| {
+                   if print_full_forest {
+
       ```
 
-      Let me know if you have any other questions
+      These changes introduce a `token_display` variable at the beginning of the `step` function, which holds the displayable version of the current token. This variable is then used throughout the function's debug logs, making them much easier to read and understand during a parsing session. The `log_gss` function is also updated to provide this more readable output.
     metadata:
   - user: |
       Apply result (git-llm mode):

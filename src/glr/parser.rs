@@ -734,10 +734,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         if Some(token_id) == self.parser.ignore_terminal_id {
-            crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
+            crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
             return;
         }
 
+        let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
 
@@ -754,11 +755,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
         while let Some(state) = phase1_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token '{}'", peek.edge_value().state_id.0, token_display);
                 // We use phase1 actions here, which exclude the default reduce action,
                 // as that should have been handled at the end of the previous step.
                 if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
-                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
+                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                             let stack_for_push = peek.to_arc_node();
@@ -790,7 +791,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     }
                 } else {
-                    crate::debug!(5, "Phase 1: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
+                    crate::debug!(5, "Phase 1: No specific action for state {}, token '{}'. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_display);
                 }
             }
         }
@@ -800,10 +801,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         while let Some(state) = phase2_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token {}", peek.edge_value().state_id.0, token_id.0);
+                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token '{}'", peek.edge_value().state_id.0, token_display);
                 // We use phase2 actions here, which include all lookahead-specific actions.
                 if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
-                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token {}", action, peek.edge_value().state_id.0, token_id.0);
+                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                             let stack_for_push = peek.to_arc_node();
@@ -835,7 +836,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     }
                 } else {
-                    crate::debug!(5, "Phase 2: No specific action for state {}, token {}. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_id.0);
+                    crate::debug!(5, "Phase 2: No specific action for state {}, token '{}'. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_display);
                 }
             }
         }
@@ -916,8 +917,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(4, "{} - token {} ({:?}) - nodes: {:?}",
-                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| t), stats);
+        crate::debug!(4, "{} - token '{}' ({}) - nodes: {:?}",
+                      phase, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {
