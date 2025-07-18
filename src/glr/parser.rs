@@ -104,8 +104,7 @@ impl ParseState {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(None))) }
     }
     pub fn from_existing(existing: &Self) -> Self {
-        let llm_vocab = existing.stack.llm_tokens().llm_vocab().clone();
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))) }
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh_from_existing(&existing.stack))) }
     }
 }
 
