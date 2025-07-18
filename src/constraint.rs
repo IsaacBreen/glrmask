@@ -1114,7 +1114,9 @@ impl<'a> GrammarConstraintState<'a> {
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.full_union_acc().llm_tokens().allowed();
+                            timeit!("get_mask final_mask update", {
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                            });
                         }
 
                         if glr_s.is_ok() {

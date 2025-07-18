@@ -401,7 +401,7 @@ impl GSSNode {
     pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
-    // #[time_it]
+    #[time_it]
     pub fn full_union_acc(&self) -> Acc {
         self.acc_manager.union.accumulate_seq(&self.acc_manager.local)
     }
@@ -877,7 +877,7 @@ impl GSSNode {
     ///
     /// The process is post-order: children are fused before their parents. This means that
     /// deeper parts of the graph are simplified first.
-    // #[time_it]
+    #[time_it]
     pub fn fuse_predecessors(&mut self, levels: usize) {
         if levels == 0 {
             return;
