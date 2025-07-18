@@ -566,6 +566,31 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                 match action {
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } 
                         if *action_nt_id == nonterminal_id && *action_len == len => None,
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
+                        let mut reduces = reduces.clone();
+                        use std::collections::btree_map::Entry;
+                        match reduces.entry(len) {
+                            Entry::Occupied(mut entry) => {
+                                if entry.get_mut().remove(&nonterminal_id).is_some() {
+                                    if entry.get().is_empty() {
+                                        entry.remove();
+                                    }
+                                }
+                                match (shift, reduces.iter().map(|(_, nts)| nts.len()).sum::<usize>()) {
+                                    (None, 0) => None,
+                                    (None, 1) => {
+                                        let (len, nonterminal_id_to_production_ids) = reduces.into_iter().next().unwrap();
+                                        let (nonterminal_id, production_ids) = nonterminal_id_to_production_ids.into_iter().next().unwrap();
+                                        Some((tid, Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }))
+                                    },
+                                    (Some(shift_id), 0) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Shift(*shift_id))),
+                                    (&shift, 2..) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })),
+                                    (&shift @ Some(_), 1..) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })),
+                                }
+                            },
+                            Entry::Vacant(_) => Some((tid, action.clone())),
+                        }
+                    },
                     _ => Some((tid, action.clone()))
                 }
             }).collect::<Stage7Phase1ShiftsAndReduces>();
