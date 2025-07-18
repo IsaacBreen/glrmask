@@ -60,6 +60,11 @@ def main():
     log_path = Path(sys.argv[2])
     output_path = Path("timings_visualization.html")
 
+    # Pane width configuration: flex-grow ratio for code vs details panes.
+    # For 1/3 code vs 2/3 details split, use 1 and 2. For 50/50, use 1 and 1.
+    code_pane_flex_ratio = 1
+    details_pane_flex_ratio = 2
+
     full_text = source_path.read_text(encoding='utf-8')
     log_content = log_path.read_text(encoding='utf-8')
 
@@ -146,8 +151,8 @@ def main():
     <title>Performance Visualization</title>
     <style>
         body {{ font-family: sans-serif; display: flex; height: 100vh; margin: 0; }}
-        #code-container {{ flex: 1; overflow: auto; padding: 1em; border-right: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; line-height: 1.4; }}
-        #details-container {{ flex: 1; overflow: auto; padding: 1em; }}
+        #code-container {{ flex: {code_pane_flex_ratio}; overflow: auto; padding: 1em; border-right: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; line-height: 1.4; }}
+        #details-container {{ flex: {details_pane_flex_ratio}; overflow: auto; padding: 1em; }}
         .token {{ cursor: pointer; border-radius: 3px; }}
         .token:hover {{ outline: 1px solid blue; }}
         .token.locked {{ outline: 2px solid blue; }}
