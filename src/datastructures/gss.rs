@@ -105,22 +105,26 @@ impl Acc {
     }
 
     /// Creates a fresh, unconstrained accumulator.
-    pub fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         Self {
             llm_token_info: LLMTokenInfo::none(llm_vocab),
             disallowed_terminals: BTreeMap::new(),
         }
     }
 
-    pub fn new_fresh_from_existing2(acc: &Acc) -> Self {
+    pub fn new_fresh_without_vocab() -> Self {
+        Self::new_fresh(None)
+    }
+
+    pub fn new_fresh_from_existing(acc: &Acc) -> Self {
         Self::new_fresh(acc.llm_tokens().llm_vocab.clone())
     }
 
-    pub fn new_fresh_from_existing(stack: &GSSNode) -> Self {
+    pub fn new_fresh_from_existing_stack(stack: &GSSNode) -> Self {
         Self::new_fresh(stack.llm_tokens().llm_vocab.clone())
     }
 
-    pub fn new_fresh_from_existing_stack(stack: &GSSNode) -> Self {
+    pub fn new_fresh_from_existing_stack2(stack: &GSSNode) -> Self {
         Self::new_fresh(stack.acc_manager.local.llm_tokens().llm_vocab.clone())
     }
 
@@ -410,7 +414,7 @@ impl GSSNode {
     }
 
     pub fn fresh_from_existing(node: &GSSNode) -> Self {
-        Self::new(Acc::new_fresh_from_existing(&node))
+        Self::new(Acc::new_fresh_from_existing_stack(&node))
     }
 
     fn predecessors(&self) -> &NodeMap { &self.predecessors }

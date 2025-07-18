@@ -100,7 +100,7 @@ pub struct ParseState { // No longer generic
 
 impl ParseState {
     pub fn new_without_vocab() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(None))) }
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh_without_vocab())) }
     }
     pub fn from_existing(existing: &Self) -> Self {
         ParseState { stack: Arc::new(GSSNode::fresh_from_existing(&existing.stack)) }
@@ -251,7 +251,7 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(Acc::new_fresh(llm_vocab))
+        self.init_glr_parser_with_acc(Acc::new_fresh_without_vocab())
     }
 
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -336,7 +336,7 @@ impl GLRParser {
     }
 
     pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(Acc::new_fresh(llm_vocab))
+        self.init_parse_state_with_acc(Acc::new_fresh_without_vocab())
     }
 
     pub fn init_parse_state_with_acc(&self, initial_acc: Acc) -> ParseState { // No longer generic
@@ -344,7 +344,7 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing2(&initial_acc))); // root has empty acc
+        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack(&initial_acc))); // root has empty acc
         let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
     }
@@ -693,7 +693,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh_from_existing_stack(stack));
+        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh_from_existing_stack2(stack));
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -735,7 +735,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
         timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
-            Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack(&peek.predecessor_node)))
+            Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack2(&peek.predecessor_node)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {
