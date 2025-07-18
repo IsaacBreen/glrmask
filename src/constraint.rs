@@ -1102,7 +1102,6 @@ impl<'a> GrammarConstraintState<'a> {
                             let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
                                 .map(|s| s.to_string())
                                 .unwrap_or("UNKNOWN_TERMINAL".to_string());
-                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
                             glr_s.step(*gtid);
                             // });
