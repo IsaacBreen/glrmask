@@ -344,7 +344,7 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing(&initial_acc))); // root has empty acc
+        let root = Arc::new(GSSNode::new(Acc::new_fresh_from_existing2(&initial_acc))); // root has empty acc
         let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
     }
