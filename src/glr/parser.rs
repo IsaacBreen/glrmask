@@ -16,7 +16,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::glr::items::{compute_closure, Item};
-use crate::glr::table::{Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce, Reduce};
+use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
 
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
@@ -132,6 +132,13 @@ impl JSONConvertible for StopReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParserPhase {
+    /// The parser has completed all reductions for the current state and is ready for a new token.
+    ReadyForPhase1,
+    /// The parser has processed a token (shifts and lookahead-reduces) and is ready for default reductions.
+    ReadyForPhase3,
+}
 
 #[derive(Clone)]
 pub struct GLRParser {
@@ -260,6 +267,7 @@ impl GLRParser {
             active_state: ParseState::new_without_vocab(),
             action_not_found_states: ParseState::new_without_vocab(),
             cycled_states: ParseState::new_without_vocab(),
+            phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
         }
     }
 
@@ -270,33 +278,9 @@ impl GLRParser {
             active_state: initial_parse_state,
             action_not_found_states: ParseState::new_without_vocab(),
             cycled_states: ParseState::new_without_vocab(),
+            phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
         };
-        // Mini phase 3 on initialization
-        let mut default_reduce_todo: VecDeque<ParseState> = VecDeque::new();
-        default_reduce_todo.push_back(parser_state.active_state.clone());
-        let mut next = ParseState::from_existing(&parser_state.active_state);
-
-        timeit!("GLRParserState::init_glr_parser::mini_phase3", {
-        while let Some(state) = default_reduce_todo.pop_front() {
-            for peek in state.stack.peek_iter() {
-                let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
-                if row.phase3_default_reduce.clone_and_merge {
-                    timeit!("GLRParser::init::mini_phase3::merge", {
-                        next.merge(ParseState { stack: peek.to_arc_node() });
-                    });
-                }
-                if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    timeit!("GLRParser::init::mini_phase3::reduce", {
-                        let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                        if !new_stack.is_empty() {
-                            default_reduce_todo.push_back(ParseState { stack: new_stack });
-                        }
-                    });
-                }
-            }
-        }
-        });
-        parser_state.active_state = next;
+        parser_state.do_phase3();
         parser_state
     }
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
@@ -305,33 +289,9 @@ impl GLRParser {
             active_state: parse_state,
             action_not_found_states: ParseState::new_without_vocab(),
             cycled_states: ParseState::new_without_vocab(),
+            phase: ParserPhase::ReadyForPhase3,
         };
-        // Mini phase 3 on initialization
-        let mut default_reduce_todo: VecDeque<ParseState> = VecDeque::new();
-        default_reduce_todo.push_back(parser_state.active_state.clone());
-        let mut next = ParseState::from_existing(&parser_state.active_state);
-
-        timeit!("GLRParserState::init_glr_parser_from_parse_state::mini_phase3", {
-        while let Some(state) = default_reduce_todo.pop_front() {
-            for peek in state.stack.peek_iter() {
-                let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
-                if row.phase3_default_reduce.clone_and_merge {
-                    timeit!("GLRParser::init_from_state::mini_phase3::merge", {
-                        next.merge(ParseState { stack: peek.to_arc_node() });
-                    });
-                }
-                if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    timeit!("GLRParser::init_from_state::mini_phase3::reduce", {
-                        let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                        if !new_stack.is_empty() {
-                            default_reduce_todo.push_back(ParseState { stack: new_stack });
-                        }
-                    });
-                }
-            }
-        }
-        });
-        parser_state.active_state = next;
+        parser_state.do_phase3();
         parser_state
     }
 
@@ -684,6 +644,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     pub action_not_found_states: ParseState,
     pub cycled_states: ParseState,
+    phase: ParserPhase,
 }
 
 impl<'a> GLRParserState<'a> { // No longer generic
@@ -748,196 +709,150 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // })
     }
 
-    #[time_it("GLRParserState::step")]
-    pub fn step(&mut self, token_id: TerminalID) {
+    #[time_it("GLRParserState::do_phase1_and_2")]
+    fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+        if self.phase == ParserPhase::ReadyForPhase3 {
+            self.do_phase3();
+        }
+        assert_eq!(self.phase, ParserPhase::ReadyForPhase1);
+
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
             return;
         }
 
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
-        crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
-        self.log_gss("Step-start", token_id);
+        self.log_gss("Phase1/2-start", token_id);
 
         let mut phase1_todo: VecDeque<ParseState> = VecDeque::new();
-        phase1_todo.push_back(ParseState { stack: self.active_state.stack.clone() });
+        phase1_todo.push_back(self.active_state.clone());
 
         let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
+        let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
-        let mut phase3_todo: VecDeque<ParseState> = VecDeque::new();
-        let mut next = ParseState::from_existing(&self.active_state);
-
-        // --- Phase 1: Process lookahead-based actions excluding reductions promoted to default ---
-        crate::debug!(4, "--- Phase 1: Processing initial states ({} items in todo) ---", phase1_todo.len());
+        // --- Phase 1 ---
         timeit!("GLRParserState::step::phase1", {
-        while let Some(state) = phase1_todo.pop_front() {
-            for peek in state.stack.peek_iter() {
-                let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                crate::debug!(5, "Phase 1: Peeking state {}, looking for action on token '{}'", peek.edge_value().state_id.0, token_display);
-                // We use phase1 actions here, which exclude the default reduce action,
-                // as that should have been handled at the end of the previous step.
-                if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
-                    crate::debug!(4, "Phase 1: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
-                    match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                            // timeit!("GLRParserState::step::phase1::shift", {
-                            let stack_for_push = peek.to_arc_node();
-                            let new_content = ParseStateEdgeContent { state_id: *to };
-                            let new_parse_state = self.push_state(&stack_for_push, new_content);
-                            phase3_todo.push_back(new_parse_state);
-                            // });
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
-                            // timeit!("GLRParserState::step::phase1::reduce", {
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                            if !s_new_arc.is_empty() {
-                                phase2_todo.push_back(ParseState { stack: s_new_arc });
+            while let Some(state) = phase1_todo.pop_front() {
+                for peek in state.stack.peek_iter() {
+                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                    if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                                let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                shifted_states_todo.push_back(new_parse_state);
                             }
-                            // });
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                            // timeit!("GLRParserState::step::phase1::split", {
-                            if let Some(to) = shift {
-                                // timeit!("GLRParserState::step::phase1::split::shift", {
-                                let stack_for_push = peek.to_arc_node();
-                                let new_content = ParseStateEdgeContent { state_id: *to };
-                                let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                phase3_todo.push_back(new_parse_state);
-                                // });
-                            }
-                            for (len, nts) in reduces {
-                                for (nt, _prod_ids) in nts {
-                                    // timeit!("GLRParserState::step::phase1::split::reduce", {
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                    if !s_new_arc.is_empty() {
-                                        phase2_todo.push_back(ParseState { stack: s_new_arc });
-                                    }
-                                    // });
-                                }
-                            }
-                            // });
-                        }
-                    }
-                } else {
-                    crate::debug!(5, "Phase 1: No specific action for state {}, token '{}'. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_display);
-                }
-            }
-        }
-        });
-
-        // // Merge before Phase 2
-        // if !phase2_todo.is_empty() {
-        //     crate::debug!(4, "Merging phase2_todo before Phase 2");
-        //     let mut merged_phase2 = phase2_todo.pop_front().unwrap();
-        //     for state in std::mem::take(&mut phase2_todo) {
-        //         merged_phase2.merge(state);
-        //     }
-        //     phase2_todo.push_back(merged_phase2);
-        // }
-
-        crate::debug!(4, "--- Phase 2: Processing states from reductions ({} items in todo) ---", phase2_todo.len());
-        // --- Phase 2: Process lookahead-based actions ---
-        timeit!("GLRParserState::step::phase2", {
-        while let Some(state) = phase2_todo.pop_front() {
-            for peek in state.stack.peek_iter() {
-                let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                crate::debug!(5, "Phase 2: Peeking state {}, looking for action on token '{}'", peek.edge_value().state_id.0, token_display);
-                // We use phase2 actions here, which include all lookahead-specific actions.
-                if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
-                    crate::debug!(4, "Phase 2: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
-                    match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                            // timeit!("GLRParserState::step::phase2::shift", {
-                                let stack_for_push = peek.to_arc_node();
-                                let new_content = ParseStateEdgeContent { state_id: *to };
-                                let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                phase3_todo.push_back(new_parse_state);
-                            // });
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
-                            // timeit!("GLRParserState::step::phase2::reduce", {
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                 if !s_new_arc.is_empty() {
                                     phase2_todo.push_back(ParseState { stack: s_new_arc });
                                 }
-                            // });
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                            // timeit!("GLRParserState::step::phase2::split", {
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    timeit!("GLRParserState::step::phase2::split::shift", {
-                                        let stack_for_push = peek.to_arc_node();
-                                        let new_content = ParseStateEdgeContent { state_id: *to };
-                                        let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                        phase3_todo.push_back(new_parse_state);
-                                    });
+                                    let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                    shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
                                     for (nt, _prod_ids) in nts {
-                                        timeit!("GLRParserState::step::phase2::split::reduce", {
+                                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                        if !s_new_arc.is_empty() {
+                                            phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // --- Phase 2 ---
+        timeit!("GLRParserState::step::phase2", {
+            while let Some(state) = phase2_todo.pop_front() {
+                for peek in state.stack.peek_iter() {
+                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                    if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                                let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                shifted_states_todo.push_back(new_parse_state);
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                if !s_new_arc.is_empty() {
+                                    phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                }
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                if let Some(to) = shift {
+                                    let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                    shifted_states_todo.push_back(new_parse_state);
+                                }
+                                for (len, nts) in reduces {
+                                    for (nt, _prod_ids) in nts {
                                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                             if !s_new_arc.is_empty() {
                                                 phase2_todo.push_back(ParseState { stack: s_new_arc });
                                             }
-                                        });
                                     }
                                 }
-                            // });
+                            }
                         }
                     }
-                } else {
-                    crate::debug!(5, "Phase 2: No specific action for state {}, token '{}'. Path will be pruned if no default reduce applies later.", peek.edge_value().state_id.0, token_display);
                 }
             }
-        }
         });
 
-        // // Merge before Phase 3
-        // if !phase3_todo.is_empty() {
-        //     crate::debug!(4, "Merging phase3_todo before Phase 3");
-        //     // Merge all states in phase3_todo into next
-        //     let mut merged_phase3 = phase3_todo.pop_front().unwrap();
-        //     for state in std::mem::take(&mut phase3_todo) {
-        //         merged_phase3.merge(state);
-        //     }
-        //     phase3_todo.push_back(merged_phase3);
-        // }
+        // Consolidate all shifted states into the new active_state for phase 3
+        let mut next_active = ParseState::new_without_vocab();
+        for state in shifted_states_todo {
+            next_active.merge(state);
+        }
+        self.active_state = next_active;
+        self.phase = ParserPhase::ReadyForPhase3;
+        self.log_gss("Phase1/2-end", token_id);
+    }
 
-        crate::debug!(4, "--- Phase 3: Processing states from shifts ({} items in todo) ---", phase3_todo.len());
-        // --- Phase 3: Process default reductions on post-shift states ---
+    #[time_it("GLRParserState::do_phase3")]
+    fn do_phase3(&mut self) {
+        if self.phase == ParserPhase::ReadyForPhase1 {
+            return;
+        }
+        assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
+
+        let mut phase3_todo: VecDeque<ParseState> = VecDeque::new();
+        if !self.active_state.stack.is_empty() {
+            phase3_todo.push_back(self.active_state.clone());
+        }
+
+        let mut next = ParseState::new_without_vocab();
+
         timeit!("GLRParserState::step::phase3", {
-        while let Some(state) = phase3_todo.pop_front() {
-            for peek in state.stack.peek_iter() {
-                let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                crate::debug!(5, "Phase 3: Peeking state {}", peek.edge_value().state_id.0);
-                if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    timeit!("GLRParserState::step::phase3::reduce", {
-                        crate::debug!(4, "Phase 3: Found default reduce {:?} for state {}", r, peek.edge_value().state_id.0);
-                        // This peek has a default reduce.
-                        // The result of the reduction goes back on the todo list for this phase.
+            while let Some(state) = phase3_todo.pop_front() {
+                for peek in state.stack.peek_iter() {
+                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                    if let Some(ref r) = row.phase3_default_reduce.reduce {
                         let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack.is_empty() {
-                            crate::debug!(5, "Phase 3: Pushing result of default reduce to phase3_todo");
                             phase3_todo.push_back(ParseState { stack: new_stack });
                         }
-                    });
-                }
-                if row.phase3_default_reduce.clone_and_merge {
-                    timeit!("GLRParserState::step::phase3::merge", {
-                        crate::debug!(4, "Phase 3: Merging state {} into next active states", peek.edge_value().state_id.0);
+                    }
+                    if row.phase3_default_reduce.clone_and_merge {
                         next.merge(ParseState { stack: peek.to_arc_node() });
-                    });
+                    }
                 }
             }
-        }
         });
 
         self.active_state = next;
+        self.phase = ParserPhase::ReadyForPhase1;
+    }
 
-        if !self.active_state.stack.is_empty() {
-            self.log_gss("Step-end", token_id);
-        }
-        crate::debug!(4, "----------------------------------------------------------------");
+    #[time_it("GLRParserState::step")]
+    pub fn step(&mut self, token_id: TerminalID) {
+        self.do_phase1_and_2(token_id);
+        self.do_phase3();
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
