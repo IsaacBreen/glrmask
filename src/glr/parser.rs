@@ -100,14 +100,12 @@ pub struct ParseState { // No longer generic
 }
 
 impl ParseState {
-    pub fn new(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))) }
-    }
     pub fn new_without_vocab() -> Self {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(None))) }
     }
     pub fn from_existing(existing: &Self) -> Self {
-        ParseState::new(existing.stack.llm_tokens().llm_vocab().clone())
+        let llm_vocab = existing.stack.llm_tokens().llm_vocab().clone();
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))) }
     }
 }
 
