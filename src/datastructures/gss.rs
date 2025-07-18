@@ -291,7 +291,7 @@ fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
 
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
-// #[time_it]
+#[time_it]
 fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -619,7 +619,7 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
-#[time_it]
+// #[time_it]
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
@@ -636,25 +636,22 @@ fn prune_and_transform_recursive(
             None
         }
         Some((new_local_acc, continue_recursion)) => {
-            let new_predecessors_set = if continue_recursion {
-                node_arc.predecessors.values().flat_map(|m| m.iter())
+            let new_node_predecessors_map = if continue_recursion {
+                let new_predecessors_set = node_arc.predecessors.values().flat_map(|m| m.iter())
                     .filter_map(|(edge_val, pred_arc)| {
                         prune_and_transform_recursive(pred_arc, closure, memo)
                             .map(|new_pred_arc| (new_pred_arc, edge_val.clone()))
                     })
-                    .collect::<NodeSet>()
+                    .collect::<NodeSet>();
+                if new_predecessors_set.is_empty() && !node_arc.predecessors.is_empty() {
+                    memo.insert(node_ptr, None);
+                    return None;
+                }
+                process_predecessors(&new_predecessors_set)
             } else { // Don't recurse, keep existing predecessors.
-                node_arc.predecessors.values().flat_map(|m| m.iter())
-                    .map(|(edge_val, pred_arc)| (pred_arc.clone(), edge_val.clone()))
-                    .collect::<NodeSet>()
+                node_arc.predecessors.clone()
             };
 
-            if new_predecessors_set.is_empty() && !node_arc.predecessors.is_empty() {
-                memo.insert(node_ptr, None);
-                return None;
-            }
-
-            let new_node_predecessors_map = process_predecessors(&new_predecessors_set);
             let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
 
             let result_arc = Arc::new(transformed_node);
