@@ -19,7 +19,7 @@ use std::ops::{BitOr, BitOrAssign};
 use profiler_macro::{time_it, timeit};
 // --- Type Aliases ---
 
-pu type MaxDepth = usize;
+pub type MaxDepth = usize;
 /// Maps a node's depth to its predecessors at that depth.
 type NodeMap = BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
