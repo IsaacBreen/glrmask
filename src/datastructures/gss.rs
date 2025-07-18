@@ -401,7 +401,7 @@ impl GSSNode {
     pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
-    #[time_it]
+    // #[time_it]
     pub fn full_union_acc(&self) -> Acc {
         self.acc_manager.union.accumulate_seq(&self.acc_manager.local)
     }

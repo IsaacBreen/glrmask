@@ -1084,7 +1084,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut results = Vec::new();
                     let mut glr_s = glr_s.clone();
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
-                    disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
                     crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
                     for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
