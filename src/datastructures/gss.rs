@@ -272,7 +272,8 @@ pub struct GSSPeek<'a> {
 
 // Helper functions for GSSNode construction
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    // predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    0
 }
 
 fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
@@ -330,7 +331,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 }
 
 /// Merges the `source` NodeMap into the `target` NodeMap.
-#[time_it]
+// #[time_it]
 fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
     for (depth, source_preds_for_depth) in source {
         let target_preds_for_depth = target.entry(depth).or_default();
@@ -471,9 +472,9 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one.
-    #[time_it]
+    // #[time_it]
     pub fn merge(&mut self, other: &Self) {
-        timeit!("GSSNode::merge", {
+        // timeit!("GSSNode::merge", {
         if self == other { return; }
 
         if other.predecessors.is_empty() && other.acc_manager.local.is_empty() { return; }
@@ -493,7 +494,7 @@ impl GSSNode {
         // Create a new node with the merged properties.
         let new_node = GSSNode::new_with_map(Arc::new(merged_local), new_predecessors);
         *self = new_node;
-        });
+        // });
     }
 
     pub fn merged(mut self, other: Self) -> Self {
