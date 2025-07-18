@@ -616,6 +616,7 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
+// #[time_it]
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
