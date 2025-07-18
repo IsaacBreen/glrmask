@@ -1021,7 +1021,10 @@ pub struct ParseStateKey {
 }
 
 impl ParseState { // No longer generic
-    pub fn merge(&mut self, other: ParseState) {
+    pub fn merge(&mut self, mut other: ParseState) {
+        if self.stack.num_predecessors() < other.stack.num_predecessors() {
+            std::mem::swap(self, &mut other);
+        }
         Arc::make_mut(&mut self.stack).merge(&other.stack);
     }
 }
