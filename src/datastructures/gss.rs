@@ -125,12 +125,12 @@ impl Acc {
     }
 
     /// Checks if the accumulator is in its default, unconstrained state.
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.llm_token_info.is_empty() && self.disallowed_terminals.is_empty()
     }
 
     /// Checks if the path is dead (e.g., allows no LLM tokens).
-    pub fn is_dead(&self) -> bool {
+    fn is_dead(&self) -> bool {
         self.llm_token_info.is_all()
     }
 
@@ -139,7 +139,7 @@ impl Acc {
     /// Accumulates constraints sequentially (e.g., adding a new constraint to a path).
     /// This is a union of constraints.
     // #[time_it]
-    pub fn accumulate_seq(&self, other: &Self) -> Self {
+    fn accumulate_seq(&self, other: &Self) -> Self {
         // LLM tokens: union of disallowed sets
         let mut new_llm_tokens = self.llm_token_info.disallowed();
         new_llm_tokens |= &other.llm_token_info.disallowed();
@@ -163,7 +163,7 @@ impl Acc {
 
     /// Merges constraints from parallel paths (union of paths).
     // #[time_it]
-    pub fn merge_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    fn merge_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
             return Acc::new_fresh(llm_vocab);
@@ -198,7 +198,7 @@ impl Acc {
 
     /// Intersects constraints from parallel paths.
     // #[time_it]
-    pub fn intersect_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    fn intersect_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
             return Acc::new_fresh(llm_vocab);
@@ -400,20 +400,20 @@ impl GSSNode {
         Self::new_with_map(Arc::new(local_acc), predecessors_map)
     }
 
-    pub fn predecessors(&self) -> &NodeMap { &self.predecessors }
+    fn predecessors(&self) -> &NodeMap { &self.predecessors }
     pub fn num_predecessors(&self) -> usize { self.predecessors.values().map(|inner_map| inner_map.len()).sum() }
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
-    pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
+    fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
     // #[time_it]
-    pub fn full_union_acc(&self) -> Acc {
+    fn full_union_acc(&self) -> Acc {
         self.acc_manager.union.accumulate_seq(&self.acc_manager.local)
     }
 
     /// Returns the full intersection of constraints for all paths ending at this node.
     // #[time_it]
-    pub fn full_intersection_acc(&self) -> Acc {
+    fn full_intersection_acc(&self) -> Acc {
         self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
 
@@ -427,6 +427,10 @@ impl GSSNode {
 
     pub fn disallowed_terminals(&self) -> TerminalInfo {
         self.full_union_acc().disallowed_terminals
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.full_union_acc().is_alive()
     }
 }
 

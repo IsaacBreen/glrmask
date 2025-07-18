@@ -978,7 +978,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn is_ok(&self) -> bool {
-        !self.active_state.stack.is_empty() && self.active_state.stack.full_union_acc().is_alive()
+        !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
     }
 
     // #[time_it("GLRParserState::log_gss")]
