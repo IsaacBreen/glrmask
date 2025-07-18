@@ -694,7 +694,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh(stack.llm_tokens().llm_vocab().clone()));
+        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh_from_existing_stack(stack));
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -736,7 +736,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
         timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
-            Arc::new(GSSNode::new(Acc::new_fresh(self.active_state.stack.llm_tokens().llm_vocab().clone())))
+            Arc::new(GSSNode::new(Acc::new_fresh_from_existing_stack(&peek.predecessor_node)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {

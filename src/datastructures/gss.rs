@@ -55,7 +55,7 @@ impl LLMTokenInfo {
     fn is_all(&self) -> bool {
         self.disallowed() == LLMTokenBV::ones(self.max_num_llm_tokens())
     }
-    pub fn llm_vocab(&self) -> &Option<Arc<LLMVocab>> {
+    fn llm_vocab(&self) -> &Option<Arc<LLMVocab>> {
         &self.llm_vocab
     }
     fn max_num_llm_tokens(&self) -> usize {
@@ -108,7 +108,7 @@ impl Acc {
     }
 
     /// Creates a fresh, unconstrained accumulator.
-    pub fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         Self {
             llm_token_info: LLMTokenInfo::none(llm_vocab),
             disallowed_terminals: BTreeMap::new(),
@@ -117,6 +117,10 @@ impl Acc {
 
     pub fn new_fresh_from_existing(acc: &Acc) -> Self {
         Self::new_fresh(acc.llm_tokens().llm_vocab.clone())
+    }
+
+    pub fn new_fresh_from_existing_stack(stack: &GSSNode) -> Self {
+        Self::new_fresh(stack.acc_manager.local.llm_tokens().llm_vocab.clone())
     }
 
     fn llm_tokens(&self) -> &LLMTokenInfo { &self.llm_token_info }
@@ -410,7 +414,7 @@ impl GSSNode {
     }
 
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
-    pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
+    fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
     // #[time_it]
@@ -424,11 +428,12 @@ impl GSSNode {
         self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
 
+    fn llm_tokens(&self) -> LLMTokenInfo { self.full_union_acc().llm_token_info }
+
     pub fn num_predecessors(&self) -> usize { self.predecessors.values().map(|inner_map| inner_map.len()).sum() }
-    pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
-    pub fn llm_tokens(&self) -> LLMTokenInfo { self.full_union_acc().llm_token_info }
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.full_union_acc().llm_tokens().allowed() }
     pub fn disallowed_terminals(&self) -> TerminalInfo { self.full_union_acc().disallowed_terminals }
+    pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
     pub fn is_alive(&self) -> bool { self.full_union_acc().is_alive() }
 }
 
