@@ -710,7 +710,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     #[time_it("GLRParserState::do_phase1_and_2")]
-    fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+    pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
         if self.phase == ParserPhase::ReadyForPhase3 {
             self.do_phase3();
         }
@@ -815,7 +815,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     #[time_it("GLRParserState::do_phase3")]
-    fn do_phase3(&mut self) {
+    pub fn do_phase3(&mut self) {
         if self.phase == ParserPhase::ReadyForPhase1 {
             return;
         }

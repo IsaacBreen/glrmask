@@ -1103,7 +1103,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 .map(|s| s.to_string())
                                 .unwrap_or("UNKNOWN_TERMINAL".to_string());
                             // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
-                            glr_s.step(*gtid);
+                            glr_s.do_phase1_and_2(*gtid);
                             // });
 
                             if glr_s.is_ok() {
@@ -1143,6 +1143,7 @@ impl<'a> GrammarConstraintState<'a> {
                         false
                     } else {
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        glr_s.do_phase3();
                         // Fuse
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         !glr_s.active_state.stack.is_empty()
