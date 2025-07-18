@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, LLMTokenInfo};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;

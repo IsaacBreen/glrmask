@@ -29,7 +29,7 @@ type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 /// Represents the set of disallowed LLM tokens for a path. `None` means no tokens are disallowed.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LLMTokenInfo {
+struct LLMTokenInfo {
     llm_tokens: Option<LLMTokenBV>,
     llm_vocab: Option<Arc<LLMVocab>>,
 }
@@ -108,7 +108,7 @@ impl Acc {
     }
 
     /// Creates a fresh, unconstrained accumulator.
-    fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    pub fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         Self {
             llm_token_info: LLMTokenInfo::none(llm_vocab),
             disallowed_terminals: BTreeMap::new(),
