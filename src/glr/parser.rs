@@ -772,32 +772,42 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     crate::debug!(4, "Phase 1: Found action {:?} for state {} on token '{}'", action, peek.edge_value().state_id.0, token_display);
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                            timeit!("GLRParserState::step::phase1::shift", {
                             let stack_for_push = peek.to_arc_node();
                             let new_content = ParseStateEdgeContent { state_id: *to };
                             let new_parse_state = self.push_state(&stack_for_push, new_content);
                             phase3_todo.push_back(new_parse_state);
+                            });
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+                            timeit!("GLRParserState::step::phase1::reduce", {
                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                             if !s_new_arc.is_empty() {
                                 phase2_todo.push_back(ParseState { stack: s_new_arc });
                             }
+                            });
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            timeit!("GLRParserState::step::phase1::split", {
                             if let Some(to) = shift {
+                                timeit!("GLRParserState::step::phase1::split::shift", {
                                 let stack_for_push = peek.to_arc_node();
                                 let new_content = ParseStateEdgeContent { state_id: *to };
                                 let new_parse_state = self.push_state(&stack_for_push, new_content);
                                 phase3_todo.push_back(new_parse_state);
+                                });
                             }
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
+                                    timeit!("GLRParserState::step::phase1::split::reduce", {
                                     let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                     if !s_new_arc.is_empty() {
                                         phase2_todo.push_back(ParseState { stack: s_new_arc });
                                     }
+                                    });
                                 }
                             }
+                            });
                         }
                     }
                 } else {
