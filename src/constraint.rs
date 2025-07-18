@@ -1039,8 +1039,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1);
-                let full_union_acc = glr_state.active_state.stack.full_union_acc();
-                let disallowed_terminals_for_gss = full_union_acc.disallowed_terminals();
+                let disallowed_terminals_for_gss = glr_state.active_state.stack.disallowed_terminals();
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss.iter() {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
@@ -1117,7 +1116,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
-                            let glr_active_tokens = glr_s.active_state.stack.full_union_acc().llm_tokens().allowed();
+                            let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                             timeit!("get_mask final_mask update", {
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
                             });
@@ -1140,7 +1139,7 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
                     if precomputed_node_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.full_union_acc().llm_tokens().allowed();
+                        let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {

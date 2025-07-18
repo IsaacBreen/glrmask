@@ -34,31 +34,31 @@ pub struct LLMTokenInfo {
     llm_vocab: Option<Arc<LLMVocab>>,
 }
 impl LLMTokenInfo {
-    pub fn none(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    fn none(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         Self { llm_tokens: None, llm_vocab }
     }
-    pub fn all(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+    fn all(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let mut this = Self::none(llm_vocab.clone());
         this.llm_tokens = Some(LLMTokenBV::ones(this.max_num_llm_tokens()));
         this
     }
-    pub fn disallowed(&self) -> LLMTokenBV {
+    fn disallowed(&self) -> LLMTokenBV {
         self.llm_tokens.clone().unwrap_or_else(LLMTokenBV::zeros)
     }
-    pub fn allowed(&self) -> LLMTokenBV {
+    fn allowed(&self) -> LLMTokenBV {
         let all_tokens = LLMTokenBV::ones(self.max_num_llm_tokens());
         all_tokens - self.disallowed()
     }
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.llm_tokens.is_none() || self.llm_tokens.as_ref().unwrap().is_empty()
     }
-    pub fn is_all(&self) -> bool {
+    fn is_all(&self) -> bool {
         self.disallowed() == LLMTokenBV::ones(self.max_num_llm_tokens())
     }
     pub fn llm_vocab(&self) -> &Option<Arc<LLMVocab>> {
         &self.llm_vocab
     }
-    pub fn max_num_llm_tokens(&self) -> usize {
+    fn max_num_llm_tokens(&self) -> usize {
         self.llm_vocab.as_ref().map_or(usize::MAX, |vocab| vocab.internal_max_llm_token.saturating_add(1))
     }
 }
@@ -103,7 +103,7 @@ pub struct Acc {
 }
 
 impl Acc {
-    pub fn new(llm_token_info: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
+    fn new(llm_token_info: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
         Self { llm_token_info, disallowed_terminals }
     }
 
@@ -115,10 +115,14 @@ impl Acc {
         }
     }
 
-    pub fn llm_tokens(&self) -> &LLMTokenInfo { &self.llm_token_info }
-    pub fn llm_tokens_mut(&mut self) -> &mut LLMTokenInfo { &mut self.llm_token_info }
-    pub fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
-    pub fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo { &mut self.disallowed_terminals }
+    fn llm_tokens(&self) -> &LLMTokenInfo { &self.llm_token_info }
+    fn llm_tokens_mut(&mut self) -> &mut LLMTokenInfo { &mut self.llm_token_info }
+    fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
+    fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo { &mut self.disallowed_terminals }
+
+    pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
+        self.llm_token_info.llm_vocab.clone()
+    }
 
     /// Checks if the accumulator is in its default, unconstrained state.
     pub fn is_empty(&self) -> bool {
@@ -415,6 +419,14 @@ impl GSSNode {
 
     pub fn llm_tokens(&self) -> LLMTokenInfo {
         self.full_union_acc().llm_token_info
+    }
+
+    pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+        self.full_union_acc().llm_tokens().allowed()
+    }
+
+    pub fn disallowed_terminals(&self) -> TerminalInfo {
+        self.full_union_acc().disallowed_terminals
     }
 }
 
