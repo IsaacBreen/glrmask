@@ -471,7 +471,7 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one.
-    // #[time_it]
+    #[time_it]
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
