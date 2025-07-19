@@ -399,15 +399,15 @@ impl GSSNode {
         self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
 
-    fn llm_tokens(&self) -> LLMTokenInfo { self.full_union_acc().llm_token_info }
+    fn llm_tokens(&self) -> LLMTokenInfo { self.full_intersection_acc().llm_token_info }
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
     pub fn max_depth(&self) -> MaxDepth { self.max_depth }
     pub fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
-    pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.full_union_acc().llm_tokens().allowed() }
-    pub fn disallowed_terminals(&self) -> TerminalInfo { self.full_union_acc().disallowed_terminals }
+    pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.full_intersection_acc().llm_tokens().allowed() }
+    pub fn disallowed_terminals(&self) -> TerminalInfo { self.full_intersection_acc().disallowed_terminals }
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
-    pub fn is_alive(&self) -> bool { self.full_union_acc().is_alive() }
+    pub fn is_alive(&self) -> bool { self.full_intersection_acc().is_alive() }
 }
 
 // Core GSS operations
@@ -479,8 +479,8 @@ impl GSSNode {
         // Create a new node with the merged properties.
         // let new_node = GSSNode::new_with_map(Arc::new(merged_local), new_predecessors);
 
-        let merged_union = Acc::intersect_parallel([self.acc_manager.union.as_ref(), other.acc_manager.union.as_ref()]);
-        let merged_intersection = Acc::merge_parallel([self.acc_manager.intersection.as_ref(), other.acc_manager.intersection.as_ref()]);
+        let merged_union = Acc::merge_parallel([self.acc_manager.union.as_ref(), other.acc_manager.union.as_ref()]);
+        let merged_intersection = Acc::intersect_parallel([self.acc_manager.intersection.as_ref(), other.acc_manager.intersection.as_ref()]);
 
         let acc_manager = AccManager {
             local: Arc::new(merged_local),
