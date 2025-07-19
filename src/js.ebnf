@@ -72,6 +72,7 @@ finally_clause ::= 'finally' block ;
 function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
 
 parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
+
 formal_parameter ::= binding_pattern ( '=' expression )? ;
 
 return_statement ::= 'return' expression? ';'? ;
@@ -84,7 +85,7 @@ debugger_statement ::= 'debugger' ';'? ;
 binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
 object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
 property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-array_binding_pattern ::= '[' ( ELISION? binding_element )* (','? '...' binding_pattern)? ']' ;
+array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
 binding_element ::= binding_pattern ('=' expression)? ;
 
 // ES6 Modules
@@ -179,6 +180,7 @@ member_expression ::=
   | member_expression '?.' '[' expression ']'
   | member_expression '.' IDENTIFIER
   | member_expression '?.' '.' IDENTIFIER
+  | member_expression private_identifier
   | 'new' member_expression arguments
   | member_expression template_literal
   ;
@@ -203,11 +205,12 @@ ELISION ::= ','+ ;
 
 object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
 property_assignment ::=
-    property_name ':' assignment_expression
-  | '...' assignment_expression
+    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
   | 'get' property_name '(' ')' block
   | 'set' property_name '(' IDENTIFIER ')' block
-  | IDENTIFIER // Shorthand property name
+  | property_name ':' assignment_expression
+  | '...' assignment_expression
+  | IDENTIFIER // Shorthand property
   ;
 property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
 
