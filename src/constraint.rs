@@ -599,14 +599,10 @@ impl<'r> Precomputer<'r> {
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
             |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
-                if let Some(terminal_id) = edge_terminal_opt {
-                    // A new chain of terminals starts. The only predecessor that matters for the child
-                    // is the terminal on this edge.
-                    Some(BTreeSet::from([*terminal_id]))
-                } else {
-                    // No terminal on this edge, so the child inherits the same set of
-                    // "most recent" predecessors from the parent.
-                    Some(predecessors.clone())
+                match edge_terminal_opt {
+                    Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                    Some(t) => Some(BTreeSet::from([*t])),
+                    None => Some(predecessors.clone()),
                 }
             },
             // merge: Union of predecessor sets from different paths.
@@ -620,7 +616,7 @@ impl<'r> Precomputer<'r> {
                 if all_immediate_predecessors.is_empty() {
                     return true; // Continue traversal
                 }
-    
+
                 // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                 let mut allowed_follow_terminals = BTreeSet::new();
                 for preceding_terminal in &*all_immediate_predecessors {
