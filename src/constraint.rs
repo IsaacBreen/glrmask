@@ -466,6 +466,7 @@ struct Precomputer<'r> {
     pb:               ProgressBar,
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+    ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
     tags:             RefCell<HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
     end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
@@ -518,6 +519,7 @@ impl<'r> Precomputer<'r> {
             pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
+            ignore_terminal_id,
             tags: RefCell::new(Default::default()),
             end_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
@@ -591,6 +593,7 @@ impl<'r> Precomputer<'r> {
             .collect();
     
         let terminal_follow_map = &self.terminal_follow_map;
+        let ignore_terminal_id = self.ignore_terminal_id;
 
         Trie::special_map(
             initial_nodes_and_values,
@@ -624,6 +627,9 @@ impl<'r> Precomputer<'r> {
                     if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
                         allowed_follow_terminals.extend(follow_set.iter().cloned());
                     }
+                }
+                if let Some(ignore_terminal_id) = ignore_terminal_id {
+                    allowed_follow_terminals.insert(ignore_terminal_id);
                 }
     
                 // Prune children of the current node.
