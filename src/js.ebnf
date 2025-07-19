@@ -169,7 +169,8 @@ call_expression ::=
   | call_expression '?.' '[' expression ']'
   | call_expression '.' IDENTIFIER
   | call_expression '?.' '.' IDENTIFIER
-  | call_expression private_identifier
+  | call_expression '.' private_identifier
+  | call_expression '?.' private_identifier
   | call_expression template_literal
   ;
 
@@ -181,7 +182,8 @@ member_expression ::=
   | member_expression '?.' '[' expression ']'
   | member_expression '.' IDENTIFIER
   | member_expression '?.' '.' IDENTIFIER
-  | member_expression private_identifier
+  | member_expression '.' private_identifier
+  | member_expression '?.' private_identifier
   | 'new' member_expression arguments
   | member_expression template_literal
   ;
