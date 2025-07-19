@@ -1151,6 +1151,7 @@ impl<'a> GrammarConstraintState<'a> {
                     } else {
                         crate::debug!(4, "Processing non-end precomputed node data: {:?}", precomputed_node_data);
                         glr_s.do_phase3();
+                        crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
