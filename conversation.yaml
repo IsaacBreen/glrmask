@@ -1,11 +1,11 @@
 local_system:
   attached_files:
-    - src/example_code2.js
     - src/js.ebnf
-  conversation_file: conversation.yaml
+    - src/example_code2.js
+  conversation_file:
   compile_command:
   initial_file_contents:
-    src/js.ebnf: |-
+    src/js.ebnf: |
       // Instruct the parser to ignore Whitespace and Comments between tokens.
       !ignore IGNORE;
 
@@ -27,6 +27,7 @@ local_system:
         | if_statement
         | iteration_statement
         | switch_statement
+        | with_statement
         | try_statement
         | function_declaration
         | return_statement
@@ -34,6 +35,10 @@ local_system:
         | continue_statement
         | throw_statement
         | debugger_statement
+        | labeled_statement
+        | class_declaration
+        | import_statement
+        | export_statement
         | expression_statement
         ;
 
@@ -43,11 +48,13 @@ local_system:
 
       block ::= '{' statement_list? '}' ;
 
-      declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
+      labeled_statement ::= IDENTIFIER ':' statement ;
+
+      declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
 
       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-      variable_declaration ::= IDENTIFIER ( '=' expression )? ;
+      variable_declaration ::= binding_pattern ( '=' expression )? ;
 
       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
@@ -55,6 +62,7 @@ local_system:
           'while' '(' expression ')' statement
         | 'do' statement 'while' '(' expression ')' ';'
         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
+        | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
         ;
 
@@ -63,13 +71,17 @@ local_system:
       case_clause ::= 'case' expression ':' statement_list? ;
       default_clause ::= 'default' ':' statement_list? ;
 
+      with_statement ::= 'with' '(' expression ')' statement ;
+
       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
+      catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
       finally_clause ::= 'finally' block ;
 
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+      function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
 
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+      parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
+
+      formal_parameter ::= binding_pattern ( '=' expression )? ;
 
       return_statement ::= 'return' expression? ';'? ;
       break_statement ::= 'break' IDENTIFIER? ';'? ;
@@ -77,21 +89,43 @@ local_system:
       throw_statement ::= 'throw' expression ';'? ;
       debugger_statement ::= 'debugger' ';'? ;
 
+      // Binding Patterns (for destructuring)
+      binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
+      object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
+      property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
+      array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
+      binding_element ::= binding_pattern ('=' expression)? ;
+
+      // ES6 Modules
+      import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
+      import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
+      default_import ::= IDENTIFIER ;
+      named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
+      namespace_import ::= '*' 'as' IDENTIFIER ;
+      import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
+      export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
+      named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
+      export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
       // Expressions (Precedence from lowest to highest)
       expression ::= assignment_expression ;
 
       assignment_expression ::=
-          arrow_function
+          yield_expression
+        | arrow_function
         | conditional_expression
-        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
         ;
 
       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
 
       conditional_expression ::=
-          logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
+          coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
         ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
 
       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
@@ -111,11 +145,13 @@ local_system:
 
       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
 
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
           postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
+        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
         ;
 
       postfix_expression ::=
@@ -134,22 +170,32 @@ local_system:
 
       call_expression ::=
           member_expression arguments
+        | 'super' arguments
         | call_expression arguments
-        | call_expression '[' expression ']' 
+        | call_expression '?.' arguments
+        | call_expression '[' expression ']'
+        | call_expression '?.' '[' expression ']'
         | call_expression '.' IDENTIFIER
+        | call_expression '?.' '.' IDENTIFIER
+        | call_expression template_literal
         ;
 
       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
       member_expression ::=
           primary_expression
-        | member_expression '[' expression ']' 
+        | member_expression '[' expression ']'
+        | member_expression '?.' '[' expression ']'
         | member_expression '.' IDENTIFIER
+        | member_expression '?.' '.' IDENTIFIER
+        | member_expression private_identifier
         | 'new' member_expression arguments
+        | member_expression template_literal
         ;
 
       primary_expression ::=
-          'this' 
+          'this'
+        | 'super'
         | IDENTIFIER
         | literal
         | array_literal
@@ -158,24 +204,38 @@ local_system:
         | '(' expression ')'
         ;
 
-      function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
+      function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
+
+      yield_expression ::= 'yield' '*'? expression? ;
 
       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
       ELISION ::= ','+ ;
 
-      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
+      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
       property_assignment ::=
-          property_name ':' assignment_expression
+          'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
         | 'get' property_name '(' ')' block
         | 'set' property_name '(' IDENTIFIER ')' block
+        | property_name ':' assignment_expression
+        | '...' assignment_expression
+        | IDENTIFIER // Shorthand property
         ;
-      property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
+      property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
+
+      class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
+      class_body ::= '{' class_member* '}' ;
+      class_member ::= (method_definition | field_definition) ';'? | ';' ;
+      field_definition ::= ('static')? class_property_name ('=' expression)? ;
+      method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
+      class_property_name ::= property_name | private_identifier ;
+      private_identifier ::= '#' IDENTIFIER ;
 
       // Literals
       literal ::=
           NULL_LITERAL
         | BOOLEAN_LITERAL
         | NUMERIC_LITERAL
+        | BIGINT_LITERAL
         | STRING_LITERAL
         | REGULAR_EXPRESSION_LITERAL
         | template_literal
@@ -194,6 +254,7 @@ local_system:
       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
+      BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
 
       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
@@ -211,7 +272,7 @@ local_system:
       IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
       IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
       HEX_DIGIT ::= [0-9a-fA-F] ;
-    src/example_code2.js: |-
+    src/example_code2.js: |
       aaaaa;
       //=========
       // <></>
@@ -579,8 +640,35 @@ local_system:
           console.log('default export');
       }
       */
+
+      // --- 9. Deeply Nested Statements ---
+      // To test parser recursion depth and handling of complex block structures.
+      function deeplyNestedTest(depth) {
+          if (depth > 0) {
+              for (let i = 0; i < 1; i++) {
+                  while (i < 1) {
+                      try {
+                          switch (i) {
+                              case 0:
+                                  if (true) {
+                                      let a = 1;
+                                      {
+                                          {
+                                              {
+                                                  deeplyNestedTest(depth - 1);
+                                              }
+                                          }
+                                      }
+                                  }
+                                  break;
+                          }
+                      } catch (e) { /* ignore */ }
+                  }
+              }
+          }
+      }
   prev_file_contents:
-    src/js.ebnf: |-
+    src/js.ebnf: |
       // Instruct the parser to ignore Whitespace and Comments between tokens.
       !ignore IGNORE;
 
@@ -602,6 +690,7 @@ local_system:
         | if_statement
         | iteration_statement
         | switch_statement
+        | with_statement
         | try_statement
         | function_declaration
         | return_statement
@@ -609,6 +698,10 @@ local_system:
         | continue_statement
         | throw_statement
         | debugger_statement
+        | labeled_statement
+        | class_declaration
+        | import_statement
+        | export_statement
         | expression_statement
         ;
 
@@ -618,11 +711,13 @@ local_system:
 
       block ::= '{' statement_list? '}' ;
 
-      declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
+      labeled_statement ::= IDENTIFIER ':' statement ;
+
+      declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
 
       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-      variable_declaration ::= IDENTIFIER ( '=' expression )? ;
+      variable_declaration ::= binding_pattern ( '=' expression )? ;
 
       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
@@ -630,6 +725,7 @@ local_system:
           'while' '(' expression ')' statement
         | 'do' statement 'while' '(' expression ')' ';'
         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
+        | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
         ;
 
@@ -638,13 +734,17 @@ local_system:
       case_clause ::= 'case' expression ':' statement_list? ;
       default_clause ::= 'default' ':' statement_list? ;
 
+      with_statement ::= 'with' '(' expression ')' statement ;
+
       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
+      catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
       finally_clause ::= 'finally' block ;
 
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+      function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
 
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+      parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
+
+      formal_parameter ::= binding_pattern ( '=' expression )? ;
 
       return_statement ::= 'return' expression? ';'? ;
       break_statement ::= 'break' IDENTIFIER? ';'? ;
@@ -652,21 +752,43 @@ local_system:
       throw_statement ::= 'throw' expression ';'? ;
       debugger_statement ::= 'debugger' ';'? ;
 
+      // Binding Patterns (for destructuring)
+      binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
+      object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
+      property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
+      array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
+      binding_element ::= binding_pattern ('=' expression)? ;
+
+      // ES6 Modules
+      import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
+      import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
+      default_import ::= IDENTIFIER ;
+      named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
+      namespace_import ::= '*' 'as' IDENTIFIER ;
+      import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
+      export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
+      named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
+      export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
       // Expressions (Precedence from lowest to highest)
       expression ::= assignment_expression ;
 
       assignment_expression ::=
-          arrow_function
+          yield_expression
+        | arrow_function
         | conditional_expression
-        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
         ;
 
       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
 
       conditional_expression ::=
-          logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
+          coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
         ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
 
       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
@@ -686,11 +808,13 @@ local_system:
 
       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
 
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
           postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
+        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
         ;
 
       postfix_expression ::=
@@ -709,22 +833,32 @@ local_system:
 
       call_expression ::=
           member_expression arguments
+        | 'super' arguments
         | call_expression arguments
-        | call_expression '[' expression ']' 
+        | call_expression '?.' arguments
+        | call_expression '[' expression ']'
+        | call_expression '?.' '[' expression ']'
         | call_expression '.' IDENTIFIER
+        | call_expression '?.' '.' IDENTIFIER
+        | call_expression template_literal
         ;
 
       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
       member_expression ::=
           primary_expression
-        | member_expression '[' expression ']' 
+        | member_expression '[' expression ']'
+        | member_expression '?.' '[' expression ']'
         | member_expression '.' IDENTIFIER
+        | member_expression '?.' '.' IDENTIFIER
+        | member_expression private_identifier
         | 'new' member_expression arguments
+        | member_expression template_literal
         ;
 
       primary_expression ::=
-          'this' 
+          'this'
+        | 'super'
         | IDENTIFIER
         | literal
         | array_literal
@@ -733,24 +867,38 @@ local_system:
         | '(' expression ')'
         ;
 
-      function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
+      function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
+
+      yield_expression ::= 'yield' '*'? expression? ;
 
       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
       ELISION ::= ','+ ;
 
-      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
+      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
       property_assignment ::=
-          property_name ':' assignment_expression
+          'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
         | 'get' property_name '(' ')' block
         | 'set' property_name '(' IDENTIFIER ')' block
+        | property_name ':' assignment_expression
+        | '...' assignment_expression
+        | IDENTIFIER // Shorthand property
         ;
-      property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
+      property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
+
+      class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
+      class_body ::= '{' class_member* '}' ;
+      class_member ::= (method_definition | field_definition) ';'? | ';' ;
+      field_definition ::= ('static')? class_property_name ('=' expression)? ;
+      method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
+      class_property_name ::= property_name | private_identifier ;
+      private_identifier ::= '#' IDENTIFIER ;
 
       // Literals
       literal ::=
           NULL_LITERAL
         | BOOLEAN_LITERAL
         | NUMERIC_LITERAL
+        | BIGINT_LITERAL
         | STRING_LITERAL
         | REGULAR_EXPRESSION_LITERAL
         | template_literal
@@ -769,6 +917,7 @@ local_system:
       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
+      BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
 
       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
@@ -786,7 +935,7 @@ local_system:
       IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
       IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
       HEX_DIGIT ::= [0-9a-fA-F] ;
-    src/example_code2.js: |-
+    src/example_code2.js: |
       aaaaa;
       //=========
       // <></>
@@ -1154,6 +1303,33 @@ local_system:
           console.log('default export');
       }
       */
+
+      // --- 9. Deeply Nested Statements ---
+      // To test parser recursion depth and handling of complex block structures.
+      function deeplyNestedTest(depth) {
+          if (depth > 0) {
+              for (let i = 0; i < 1; i++) {
+                  while (i < 1) {
+                      try {
+                          switch (i) {
+                              case 0:
+                                  if (true) {
+                                      let a = 1;
+                                      {
+                                          {
+                                              {
+                                                  deeplyNestedTest(depth - 1);
+                                              }
+                                          }
+                                      }
+                                  }
+                                  break;
+                          }
+                      } catch (e) { /* ignore */ }
+                  }
+              }
+          }
+      }
   diffs_applied_this_send: true
 system:
   message: |2
@@ -1200,6 +1376,7 @@ messages:
         | if_statement
         | iteration_statement
         | switch_statement
+        | with_statement
         | try_statement
         | function_declaration
         | return_statement
@@ -1207,6 +1384,10 @@ messages:
         | continue_statement
         | throw_statement
         | debugger_statement
+        | labeled_statement
+        | class_declaration
+        | import_statement
+        | export_statement
         | expression_statement
         ;
 
@@ -1216,11 +1397,13 @@ messages:
 
       block ::= '{' statement_list? '}' ;
 
-      declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
+      labeled_statement ::= IDENTIFIER ':' statement ;
+
+      declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
 
       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-      variable_declaration ::= IDENTIFIER ( '=' expression )? ;
+      variable_declaration ::= binding_pattern ( '=' expression )? ;
 
       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
@@ -1228,6 +1411,7 @@ messages:
           'while' '(' expression ')' statement
         | 'do' statement 'while' '(' expression ')' ';'
         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
+        | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
         ;
 
@@ -1236,13 +1420,17 @@ messages:
       case_clause ::= 'case' expression ':' statement_list? ;
       default_clause ::= 'default' ':' statement_list? ;
 
+      with_statement ::= 'with' '(' expression ')' statement ;
+
       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
+      catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
       finally_clause ::= 'finally' block ;
 
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+      function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
 
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+      parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
+
+      formal_parameter ::= binding_pattern ( '=' expression )? ;
 
       return_statement ::= 'return' expression? ';'? ;
       break_statement ::= 'break' IDENTIFIER? ';'? ;
@@ -1250,21 +1438,43 @@ messages:
       throw_statement ::= 'throw' expression ';'? ;
       debugger_statement ::= 'debugger' ';'? ;
 
+      // Binding Patterns (for destructuring)
+      binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
+      object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
+      property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
+      array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
+      binding_element ::= binding_pattern ('=' expression)? ;
+
+      // ES6 Modules
+      import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
+      import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
+      default_import ::= IDENTIFIER ;
+      named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
+      namespace_import ::= '*' 'as' IDENTIFIER ;
+      import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
+      export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
+      named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
+      export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
       // Expressions (Precedence from lowest to highest)
       expression ::= assignment_expression ;
 
       assignment_expression ::=
-          arrow_function
+          yield_expression
+        | arrow_function
         | conditional_expression
-        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
         ;
 
       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
 
       conditional_expression ::=
-          logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
+          coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
         ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
 
       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
@@ -1284,11 +1494,13 @@ messages:
 
       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
 
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
           postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
+        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
         ;
 
       postfix_expression ::=
@@ -1307,22 +1519,32 @@ messages:
 
       call_expression ::=
           member_expression arguments
+        | 'super' arguments
         | call_expression arguments
-        | call_expression '[' expression ']' 
+        | call_expression '?.' arguments
+        | call_expression '[' expression ']'
+        | call_expression '?.' '[' expression ']'
         | call_expression '.' IDENTIFIER
+        | call_expression '?.' '.' IDENTIFIER
+        | call_expression template_literal
         ;
 
       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
       member_expression ::=
           primary_expression
-        | member_expression '[' expression ']' 
+        | member_expression '[' expression ']'
+        | member_expression '?.' '[' expression ']'
         | member_expression '.' IDENTIFIER
+        | member_expression '?.' '.' IDENTIFIER
+        | member_expression private_identifier
         | 'new' member_expression arguments
+        | member_expression template_literal
         ;
 
       primary_expression ::=
-          'this' 
+          'this'
+        | 'super'
         | IDENTIFIER
         | literal
         | array_literal
@@ -1331,24 +1553,38 @@ messages:
         | '(' expression ')'
         ;
 
-      function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
+      function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
+
+      yield_expression ::= 'yield' '*'? expression? ;
 
       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
       ELISION ::= ','+ ;
 
-      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
+      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
       property_assignment ::=
-          property_name ':' assignment_expression
+          'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
         | 'get' property_name '(' ')' block
         | 'set' property_name '(' IDENTIFIER ')' block
+        | property_name ':' assignment_expression
+        | '...' assignment_expression
+        | IDENTIFIER // Shorthand property
         ;
-      property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
+      property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
+
+      class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
+      class_body ::= '{' class_member* '}' ;
+      class_member ::= (method_definition | field_definition) ';'? | ';' ;
+      field_definition ::= ('static')? class_property_name ('=' expression)? ;
+      method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
+      class_property_name ::= property_name | private_identifier ;
+      private_identifier ::= '#' IDENTIFIER ;
 
       // Literals
       literal ::=
           NULL_LITERAL
         | BOOLEAN_LITERAL
         | NUMERIC_LITERAL
+        | BIGINT_LITERAL
         | STRING_LITERAL
         | REGULAR_EXPRESSION_LITERAL
         | template_literal
@@ -1367,6 +1603,7 @@ messages:
       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
+      BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
 
       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
@@ -1384,6 +1621,7 @@ messages:
       IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
       IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
       HEX_DIGIT ::= [0-9a-fA-F] ;
+
       ```
     metadata:
       filename: src/js.ebnf
@@ -1756,2125 +1994,64 @@ messages:
           console.log('default export');
       }
       */
+
+      // --- 9. Deeply Nested Statements ---
+      // To test parser recursion depth and handling of complex block structures.
+      function deeplyNestedTest(depth) {
+          if (depth > 0) {
+              for (let i = 0; i < 1; i++) {
+                  while (i < 1) {
+                      try {
+                          switch (i) {
+                              case 0:
+                                  if (true) {
+                                      let a = 1;
+                                      {
+                                          {
+                                              {
+                                                  deeplyNestedTest(depth - 1);
+                                              }
+                                          }
+                                      }
+                                  }
+                                  break;
+                          }
+                      } catch (e) { /* ignore */ }
+                  }
+              }
+          }
+      }
+
       ```
     metadata:
       filename: src/example_code2.js
   - user: |-
-      There are a few constructs in the example code that the grammar doesn't yet support.
-      Fix the grammar so it supports all these.
+      This grammar fails on the following line in example_code2.js.
+      Fix the grammar.
+      ```
+              console.log(`${this.name} makes a noise. Secret is ${this.#privateField}`);
+      ```
     metadata:
   - assistant: |-
-      Of course, I can help with that. The provided EBNF grammar for JavaScript is missing several modern (and some older) features that are present in your example code. I'll provide a patch for `src/js.ebnf` to make it more comprehensive and able to parse the "kitchen sink" example.
+      Of course, I can help you with that. The issue is that your grammar is missing a production for accessing a private identifier on a `call_expression`.
 
-      Here are the changes to add support for features like classes, async/await, destructuring, optional chaining, and more.
+      While the expression `this.#privateField` involves `this`, which is a `member_expression` and not a `call_expression`, the grammar is inconsistent. For member access operators like `.` and `[]`, there are parallel rules for both `member_expression` and `call_expression` to allow chaining (e.g., `foo().bar`). This parallelism is missing for private field access (`#`).
 
-      ### Patches for `src/js.ebnf`
+      Adding the corresponding rule for `call_expression` makes the grammar more consistent and correct according to the ECMAScript specification, which should resolve the parsing issue.
 
-      I'll update the grammar to include the missing syntax constructs. This is a substantial update to cover the wide range of features in your test file.
+      Here is the patch for `src/js.ebnf`:
 
       ```diff
       --- a/src/js.ebnf
       +++ b/src/js.ebnf
-      @@ -15,6 +15,7 @@
-         | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -22,7 +23,11 @@
-         | continue_statement
-         | throw_statement
-         | debugger_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | expression_statement
-         ;
-       
-      @@ -32,11 +37,13 @@
-       
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -44,6 +51,7 @@
-           'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-      @@ -52,15 +60,17 @@
-       case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -68,11 +78,31 @@
-       throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )* (','? '...' binding_pattern)? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-       // ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-         | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-      @@ -81,25 +111,31 @@
-       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-       logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
-       
-       bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
-       
-       bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
-       
-       bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
-       
-       equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
-       
-       relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
-       
-       shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
-       
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      @@ -118,23 +154,29 @@
-       
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      -  | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-      +  | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -143,26 +185,41 @@
-         | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-      -object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-      +object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-       property_assignment ::=
-           property_name ':' assignment_expression
-      +  | '...' assignment_expression
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | IDENTIFIER
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-         ;
-       
-       NULL_LITERAL ::= 'null' ;
-      @@ -177,6 +234,7 @@
-       EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-      ```
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/js.ebnf
-      Applying patch to 'src/js.ebnf' using custom patcher...
-      Error applying patch to src/js.ebnf:
-      Hunk #6 (header: @@ -68,11 +78,31 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      throw_statement ::= 'throw' expression ';'? ;
-      debugger_statement ::= 'debugger' ';'? ;
-
-      // ES6 Modules
-      // Expressions (Precedence from lowest to highest)
-      expression ::= assignment_expression ;
-
-      assignment_expression ::=
-          arrow_function
-        | conditional_expression
-        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-        ;
-      --- Expected Context (from patch, after normalization): ---
-      throw_statement ::= 'throw' expression ';'? ;
-      debugger_statement ::= 'debugger' ';'? ;
-
-
-
-      expression ::= assignment_expression ;
-
-      assignment_expression ::=
-      arrow_function
-      | conditional_expression
-      | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-      ;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 79 with ratio 0.83 (10/12 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-      + continue_statement ::= 'continue' IDENTIFIER? ';'? ;
-        throw_statement ::= 'throw' expression ';'? ;
-        debugger_statement ::= 'debugger' ';'? ;
-      - 
-        
-        
-        expression ::= assignment_expression ;
-        
-        assignment_expression ::=
-        arrow_function
-        | conditional_expression
-      - | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-      ?                                                                                                                    --------
-
-      + | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-        ;
-      Problematic diff content:
-      ---
-      --- a/src/js.ebnf
-      +++ b/src/js.ebnf
-      @@ -15,6 +15,7 @@
-         | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -22,7 +23,11 @@
-         | continue_statement
-         | throw_statement
-         | debugger_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | expression_statement
-         ;
-       
-      @@ -32,11 +37,13 @@
-       
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -44,6 +51,7 @@
-           'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-      @@ -52,15 +60,17 @@
-       case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -68,11 +78,31 @@
-       throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )* (','? '...' binding_pattern)? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-       // ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-         | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-      @@ -81,25 +111,31 @@
-       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-       logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
-       
-       bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
-       
-       bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
-       
-       bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
-       
-       equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
-       
-       relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
-       
-       shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
-       
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      @@ -118,23 +154,29 @@
-       
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      -  | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-      +  | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -143,26 +185,41 @@
-         | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-      -object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-      +object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-       property_assignment ::=
-           property_name ':' assignment_expression
-      +  | '...' assignment_expression
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | IDENTIFIER
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-         ;
-       
-       NULL_LITERAL ::= 'null' ;
-      @@ -177,6 +234,7 @@
-       EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-      ---
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/js.ebnf
-      Applying patch to 'src/js.ebnf' using custom patcher...
-      Error applying patch to src/js.ebnf:
-      Hunk #6 (header: @@ -68,11 +78,31 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      throw_statement ::= 'throw' expression ';'? ;
-      debugger_statement ::= 'debugger' ';'? ;
-
-      // ES6 Modules
-      // Expressions (Precedence from lowest to highest)
-      expression ::= assignment_expression ;
-
-      assignment_expression ::=
-          arrow_function
-        | conditional_expression
-        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-        ;
-      --- Expected Context (from patch, after normalization): ---
-      throw_statement ::= 'throw' expression ';'? ;
-      debugger_statement ::= 'debugger' ';'? ;
-
-
-
-      expression ::= assignment_expression ;
-
-      assignment_expression ::=
-      arrow_function
-      | conditional_expression
-      | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-      ;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 79 with ratio 0.83 (10/12 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-      + continue_statement ::= 'continue' IDENTIFIER? ';'? ;
-        throw_statement ::= 'throw' expression ';'? ;
-        debugger_statement ::= 'debugger' ';'? ;
-      - 
-        
-        
-        expression ::= assignment_expression ;
-        
-        assignment_expression ::=
-        arrow_function
-        | conditional_expression
-      - | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-      ?                                                                                                                    --------
-
-      + | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-        ;
-      Problematic diff content:
-      ---
-      --- a/src/js.ebnf
-      +++ b/src/js.ebnf
-      @@ -15,6 +15,7 @@
-         | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -22,7 +23,11 @@
-         | continue_statement
-         | throw_statement
-         | debugger_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | expression_statement
-         ;
-       
-      @@ -32,11 +37,13 @@
-       
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -44,6 +51,7 @@
-           'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-      @@ -52,15 +60,17 @@
-       case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -68,11 +78,31 @@
-       throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )* (','? '...' binding_pattern)? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-       // ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-         | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-      @@ -81,25 +111,31 @@
-       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-       logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
-       
-       bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
-       
-       bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
-       
-       bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
-       
-       equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
-       
-       relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
-       
-       shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
-       
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      @@ -118,23 +154,29 @@
-       
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      -  | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-      +  | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -143,26 +185,41 @@
-         | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-      -object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-      +object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-       property_assignment ::=
-           property_name ':' assignment_expression
-      +  | '...' assignment_expression
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | IDENTIFIER
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-         ;
-       
-       NULL_LITERAL ::= 'null' ;
-      @@ -177,6 +234,7 @@
-       EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-      ---
-
-
-      LLM apply output:
-      Using model 'gemini/gemini-2.5-flash' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/js.ebnf"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/js.ebnf
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/js.ebnf
-    metadata:
-  - user: |-
-      Diff of src/example_code2.js since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/js.ebnf since previous turn:
-      ```diff
-      --- original version of src/js.ebnf+++ current version of src/js.ebnf@@ -19,6 +19,7 @@   | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -26,6 +27,10 @@   | continue_statement
-         | throw_statement
-         | debugger_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | expression_statement
-         ;
-       
-      @@ -35,11 +40,13 @@ 
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -47,6 +54,7 @@     'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-      @@ -55,13 +63,16 @@ case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -69,21 +80,43 @@ throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )* (','? '...' binding_pattern)? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-      +// ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-      +  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-       
-       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-      @@ -103,11 +136,13 @@ 
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
-      +  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-         ;
-       
-       postfix_expression ::=
-      @@ -126,22 +161,31 @@ 
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
+      @@ -183,6 +183,7 @@
+         | call_expression '?.' '[' expression ']'
          | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
+         | call_expression '?.' '.' IDENTIFIER
+      +  | call_expression private_identifier
+         | call_expression template_literal
          ;
        
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -150,24 +194,37 @@   | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-      -object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-      +object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-       property_assignment ::=
-           property_name ':' assignment_expression
-      +  | '...' assignment_expression
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | IDENTIFIER // Shorthand property name
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-      @@ -186,6 +243,7 @@ HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-      @@ -202,4 +260,4 @@ IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
-       IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
-       IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
-      -HEX_DIGIT ::= [0-9a-fA-F] ;+HEX_DIGIT ::= [0-9a-fA-F] ;
-
-      ```
-    metadata:
-  - user: |-
-      An example is this line:
-      ```
-          [mySymbol]: "symbol key value",
-      ```
-      Find all other cases.
-    metadata:
-  - assistant: |-
-      You are right to point out that the grammar was still incomplete. The phrase "find all other cases" was a great hint. I missed a few things, particularly around method definitions in object literals and accessing private class fields. My apologies for that.
-
-      Here is a corrected and more complete patch for `src/js.ebnf` that should handle all the syntax in your example file.
-
-      I've made two key corrections based on your feedback:
-      1.  **Object Literal Methods**: The grammar now correctly parses method definitions (including `async` and generator methods) inside object literals, not just property assignments to function expressions.
-      2.  **Private Field Access**: The grammar now supports accessing private class fields (e.g., `this.#privateField`), which was missing from the `member_expression` rule.
-
-      Here is the updated diff:
-
-      ```diff
-      --- a/src/js.ebnf
-      +++ b/src/js.ebnf
-      @@ -15,6 +15,11 @@
-         | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -27,11 +32,13 @@
-       
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -39,21 +46,26 @@
-           'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-       switch_statement ::= 'switch' '(' expression ')' '{' case_clauses? ( default_clause case_clauses? )? '}' ;
-       case_clauses ::= case_clause+ ;
-       case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -61,11 +73,33 @@
-       throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-      +// ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-      +  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-       
-       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-      @@ -73,8 +107,10 @@
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-      @@ -90,10 +126,14 @@
-       
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
-      +  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-         ;
-       
-       postfix_expression ::=
-      @@ -108,23 +148,32 @@
-       
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-         | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-      +  | member_expression private_identifier
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -133,26 +182,41 @@
-         | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-       object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-       property_assignment ::=
-      -    property_name ':' assignment_expression
-      +    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | property_name ':' assignment_expression
-      +  | '...' assignment_expression
-      +  | IDENTIFIER // Shorthand property
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-         ;
-       
-       NULL_LITERAL ::= 'null' ;
-      @@ -164,6 +228,7 @@
-       EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-      ```
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/js.ebnf
-      Applying patch to 'src/js.ebnf' using custom patcher...
-      Error applying patch to src/js.ebnf:
-      Hunk #1 (header: @@ -15,6 +15,11 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-        | if_statement
-        | iteration_statement
-        | switch_statement
-        | try_statement
-        | function_declaration
-        | return_statement
-      --- Expected Context (from patch, after normalization): ---
-      | if_statement
-      | iteration_statement
-      | switch_statement
-      | try_statement
-      | function_declaration
-      | return_statement
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 19 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        | if_statement
-        | iteration_statement
-        | switch_statement
-      + | with_statement
-        | try_statement
-        | function_declaration
-      - | return_statement
-      Problematic diff content:
-      ---
-      --- a/src/js.ebnf
-      +++ b/src/js.ebnf
-      @@ -15,6 +15,11 @@
-         | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -27,11 +32,13 @@
-       
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -39,21 +46,26 @@
-           'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-       switch_statement ::= 'switch' '(' expression ')' '{' case_clauses? ( default_clause case_clauses? )? '}' ;
-       case_clauses ::= case_clause+ ;
-       case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -61,11 +73,33 @@
-       throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-      +// ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-      +  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-       
-       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-      @@ -73,8 +107,10 @@
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-      @@ -90,10 +126,14 @@
-       
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
-      +  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-         ;
-       
-       postfix_expression ::=
-      @@ -108,23 +148,32 @@
-       
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-         | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-      +  | member_expression private_identifier
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -133,26 +182,41 @@
-         | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-       object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-       property_assignment ::=
-      -    property_name ':' assignment_expression
-      +    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | property_name ':' assignment_expression
-      +  | '...' assignment_expression
-      +  | IDENTIFIER // Shorthand property
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-         ;
-       
-       NULL_LITERAL ::= 'null' ;
-      @@ -164,6 +228,7 @@
-       EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-      ---
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/js.ebnf
-      Applying patch to 'src/js.ebnf' using custom patcher...
-      Error applying patch to src/js.ebnf:
-      Hunk #1 (header: @@ -15,6 +15,11 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-        | if_statement
-        | iteration_statement
-        | switch_statement
-        | try_statement
-        | function_declaration
-        | return_statement
-      --- Expected Context (from patch, after normalization): ---
-      | if_statement
-      | iteration_statement
-      | switch_statement
-      | try_statement
-      | function_declaration
-      | return_statement
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 19 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        | if_statement
-        | iteration_statement
-        | switch_statement
-      + | with_statement
-        | try_statement
-        | function_declaration
-      - | return_statement
-      Problematic diff content:
-      ---
-      --- a/src/js.ebnf
-      +++ b/src/js.ebnf
-      @@ -15,6 +15,11 @@
-         | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -27,11 +32,13 @@
-       
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -39,21 +46,26 @@
-           'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-       switch_statement ::= 'switch' '(' expression ')' '{' case_clauses? ( default_clause case_clauses? )? '}' ;
-       case_clauses ::= case_clause+ ;
-       case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -61,11 +73,33 @@
-       throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-      +// ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-      +  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-       
-       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-      @@ -73,8 +107,10 @@
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-      @@ -90,10 +126,14 @@
-       
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
-      +  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-         ;
-       
-       postfix_expression ::=
-      @@ -108,23 +148,32 @@
-       
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-         | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-      +  | member_expression private_identifier
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -133,26 +182,41 @@
-         | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-       object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-       property_assignment ::=
-      -    property_name ':' assignment_expression
-      +    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | property_name ':' assignment_expression
-      +  | '...' assignment_expression
-      +  | IDENTIFIER // Shorthand property
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-         ;
-       
-       NULL_LITERAL ::= 'null' ;
-      @@ -164,6 +228,7 @@
-       EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-       HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-      ---
-
-
-      LLM apply output:
-      Using model 'gemini/gemini-2.5-flash' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/js.ebnf"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/js.ebnf
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/js.ebnf
-    metadata:
-  - user: |-
-      Diff of src/example_code2.js since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/js.ebnf since previous turn:
-      ```diff
-      --- original version of src/js.ebnf+++ current version of src/js.ebnf@@ -19,6 +19,7 @@   | if_statement
-         | iteration_statement
-         | switch_statement
-      +  | with_statement
-         | try_statement
-         | function_declaration
-         | return_statement
-      @@ -26,6 +27,10 @@   | continue_statement
-         | throw_statement
-         | debugger_statement
-      +  | labeled_statement
-      +  | class_declaration
-      +  | import_statement
-      +  | export_statement
-         | expression_statement
-         ;
-       
-      @@ -35,11 +40,13 @@ 
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';' ;
-      +labeled_statement ::= IDENTIFIER ':' statement ;
-      +
-      +declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-       
-       variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-       
-      -variable_declaration ::= IDENTIFIER ( '=' expression )? ;
-      +variable_declaration ::= binding_pattern ( '=' expression )? ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-      @@ -47,6 +54,7 @@     'while' '(' expression ')' statement
-         | 'do' statement 'while' '(' expression ')' ';'
-         | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-      +  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-         | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-         ;
-       
-      @@ -55,13 +63,17 @@ case_clause ::= 'case' expression ':' statement_list? ;
-       default_clause ::= 'default' ':' statement_list? ;
-       
-      +with_statement ::= 'with' '(' expression ')' statement ;
-      +
-       try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-      -catch_clause ::= 'catch' '(' IDENTIFIER ')' block ;
-      +catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-       finally_clause ::= 'finally' block ;
-       
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-      +
-      +formal_parameter ::= binding_pattern ( '=' expression )? ;
-       
-       return_statement ::= 'return' expression? ';'? ;
-       break_statement ::= 'break' IDENTIFIER? ';'? ;
-      @@ -69,21 +81,43 @@ throw_statement ::= 'throw' expression ';'? ;
-       debugger_statement ::= 'debugger' ';'? ;
-       
-      +// Binding Patterns (for destructuring)
-      +binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-      +object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-      +property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-      +array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
-      +binding_element ::= binding_pattern ('=' expression)? ;
-      +
-      +// ES6 Modules
-      +import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-      +import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-      +default_import ::= IDENTIFIER ;
-      +named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-      +namespace_import ::= '*' 'as' IDENTIFIER ;
-      +import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-      +export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-      +named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-      +export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-      +
-       // Expressions (Precedence from lowest to highest)
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    arrow_function
-      +    yield_expression
-      +  | arrow_function
-         | conditional_expression
-      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ) assignment_expression
-      +  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-         ;
-       
-       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-       
-       conditional_expression ::=
-      -    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      -  ;
-      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-       
-       logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-       
-      @@ -103,11 +137,13 @@ 
-       additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-       
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-      +multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-      +
-      +exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-           postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
-      +  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-         ;
-       
-       postfix_expression ::=
-      @@ -126,22 +162,32 @@ 
-       call_expression ::=
-           member_expression arguments
-      +  | 'super' arguments
-         | call_expression arguments
-      -  | call_expression '[' expression ']' 
-      +  | call_expression '?.' arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '?.' '[' expression ']'
-         | call_expression '.' IDENTIFIER
-      +  | call_expression '?.' '.' IDENTIFIER
-      +  | call_expression template_literal
-         ;
-       
-       arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression '[' expression ']' 
-      +  | member_expression '[' expression ']'
-      +  | member_expression '?.' '[' expression ']'
-         | member_expression '.' IDENTIFIER
-      +  | member_expression '?.' '.' IDENTIFIER
-      +  | member_expression private_identifier
-         | 'new' member_expression arguments
-      +  | member_expression template_literal
-         ;
-       
-       primary_expression ::=
-      -    'this' 
-      +    'this'
-      +  | 'super'
-         | IDENTIFIER
-         | literal
-         | array_literal
-      @@ -150,24 +196,38 @@   | '(' expression ')'
-         ;
-       
-      -function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
-      +function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-      +
-      +yield_expression ::= 'yield' '*'? expression? ;
-       
-       array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-       ELISION ::= ','+ ;
-       
-      -object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
-      +object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-       property_assignment ::=
-      -    property_name ':' assignment_expression
-      +    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
-         | 'get' property_name '(' ')' block
-         | 'set' property_name '(' IDENTIFIER ')' block
-      -  ;
-      -property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL ;
-      +  | property_name ':' assignment_expression
-      +  | '...' assignment_expression
-      +  | IDENTIFIER // Shorthand property
-      +  ;
-      +property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-      +
-      +class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-      +class_body ::= '{' class_member* '}' ;
-      +class_member ::= (method_definition | field_definition) ';'? | ';' ;
-      +field_definition ::= ('static')? class_property_name ('=' expression)? ;
-      +method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-      +class_property_name ::= property_name | private_identifier ;
-      +private_identifier ::= '#' IDENTIFIER ;
-       
-       // Literals
-       literal ::=
-           NULL_LITERAL
-         | BOOLEAN_LITERAL
-         | NUMERIC_LITERAL
-      +  | BIGINT_LITERAL
-         | STRING_LITERAL
-         | REGULAR_EXPRESSION_LITERAL
-         | template_literal
-      @@ -186,6 +246,7 @@ HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-       BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-       OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-      +BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-       
-       STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-       ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-      @@ -202,4 +263,4 @@ IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
-       IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
-       IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
-      -HEX_DIGIT ::= [0-9a-fA-F] ;+HEX_DIGIT ::= [0-9a-fA-F] ;
-
-      ```
-    metadata:
-  - user: Add to the example code an block of really deeply nested statements.
-    metadata:
-  - assistant: |-
-      Of course. It's a good idea to stress-test the parser's ability to handle recursion with deeply nested structures. I'll add a new section to `src/example_code2.js` for this purpose.
-
-      Here is the patch for `src/example_code2.js`:
-
-      ```diff
-      --- a/src/example_code2.js
-      +++ b/src/example_code2.js
-      @@ -260,3 +260,30 @@
-           console.log('default export');
-       }
-       */
-      +
-      +// --- 9. Deeply Nested Statements ---
-      +// To test parser recursion depth and handling of complex block structures.
-      +function deeplyNestedTest(depth) {
-      +    if (depth > 0) {
-      +        for (let i = 0; i < 1; i++) {
-      +            while (i < 1) {
-      +                try {
-      +                    switch (i) {
-      +                        case 0:
-      +                            if (true) {
-      +                                let a = 1;
-      +                                {
-      +                                    {
-      +                                        {
-      +                                            deeplyNestedTest(depth - 1);
-      +                                        }
-      +                                    }
-      +                                }
-      +                            }
-      +                            break;
-      +                    }
-      +                } catch (e) { /* ignore */ }
-      +            }
-      +        }
-      +    }
-      +}
-
       ```
     metadata:
   - user: |
@@ -3882,8 +2059,8 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/example_code2.js
-      Applying patch to 'src/example_code2.js' using custom patcher...
-      Successfully applied patch and wrote to src/example_code2.js.
+      Identified target file: src/js.ebnf
+      Applying patch to 'src/js.ebnf' using custom patcher...
+      Successfully applied patch and wrote to src/js.ebnf.
     metadata:
 ...

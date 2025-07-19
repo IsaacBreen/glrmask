@@ -169,6 +169,7 @@ call_expression ::=
   | call_expression '?.' '[' expression ']'
   | call_expression '.' IDENTIFIER
   | call_expression '?.' '.' IDENTIFIER
+  | call_expression private_identifier
   | call_expression template_literal
   ;
 
