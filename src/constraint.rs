@@ -1112,6 +1112,7 @@ impl<'a> GrammarConstraintState<'a> {
                             if glr_s.is_ok() {
                                 entry.successful += 1;
                             }
+                            crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
                         }
                         // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                         // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -1129,6 +1130,7 @@ impl<'a> GrammarConstraintState<'a> {
                             results.push((child_node_trie_data.clone(), glr_s));
                         }
                     }
+                    crate::debug!(4, "Step function results: {:?}", results);
                     results
                 })
             },
