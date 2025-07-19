@@ -403,7 +403,7 @@ impl GSSNode {
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
     pub fn max_depth(&self) -> MaxDepth { self.max_depth }
-    pub fn dest_key(&self) -> DestKey { self.max_depth }
+    pub fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.full_union_acc().llm_tokens().allowed() }
     pub fn disallowed_terminals(&self) -> TerminalInfo { self.full_union_acc().disallowed_terminals }
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
