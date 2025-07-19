@@ -846,7 +846,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
             // let gss_roots: Vec<&GSSNode> = constraint_state.state.values()
             //     .map(|glr_state| glr_state.active_state.stack.as_ref())
             //     .collect();
-            // 
+            //
             // if gss_roots.is_empty() {
             //     println!("      No active GSS roots to sample from.");
             // } else {
