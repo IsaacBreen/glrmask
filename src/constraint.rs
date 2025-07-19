@@ -299,11 +299,6 @@ impl GrammarConstraint {
             }
         }
 
-        // Add the ignore terminal
-        if let Some(ignore_terminal_id) = parser.ignore_terminal_id {
-            // TODO
-        }
-
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
 
         let precomputed = Self::precompute(
@@ -312,6 +307,7 @@ impl GrammarConstraint {
             &token_name_map,
             internal_max_llm_token, 
             &terminal_follow_map_ids, // Pass the new map
+            parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
 
@@ -336,6 +332,7 @@ impl GrammarConstraint {
         token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
         terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
         let mut helper = Precomputer::new(
@@ -344,14 +341,14 @@ impl GrammarConstraint {
             internal_max_llm_token, 
             MERGE_THRESHOLD,
             terminal_follow_map_ids, // Pass to Precomputer::new
+            ignore_terminal_id,
         );
 
         helper.run_dfs();
         helper.prune_dead_paths();
-        // TODO: Fix ignore token handling in terminal follows, or work around it by leaving ignore tokens out of precompute tree altogether.
-        // helper.prune_on_no_terminal_follow();
-        // helper.prune_dead_paths();
-        // helper.prune_on_no_terminal_follow();
+        helper.prune_on_no_terminal_follow();
+        helper.prune_dead_paths();
+        helper.prune_on_no_terminal_follow();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -481,6 +478,7 @@ impl<'r> Precomputer<'r> {
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
+        ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
             .iter()
