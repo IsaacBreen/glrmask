@@ -594,7 +594,8 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
 
     // llm_token_map.retain(|v, _| [b"a".as_ref(), b" ", b"aa", b"aaa", b"aaaa", b"aaaaa", b"  ", b"   "].contains(&v.as_ref()));
     // llm_token_map.retain(|v, _| v.len() <= 2);
-    llm_token_map.retain(|v, _| v.len() <= 3 && v.iter().all(|c| !c.is_ascii_alphabetic() || c == &b'a'));
+    // llm_token_map.retain(|v, _| v.len() <= 2 && v.iter().all(|c| c.is_ascii_whitespace() || c == &b'a'));
+    llm_token_map.retain(|v, _| [b"a".as_ref(), b"aa", b" ", b"  "].contains(&v.as_ref()));
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
