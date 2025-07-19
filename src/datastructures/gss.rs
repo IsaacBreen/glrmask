@@ -458,7 +458,7 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one.
-    // #[time_it]
+    #[time_it]
     pub fn merge(&mut self, other: &Self) {
         // timeit!("GSSNode::merge", {
         if self == other { return; }
@@ -477,7 +477,27 @@ impl GSSNode {
         merge_node_maps(&mut new_predecessors, other.predecessors.clone());
         
         // Create a new node with the merged properties.
-        let new_node = GSSNode::new_with_map(Arc::new(merged_local), new_predecessors);
+        // let new_node = GSSNode::new_with_map(Arc::new(merged_local), new_predecessors);
+
+        let merged_union = Acc::merge_parallel([self.acc_manager.union.as_ref(), other.acc_manager.union.as_ref()]);
+        let merged_intersection = Acc::intersect_parallel([self.acc_manager.intersection.as_ref(), other.acc_manager.intersection.as_ref()]);
+
+        let acc_manager = AccManager {
+            local: Arc::new(merged_local),
+            union: Arc::new(merged_union),
+            intersection: Arc::new(merged_intersection),
+        };
+
+        let hash_key_cache = compute_hash_key(&new_predecessors, &acc_manager);
+        let max_depth = std::cmp::max(self.max_depth, other.max_depth);
+
+        let new_node = GSSNode {
+            acc_manager,
+            predecessors: new_predecessors,
+            hash_key_cache,
+            max_depth,
+        };
+
         *self = new_node;
         // });
     }
