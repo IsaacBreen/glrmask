@@ -1092,9 +1092,6 @@ impl<'a> GrammarConstraintState<'a> {
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                         if let Some(gtid) = grammar_token_opt {
-                            // if Some(*gtid) == self.parent.parser.ignore_terminal_id {
-                            //     continue;
-                            // }
                             let mut counts_guard = step_counts_clone1.lock().unwrap();
                             let entry = counts_guard.entry(*gtid).or_default();
                             entry.total += 1;
@@ -1142,9 +1139,9 @@ impl<'a> GrammarConstraintState<'a> {
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
+                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         glr_s.do_phase3();
-                        // Fuse
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         !glr_s.active_state.stack.is_empty()
                     }
