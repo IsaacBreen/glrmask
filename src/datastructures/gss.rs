@@ -1200,7 +1200,7 @@ fn format_acc(
         let llm_info = if disallowed_llm_info.is_empty() {
             "LLM(None)".to_string()
         } else {
-            let bv = disallowed_llm_info.disallowed();
+            let bv = disallowed_llm_info.allowed();
             if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
                 const MAX_SAMPLES: usize = 3;
                 let token_samples: Vec<_> = bv.iter().take(MAX_SAMPLES)

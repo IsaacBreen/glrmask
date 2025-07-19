@@ -1095,6 +1095,8 @@ impl<'a> GrammarConstraintState<'a> {
                         allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
+                        crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
                         if let Some(gtid) = grammar_token_opt {
                             let mut counts_guard = step_counts_clone1.lock().unwrap();
                             let entry = counts_guard.entry(*gtid).or_default();
@@ -1111,7 +1113,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 entry.successful += 1;
                             }
                         }
-                        crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
+                        // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                         // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
