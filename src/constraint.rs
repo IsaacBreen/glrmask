@@ -1130,7 +1130,7 @@ impl<'a> GrammarConstraintState<'a> {
                             results.push((child_node_trie_data.clone(), glr_s));
                         }
                     }
-                    crate::debug!(4, "Step function results: {:?}", results);
+                    crate::debug!(4, "Step function results len: {}", results.len());
                     results
                 })
             },
