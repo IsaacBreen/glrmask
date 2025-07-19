@@ -861,11 +861,11 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                         sampled_stack.reverse();
 
                         println!("    --- Sample {} (seed {}) ---", sample_idx + 1, seed);
-                        let explanation = grammar_constraint.parser.explain_stack(&sampled_stack);
-                        // Indent the explanation for readability
-                        for line in explanation.lines() {
-                            println!("      {}", line);
-                        }
+                        // let explanation = grammar_constraint.parser.explain_stack(&sampled_stack);
+                        // // Indent the explanation for readability
+                        // for line in explanation.lines() {
+                        //     println!("      {}", line);
+                        // }
                     } else {
                         println!("    Sample {}: No path found (GSS might be empty or just a root).", sample_idx + 1);
                         // If one sample fails, others might too. Break to avoid redundant messages.
