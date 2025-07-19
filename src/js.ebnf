@@ -1,4 +1,4 @@
-file ::= 'a' 'a' 'a';
+file ::= 'var' 'a' '=' '1' ';';
 
 !ignore WS;
 WS ::= (' ') + ;
