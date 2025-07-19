@@ -600,8 +600,7 @@ impl<'r> Precomputer<'r> {
             // step: Propagate predecessor terminals.
             |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                 match edge_terminal_opt {
-                    // Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                    Some(t) if Some(*t) == ignore_terminal_id => None,
+                    Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
                     Some(t) => Some(BTreeSet::from([*t])),
                     None => Some(predecessors.clone()),
                 }
@@ -625,10 +624,7 @@ impl<'r> Precomputer<'r> {
                         allowed_follow_terminals.extend(follow_set.iter().cloned());
                     }
                 }
-                if let Some(ignore_terminal_id) = ignore_terminal_id {
-                    allowed_follow_terminals.insert(ignore_terminal_id);
-                }
-    
+
                 // Prune children of the current node.
                 node.children_mut().retain(|edge_terminal_opt, _dest_map| {
                     match edge_terminal_opt {
