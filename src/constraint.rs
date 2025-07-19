@@ -624,6 +624,9 @@ impl<'r> Precomputer<'r> {
                         allowed_follow_terminals.extend(follow_set.iter().cloned());
                     }
                 }
+                if let Some(ignore_terminal_id) = ignore_terminal_id {
+                    allowed_follow_terminals.insert(ignore_terminal_id);
+                }
     
                 // Prune children of the current node.
                 node.children_mut().retain(|edge_terminal_opt, _dest_map| {
