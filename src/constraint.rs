@@ -600,7 +600,8 @@ impl<'r> Precomputer<'r> {
             // step: Propagate predecessor terminals.
             |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                 match edge_terminal_opt {
-                    Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                    // Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                    Some(t) if Some(*t) == ignore_terminal_id => None,
                     Some(t) => Some(BTreeSet::from([*t])),
                     None => Some(predecessors.clone()),
                 }
