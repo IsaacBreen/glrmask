@@ -1143,16 +1143,19 @@ impl<'a> GrammarConstraintState<'a> {
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
+                    crate::debug!(4, "Processing precomputed node data: {:?}", precomputed_node_data);
                     if precomputed_node_data.value.end {
                         let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
+                        crate::debug!(4, "Processing non-end precomputed node data: {:?}", precomputed_node_data);
                         glr_s.do_phase3();
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         !glr_s.active_state.stack.is_empty()
                     }
                 })
