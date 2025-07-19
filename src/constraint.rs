@@ -1137,6 +1137,8 @@ impl<'a> GrammarConstraintState<'a> {
             // merge_fn
             |glr_s1, glr_s2| {
                 timeit!("get_mask merge_fn", {
+                    crate::debug!(4, "Active LLM tokens in glr_s1 before merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+                    crate::debug!(4, "Active LLM tokens in glr_s2 before merge: {:?}", glr_s2.active_state.stack.allowed_llm_tokens());
                     glr_s1.merge_with(glr_s2);
                 })
             },
