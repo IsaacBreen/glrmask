@@ -595,7 +595,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     // llm_token_map.retain(|v, _| [b"a".as_ref(), b" ", b"aa", b"aaa", b"aaaa", b"aaaaa", b"  ", b"   "].contains(&v.as_ref()));
     // llm_token_map.retain(|v, _| v.len() <= 2);
     // llm_token_map.retain(|v, _| v.len() <= 2 && v.iter().all(|c| c.is_ascii_whitespace() || c == &b'a'));
-    llm_token_map.retain(|v, _| [b"a".as_ref(), b" a"].contains(&v.as_ref()));
+    // llm_token_map.retain(|v, _| [b"a".as_ref(), b" a"].contains(&v.as_ref()));
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
@@ -684,7 +684,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
 
     // The full text to tokenize.
-    let example_code_path = "src/example_code.js";
+    let example_code_path = "src/example_code2.js";
     let full_text_to_tokenize = match fs::read_to_string(example_code_path) {
         Ok(s) => s,
         Err(e) => {
