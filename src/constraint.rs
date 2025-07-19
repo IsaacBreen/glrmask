@@ -1139,10 +1139,11 @@ impl<'a> GrammarConstraintState<'a> {
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
-                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         glr_s.do_phase3();
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         !glr_s.active_state.stack.is_empty()
                     }
                 })
