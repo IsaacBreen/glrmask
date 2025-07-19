@@ -298,6 +298,12 @@ impl GrammarConstraint {
                 terminal_follow_map_ids.insert(t1_id, following_ids);
             }
         }
+
+        // Add the ignore terminal
+        if let Some(ignore_terminal_id) = parser.ignore_terminal_id {
+            // TODO
+        }
+
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
 
         let precomputed = Self::precompute(
