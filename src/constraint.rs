@@ -1153,6 +1153,8 @@ impl<'a> GrammarConstraintState<'a> {
                         glr_s.do_phase3();
                         crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
