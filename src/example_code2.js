@@ -365,3 +365,30 @@ export default function() {
     console.log('default export');
 }
 */
+
+// --- 9. Deeply Nested Statements ---
+// To test parser recursion depth and handling of complex block structures.
+function deeplyNestedTest(depth) {
+    if (depth > 0) {
+        for (let i = 0; i < 1; i++) {
+            while (i < 1) {
+                try {
+                    switch (i) {
+                        case 0:
+                            if (true) {
+                                let a = 1;
+                                {
+                                    {
+                                        {
+                                            deeplyNestedTest(depth - 1);
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        }
+    }
+}
