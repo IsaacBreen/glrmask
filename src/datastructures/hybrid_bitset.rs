@@ -437,7 +437,7 @@ impl Sub for HybridBitset {
     // #[time_it]
     fn sub(self, rhs: Self) -> Self::Output {
         HybridBitset {
-            inner: &self.inner - &rhs.inner,
+            inner: self.inner - rhs.inner,
         }
     }
 }
@@ -580,6 +580,25 @@ impl Into<BitVec<usize, Lsb0>> for HybridBitset {
 impl From<BitVec<usize, Lsb0>> for HybridBitset {
     fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
         HybridBitset { inner: RangeSetBlaze::from_iter(bitvec.iter_ones()) }
+    }
+}
+
+// --- Operations on owned values ---
+impl<'a> BitAnd<&'a HybridBitset> for HybridBitset {
+    type Output = HybridBitset;
+    fn bitand(self, rhs: &'a HybridBitset) -> Self::Output {
+        HybridBitset {
+            inner: self.inner & &rhs.inner,
+        }
+    }
+}
+
+impl<'a> BitOr<&'a HybridBitset> for HybridBitset {
+    type Output = HybridBitset;
+    fn bitor(self, rhs: &'a HybridBitset) -> Self::Output {
+        HybridBitset {
+            inner: self.inner | &rhs.inner,
+        }
     }
 }
 
