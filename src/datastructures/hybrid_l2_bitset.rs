@@ -172,17 +172,7 @@ impl BitXor for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
-        HybridL2Bitset {
-            inner: self.inner.zip_with(&rhs.inner, |v1, v2| match (v1, v2) {
-                (Some(bs1), Some(bs2)) => {
-                    let result = bs1 ^ bs2;
-                    if result.is_empty() { None } else { Some(result) }
-                },
-                (Some(bs1), None) => Some(bs1.clone()),
-                (None, Some(bs2)) => Some(bs2.clone()),
-                (None, None) => None,
-            }),
-        }
+        todo!()
     }
 }
 
