@@ -10,7 +10,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::glr::parser::ParseStateEdgeContent;
-use crate::constraint::{LLMTokenBV, LLMVocab, TerminalBV};
+use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
