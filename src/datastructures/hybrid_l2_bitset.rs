@@ -5,6 +5,7 @@ use std::ops::RangeInclusive;
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub};
+use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 
@@ -16,10 +17,32 @@ use std::cmp::Ordering;
 ///
 /// An empty `HybridBitset` is never stored; if a row becomes empty, it is
 /// removed from the map.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HybridL2Bitset {
     /// The underlying map from usize (L1 index) to a HybridBitset (L2 indices).
     inner: RangeMapBlaze<usize, HybridBitset>,
+}
+
+impl Debug for HybridL2Bitset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut ds = f.debug_struct("HybridL2Bitset");
+
+        const MAX_RANGES_TO_SHOW: usize = 5;
+        let total_ranges = self.inner.ranges_len();
+
+        if f.alternate() || total_ranges <= MAX_RANGES_TO_SHOW {
+            // In alternate mode or for small sets, show full inner map.
+            // The inner HybridBitsets already have a truncating Debug impl.
+            ds.field("inner", &self.inner);
+        } else {
+            // For normal mode with many ranges, show a preview.
+            let ranges_to_show: Vec<_> = self.inner.range_values().take(MAX_RANGES_TO_SHOW).collect();
+            ds.field("inner_preview", &ranges_to_show);
+            ds.field("...", &format_args!("and {} more ranges", total_ranges - MAX_RANGES_TO_SHOW));
+        }
+
+        ds.finish()
+    }
 }
 
 impl PartialOrd for HybridL2Bitset {

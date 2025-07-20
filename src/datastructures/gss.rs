@@ -1000,15 +1000,30 @@ fn format_acc(
             return "Terminals(All Disallowed)".to_string();
         }
         let mut parts = Vec::new();
-        for (state_val, allowed_bv) in allowed_terminals.iter_l1_bitsets() {
-             let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
-             if !disallowed_bv.is_empty() {
-                let names: Vec<_> = disallowed_bv.iter()
+        const MAX_PARTS: usize = 5;
+        for (range, allowed_bv) in allowed_terminals.range_values() {
+            if parts.len() >= MAX_PARTS {
+                parts.push("...".to_string());
+                break;
+            }
+            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+            if !disallowed_bv.is_empty() {
+                const MAX_NAMES: usize = 3;
+                let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES)
                     .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
                         .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
                     .collect();
-                parts.push(format!("State {}:[{}]", state_val, names.join(", ")));
-             }
+                let names_str = names.join(", ");
+                let ellipsis = if disallowed_bv.len() > MAX_NAMES { ", ..." } else { "" };
+
+                let range_str = if range.start() == range.end() {
+                    format!("{}", range.start())
+                } else {
+                    format!("{}..={}", range.start(), range.end())
+                };
+
+                parts.push(format!("State(s) {}:[{}{}]", range_str, names_str, ellipsis));
+            }
         }
         if parts.is_empty() {
             "Terminals(None Disallowed)".to_string()
