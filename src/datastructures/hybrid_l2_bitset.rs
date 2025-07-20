@@ -86,6 +86,57 @@ impl HybridL2Bitset {
             bitset.iter().map(move |l2_index| (l1_index, l2_index))
         })
     }
+
+    /// Returns the complement of the set, assuming a universe of all possible
+    /// `(usize, usize)` points. This can be a very large set.
+    pub fn complement(&self) -> Self {
+        let universe = Self {
+            inner: RangeMapBlaze::from_iter([(0..=usize::MAX, HybridBitset::max_ones())])
+        };
+        &universe ^ self
+    }
+
+    /// A generalized intersection operation.
+    ///
+    /// For L1 keys present in both sets, the corresponding L2 bitsets are intersected.
+    /// For L1 keys present in only one set, the L2 bitset is intersected with the `default`.
+    /// If `default` is `None`, keys present in only one set are excluded from the result.
+    pub fn intersection_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
+        self.zip_op(other, default, |a, b| a & b)
+    }
+
+    /// A generalized union operation.
+    ///
+    /// For L1 keys present in both sets, the corresponding L2 bitsets are unioned.
+    /// For L1 keys present in only one set, the L2 bitset is unioned with the `default`.
+    /// If `default` is `None`, keys present in only one set are excluded from the result.
+    pub fn union_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
+        self.zip_op(other, default, |a, b| a | b)
+    }
+
+    /// Helper function to perform a zip operation between two `HybridL2Bitset`s.
+    fn zip_op<F>(&self, other: &Self, default: Option<HybridBitset>, op: F) -> Self
+    where
+        F: Fn(&HybridBitset, &HybridBitset) -> HybridBitset,
+    {
+        Self {
+            inner: self.inner.zip_with(&other.inner, |v1, v2| {
+                let (res_v1, res_v2) = match (v1, v2) {
+                    (Some(bs1), Some(bs2)) => (Some(bs1), Some(bs2)),
+                    (Some(bs1), None) => (Some(bs1), default.as_ref()),
+                    (None, Some(bs2)) => (default.as_ref(), Some(bs2)),
+                    (None, None) => (None, None),
+                };
+
+                if let (Some(bs1), Some(bs2)) = (res_v1, res_v2) {
+                    let result = op(bs1, bs2);
+                    if result.is_empty() { None } else { Some(result) }
+                } else {
+                    None
+                }
+            })
+        }
+    }
 }
 
 impl Default for HybridL2Bitset {
@@ -100,7 +151,9 @@ impl BitAnd for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        todo!()
+        // Standard intersection excludes keys not present in both sets.
+        // This is equivalent to intersection_with a default of None.
+        self.intersection_with(rhs, None)
     }
 }
 
@@ -108,7 +161,10 @@ impl BitOr for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        todo!()
+        // Standard union includes keys from both. If a key is missing from one,
+        // it's treated as an empty set. This is equivalent to union_with a
+        // default of an empty HybridBitset.
+        self.union_with(rhs, Some(HybridBitset::zeros()))
     }
 }
 
@@ -116,7 +172,17 @@ impl BitXor for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
-        todo!()
+        HybridL2Bitset {
+            inner: self.inner.zip_with(&rhs.inner, |v1, v2| match (v1, v2) {
+                (Some(bs1), Some(bs2)) => {
+                    let result = bs1 ^ bs2;
+                    if result.is_empty() { None } else { Some(result) }
+                },
+                (Some(bs1), None) => Some(bs1.clone()),
+                (None, Some(bs2)) => Some(bs2.clone()),
+                (None, None) => None,
+            }),
+        }
     }
 }
 
@@ -124,37 +190,37 @@ impl BitXor for &HybridL2Bitset {
 
 impl BitAndAssign for HybridL2Bitset {
     fn bitand_assign(&mut self, rhs: Self) {
-        todo!()
+        *self &= &rhs;
     }
 }
 
 impl BitAndAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
-        todo!()
+        *self = &*self & rhs;
     }
 }
 
 impl BitOrAssign for HybridL2Bitset {
     fn bitor_assign(&mut self, rhs: Self) {
-        todo!()
+        *self |= &rhs;
     }
 }
 
 impl BitOrAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
-        todo!()
+        *self = &*self | rhs;
     }
 }
 
 impl BitXorAssign for HybridL2Bitset {
     fn bitxor_assign(&mut self, rhs: Self) {
-        todo!()
+        *self ^= &rhs;
     }
 }
 
 impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
-        todo!()
+        *self = &*self ^ rhs;
     }
 }
 
@@ -325,5 +391,57 @@ mod tests {
         assert!(l2_set.contains(51));
 
         assert!(set.get_l2_bitset(99).is_none());
+    }
+
+    #[test]
+    fn test_with_ops() {
+        let mut set1 = HybridL2Bitset::new();
+        set1.insert(10, 100); // in set1 only
+        set1.insert(20, 200); // in both
+
+        let mut set2 = HybridL2Bitset::new();
+        set2.insert(20, 201); // in both
+        set2.insert(30, 300); // in set2 only
+
+        // intersection_with
+        // with None default (same as bitand)
+        let inter_none = set1.intersection_with(&set2, None);
+        let mut expected_inter = HybridL2Bitset::new();
+        // key 20 is in both. intersection of {200} and {201} is empty.
+        assert!(inter_none.is_empty());
+        assert_eq!(inter_none, &set1 & &set2);
+
+
+        // with non-empty default
+        let default_bs = HybridBitset::from_iter(vec![100, 200, 300]);
+        let inter_default = set1.intersection_with(&set2, Some(default_bs.clone()));
+        // key 10: {100} & {100,200,300} -> {100}
+        // key 20: {200} & {201} -> {}
+        // key 30: {100,200,300} & {300} -> {300}
+        let mut expected_inter_default = HybridL2Bitset::new();
+        expected_inter_default.insert(10, 100);
+        expected_inter_default.insert(30, 300);
+        assert_eq!(inter_default, expected_inter_default);
+
+        // union_with
+        // with None default (only common keys)
+        let union_none = set1.union_with(&set2, None);
+        // key 10: excluded
+        // key 20: {200} | {201} -> {200, 201}
+        // key 30: excluded
+        let mut expected_union_none = HybridL2Bitset::new();
+        expected_union_none.insert(20, 200);
+        expected_union_none.insert(20, 201);
+        assert_eq!(union_none, expected_union_none);
+
+        // with zeros default (same as bitor)
+        let union_zeros = set1.union_with(&set2, Some(HybridBitset::zeros()));
+        let mut expected_union_zeros = HybridL2Bitset::new();
+        expected_union_zeros.insert(10, 100);
+        expected_union_zeros.insert(20, 200);
+        expected_union_zeros.insert(20, 201);
+        expected_union_zeros.insert(30, 300);
+        assert_eq!(union_zeros, expected_union_zeros);
+        assert_eq!(union_zeros, &set1 | &set2);
     }
 }
