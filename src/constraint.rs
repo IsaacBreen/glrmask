@@ -392,8 +392,8 @@ impl GrammarConstraint {
         //     original_bv.insert(*original_id_val as usize);
         // }
         for i in 0..=self.llm_vocab.internal_max_llm_token {
-            if let Some(original_id_val) = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&i) {
-                if internal_bv.contains(i) {
+            if internal_bv.contains(i) {
+                if let Some(original_id_val) = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&i) {
                     original_bv.insert(*original_id_val);
                 }
             }
