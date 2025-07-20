@@ -1,5 +1,8 @@
-use range_set_blaze::RangeMapBlaze;
 use crate::datastructures::hybrid_bitset::HybridBitset;
+use range_set_blaze::prelude::*;
+use range_set_blaze::RangeMapBlaze;
+use std::collections::BTreeSet;
+use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign};
 
 /// A two-dimensional bitset, conceptually a map from `usize` to `HybridBitset`.
@@ -90,7 +93,23 @@ impl HybridL2Bitset {
     /// Returns the complement of the set, assuming a universe of all possible
     /// `(usize, usize)` points. This can be a very large set.
     pub fn complement(&self) -> Self {
-        todo!()
+        // 1. Complement the L1 keys. The new ranges will have `HybridBitset::max_ones()` as value.
+        let complemented_l1_keys = self
+            .inner
+            .ranges()
+            .complement()
+            .map(|range| (range, HybridBitset::max_ones()));
+
+        // 2. Complement the values of existing L1 keys.
+        let complemented_values = self
+            .inner
+            .range_values()
+            .map(|(range, bitset)| (range, bitset.inverted()));
+
+        // 3. Union them.
+        HybridL2Bitset {
+            inner: complemented_l1_keys.chain(complemented_values).collect(),
+        }
     }
 
     /// A generalized intersection operation.
@@ -125,7 +144,79 @@ impl HybridL2Bitset {
     where
         F: Fn(&HybridBitset, &HybridBitset) -> HybridBitset,
     {
-        todo!()
+        let mut points = BTreeSet::new();
+        if !self.inner.is_empty() || !other.inner.is_empty() || default.is_some() {
+            points.insert(0);
+        }
+
+        for (range, _) in self.inner.range_values() {
+            points.insert(*range.start());
+            if *range.end() < usize::MAX {
+                points.insert(range.end() + 1);
+            }
+        }
+        for (range, _) in other.inner.range_values() {
+            points.insert(*range.start());
+            if *range.end() < usize::MAX {
+                points.insert(range.end() + 1);
+            }
+        }
+
+        let mut new_ranges = Vec::new();
+        let empty_bs = HybridBitset::zeros();
+
+        let mut process_interval = |start, end| {
+            if start > end {
+                return;
+            }
+            let mid = start;
+
+            let self_bs_opt = self.inner.get(mid);
+            let other_bs_opt = other.inner.get(mid);
+
+            let result_bs = match (self_bs_opt, other_bs_opt) {
+                (Some(s), Some(o)) => op(s, o),
+                (Some(s), None) => {
+                    if let Some(ref d) = default {
+                        op(s, d)
+                    } else {
+                        return; // Exclude if no default
+                    }
+                }
+                (None, Some(o)) => {
+                    if let Some(ref d) = default {
+                        op(d, o)
+                    } else {
+                        return; // Exclude if no default
+                    }
+                }
+                (None, None) => {
+                    // Both are implicitly empty.
+                    // The `default` is for when a key is in one but not the other.
+                    // When both are missing, it's op(empty, empty).
+                    op(&empty_bs, &empty_bs)
+                }
+            };
+
+            if !result_bs.is_empty() {
+                new_ranges.push((start..=end, result_bs));
+            }
+        };
+
+        let points_vec: Vec<_> = points.into_iter().collect();
+        for window in points_vec.windows(2) {
+            process_interval(window[0], window[1] - 1);
+        }
+
+        if let Some(&last_point) = points_vec.last() {
+            if last_point <= usize::MAX {
+                process_interval(last_point, usize::MAX);
+            }
+        }
+
+        HybridL2Bitset {
+            inner: RangeMapBlaze::from_iter(new_ranges),
+        }
     }
 }
 
@@ -164,8 +255,7 @@ impl BitXor for &HybridL2Bitset {
     fn bitxor(self, rhs: Self) -> Self::Output {
         // Standard symmetric difference includes keys from both sets.
         // If a key is missing from one, it's treated as an empty set.
-        // This is equivalent to symmetric_difference_with a default of None.
-        self.symmetric_difference_with(rhs, None)
+        self.symmetric_difference_with(rhs, Some(HybridBitset::zeros()))
     }
 }
 
@@ -206,7 +296,6 @@ impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
         *self = &*self ^ rhs;
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -317,25 +406,36 @@ mod tests {
         // Intersection
         let intersection = &set1 & &set2;
         let expected_intersection: BTreeSet<(usize, usize)> = vec![(20, 200)].into_iter().collect();
-        assert_eq!(intersection.iter().collect::<BTreeSet<_>>(), expected_intersection);
+        assert_eq!(
+            intersection.iter().collect::<BTreeSet<_>>(),
+            expected_intersection
+        );
 
         // Union
         let union = &set1 | &set2;
         let expected_union: BTreeSet<(usize, usize)> = vec![
-            (10, 100), (10, 101),
-            (11, 101), (11, 102),
+            (10, 100),
+            (10, 101),
+            (11, 101),
+            (11, 102),
             (20, 200),
             (30, 300),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(union.iter().collect::<BTreeSet<_>>(), expected_union);
 
         // Symmetric Difference (XOR)
         let xor = &set1 ^ &set2;
         let expected_xor: BTreeSet<(usize, usize)> = vec![
-            (10, 100), (10, 101),
-            (11, 101), (11, 102),
+            (10, 100),
+            (10, 101),
+            (11, 101),
+            (11, 102),
             (30, 300),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(xor.iter().collect::<BTreeSet<_>>(), expected_xor);
     }
 
@@ -351,15 +451,26 @@ mod tests {
 
         let mut set1_and = set1_orig.clone();
         set1_and &= &set2;
-        assert_eq!(set1_and.iter().collect::<BTreeSet<_>>(), vec![(20, 200)].into_iter().collect());
+        assert_eq!(
+            set1_and.iter().collect::<BTreeSet<_>>(),
+            vec![(20, 200)].into_iter().collect()
+        );
 
         let mut set1_or = set1_orig.clone();
         set1_or |= &set2;
-        assert_eq!(set1_or.iter().collect::<BTreeSet<_>>(), vec![(10, 100), (20, 200), (30, 300)].into_iter().collect());
+        assert_eq!(
+            set1_or.iter().collect::<BTreeSet<_>>(),
+            vec![(10, 100), (20, 200), (30, 300)]
+                .into_iter()
+                .collect()
+        );
 
         let mut set1_xor = set1_orig.clone();
         set1_xor ^= &set2;
-        assert_eq!(set1_xor.iter().collect::<BTreeSet<_>>(), vec![(10, 100), (30, 300)].into_iter().collect());
+        assert_eq!(
+            set1_xor.iter().collect::<BTreeSet<_>>(),
+            vec![(10, 100), (30, 300)].into_iter().collect()
+        );
     }
 
     #[test]
@@ -393,7 +504,6 @@ mod tests {
         // key 20 is in both. intersection of {200} and {201} is empty.
         assert!(inter_none.is_empty());
         assert_eq!(inter_none, &set1 & &set2);
-
 
         // with non-empty default
         let default_bs = HybridBitset::from_iter(vec![100, 200, 300]);
