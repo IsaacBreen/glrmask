@@ -1,6 +1,7 @@
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use range_set_blaze::prelude::*;
 use range_set_blaze::RangeMapBlaze;
+use std::ops::RangeInclusive;
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub};
@@ -159,6 +160,11 @@ impl HybridL2Bitset {
 
     pub fn iter_l1_bitsets(&self) -> impl Iterator<Item = (usize, &HybridBitset)> {
         self.inner.iter()
+    }
+
+    /// Returns an iterator over ranges of L1 indices and their corresponding L2 bitsets.
+    pub fn range_values(&self) -> impl Iterator<Item = (RangeInclusive<usize>, &HybridBitset)> {
+        self.inner.range_values()
     }
 
     /// Computes the complement of the set.

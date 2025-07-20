@@ -3231,7 +3231,7 @@ local_system:
               if n == 0 {
                   return self.clone();
               }
-              self.pop().popn(n).to_node()
+              self.pop().popn(n - 1).to_node()
           }
 
           /// Merges another `GSSNode` into this one. This is a union of possibilities.
@@ -14718,7 +14718,8 @@ local_system:
                                   Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                       if !s_new_arc.is_empty() {
-                                          phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                          let new_parse_state = ParseState { stack: s_new_arc };
+                                          phase2_todo.push_back(new_parse_state);
                                       }
                                   }
                                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -14728,10 +14729,11 @@ local_system:
                                       }
                                       for (len, nts) in reduces {
                                           for (nt, _prod_ids) in nts {
-                                              let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                              if !s_new_arc.is_empty() {
-                                                  phase2_todo.push_back(ParseState { stack: s_new_arc });
-                                              }
+                                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                                  if !s_new_arc.is_empty() {
+                                                      let new_parse_state = ParseState { stack: s_new_arc };
+                                                      phase2_todo.push_back(new_parse_state);
+                                                  }
                                           }
                                       }
                                   }
@@ -14741,9 +14743,14 @@ local_system:
                   }
               });
 
+              let mut processed_in_phase2 = BTreeSet::new();
+
               // --- Phase 2 ---
               timeit!("GLRParserState::step::phase2", {
                   while let Some(state) = phase2_todo.pop_front() {
+                      if !processed_in_phase2.insert(state.clone()) {
+                          continue;
+                      }
                       for peek in state.stack.peek_iter() {
                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                           if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
@@ -14800,16 +14807,22 @@ local_system:
                   phase3_todo.push_back(self.active_state.clone());
               }
 
+              let mut processed_in_phase3 = BTreeSet::new();
               let mut next = ParseState::new_without_vocab();
 
               timeit!("GLRParserState::step::phase3", {
                   while let Some(state) = phase3_todo.pop_front() {
+                      if !processed_in_phase3.insert(state.clone()) {
+                          continue;
+                      }
+
                       for peek in state.stack.peek_iter() {
                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                           if let Some(ref r) = row.phase3_default_reduce.reduce {
                               let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                               if !new_stack.is_empty() {
-                                  phase3_todo.push_back(ParseState { stack: new_stack });
+                                  let new_parse_state = ParseState { stack: new_stack };
+                                  phase3_todo.push_back(new_parse_state);
                               }
                           }
                           if row.phase3_default_reduce.clone_and_merge {
@@ -28708,7 +28721,7 @@ local_system:
               if n == 0 {
                   return self.clone();
               }
-              self.pop().popn(n).to_node()
+              self.pop().popn(n - 1).to_node()
           }
 
           /// Merges another `GSSNode` into this one. This is a union of possibilities.
@@ -40195,7 +40208,8 @@ local_system:
                                   Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                       if !s_new_arc.is_empty() {
-                                          phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                          let new_parse_state = ParseState { stack: s_new_arc };
+                                          phase2_todo.push_back(new_parse_state);
                                       }
                                   }
                                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -40205,10 +40219,11 @@ local_system:
                                       }
                                       for (len, nts) in reduces {
                                           for (nt, _prod_ids) in nts {
-                                              let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                              if !s_new_arc.is_empty() {
-                                                  phase2_todo.push_back(ParseState { stack: s_new_arc });
-                                              }
+                                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                                  if !s_new_arc.is_empty() {
+                                                      let new_parse_state = ParseState { stack: s_new_arc };
+                                                      phase2_todo.push_back(new_parse_state);
+                                                  }
                                           }
                                       }
                                   }
@@ -40218,9 +40233,14 @@ local_system:
                   }
               });
 
+              let mut processed_in_phase2 = BTreeSet::new();
+
               // --- Phase 2 ---
               timeit!("GLRParserState::step::phase2", {
                   while let Some(state) = phase2_todo.pop_front() {
+                      if !processed_in_phase2.insert(state.clone()) {
+                          continue;
+                      }
                       for peek in state.stack.peek_iter() {
                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                           if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
@@ -40277,16 +40297,22 @@ local_system:
                   phase3_todo.push_back(self.active_state.clone());
               }
 
+              let mut processed_in_phase3 = BTreeSet::new();
               let mut next = ParseState::new_without_vocab();
 
               timeit!("GLRParserState::step::phase3", {
                   while let Some(state) = phase3_todo.pop_front() {
+                      if !processed_in_phase3.insert(state.clone()) {
+                          continue;
+                      }
+
                       for peek in state.stack.peek_iter() {
                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                           if let Some(ref r) = row.phase3_default_reduce.reduce {
                               let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                               if !new_stack.is_empty() {
-                                  phase3_todo.push_back(ParseState { stack: new_stack });
+                                  let new_parse_state = ParseState { stack: new_stack };
+                                  phase3_todo.push_back(new_parse_state);
                               }
                           }
                           if row.phase3_default_reduce.clone_and_merge {
@@ -54232,7 +54258,7 @@ messages:
               if n == 0 {
                   return self.clone();
               }
-              self.pop().popn(n).to_node()
+              self.pop().popn(n - 1).to_node()
           }
 
           /// Merges another `GSSNode` into this one. This is a union of possibilities.
@@ -65783,7 +65809,8 @@ messages:
                                   Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                       if !s_new_arc.is_empty() {
-                                          phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                          let new_parse_state = ParseState { stack: s_new_arc };
+                                          phase2_todo.push_back(new_parse_state);
                                       }
                                   }
                                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -65793,10 +65820,11 @@ messages:
                                       }
                                       for (len, nts) in reduces {
                                           for (nt, _prod_ids) in nts {
-                                              let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                              if !s_new_arc.is_empty() {
-                                                  phase2_todo.push_back(ParseState { stack: s_new_arc });
-                                              }
+                                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                                  if !s_new_arc.is_empty() {
+                                                      let new_parse_state = ParseState { stack: s_new_arc };
+                                                      phase2_todo.push_back(new_parse_state);
+                                                  }
                                           }
                                       }
                                   }
@@ -65806,9 +65834,14 @@ messages:
                   }
               });
 
+              let mut processed_in_phase2 = BTreeSet::new();
+
               // --- Phase 2 ---
               timeit!("GLRParserState::step::phase2", {
                   while let Some(state) = phase2_todo.pop_front() {
+                      if !processed_in_phase2.insert(state.clone()) {
+                          continue;
+                      }
                       for peek in state.stack.peek_iter() {
                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                           if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
@@ -65865,16 +65898,22 @@ messages:
                   phase3_todo.push_back(self.active_state.clone());
               }
 
+              let mut processed_in_phase3 = BTreeSet::new();
               let mut next = ParseState::new_without_vocab();
 
               timeit!("GLRParserState::step::phase3", {
                   while let Some(state) = phase3_todo.pop_front() {
+                      if !processed_in_phase3.insert(state.clone()) {
+                          continue;
+                      }
+
                       for peek in state.stack.peek_iter() {
                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                           if let Some(ref r) = row.phase3_default_reduce.reduce {
                               let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                               if !new_stack.is_empty() {
-                                  phase3_todo.push_back(ParseState { stack: new_stack });
+                                  let new_parse_state = ParseState { stack: new_stack };
+                                  phase3_todo.push_back(new_parse_state);
                               }
                           }
                           if row.phase3_default_reduce.clone_and_merge {
@@ -76679,120 +76718,185 @@ messages:
     metadata:
       filename: src/types.rs
   - user: |-
-      I've recently upgraded gss.rs and added L1 hybrid bitset. But now the tests in test_constraint_basic.rs hang forever. e.g. test_constraint_simple.
-      Investigate why. Fix it if you find an obvious cause. Otherwise it's ok to add debug statements so I can see *where* it's hanging.
+      Anything that uses iter_l1_bitsets is going to be horrendously slow. We should *not* be using it.
+      In fact, TerminalInfo shouldn't be a BTreeMap, it should be a HybridL2Bitset.
+      Then, when we use the result of `disallowed_terminals`, we should loop over the ranges efficiently, and skip iterations for which the bitvec value is not gonna make a difference.
+      Looping over ranges is better than looping over each individual index... it's what RangeMapBlaze allows us to do.
     metadata:
   - assistant: |-
-      Hello! I see you're running into an issue with some tests hanging. An infinite loop is a likely culprit, especially with the complex state management in a GLR parser. I've identified two issues that could be causing this behavior and other correctness problems.
+      Based on your request to optimize performance by changing how `disallowed_terminals` are handled, I've made the following modifications:
 
-      The first issue, and the most likely cause of the hang, is in the worklist algorithms within your GLR parser's reduction phases. The loops that process reductions could potentially re-process the same parser state, leading to an infinite loop, especially with certain grammar constructs like unit or epsilon productions. I've added tracking for processed states to ensure each state is handled only once per phase.
+      1.  **`TerminalInfo` Type Change**: The type alias `TerminalInfo` in `src/datastructures/gss.rs`, which represents disallowed terminals, has been changed from a `BTreeMap<TokenizerStateID, TerminalBV>` to a more efficient `HybridL2Bitset`.
 
-      The second issue is a correctness bug in how `GSSNode::popn` was implemented. It was popping one more state than intended (n+1 instead of n), which would lead to incorrect parsing results.
+      2.  **Optimized `disallowed_terminals()`**: The `GSSNode::disallowed_terminals()` method has been updated to efficiently compute the set of disallowed terminals by directly using the `complement()` method on the `HybridL2Bitset` of allowed terminals. This avoids slow iteration.
 
-      Here are the patches to fix these issues.
+      3.  **Efficient Range-Based Iteration in `get_mask()`**: The `get_mask()` function in `src/constraint.rs` now iterates over ranges of tokenizer states from the `HybridL2Bitset`, as you suggested. This is significantly more efficient than iterating over each tokenizer state individually.
 
-      ### File: `src/datastructures/gss.rs`
+      4.  **Updated `disallow_terminals_and_prune_arc()`**: This function in `src/datastructures/gss.rs` and its usage in `src/constraint.rs` have been updated to work with the new `HybridL2Bitset` type, simplifying the logic.
 
-      I've corrected the `popn` function to pop the correct number of states from the GSS.
+      These changes should improve the performance of `get_mask` by avoiding expensive iterations and leveraging the range-based capabilities of the underlying data structures.
 
+      Here are the required patches:
+
+      ```diff
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1300,16 +1300,23 @@
+                   if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
+                       let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                       forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::max_ones();
+      -                let disallowed_terminals_for_gss = glr_state.active_state.stack.disallowed_terminals();
+      -                for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss.iter() {
+      -                    let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
+      -                    for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+      -                        if disallowed_terminals_for_state.contains(terminal_id.0) {
+      -                            // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
+      -                            forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+      +                let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
+      +
+      +                // Iterate over ranges of tokenizer states that have the same set of disallowed terminals.
+      +                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+      +                    if disallowed_terminals_for_range.is_empty() {
+      +                        continue;
+      +                    }
+      +
+      +                    // Get a sub-view of possible_matches that covers this range of tokenizer states.
+      +                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+      +
+      +                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
+      +                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+      +                            if disallowed_terminals_for_range.contains(terminal_id.0) {
+      +                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+      +                            }
+                               }
+                           }
+                       }
+                       let mut glr_state = glr_state.clone();
+                       if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::max_ones()) {
+      @@ -1600,12 +1607,12 @@
+                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+       
+      -                        let mut disallowed_terminals: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+      +                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                               if let Some(end_state_id) = exec_result.end_state {
+                                   let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                                   // Disallow this token from being matched again immediately.
+                                   disallowed_terminals_for_end_state.insert(match_info.id);
+      -                            disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
+      +                            disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
+                               }
+                               disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+       
+
+      ```
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -251,7 +251,7 @@
-               if n == 0 {
-                   return self.clone();
-               }
-      -        self.pop().popn(n).to_node()
-      +        self.pop().popn(n - 1).to_node()
+      @@ -10,6 +10,7 @@
+       use crate::glr::grammar::Terminal;
+       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+       use crate::types::TerminalID;
+      +use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+       use std::ops::{BitAnd, BitOr};
+       use profiler_macro::{time_it, timeit};
+       
+      @@ -20,8 +21,8 @@
+       type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
+       /// A temporary set of predecessors used during node construction and simplification.
+       type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
+      -/// For a given tokenizer state, holds the bitvector of disallowed terminals.
+      -pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+      +/// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
+      +pub type TerminalInfo = HybridL2Bitset;
+       
+       
+       // --- Accumulator (Acc) ---
+      @@ -161,19 +162,7 @@
+           /// Returns a map of disallowed terminals for each tokenizer state.
+           /// A terminal is disallowed if it's disallowed on *every* path to this node.
+           pub fn disallowed_terminals(&self) -> TerminalInfo {
+      -        let allowed_terminals = self.acc.intersection_terminals();
+      -        if allowed_terminals.is_empty() {
+      -            return BTreeMap::new();
+      -        }
+      -        let mut disallowed = BTreeMap::new();
+      -        for (l1_index, allowed_l2) in allowed_terminals.iter_l1_bitsets() {
+      -            let state_id = TokenizerStateID(l1_index);
+      -            let disallowed_l2 = HybridBitset::max_ones() - allowed_l2;
+      -            if !disallowed_l2.is_empty() {
+      -                disallowed.insert(state_id, disallowed_l2);
+      -            }
+      -        }
+      -        disallowed
+      +        self.acc.intersection_terminals().complement()
            }
        
-           /// Merges another `GSSNode` into this one. This is a union of possibilities.
+           pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
+      @@ -368,16 +357,11 @@
+       
+       pub fn disallow_terminals_and_prune_arc(
+           root_arc: &mut Arc<GSSNode>,
+      -    disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
+      +    disallowed_terminals: &HybridL2Bitset,
+           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+       ) {
+           let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+               let mut new_acc = (*node.acc).clone();
+      -        let mut disallowed_mask = HybridL2Bitset::new();
+      -        for (state_id, disallowed_bv) in disallowed_terminals {
+      -            disallowed_mask.insert_l2_bitset(state_id.0, disallowed_bv.clone());
+      -        }
+      -        new_acc.local_terminals = &new_acc.local_terminals - &disallowed_mask;
+      +        new_acc.local_terminals = &new_acc.local_terminals - disallowed_terminals;
+               Some((new_acc, true))
+           };
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
 
       ```
-
-      ### File: `src/glr/parser.rs`
-
-      I've added tracking for processed states in the reduction phases (`do_phase1_and_2` and `do_phase3`) to prevent infinite loops.
-
       ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -658,9 +658,14 @@
-                   }
-               });
+      --- a/src/datastructures/hybrid_l2_bitset.rs
+      +++ b/src/datastructures/hybrid_l2_bitset.rs
+      @@ -1,6 +1,7 @@
+       use crate::datastructures::hybrid_bitset::HybridBitset;
+       use range_set_blaze::prelude::*;
+       use range_set_blaze::RangeMapBlaze;
+      +use std::ops::RangeInclusive;
+       use std::collections::BTreeSet;
+       use std::iter::FromIterator;
+       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub};
+      @@ -141,6 +142,11 @@
+               self.inner.iter()
+           }
        
-      +        let mut processed_in_phase2 = BTreeSet::new();
+      +    /// Returns an iterator over ranges of L1 indices and their corresponding L2 bitsets.
+      +    pub fn range_values(&self) -> impl Iterator<Item = (RangeInclusive<usize>, &HybridBitset)> {
+      +        self.inner.range_values()
+      +    }
       +
-               // --- Phase 2 ---
-               timeit!("GLRParserState::step::phase2", {
-                   while let Some(state) = phase2_todo.pop_front() {
-      +                if !processed_in_phase2.insert(state.clone()) {
-      +                    continue;
-      +                }
-                       for peek in state.stack.peek_iter() {
-                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                           if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
-      @@ -671,7 +676,8 @@
-                                   Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
-                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                       if !s_new_arc.is_empty() {
-      -                                    phase2_todo.push_back(ParseState { stack: s_new_arc });
-      +                                    let new_parse_state = ParseState { stack: s_new_arc };
-      +                                    phase2_todo.push_back(new_parse_state);
-                                       }
-                                   }
-                                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      @@ -683,7 +689,8 @@
-                                           for (nt, _prod_ids) in nts {
-                                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                                   if !s_new_arc.is_empty() {
-      -                                                phase2_todo.push_back(ParseState { stack: s_new_arc });
-      +                                                let new_parse_state = ParseState { stack: s_new_arc };
-      +                                                phase2_todo.push_back(new_parse_state);
-                                                   }
-                                           }
-                                       }
-      @@ -708,14 +715,20 @@
-                   phase3_todo.push_back(self.active_state.clone());
-               }
-       
-      +        let mut processed_in_phase3 = BTreeSet::new();
-               let mut next = ParseState::new_without_vocab();
-       
-               timeit!("GLRParserState::step::phase3", {
-                   while let Some(state) = phase3_todo.pop_front() {
-      +                if !processed_in_phase3.insert(state.clone()) {
-      +                    continue;
-      +                }
-      +
-                       for peek in state.stack.peek_iter() {
-                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                           if let Some(ref r) = row.phase3_default_reduce.reduce {
-                               let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                               if !new_stack.is_empty() {
-      -                            phase3_todo.push_back(ParseState { stack: new_stack });
-      +                            let new_parse_state = ParseState { stack: new_stack };
-      +                            phase3_todo.push_back(new_parse_state);
-                               }
-                           }
-                           if row.phase3_default_reduce.clone_and_merge {
+           /// Computes the complement of the set.
+           ///
+           /// For every first-level index (`l1_index`) present in the set, its
 
       ```
-
-      These changes should resolve the hanging issue and improve the correctness of the GLR parser. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/datastructures/gss.rs
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
 
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      --- Processing Diff Block 3 ---
+      Identified target file: src/datastructures/hybrid_l2_bitset.rs
+      Applying patch to 'src/datastructures/hybrid_l2_bitset.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/hybrid_l2_bitset.rs.
     metadata:
 ...

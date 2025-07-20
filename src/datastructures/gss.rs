@@ -29,8 +29,8 @@ type NodeMap = BTreeMap<(ParseStateEdgeContent, DestKey), Arc<GSSNode>>;
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
-/// For a given tokenizer state, holds the bitvector of disallowed terminals.
-pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+/// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
+pub type TerminalInfo = HybridL2Bitset;
 
 
 // --- Accumulator (Acc) ---
@@ -256,19 +256,7 @@ impl GSSNode {
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on *every* path to this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
-        let allowed_terminals = self.acc.intersection_terminals();
-        if allowed_terminals.is_empty() {
-            return BTreeMap::new();
-        }
-        let mut disallowed = BTreeMap::new();
-        for (l1_index, allowed_l2) in allowed_terminals.iter_l1_bitsets() {
-            let state_id = TokenizerStateID(l1_index);
-            let disallowed_l2 = HybridBitset::max_ones() - allowed_l2;
-            if !disallowed_l2.is_empty() {
-                disallowed.insert(state_id, disallowed_l2);
-            }
-        }
-        disallowed
+        self.acc.intersection_terminals().complement()
     }
 
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
@@ -553,16 +541,12 @@ pub fn reset_llm_tokens(
 
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
+    disallowed_terminals: &HybridL2Bitset,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
-        let mut disallowed_mask = HybridL2Bitset::new();
-        for (state_id, disallowed_bv) in disallowed_terminals {
-            disallowed_mask.insert_l2_bitset(state_id.0, disallowed_bv.clone());
-        }
-        new_acc.local_terminals = &new_acc.local_terminals - &disallowed_mask;
+        new_acc.local_terminals = &new_acc.local_terminals - disallowed_terminals;
         Some((new_acc, true))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
