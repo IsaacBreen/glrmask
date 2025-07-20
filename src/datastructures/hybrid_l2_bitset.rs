@@ -1,3 +1,4 @@
+use range_set_blaze::RangeMapBlaze;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign};
 
@@ -43,7 +44,7 @@ impl HybridL2Bitset {
 
     /// Inserts a 2D point (l1_index, l2_index) into the set.
     pub fn insert(&mut self, l1_index: usize, l2_index: usize) {
-        let mut bitset = self.inner.remove_key(l1_index).unwrap_or_else(HybridBitset::zeros);
+        let mut bitset = self.inner.remove(l1_index).unwrap_or_else(HybridBitset::zeros);
         bitset.insert(l2_index);
         self.inner.insert(l1_index, bitset);
     }
@@ -52,7 +53,7 @@ impl HybridL2Bitset {
     ///
     /// Returns `true` if the point was present in the set.
     pub fn remove(&mut self, l1_index: usize, l2_index: usize) -> bool {
-        if let Some(mut bitset) = self.inner.remove_key(l1_index) {
+        if let Some(mut bitset) = self.inner.remove(l1_index) {
             let was_present = bitset.remove(l2_index);
             // If the bitset is not empty after removal, we must insert it back.
             if !bitset.is_empty() {
@@ -81,10 +82,8 @@ impl HybridL2Bitset {
     /// Returns an iterator over all set points `(l1_index, l2_index)`.
     /// The points are yielded in lexicographical order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
-        self.inner.iter().flat_map(|(range, bitset)| {
-            range
-                .clone()
-                .flat_map(move |l1_index| bitset.iter().map(move |l2_index| (l1_index, l2_index)))
+        self.inner.iter().flat_map(|(l1_index, bitset)| {
+            bitset.iter().map(move |l2_index| (l1_index, l2_index))
         })
     }
 }
@@ -101,13 +100,7 @@ impl BitAnd for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        HybridL2Bitset {
-            inner: self.inner.intersection_with_filter(
-                &rhs.inner,
-                |bs1, bs2| &bs1 & &bs2,
-                |bs| !bs.is_empty(),
-            ),
-        }
+        todo!()
     }
 }
 
@@ -115,9 +108,7 @@ impl BitOr for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        HybridL2Bitset {
-            inner: self.inner.union_with(&rhs.inner, |bs1, bs2| &bs1 | &bs2),
-        }
+        todo!()
     }
 }
 
@@ -125,13 +116,7 @@ impl BitXor for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
-        HybridL2Bitset {
-            inner: self.inner.symmetric_difference_with_filter(
-                &rhs.inner,
-                |bs1, bs2| &bs1 ^ &bs2,
-                |bs| !bs.is_empty(),
-            ),
-        }
+        todo!()
     }
 }
 
@@ -139,37 +124,37 @@ impl BitXor for &HybridL2Bitset {
 
 impl BitAndAssign for HybridL2Bitset {
     fn bitand_assign(&mut self, rhs: Self) {
-        self.inner = self.inner.intersection_with_filter(&rhs.inner, |b1, b2| b1 & b2, |b| !b.is_empty());
+        todo!()
     }
 }
 
 impl BitAndAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
-        self.inner = self.inner.intersection_with_filter(&rhs.inner, |b1, b2| b1 & b2, |b| !b.is_empty());
+        todo!()
     }
 }
 
 impl BitOrAssign for HybridL2Bitset {
     fn bitor_assign(&mut self, rhs: Self) {
-        self.inner = self.inner.union_with(&rhs.inner, |b1, b2| b1 | b2);
+        todo!()
     }
 }
 
 impl BitOrAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
-        self.inner = self.inner.union_with(&rhs.inner, |b1, b2| b1 | b2);
+        todo!()
     }
 }
 
 impl BitXorAssign for HybridL2Bitset {
     fn bitxor_assign(&mut self, rhs: Self) {
-        self.inner = self.inner.symmetric_difference_with_filter(&rhs.inner, |b1, b2| b1 ^ b2, |b| !b.is_empty());
+        todo!()
     }
 }
 
 impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
-        self.inner = self.inner.symmetric_difference_with_filter(&rhs.inner, |b1, b2| b1 ^ b2, |b| !b.is_empty());
+        todo!()
     }
 }
 
