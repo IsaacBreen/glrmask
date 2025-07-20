@@ -5,7 +5,7 @@ use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher}; // Added
 use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, RangeInclusive, Sub, SubAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, RangeInclusive, Sub, SubAssign};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 
 // --- The Hybrid Bitset Struct ---
