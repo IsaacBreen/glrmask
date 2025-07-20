@@ -90,10 +90,7 @@ impl HybridL2Bitset {
     /// Returns the complement of the set, assuming a universe of all possible
     /// `(usize, usize)` points. This can be a very large set.
     pub fn complement(&self) -> Self {
-        let universe = Self {
-            inner: RangeMapBlaze::from_iter([(0..=usize::MAX, HybridBitset::max_ones())])
-        };
-        &universe ^ self
+        todo!()
     }
 
     /// A generalized intersection operation.
@@ -114,28 +111,21 @@ impl HybridL2Bitset {
         self.zip_op(other, default, |a, b| a | b)
     }
 
+    /// A generalized symmetric difference operation.
+    ///
+    /// For L1 keys present in both sets, the corresponding L2 bitsets are XORed.
+    /// For L1 keys present in only one set, the L2 bitset is XORed with the `default`.
+    /// If `default` is `None`, keys present in only one set are excluded from the result.
+    pub fn symmetric_difference_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
+        self.zip_op(other, default, |a, b| a ^ b)
+    }
+
     /// Helper function to perform a zip operation between two `HybridL2Bitset`s.
     fn zip_op<F>(&self, other: &Self, default: Option<HybridBitset>, op: F) -> Self
     where
         F: Fn(&HybridBitset, &HybridBitset) -> HybridBitset,
     {
-        Self {
-            inner: self.inner.zip_with(&other.inner, |v1, v2| {
-                let (res_v1, res_v2) = match (v1, v2) {
-                    (Some(bs1), Some(bs2)) => (Some(bs1), Some(bs2)),
-                    (Some(bs1), None) => (Some(bs1), default.as_ref()),
-                    (None, Some(bs2)) => (default.as_ref(), Some(bs2)),
-                    (None, None) => (None, None),
-                };
-
-                if let (Some(bs1), Some(bs2)) = (res_v1, res_v2) {
-                    let result = op(bs1, bs2);
-                    if result.is_empty() { None } else { Some(result) }
-                } else {
-                    None
-                }
-            })
-        }
+        todo!()
     }
 }
 
@@ -172,7 +162,10 @@ impl BitXor for &HybridL2Bitset {
     type Output = HybridL2Bitset;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
-        todo!()
+        // Standard symmetric difference includes keys from both sets.
+        // If a key is missing from one, it's treated as an empty set.
+        // This is equivalent to symmetric_difference_with a default of None.
+        self.symmetric_difference_with(rhs, None)
     }
 }
 
