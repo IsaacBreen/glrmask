@@ -41,6 +41,15 @@ pub struct Acc {
     allowed_terminals: AllowedTerminals,
 }
 
+impl Default for Acc {
+    fn default() -> Self {
+        Self {
+            allowed_llm_tokens: LLMTokenBV::max_ones(),
+            allowed_terminals: BTreeMap::new(),
+        }
+    }
+}
+
 /// Combines multiple terminal maps using a provided bitwise operation.
 fn combine_terminal_maps<'a>(
     maps: impl IntoIterator<Item = &'a AllowedTerminals>,
@@ -58,12 +67,13 @@ fn combine_terminal_maps<'a>(
     }
 
     let mut result_map = BTreeMap::new();
+    let max_ones = TerminalBV::max_ones();
     for key in all_keys {
         let mut combined_bv = identity.clone();
         let mut first = true;
         for map in &maps_vec {
             // If a key is missing, it implies all terminals are allowed for that state.
-            let bv = map.get(key).unwrap_or(&TerminalBV::max_ones());
+            let bv = map.get(key).unwrap_or(&max_ones);
             if first {
                 combined_bv = bv.clone();
                 first = false;
@@ -577,7 +587,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
     tokens_to_disallow: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
-    let allowed_tokens = LLMTokenBV::max_ones() - tokens_to_disallow;
+    let allowed_tokens = &LLMTokenBV::max_ones() - tokens_to_disallow;
     allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_tokens, memo);
 }
 
@@ -623,10 +633,11 @@ pub fn prune_disallowed_terminals(
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
+    let max_ones = TerminalBV::max_ones();
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let intersection_acc = node.full_intersection_acc();
         for (state_id, matched) in matched_terminals {
-            let allowed_by_gss = intersection_acc.allowed_terminals.get(state_id).unwrap_or(&TerminalBV::max_ones());
+            let allowed_by_gss = intersection_acc.allowed_terminals.get(state_id).unwrap_or(&max_ones);
             if allowed_by_gss.is_disjoint(matched) {
                 return None; // All paths to this node disallow a terminal that was just matched. Prune.
             }
@@ -635,7 +646,7 @@ pub fn prune_disallowed_terminals(
         let union_acc = node.full_union_acc();
         let mut needs_recursion = false;
         for (state_id, matched) in matched_terminals {
-            let allowed_by_gss = union_acc.allowed_terminals.get(state_id).unwrap_or(&TerminalBV::max_ones());
+            let allowed_by_gss = union_acc.allowed_terminals.get(state_id).unwrap_or(&max_ones);
             if allowed_by_gss.is_disjoint(matched) {
                 needs_recursion = true;
                 break;
