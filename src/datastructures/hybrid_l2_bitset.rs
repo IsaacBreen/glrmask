@@ -27,6 +27,16 @@ impl HybridL2Bitset {
         }
     }
 
+    /// Creates a new `HybridL2Bitset` with all entries allowed.
+    pub fn all() -> Self {
+        HybridL2Bitset {
+            inner: RangeMapBlaze::from_iter(std::iter::once((
+                0..=usize::MAX,
+                HybridBitset::max_ones(),
+            ))),
+        }
+    }
+
     /// Returns `true` if the set contains no elements.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
