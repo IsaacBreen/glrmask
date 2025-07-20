@@ -25,12 +25,13 @@ pub struct HybridL2Bitset {
 
 impl Debug for HybridL2Bitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let f_alternate = f.alternate();
         let mut ds = f.debug_struct("HybridL2Bitset");
 
         const MAX_RANGES_TO_SHOW: usize = 5;
         let total_ranges = self.inner.ranges_len();
 
-        if f.alternate() || total_ranges <= MAX_RANGES_TO_SHOW {
+        if f_alternate || total_ranges <= MAX_RANGES_TO_SHOW {
             // In alternate mode or for small sets, show full inner map.
             // The inner HybridBitsets already have a truncating Debug impl.
             ds.field("inner", &self.inner);
