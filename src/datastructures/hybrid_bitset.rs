@@ -602,6 +602,15 @@ impl<'a> BitOr<&'a HybridBitset> for HybridBitset {
     }
 }
 
+impl<'a> Sub<&'a HybridBitset> for HybridBitset {
+    type Output = HybridBitset;
+    fn sub(self, rhs: &'a HybridBitset) -> Self::Output {
+        HybridBitset {
+            inner: self.inner - &rhs.inner,
+        }
+    }
+}
+
 // --- Tests ---
 #[cfg(test)]
 mod tests {

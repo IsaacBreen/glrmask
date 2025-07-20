@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub};
 use std::hash::{Hash, Hasher};
-use std::ops::RangeInclusive;
+use std::cmp::Ordering;
 
 /// A two-dimensional bitset, conceptually a map from `usize` to `HybridBitset`.
 ///
@@ -15,10 +15,24 @@ use std::ops::RangeInclusive;
 ///
 /// An empty `HybridBitset` is never stored; if a row becomes empty, it is
 /// removed from the map.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HybridL2Bitset {
     /// The underlying map from usize (L1 index) to a HybridBitset (L2 indices).
     inner: RangeMapBlaze<usize, HybridBitset>,
+}
+
+impl PartialOrd for HybridL2Bitset {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HybridL2Bitset {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_iter = self.inner.range_values();
+        let other_iter = other.inner.range_values();
+        self_iter.cmp(other_iter)
+    }
 }
 
 impl Hash for HybridL2Bitset {
@@ -95,6 +109,10 @@ impl HybridL2Bitset {
         } else {
             false // No bitset at l1_index.
         }
+    }
+
+    pub fn remove_l1(&mut self, l1_index: usize) -> Option<HybridBitset> {
+        self.inner.remove(l1_index)
     }
 
     /// Checks if a 2D point (l1_index, l2_index) is present in the set.
