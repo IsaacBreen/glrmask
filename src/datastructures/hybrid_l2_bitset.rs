@@ -93,8 +93,7 @@ impl HybridL2Bitset {
     /// Computes the complement of the set.
     ///
     /// For every first-level index (`l1_index`) present in the set, its
-    /// corresponding `HybridBitset` is inverted. For example, if row 5 contains
-    /// `{10, 12}`, its complement will contain all `usize` values *except* 10 and 12.
+    /// corresponding `HybridBitset` is inverted.
     ///
     /// First-level indices that are not present in the original set will not be
     /// present in the complement.
