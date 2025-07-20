@@ -5,6 +5,7 @@ pub mod trie;
 pub mod u8set;
 pub mod vocab_prefix_tree;
 pub mod hybrid_bitset;
+pub mod hybrid_l2_bitset;
 pub mod arc_wrapper;
 pub mod ordered_hash_map;
 
