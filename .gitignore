@@ -1,3 +1,4 @@
+external/
 llm_logs/
 .partial_completion.txt
 restore-chat-history
