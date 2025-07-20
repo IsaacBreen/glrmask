@@ -29,9 +29,29 @@ impl PartialOrd for HybridL2Bitset {
 
 impl Ord for HybridL2Bitset {
     fn cmp(&self, other: &Self) -> Ordering {
-        let self_iter = self.inner.range_values();
-        let other_iter = other.inner.range_values();
-        self_iter.cmp(other_iter)
+        let mut self_iter = self.inner.range_values();
+        let mut other_iter = other.inner.range_values();
+
+        loop {
+            match (self_iter.next(), other_iter.next()) {
+                (Some((r1, v1)), Some((r2, v2))) => {
+                    // Compare ranges lexicographically by start, then by end.
+                    let range_cmp = r1.start().cmp(r2.start()).then_with(|| r1.end().cmp(r2.end()));
+                    if range_cmp != Ordering::Equal {
+                        return range_cmp;
+                    }
+                    // If ranges are identical, compare the associated HybridBitset values.
+                    let value_cmp = v1.cmp(v2);
+                    if value_cmp != Ordering::Equal {
+                        return value_cmp;
+                    }
+                    // Continue to the next element if the current ones are equal.
+                }
+                (Some(_), None) => return Ordering::Greater, // self has more elements
+                (None, Some(_)) => return Ordering::Less,    // other has more elements
+                (None, None) => return Ordering::Equal,     // Both iterators are exhausted
+            }
+        }
     }
 }
 
