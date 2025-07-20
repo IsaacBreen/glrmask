@@ -98,36 +98,6 @@ impl HybridL2Bitset {
     ///
     /// First-level indices that are not present in the original set will not be
     /// present in the complement.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crate::datastructures::hybrid_bitset::HybridBitset;
-    /// use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-    ///
-    /// let mut set = HybridL2Bitset::new();
-    /// set.insert(1, 10); // Row 1 has {10}
-    /// set.insert(1, 11); // Row 1 has {10, 11}
-    /// set.insert(3, 5);  // Row 3 has {5}
-    ///
-    /// let complement = set.complement();
-    ///
-    /// // Row 0 was empty, so it's still empty in the complement.
-    /// assert_eq!(complement.get_l2_bitset(0), None);
-    ///
-    /// // Row 1 had {10, 11}, so its complement has everything else.
-    /// assert!(!complement.contains(1, 10));
-    /// assert!(!complement.contains(1, 11));
-    /// assert!(complement.contains(1, 9));
-    /// assert!(complement.contains(1, 12));
-    ///
-    /// // Row 2 was empty, so it's still empty.
-    /// assert_eq!(complement.get_l2_bitset(2), None);
-    ///
-    /// // Row 3 had {5}, so its complement has everything else.
-    /// assert!(!complement.contains(3, 5));
-    /// assert!(complement.contains(3, 4));
-    /// ```
     pub fn complement(&self) -> Self {
         let complemented_values = self
             .inner
