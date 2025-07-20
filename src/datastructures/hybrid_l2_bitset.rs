@@ -90,25 +90,52 @@ impl HybridL2Bitset {
         })
     }
 
-    /// Returns the complement of the set, assuming a universe of all possible
-    /// `(usize, usize)` points. This can be a very large set.
+    /// Computes the complement of the set.
+    ///
+    /// For every first-level index (`l1_index`) present in the set, its
+    /// corresponding `HybridBitset` is inverted. For example, if row 5 contains
+    /// `{10, 12}`, its complement will contain all `usize` values *except* 10 and 12.
+    ///
+    /// First-level indices that are not present in the original set will not be
+    /// present in the complement.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::datastructures::hybrid_bitset::HybridBitset;
+    /// use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+    ///
+    /// let mut set = HybridL2Bitset::new();
+    /// set.insert(1, 10); // Row 1 has {10}
+    /// set.insert(1, 11); // Row 1 has {10, 11}
+    /// set.insert(3, 5);  // Row 3 has {5}
+    ///
+    /// let complement = set.complement();
+    ///
+    /// // Row 0 was empty, so it's still empty in the complement.
+    /// assert_eq!(complement.get_l2_bitset(0), None);
+    ///
+    /// // Row 1 had {10, 11}, so its complement has everything else.
+    /// assert!(!complement.contains(1, 10));
+    /// assert!(!complement.contains(1, 11));
+    /// assert!(complement.contains(1, 9));
+    /// assert!(complement.contains(1, 12));
+    ///
+    /// // Row 2 was empty, so it's still empty.
+    /// assert_eq!(complement.get_l2_bitset(2), None);
+    ///
+    /// // Row 3 had {5}, so its complement has everything else.
+    /// assert!(!complement.contains(3, 5));
+    /// assert!(complement.contains(3, 4));
+    /// ```
     pub fn complement(&self) -> Self {
-        // 1. Complement the L1 keys. The new ranges will have `HybridBitset::max_ones()` as value.
-        let complemented_l1_keys = self
-            .inner
-            .ranges()
-            .complement()
-            .map(|range| (range, HybridBitset::max_ones()));
-
-        // 2. Complement the values of existing L1 keys.
         let complemented_values = self
             .inner
             .range_values()
             .map(|(range, bitset)| (range, bitset.inverted()));
 
-        // 3. Union them.
         HybridL2Bitset {
-            inner: complemented_l1_keys.chain(complemented_values).collect(),
+            inner: complemented_values.collect(),
         }
     }
 
@@ -255,6 +282,7 @@ impl BitXor for &HybridL2Bitset {
     fn bitxor(self, rhs: Self) -> Self::Output {
         // Standard symmetric difference includes keys from both sets.
         // If a key is missing from one, it's treated as an empty set.
+        // This is equivalent to symmetric_difference_with a default of Some(HybridBitset::zeros()).
         self.symmetric_difference_with(rhs, Some(HybridBitset::zeros()))
     }
 }
