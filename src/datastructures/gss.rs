@@ -325,7 +325,7 @@ impl GSSNode {
         if n == 0 {
             return self.clone();
         }
-        self.pop().popn(n).to_node()
+        self.pop().popn(n - 1).to_node()
     }
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.

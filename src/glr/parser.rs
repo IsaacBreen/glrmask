@@ -744,7 +744,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                 if !s_new_arc.is_empty() {
-                                    phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                    let new_parse_state = ParseState { stack: s_new_arc };
+                                    phase2_todo.push_back(new_parse_state);
                                 }
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -754,10 +755,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 for (len, nts) in reduces {
                                     for (nt, _prod_ids) in nts {
-                                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                        if !s_new_arc.is_empty() {
-                                            phase2_todo.push_back(ParseState { stack: s_new_arc });
-                                        }
+                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                            if !s_new_arc.is_empty() {
+                                                let new_parse_state = ParseState { stack: s_new_arc };
+                                                phase2_todo.push_back(new_parse_state);
+                                            }
                                     }
                                 }
                             }
@@ -767,9 +769,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         });
 
+        let mut processed_in_phase2 = BTreeSet::new();
+
         // --- Phase 2 ---
         timeit!("GLRParserState::step::phase2", {
             while let Some(state) = phase2_todo.pop_front() {
+                if !processed_in_phase2.insert(state.clone()) {
+                    continue;
+                }
                 for peek in state.stack.peek_iter() {
                     let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                     if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
@@ -826,16 +833,22 @@ impl<'a> GLRParserState<'a> { // No longer generic
             phase3_todo.push_back(self.active_state.clone());
         }
 
+        let mut processed_in_phase3 = BTreeSet::new();
         let mut next = ParseState::new_without_vocab();
 
         timeit!("GLRParserState::step::phase3", {
             while let Some(state) = phase3_todo.pop_front() {
+                if !processed_in_phase3.insert(state.clone()) {
+                    continue;
+                }
+
                 for peek in state.stack.peek_iter() {
                     let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                     if let Some(ref r) = row.phase3_default_reduce.reduce {
                         let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack.is_empty() {
-                            phase3_todo.push_back(ParseState { stack: new_stack });
+                            let new_parse_state = ParseState { stack: new_stack };
+                            phase3_todo.push_back(new_parse_state);
                         }
                     }
                     if row.phase3_default_reduce.clone_and_merge {
