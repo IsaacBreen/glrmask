@@ -15,8 +15,8 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
+use std::ops::{BitOr, BitOrAssign};
 use profiler_macro::{time_it, timeit};
-
 // --- Type Aliases ---
 
 pub type MaxDepth = usize;
@@ -27,73 +27,85 @@ type NodeMap = BTreeMap<(ParseStateEdgeContent, DestKey), Arc<GSSNode>>;
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
-/// For a given tokenizer state, holds the bitvector of allowed terminals.
-pub type AllowedTerminals = BTreeMap<TokenizerStateID, TerminalBV>;
+
+/// Represents the set of disallowed LLM tokens for a path. `None` means no tokens are disallowed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct LLMTokenInfo {
+    llm_tokens: Option<LLMTokenBV>,
+}
+impl LLMTokenInfo {
+    fn none() -> Self {
+        Self { llm_tokens: None }
+    }
+    fn all() -> Self {
+        let mut this = Self::none();
+        this.llm_tokens = Some(LLMTokenBV::max_ones());
+        this
+    }
+    fn disallowed(&self) -> LLMTokenBV {
+        self.llm_tokens.clone().unwrap_or_else(LLMTokenBV::zeros)
+    }
+    fn allowed(&self) -> LLMTokenBV {
+        let all_tokens = LLMTokenBV::max_ones();
+        all_tokens - self.disallowed()
+    }
+    fn is_empty(&self) -> bool {
+        self.llm_tokens.is_none() || self.llm_tokens.as_ref().unwrap().is_empty()
+    }
+    fn is_all(&self) -> bool {
+        self.disallowed() == LLMTokenBV::max_ones()
+    }
+}
+
+impl BitOr<&LLMTokenBV> for LLMTokenInfo {
+    type Output = Self;
+    fn bitor(mut self, rhs: &LLMTokenBV) -> Self::Output {
+        if self.llm_tokens.is_none() {
+            if !rhs.is_empty() {
+                self.llm_tokens = Some(rhs.clone());
+            }
+        } else {
+            self.llm_tokens.as_mut().unwrap().bitor_assign(rhs);
+        }
+        self
+    }
+}
+
+impl BitOrAssign<&LLMTokenBV> for LLMTokenInfo {
+    fn bitor_assign(&mut self, rhs: &LLMTokenBV) {
+        if self.llm_tokens.is_none() {
+            if !rhs.is_empty() {
+                self.llm_tokens = Some(rhs.clone());
+            }
+        } else {
+            self.llm_tokens.as_mut().unwrap().bitor_assign(rhs);
+        }
+    }
+}
+
+/// For a given tokenizer state, holds the bitvector of disallowed terminals.
+pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
 
 
-// --- Accumulator (Acc) ---
+// --- Accumulator (Acc) & AccManager ---
 
-/// Represents a set of constraints (allowed tokens/terminals) for a GSS path or node.
-/// This struct holds the complete constraint information for a set of paths (e.g., all paths to a node).
+/// Represents a set of constraints (disallowed tokens/terminals) for a GSS path or node.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Acc {
-    allowed_llm_tokens: LLMTokenBV,
-    allowed_terminals: AllowedTerminals,
-}
-
-impl Default for Acc {
-    fn default() -> Self {
-        Self {
-            allowed_llm_tokens: LLMTokenBV::max_ones(),
-            allowed_terminals: BTreeMap::new(),
-        }
-    }
-}
-
-/// Combines multiple terminal maps using a provided bitwise operation.
-fn combine_terminal_maps<'a>(
-    maps: impl IntoIterator<Item = &'a AllowedTerminals>,
-    op: impl Fn(&TerminalBV, &TerminalBV) -> TerminalBV,
-    identity: TerminalBV,
-) -> AllowedTerminals {
-    let maps_vec: Vec<_> = maps.into_iter().collect();
-    if maps_vec.is_empty() {
-        return BTreeMap::new();
-    }
-
-    let mut all_keys = BTreeSet::new();
-    for map in &maps_vec {
-        all_keys.extend(map.keys());
-    }
-
-    let mut result_map = BTreeMap::new();
-    let max_ones = TerminalBV::max_ones();
-    for key in all_keys {
-        let mut combined_bv = identity.clone();
-        let mut first = true;
-        for map in &maps_vec {
-            // If a key is missing, it implies all terminals are allowed for that state.
-            let bv = map.get(key).unwrap_or(&max_ones);
-            if first {
-                combined_bv = bv.clone();
-                first = false;
-            } else {
-                combined_bv = op(&combined_bv, bv);
-            }
-        }
-        if !combined_bv.is_empty() {
-            result_map.insert(*key, combined_bv);
-        }
-    }
-    result_map
+    llm_token_info: LLMTokenInfo,
+    disallowed_terminals: TerminalInfo,
 }
 
 impl Acc {
-    /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
-    pub fn new_fresh() -> Self {
+    fn new(llm_token_info: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
+        Self { llm_token_info, disallowed_terminals }
+    }
+
+    /// Creates a fresh, unconstrained accumulator.
+    fn new_fresh() -> Self {
         Self {
-            allowed_llm_tokens: LLMTokenBV::max_ones(),
-            allowed_terminals: BTreeMap::new(),
+            llm_token_info: LLMTokenInfo::none(),
+            disallowed_terminals: BTreeMap::new(),
         }
     }
 
@@ -101,70 +113,137 @@ impl Acc {
         Self::new_fresh()
     }
 
-    pub fn new_fresh_from_existing(_acc: &Acc) -> Self {
+    pub fn new_fresh_from_existing(acc: &Acc) -> Self {
         Self::new_fresh()
     }
 
-    pub fn new_fresh_from_existing_stack(_stack: &GSSNode) -> Self {
+    pub fn new_fresh_from_existing_stack(stack: &GSSNode) -> Self {
         Self::new_fresh()
     }
 
-    /// Combines this accumulator with another sequentially, as if chaining constraints.
-    /// This results in the **intersection** of allowed sets.
-    pub fn split(&self, other: &Self) -> Self {
-        let new_llm_tokens = &self.allowed_llm_tokens & &other.allowed_llm_tokens;
-        let new_terminals = combine_terminal_maps(
-            [&self.allowed_terminals, &other.allowed_terminals],
-            |a, b| a & b,
-            TerminalBV::max_ones(),
-        );
-        Self {
-            allowed_llm_tokens: new_llm_tokens,
-            allowed_terminals: new_terminals,
+    fn llm_tokens(&self) -> &LLMTokenInfo { &self.llm_token_info }
+    fn llm_tokens_mut(&mut self) -> &mut LLMTokenInfo { &mut self.llm_token_info }
+    fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
+    fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo { &mut self.disallowed_terminals }
+
+    /// Checks if the accumulator is in its default, unconstrained state.
+    fn is_empty(&self) -> bool {
+        self.llm_token_info.is_empty() && self.disallowed_terminals.is_empty()
+    }
+
+    /// Checks if the path is dead (e.g., allows no LLM tokens).
+    fn is_dead(&self) -> bool {
+        self.llm_token_info.is_all()
+    }
+
+    pub fn is_alive(&self) -> bool { !self.is_dead() }
+
+    /// Accumulates constraints sequentially (e.g., adding a new constraint to a path).
+    /// This is a union of constraints.
+    // #[time_it]
+    fn accumulate_seq(&self, other: &Self) -> Self {
+        // LLM tokens: union of disallowed sets
+        let mut new_llm_tokens = self.llm_token_info.disallowed();
+        new_llm_tokens |= &other.llm_token_info.disallowed();
+        let new_llm_info = LLMTokenInfo {
+            llm_tokens: if new_llm_tokens.is_empty() { None } else { Some(new_llm_tokens) },
+        };
+
+        // Terminals: union of disallowed sets
+        let mut new_disallowed_terminals = self.disallowed_terminals.clone();
+        for (state_id, other_bv) in &other.disallowed_terminals {
+            *new_disallowed_terminals.entry(*state_id).or_insert_with(HybridBitset::zeros) |= other_bv;
+        }
+        new_disallowed_terminals.retain(|_, v| !v.is_empty());
+
+        Acc {
+            llm_token_info: new_llm_info,
+            disallowed_terminals: new_disallowed_terminals,
         }
     }
 
-    /// Merges a collection of accumulators from parallel paths.
-    /// This results in the **union** of allowed sets.
-    pub fn merge_many<'a>(accs: impl IntoIterator<Item = &'a Self>) -> Self {
-        let accs_vec: Vec<_> = accs.into_iter().collect();
+    /// Merges constraints from parallel paths (union of paths).
+    // #[time_it]
+    fn merge_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>) -> Self {
+        let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
-            return Self::new_fresh();
+            return Acc::new_fresh();
         }
-        let new_llm_tokens = accs_vec.iter().fold(LLMTokenBV::zeros(), |acc, item| &acc | &item.allowed_llm_tokens);
-        let new_terminals = combine_terminal_maps(
-            accs_vec.iter().map(|acc| &acc.allowed_terminals),
-            |a, b| a | b,
-            TerminalBV::zeros(),
-        );
-        Self {
-            allowed_llm_tokens: new_llm_tokens,
-            allowed_terminals: new_terminals,
+
+        // LLM tokens: intersection of disallowed sets.
+        // If path A disallows DA and path B disallows DB, the merged path allows (!DA | !DB),
+        // which means it disallows (DA & DB).
+        let mut merged_llm_bv = LLMTokenBV::zeros();
+        for acc in &accs_vec {
+            merged_llm_bv |= &acc.llm_token_info.disallowed();
+        }
+        let merged_llm_info = LLMTokenInfo {
+            llm_tokens: if merged_llm_bv.is_empty() { None } else { Some(merged_llm_bv) },
+        };
+
+        // Terminals: union of disallowed sets.
+        let mut merged_terminals = BTreeMap::new();
+        for acc in &accs_vec {
+            for (state_id, bv) in &acc.disallowed_terminals {
+                *merged_terminals.entry(*state_id).or_insert_with(HybridBitset::zeros) |= bv;
+            }
+        }
+        merged_terminals.retain(|_, v| !v.is_empty());
+
+        Acc {
+            llm_token_info: merged_llm_info,
+            disallowed_terminals: merged_terminals,
         }
     }
 
-    /// Intersects a collection of accumulators from parallel paths.
-    /// This results in the **intersection** of allowed sets.
-    pub fn intersect_many<'a>(accs: impl IntoIterator<Item = &'a Self>) -> Self {
-        let accs_vec: Vec<_> = accs.into_iter().collect();
+    /// Intersects constraints from parallel paths.
+    // #[time_it]
+    fn intersect_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>) -> Self {
+        let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
-            return Self::new_fresh();
+            return Acc::new_fresh();
         }
-        let new_llm_tokens = accs_vec.iter().fold(LLMTokenBV::max_ones(), |acc, item| &acc & &item.allowed_llm_tokens);
-        let new_terminals = combine_terminal_maps(
-            accs_vec.iter().map(|acc| &acc.allowed_terminals),
-            |a, b| a & b,
-            TerminalBV::max_ones(),
-        );
-        Self {
-            allowed_llm_tokens: new_llm_tokens,
-            allowed_terminals: new_terminals,
-        }
-    }
 
-    pub fn is_alive(&self) -> bool {
-        !self.allowed_llm_tokens.is_empty()
+        // LLM tokens: union of disallowed sets.
+        let mut intersected_llm_bv = LLMTokenBV::zeros();
+        for acc in &accs_vec {
+            intersected_llm_bv &= &acc.llm_token_info.disallowed();
+        }
+        let intersected_llm_info = LLMTokenInfo {
+            llm_tokens: if intersected_llm_bv.is_empty() { None } else { Some(intersected_llm_bv) },
+        };
+
+        // Terminals: intersection of disallowed sets.
+        let mut acc_iter = accs_vec.into_iter();
+        let mut intersected_terminals = acc_iter.next().unwrap().disallowed_terminals.clone();
+        for acc in acc_iter {
+            intersected_terminals.retain(|state_id, bv| {
+                if let Some(other_bv) = acc.disallowed_terminals.get(state_id) {
+                    // Keep only those terminals that are disallowed in both accumulators.
+                    *bv &= other_bv;
+                    !bv.is_empty() // Retain only non-empty bitsets
+                } else {
+                    false // If the state_id is not present in the other accumulator, remove it
+                }
+            });
+        }
+
+        Acc {
+            llm_token_info: intersected_llm_info,
+            disallowed_terminals: intersected_terminals,
+        }
     }
+}
+
+/// Manages the local and aggregated path accumulators for a GSS node.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct AccManager {
+    /// Constraints applied locally at this node/edge.
+    pub local: Arc<Acc>,
+    /// The union of constraints over all paths from a root to this node (excluding local).
+    pub union: Arc<Acc>,
+    /// The intersection of constraints over all paths from a root to this node (excluding local).
+    pub intersection: Arc<Acc>,
 }
 
 
@@ -173,13 +252,7 @@ impl Acc {
 /// A node in the Graph-Structured Stack (GSS).
 #[derive(Debug, Clone)]
 pub struct GSSNode {
-    /// Local constraints applied at this specific node/edge.
-    local_acc: Arc<Acc>,
-    /// The union of constraints over all paths from a root to this node's predecessors.
-    pred_union_acc: Arc<Acc>,
-    /// The intersection of constraints over all paths from a root to this node's predecessors.
-    pred_intersection_acc: Arc<Acc>,
-
+    acc_manager: AccManager,
     predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
@@ -205,9 +278,9 @@ fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
     predecessors.keys().map(|(_, dest_key)| *dest_key).max().map_or(0, |max_pred_depth| max_pred_depth + 1)
 }
 
-fn compute_hash_key(predecessors: &NodeMap, local_acc: &Acc) -> u64 {
+fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-    local_acc.hash(&mut hasher);
+    // acc_manager.hash(&mut hasher);
     for ((edge_val, dest_key), pred_arc) in predecessors {
         edge_val.hash(&mut hasher);
         dest_key.hash(&mut hasher);
@@ -268,30 +341,39 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
 impl GSSNode {
     /// Creates a new GSS root node with no predecessors.
     pub fn new(local_acc: Acc) -> Self {
+        let acc_manager = AccManager {
+            local: Arc::new(local_acc),
+            union: Arc::new(Acc::new_fresh()),
+            intersection: Arc::new(Acc::new_fresh()),
+        };
         let predecessors = NodeMap::new();
-        let local_acc = Arc::new(local_acc);
-        let pred_union_acc = Arc::new(Acc { allowed_llm_tokens: LLMTokenBV::zeros(), ..Default::default() });
-        let pred_intersection_acc = Arc::new(Acc { allowed_llm_tokens: LLMTokenBV::max_ones(), ..Default::default() });
-
-        let hash_key_cache = compute_hash_key(&predecessors, &local_acc);
+        let hash_key_cache = compute_hash_key(&predecessors, &acc_manager);
         let max_depth = compute_max_depth(&predecessors);
-        Self { local_acc, pred_union_acc, pred_intersection_acc, predecessors, hash_key_cache, max_depth }
+        Self { acc_manager, predecessors, hash_key_cache, max_depth }
     }
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
+    // #[time_it]
     fn new_with_map(local_acc: Arc<Acc>, predecessors: NodeMap) -> Self {
         let pred_full_unions: Vec<_> = predecessors.values().map(|p| p.full_union_acc()).collect();
         let pred_full_intersections: Vec<_> = predecessors.values().map(|p| p.full_intersection_acc()).collect();
 
-        let pred_union_acc = Arc::new(Acc::merge_many(pred_full_unions.iter()));
-        let pred_intersection_acc = Arc::new(Acc::intersect_many(pred_full_intersections.iter()));
+        let final_union = Arc::new(Acc::merge_parallel(pred_full_unions.iter()));
+        let final_intersection = Arc::new(Acc::intersect_parallel(pred_full_intersections.iter()));
 
-        let hash_key_cache = compute_hash_key(&predecessors, &local_acc);
+        let acc_manager = AccManager {
+            local: local_acc,
+            union: final_union,
+            intersection: final_intersection,
+        };
+
+        let hash_key_cache = compute_hash_key(&predecessors, &acc_manager);
         let max_depth = compute_max_depth(&predecessors);
-        Self { local_acc, pred_union_acc, pred_intersection_acc, predecessors, hash_key_cache, max_depth }
+        Self { acc_manager, predecessors, hash_key_cache, max_depth }
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
+    // #[time_it]
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, local_acc: Acc) -> Self {
         let mut predecessors_map = NodeMap::new();
         predecessors_map.insert((edge_value, predecessor_arc.dest_key()), predecessor_arc.clone());
@@ -303,37 +385,27 @@ impl GSSNode {
     }
 
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
+    fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
-    pub fn full_union_acc(&self) -> Acc {
-        self.pred_union_acc.split(&self.local_acc)
+    // #[time_it]
+    fn full_union_acc(&self) -> Acc {
+        self.acc_manager.union.accumulate_seq(&self.acc_manager.local)
     }
 
     /// Returns the full intersection of constraints for all paths ending at this node.
-    pub fn full_intersection_acc(&self) -> Acc {
-        self.pred_intersection_acc.split(&self.local_acc)
+    // #[time_it]
+    fn full_intersection_acc(&self) -> Acc {
+        self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
+
+    fn llm_tokens(&self) -> LLMTokenInfo { self.full_union_acc().llm_token_info }
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
     pub fn max_depth(&self) -> MaxDepth { self.max_depth }
     pub fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
-    
-    pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-        self.full_union_acc().allowed_llm_tokens
-    }
-    
-    pub fn disallowed_terminals(&self) -> BTreeMap<TokenizerStateID, TerminalBV> {
-        let allowed = &self.full_union_acc().allowed_terminals;
-        let mut disallowed = BTreeMap::new();
-        for (state_id, bv) in allowed {
-            let inverted_bv = bv.inverted();
-            if !inverted_bv.is_empty() {
-                disallowed.insert(*state_id, inverted_bv);
-            }
-        }
-        disallowed
-    }
-
+    pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.full_union_acc().llm_tokens().allowed() }
+    pub fn disallowed_terminals(&self) -> TerminalInfo { self.full_union_acc().disallowed_terminals }
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
     pub fn is_alive(&self) -> bool { self.full_union_acc().is_alive() }
 }
@@ -341,36 +413,35 @@ impl GSSNode {
 // Core GSS operations
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
+    // #[time_it]
     pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc_for_new_node: Acc) -> Self {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, local_acc_for_new_node)
     }
 
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The accumulators of predecessors are adjusted to include this node's local constraints.
-    #[time_it("GSSNode::pop")]
+    // #[time_it("GSSNode::pop")]
     pub fn pop(&self) -> GSSPop {
         let mut new_node_map = NodeMap::new();
-        let parent_local_acc = &self.local_acc;
+        let parent_local_acc = &self.acc_manager.local;
 
         for ((edge_val, dest_key), pred_arc) in &self.predecessors {
-            let new_local_acc = Arc::new(pred_arc.local_acc.split(parent_local_acc));
-            
-            let new_full_union = pred_arc.pred_union_acc.split(&new_local_acc);
-            if !new_full_union.is_alive() {
-                crate::debug!(6, "Dead path after splitting\n{:?}\nwith local\n{:?}\nresulting in\n{:?}", pred_arc.pred_union_acc, new_local_acc, new_full_union);
-                continue;
-            }
+                let mut new_pred_node = (**pred_arc).clone();
 
-            let new_pred_node = GSSNode {
-                local_acc: new_local_acc,
-                pred_union_acc: pred_arc.pred_union_acc.clone(),
-                pred_intersection_acc: pred_arc.pred_intersection_acc.clone(),
-                predecessors: pred_arc.predecessors.clone(),
-                hash_key_cache: compute_hash_key(&pred_arc.predecessors, &pred_arc.local_acc),
-                max_depth: pred_arc.max_depth,
-            };
+                // Create a new local accumulator for the popped node by accumulating the parent's local constraints.
+                let new_local_acc = Arc::new(pred_arc.acc_manager.local.accumulate_seq(parent_local_acc));
+                
+                // Check for dead paths *after* accumulation.
+                let new_full_union = new_pred_node.acc_manager.union.accumulate_seq(&new_local_acc);
+                if new_full_union.is_dead() {
+                    crate::debug!(6, "Dead path after accumulating\n{:?}\nwith local\n{:?}\nresulting in\n{:?}", new_pred_node.acc_manager.union, new_local_acc, new_full_union);
+                    continue;
+                }
 
-            let new_pred_arc = Arc::new(new_pred_node);
+                new_pred_node.acc_manager.local = new_local_acc;
+                new_pred_node.hash_key_cache = compute_hash_key(&new_pred_node.predecessors, &new_pred_node.acc_manager);
+
+                let new_pred_arc = Arc::new(new_pred_node);
             new_node_map.insert((edge_val.clone(), *dest_key), new_pred_arc);
         }
 
@@ -378,7 +449,7 @@ impl GSSNode {
     }
 
     /// Pops `n` levels from the GSS.
-    #[time_it("GSSNode::popn")]
+    // #[time_it("GSSNode::popn")]
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
             return self.clone();
@@ -389,15 +460,46 @@ impl GSSNode {
     /// Merges another `GSSNode` into this one.
     #[time_it]
     pub fn merge(&mut self, other: &Self) {
+        // timeit!("GSSNode::merge", {
         if self == other { return; }
 
-        let new_local = Arc::new(Acc::merge_many([self.local_acc.as_ref(), other.local_acc.as_ref()]));
+        if other.predecessors.is_empty() && other.acc_manager.local.is_empty() { return; }
+        if self.predecessors.is_empty() && self.acc_manager.local.is_empty() {
+            *self = other.clone();
+            return;
+        }
+
+        // Merge local accumulators
+        let merged_local = Acc::intersect_parallel([self.acc_manager.local.as_ref(), other.acc_manager.local.as_ref()]);
         
+        // Merge predecessor maps
         let mut new_predecessors = self.predecessors.clone();
         merge_node_maps(&mut new_predecessors, other.predecessors.clone());
         
-        let new_node = GSSNode::new_with_map(new_local, new_predecessors);
+        // Create a new node with the merged properties.
+        // let new_node = GSSNode::new_with_map(Arc::new(merged_local), new_predecessors);
+
+        let merged_union = Acc::intersect_parallel([self.acc_manager.union.as_ref(), other.acc_manager.union.as_ref()]);
+        let merged_intersection = Acc::merge_parallel([self.acc_manager.intersection.as_ref(), other.acc_manager.intersection.as_ref()]);
+
+        let acc_manager = AccManager {
+            local: Arc::new(merged_local),
+            union: Arc::new(merged_union),
+            intersection: Arc::new(merged_intersection),
+        };
+
+        let hash_key_cache = compute_hash_key(&new_predecessors, &acc_manager);
+        let max_depth = std::cmp::max(self.max_depth, other.max_depth);
+
+        let new_node = GSSNode {
+            acc_manager,
+            predecessors: new_predecessors,
+            hash_key_cache,
+            max_depth,
+        };
+
         *self = new_node;
+        // });
     }
 
     pub fn merged(mut self, other: Self) -> Self {
@@ -405,8 +507,9 @@ impl GSSNode {
         self
     }
 
+    // #[time_it]
     pub fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let acc = (*self.local_acc).clone();
+        let acc = (*self.acc_manager.local).clone();
         self.push(edge_value, acc)
     }
     
@@ -432,12 +535,13 @@ impl GSSPop<'_> {
         combined_node_map
     }
 
+    // #[time_it]
     pub fn pop(&self) -> GSSPop {
         let node_map = Self::_pop(&self.node_map);
         GSSPop { parent_node: self.parent_node, node_map }
     }
 
-    #[time_it("GSSPop::popn")]
+    // #[time_it("GSSPop::popn")]
     pub fn popn(&self, n: usize) -> GSSPop {
         if n == 0 {
             return self.clone();
@@ -450,8 +554,9 @@ impl GSSPop<'_> {
     }
 
     /// Converts the `GSSPop` into a single `GSSNode`.
-    #[time_it("GSSPop::to_node")]
+    // #[time_it("GSSPop::to_node")]
     pub fn to_node(&self) -> GSSNode {
+        // The new node is an aggregation point, so it has no local constraints of its own.
         let local_acc = Arc::new(Acc::new_fresh());
         GSSNode::new_with_map(local_acc, self.node_map.clone())
     }
@@ -461,8 +566,9 @@ impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
     pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
+    // #[time_it]
     pub fn to_node(&self) -> GSSNode {
-        let local_acc = self.parent_node.local_acc.split(&self.predecessor_node.full_union_acc());
+        let local_acc = self.parent_node.acc_manager.local.accumulate_seq(&self.predecessor_node.full_union_acc());
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
@@ -474,7 +580,7 @@ impl<'a> GSSPeek<'a> {
         Arc::new(self.to_node())
     }
 
-    #[time_it("GSSPeek::popn")]
+    // #[time_it("GSSPeek::popn")]
     pub fn popn(&self, n: usize) -> Arc<GSSNode> {
         Arc::new(self.to_arc_node().popn(n))
     }
@@ -491,7 +597,7 @@ impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other) || (
             self.hash_key_cache == other.hash_key_cache &&
-            self.local_acc == other.local_acc &&
+            self.acc_manager == other.acc_manager &&
             self.predecessors == other.predecessors
         )
     }
@@ -509,7 +615,7 @@ impl Ord for GSSNode {
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
-            .then_with(|| self.local_acc.cmp(&other.local_acc))
+            .then_with(|| self.acc_manager.cmp(&other.acc_manager))
             .then_with(|| self.predecessors.cmp(&other.predecessors))
     }
 }
@@ -517,6 +623,7 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
+// #[time_it]
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
@@ -558,18 +665,33 @@ fn prune_and_transform_recursive(
     }
 }
 
+// #[time_it]
 pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_local_acc = (*node.local_acc).clone();
-        new_local_acc.allowed_llm_tokens &= allowed_tokens;
+    let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
+    disallow_llm_tokens_and_prune_arc(
+        root_arc,
+        &newly_disallowed,
+        memo,
+    );
+}
 
-        let temp_full_acc = node.pred_union_acc.split(&new_local_acc);
+#[time_it]
+pub fn disallow_llm_tokens_and_prune_arc(
+    root_arc: &mut Arc<GSSNode>,
+    tokens_to_disallow: &LLMTokenBV,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) {
+    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+        let mut new_local_acc = (*node.acc_manager.local).clone();
+        new_local_acc.llm_tokens_mut().bitor_assign(tokens_to_disallow);
+
+        let temp_full_acc = node.full_union_acc().accumulate_seq(&new_local_acc);
         if temp_full_acc.is_alive() {
-            Some((new_local_acc, true))
+            Some((new_local_acc, false))
         } else {
             None
         }
@@ -581,24 +703,15 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     }
 }
 
-#[time_it]
-pub fn disallow_llm_tokens_and_prune_arc(
-    root_arc: &mut Arc<GSSNode>,
-    tokens_to_disallow: &LLMTokenBV,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
-) {
-    let allowed_tokens = &LLMTokenBV::max_ones() - tokens_to_disallow;
-    allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_tokens, memo);
-}
-
+// #[time_it]
 pub fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_local_acc = (*node.local_acc).clone();
-        let continue_recursion = new_local_acc.allowed_llm_tokens != LLMTokenBV::max_ones();
-        new_local_acc.allowed_llm_tokens = LLMTokenBV::max_ones();
+        let mut new_local_acc = (*node.acc_manager.local).clone();
+        let continue_recursion = !new_local_acc.llm_tokens().is_empty();
+        new_local_acc.llm_token_info = LLMTokenInfo::none();
         Some((new_local_acc, continue_recursion))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -608,18 +721,18 @@ pub fn reset_llm_tokens(
     }
 }
 
+// #[time_it]
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_local_acc = (*node.local_acc).clone();
-        for (state_id, bv_to_disallow) in disallowed_terminals {
-            let entry = new_local_acc.allowed_terminals.entry(*state_id).or_insert_with(TerminalBV::max_ones);
-            *entry -= bv_to_disallow;
+        let mut new_local_acc = (*node.acc_manager.local).clone();
+        for (state_id, bv) in disallowed_terminals {
+            *new_local_acc.disallowed_terminals_mut().entry(*state_id).or_insert_with(HybridBitset::zeros) |= bv;
         }
-        Some((new_local_acc, true))
+        Some((new_local_acc, false))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -628,31 +741,32 @@ pub fn disallow_terminals_and_prune_arc(
     }
 }
 
+// #[time_it]
 pub fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
-    let max_ones = TerminalBV::max_ones();
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let intersection_acc = node.full_intersection_acc();
-        for (state_id, matched) in matched_terminals {
-            let allowed_by_gss = intersection_acc.allowed_terminals.get(state_id).unwrap_or(&max_ones);
-            if allowed_by_gss.is_disjoint(matched) {
-                return None; // All paths to this node disallow a terminal that was just matched. Prune.
+        for (state_id, disallowed_by_gss) in node.full_intersection_acc().disallowed_terminals() {
+            if let Some(matched) = matched_terminals.get(state_id) {
+                if !disallowed_by_gss.is_disjoint(matched) {
+                    return None; // All paths to this node disallow a terminal that was just matched. Prune.
+                }
             }
         }
-        
-        let union_acc = node.full_union_acc();
+        // If we can't prune the whole node, we might need to recurse to prune sub-paths.
+        // This is determined by checking the union accumulator.
         let mut needs_recursion = false;
-        for (state_id, matched) in matched_terminals {
-            let allowed_by_gss = union_acc.allowed_terminals.get(state_id).unwrap_or(&max_ones);
-            if allowed_by_gss.is_disjoint(matched) {
-                needs_recursion = true;
-                break;
+        for (state_id, disallowed_by_gss_union) in node.full_union_acc().disallowed_terminals() {
+             if let Some(matched) = matched_terminals.get(state_id) {
+                if !disallowed_by_gss_union.is_disjoint(matched) {
+                    needs_recursion = true;
+                    break;
+                }
             }
         }
-        Some(((*node.local_acc).clone(), needs_recursion))
+        Some(((*node.acc_manager.local).clone(), true))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -662,19 +776,20 @@ pub fn prune_disallowed_terminals(
     }
 }
 
+// #[time_it]
 pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_local_acc = (*node.local_acc).clone();
-        let mut new_allowed = BTreeMap::new();
+        let mut new_local_acc = (*node.acc_manager.local).clone();
+        let mut new_disallowed = BTreeMap::new();
         let mut changed = false;
 
-        for (old_id, bv) in &new_local_acc.allowed_terminals {
+        for (old_id, bv) in new_local_acc.disallowed_terminals() {
             if let Some(&new_id) = map.get(old_id) {
-                *new_allowed.entry(new_id).or_insert_with(TerminalBV::max_ones) &= bv;
+                *new_disallowed.entry(new_id).or_insert_with(HybridBitset::zeros) |= bv;
                 if old_id != &new_id {
                     changed = true;
                 }
@@ -683,12 +798,12 @@ pub fn map_allowed_terminals_tokenizer_states(
             }
         }
         
-        if new_allowed.len() != new_local_acc.allowed_terminals.len() {
+        if new_disallowed.len() != new_local_acc.disallowed_terminals().len() {
             changed = true;
         }
 
-        new_local_acc.allowed_terminals = new_allowed;
-        Some((new_local_acc, changed))
+        new_local_acc.disallowed_terminals = new_disallowed;
+        Some((new_local_acc, true))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -701,6 +816,13 @@ impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
     /// This can simplify the GSS by reducing path diversity. The fusion process is applied
     /// recursively for `levels` number of levels down from this node.
+    ///
+    /// For example, if a node has predecessors `(A, edgeX)` at depth 5 and `(B, edgeX)` at depth 3,
+    /// they will be merged into a single predecessor `(merged(A,B), edgeX)`. This process
+    /// continues recursively down the graph structure.
+    ///
+    /// The process is post-order: children are fused before their parents. This means that
+    /// deeper parts of the graph are simplified first.
     #[time_it]
     pub fn fuse_predecessors(&mut self, levels: usize) {
         if levels == 0 {
@@ -761,7 +883,7 @@ pub fn fuse_predecessors_recursive(
 
     // 4. Rebuild the current node with the new, fused set of predecessors.
     let new_predecessors_map = process_predecessors(&new_predecessors_set);
-    let fused_node = GSSNode::new_with_map(node_arc.local_acc.clone(), new_predecessors_map);
+    let fused_node = GSSNode::new_with_map(node_arc.acc_manager.local.clone(), new_predecessors_map);
 
     let result_arc = Arc::new(fused_node);
     memo.insert(node_ptr, result_arc.clone());
@@ -920,6 +1042,20 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
 }
 
 /// Randomly samples a single path from a GSS forest.
+///
+/// A path is defined as a sequence of `ParseStateEdgeContent` from a root to a leaf.
+/// The sampling process starts by picking a random root from the provided slice.
+/// Then, it traverses down to a leaf by randomly selecting a predecessor at each step.
+///
+/// # Arguments
+/// * `roots` - A slice of `GSSNode` references representing the roots of the forest.
+/// * `seed` - A seed for the random number generator to ensure deterministic sampling.
+///
+/// # Returns
+/// * `Some(Vec<ParseStateEdgeContent>)` containing the sampled path if roots are provided.
+///   The path is ordered from the root-most edge to the leaf-most edge.
+///   Returns an empty vector if a root is also a leaf.
+/// * `None` if the `roots` slice is empty.
 pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
     if roots.is_empty() {
         return None;
@@ -964,6 +1100,7 @@ pub fn print_gss_forest(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
+    // return "".to_string();
     // Recursive helper to print predecessors.
     fn print_predecessors_recursive(
         node_arc: &Arc<GSSNode>,
@@ -1059,31 +1196,36 @@ fn format_acc(
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
     let format_single_acc = |acc: &Acc, label: &str| -> String {
-        let bv = &acc.allowed_llm_tokens;
-        let llm_info = if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-            const MAX_SAMPLES: usize = 3;
-            let token_samples: Vec<_> = bv.iter().take(MAX_SAMPLES)
-                .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-                .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-                .collect();
-
-            let samples_str = token_samples.join(", ");
-            let total_tokens = bv.len();
-            if total_tokens > MAX_SAMPLES {
-                format!("LLM({} tokens: [{}, ...])", total_tokens, samples_str)
-            } else {
-                format!("LLM({} tokens: [{}])", total_tokens, samples_str)
-            }
+        let disallowed_llm_info = acc.llm_tokens();
+        let llm_info = if disallowed_llm_info.is_empty() {
+            "LLM(None)".to_string()
         } else {
-            format!("LLM({} tokens)", bv.len())
+            let bv = disallowed_llm_info.allowed();
+            if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
+                const MAX_SAMPLES: usize = 3;
+                let token_samples: Vec<_> = bv.iter().take(MAX_SAMPLES)
+                    .filter_map(|internal_id| bimap.get_by_right(&internal_id))
+                    .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
+                    .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                    .collect();
+
+                let samples_str = token_samples.join(", ");
+                let total_tokens = bv.len();
+                if total_tokens > MAX_SAMPLES {
+                    format!("LLM({} tokens: [{}, ...])", total_tokens, samples_str)
+                } else {
+                    format!("LLM({} tokens: [{}])", total_tokens, samples_str)
+                }
+            } else {
+                format!("LLM({} tokens)", bv.len())
+            }
         };
 
-        if acc.allowed_terminals.is_empty() {
+        if acc.disallowed_terminals().is_empty() {
             return format!("{}:({})", label, llm_info);
         }
 
-        let allowed_info = acc.allowed_terminals.iter()
+        let disallowed_info = acc.disallowed_terminals().iter()
             .map(|(state_id, bv)| {
                 let names: Vec<_> = bv.iter()
                     .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
@@ -1094,10 +1236,10 @@ fn format_acc(
             .collect::<Vec<_>>()
             .join("; ");
 
-        format!("{}:({}, Terminals({}))", label, llm_info, allowed_info)
+        format!("{}:({}, Terminals({}))", label, llm_info, disallowed_info)
     };
 
-    let local_str = format_single_acc(&node.local_acc, "Local");
+    let local_str = format_single_acc(&node.acc_manager.local, "Local");
     let union_str = format_single_acc(&node.full_union_acc(), "FullUnion");
 
     format!("[{}, {}]", local_str, union_str)
@@ -1109,21 +1251,14 @@ mod tests {
     use super::*;
     use crate::glr::table::StateID;
 
-    fn mock_llm_acc(vals: &[usize]) -> Acc {
-        Acc {
-            allowed_llm_tokens: LLMTokenBV::from_iter(vals.iter().cloned()),
-            allowed_terminals: BTreeMap::new(),
-        }
+    fn mock_acc(val: usize) -> Acc {
+        let mut bv = LLMTokenBV::zeros();
+        bv.insert(val);
+        let disallowed_info = LLMTokenInfo { llm_tokens: Some(bv) };
+        Acc::new(disallowed_info, Default::default())
     }
 
     fn empty_acc() -> Acc {
-        Acc {
-            allowed_llm_tokens: LLMTokenBV::zeros(),
-            allowed_terminals: BTreeMap::new(),
-        }
-    }
-    
-    fn fresh_acc() -> Acc {
         Acc::new_fresh()
     }
 
@@ -1133,37 +1268,37 @@ mod tests {
 
     #[test]
     fn test_gss_new_node() {
-        let acc = mock_llm_acc(&[1]);
+        let acc = mock_acc(1);
         let node = GSSNode::new(acc.clone());
-        assert_eq!(*node.local_acc, acc);
-        assert!(node.pred_union_acc.allowed_llm_tokens.is_empty());
-        assert_eq!(node.pred_intersection_acc.allowed_llm_tokens, LLMTokenBV::max_ones());
+        assert_eq!(*node.acc_manager.local, acc);
+        assert!(node.acc_manager.union.is_empty());
+        assert!(node.acc_manager.intersection.is_empty());
         assert!(node.predecessors.is_empty());
         assert_eq!(node.max_depth, 0);
     }
 
     #[test]
     fn test_gss_push() {
-        let root = Arc::new(GSSNode::new(mock_llm_acc(&[1, 2])));
-        let pushed = root.push(mock_edge(10), mock_llm_acc(&[2, 3]));
+        let root = Arc::new(GSSNode::new(mock_acc(1)));
+        let pushed = root.push(mock_edge(10), mock_acc(2));
 
         assert_eq!(pushed.max_depth, 1);
-        assert_eq!(pushed.local_acc.allowed_llm_tokens, LLMTokenBV::from_iter(vec![2, 3]));
+        assert_eq!(*pushed.acc_manager.local, mock_acc(2));
         
-        // The pred_union_acc of the new node should be the full_union_acc of its predecessor.
-        let expected_pred_union = root.full_union_acc();
-        assert_eq!(*pushed.pred_union_acc, expected_pred_union);
+        // The union acc of the new node should be the full union of its predecessor.
+        let expected_union = root.full_union_acc();
+        assert_eq!(*pushed.acc_manager.union, expected_union);
 
-        // The full_union_acc of the new node is its pred_union_acc split with its local_acc (intersection).
-        let expected_full_union = expected_pred_union.split(&pushed.local_acc);
+        // The full union of the new node is its union + its local.
+        let expected_full_union = expected_union.accumulate_seq(&mock_acc(2));
         assert_eq!(pushed.full_union_acc(), expected_full_union);
-        assert_eq!(pushed.full_union_acc().allowed_llm_tokens.iter().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(pushed.full_union_acc().llm_tokens().disallowed().iter().collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
     fn test_gss_pop() {
-        let root = Arc::new(GSSNode::new(mock_llm_acc(&[1, 2])));
-        let pushed = Arc::new(root.push(mock_edge(10), mock_llm_acc(&[2, 3])));
+        let root = Arc::new(GSSNode::new(mock_acc(1)));
+        let pushed = Arc::new(root.push(mock_edge(10), mock_acc(2)));
         
         let pop_result = pushed.pop();
         assert_eq!(pop_result.node_map.len(), 1);
@@ -1172,57 +1307,95 @@ mod tests {
         
         // Popping from `pushed` should yield `root`, but with its local acc updated
         // by `pushed`'s local acc.
-        let expected_local = root.local_acc.split(&pushed.local_acc);
-        assert_eq!(*popped_node_arc.local_acc, expected_local);
-        assert_eq!(popped_node_arc.local_acc.allowed_llm_tokens.iter().collect::<Vec<_>>(), vec![2]);
+        let expected_local = root.acc_manager.local.accumulate_seq(&pushed.acc_manager.local);
+        assert_eq!(*popped_node_arc.acc_manager.local, expected_local);
+        assert_eq!(popped_node_arc.acc_manager.local.llm_tokens().disallowed().iter().collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
     fn test_gss_merge() {
         // Path 1: 0 -> 10(acc1)
-        let n0 = Arc::new(GSSNode::new(fresh_acc()));
-        let n1 = Arc::new(n0.push(mock_edge(0), mock_llm_acc(&[1])));
+        let n0 = Arc::new(GSSNode::new(empty_acc()));
+        let n1 = Arc::new(n0.push(mock_edge(0), mock_acc(1)));
 
         // Path 2: 0 -> 20(acc2)
-        let n2 = Arc::new(n0.push(mock_edge(0), mock_llm_acc(&[2])));
+        let n2 = Arc::new(n0.push(mock_edge(0), mock_acc(2)));
 
         // Merge n1 and n2
         let mut merged = (*n1).clone();
         merged.merge(&n2);
 
-        // Merged local acc should be the merge (union) of the two local accs.
-        let expected_local = Acc::merge_many([n1.local_acc.as_ref(), n2.local_acc.as_ref()]);
-        assert_eq!(expected_local.allowed_llm_tokens.iter().collect::<Vec<_>>(), vec![1, 2]);
-        assert_eq!(*merged.local_acc, expected_local);
+        // Merged local acc should be the parallel merge (intersection of disallowed)
+        let expected_local = Acc::merge_parallel([n1.acc_manager.local.as_ref(), n2.acc_manager.local.as_ref()]);
+        assert!(expected_local.llm_tokens().is_empty()); // intersection of {1} and {2} is empty
+        assert_eq!(*merged.acc_manager.local, expected_local);
 
         // Merged node should have one predecessor (n0) from two paths
         assert_eq!(merged.num_predecessors(), 1);
 
-        // The full union of the merged node is its pred_union split with its local.
-        let pred_full_union = n0.full_union_acc();
-        let expected_pred_union = Acc::merge_many([&pred_full_union, &pred_full_union]);
-        assert_eq!(*merged.pred_union_acc, expected_pred_union);
-        
-        let full_union = merged.full_union_acc();
-        assert_eq!(full_union.allowed_llm_tokens.iter().collect::<Vec<_>>(), vec![1, 2]);
+        // The full union of the merged node should be the parallel merge of the predecessors' full unions,
+        // plus the merged local acc.
+        let pred_full_union = n0.full_union_acc(); // empty
+        let expected_union = Acc::merge_parallel([&pred_full_union, &pred_full_union]); // still empty
+        assert_eq!(*merged.acc_manager.union, expected_union);
+        assert!(merged.full_union_acc().is_empty());
+    }
+
+    #[test]
+    fn test_gss_simplification_basic() {
+        // This test mimics the structure of the old test but uses the new AccManager logic.
+        let acc_base = mock_acc(0); // Disallows {0}
+        let acc_other = mock_acc(1); // Disallows {1}
+
+        // Leaf nodes
+        let n4_v1 = Arc::new(GSSNode::new(acc_base.clone()));
+        let n4_v2 = Arc::new(GSSNode::new(acc_other.clone()));
+
+        // Path 1
+        let d1_orig = Arc::new(n4_v1.push(mock_edge(40), empty_acc()));
+        let c1_orig = Arc::new(d1_orig.push(mock_edge(30), empty_acc()));
+        let b1_orig = Arc::new(c1_orig.push(mock_edge(20), empty_acc()));
+
+        // Path 2
+        let d2_orig = Arc::new(n4_v2.push(mock_edge(40), empty_acc()));
+
+        // Root node A1, merging Path 1 and Path 2
+        let mut a1_preds_set = NodeSet::new();
+        a1_preds_set.insert((b1_orig.clone(), mock_edge(10)));
+        a1_preds_set.insert((d2_orig.clone(), mock_edge(10)));
+        let a1_preds_map = process_predecessors(&a1_preds_set);
+        let mut a1_orig = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), a1_preds_map));
+
+        // --- Verification before simplification ---
+        // Full union of b1 should be acc_base
+        assert_eq!(b1_orig.full_union_acc(), acc_base);
+        // Full union of d2 should be acc_other
+        assert_eq!(d2_orig.full_union_acc(), acc_other);
+        // Full union of a1 is the parallel merge of its predecessors' full unions.
+        // merge_parallel of Disallowed{0} and Disallowed{1} is Disallowed{}.
+        assert!(a1_orig.full_union_acc().is_empty());
     }
 
     #[test]
     fn test_gss_fuse_predecessors() {
         // Structure:
-        // root -> (B, edge 100)
-        // root -> (C, edge 100)
-        let leaf1 = Arc::new(GSSNode::new(mock_llm_acc(&[1])));
-        let leaf2 = Arc::new(GSSNode::new(mock_llm_acc(&[2])));
-        let b = Arc::new(leaf1.push(mock_edge(1), fresh_acc()));
-        let c_tmp = Arc::new(leaf2.push(mock_edge(2), fresh_acc()));
-        let c = Arc::new(c_tmp.push(mock_edge(3), fresh_acc()));
+        // root -> (B, edge 100) at depth 1
+        // root -> (C, edge 100) at depth 3
+        let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+        let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
+        let b = Arc::new(leaf1.push(mock_edge(1), empty_acc()));
+        let c_tmp = Arc::new(leaf2.push(mock_edge(2), empty_acc()));
+        let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3), empty_acc()));
+        let c = Arc::new(c_tmp2.push(mock_edge(4), empty_acc()));
+
+        assert_eq!(b.max_depth, 1);
+        assert_eq!(c.max_depth, 3);
 
         let mut preds_map = NodeMap::new();
         preds_map.insert((mock_edge(100), b.dest_key()), b.clone());
         preds_map.insert((mock_edge(100), c.dest_key()), c.clone());
 
-        let mut root = GSSNode::new_with_map(Arc::new(fresh_acc()), preds_map);
+        let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
         assert_eq!(root.num_predecessors(), 2);
 
         // Fuse predecessors of root (levels=1)
@@ -1231,9 +1404,9 @@ mod tests {
         assert_eq!(root.num_predecessors(), 1);
         let fused_pred_arc = root.predecessors().values().next().unwrap();
 
-        let mut allowed_vec: Vec<_> = fused_pred_arc.full_union_acc().allowed_llm_tokens.iter().collect();
-        allowed_vec.sort();
-        assert_eq!(allowed_vec, vec![1, 2]);
+        let mut disallowed_vec: Vec<_> = fused_pred_arc.full_union_acc().llm_tokens().disallowed().iter().collect();
+        disallowed_vec.sort();
+        assert_eq!(disallowed_vec, vec![1, 2]);
         assert_eq!(fused_pred_arc.num_predecessors(), 2);
     }
 
