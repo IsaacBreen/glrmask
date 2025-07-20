@@ -1,5 +1,4 @@
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use range_map_blaze::RangeMapBlaze;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign};
 
 /// A two-dimensional bitset, conceptually a map from `usize` to `HybridBitset`.
