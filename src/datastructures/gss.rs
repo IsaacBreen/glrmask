@@ -39,12 +39,14 @@ pub type TerminalInfo = HybridL2Bitset;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Acc {
     // Allowed LLM tokens
-    local_llm_tokens: HybridBitset,
+    local_union_llm_tokens: HybridBitset,
+    local_intersection_llm_tokens: HybridBitset,
     path_union_llm_tokens: HybridBitset,
     path_intersection_llm_tokens: HybridBitset,
 
     // Allowed Terminals
-    local_terminals: HybridL2Bitset,
+    local_union_terminals: HybridL2Bitset,
+    local_intersection_terminals: HybridL2Bitset,
     path_union_terminals: HybridL2Bitset,
     path_intersection_terminals: HybridL2Bitset,
 }
@@ -53,10 +55,12 @@ impl Acc {
     /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
     pub fn new_fresh() -> Self {
         Self {
-            local_llm_tokens: HybridBitset::max_ones(),
+            local_union_llm_tokens: HybridBitset::max_ones(),
+            local_intersection_llm_tokens: HybridBitset::max_ones(),
             path_union_llm_tokens: HybridBitset::zeros(),
             path_intersection_llm_tokens: HybridBitset::max_ones(),
-            local_terminals: HybridL2Bitset::all(),
+            local_union_terminals: HybridL2Bitset::all(),
+            local_intersection_terminals: HybridL2Bitset::all(),
             path_union_terminals: HybridL2Bitset::new(),
             path_intersection_terminals: HybridL2Bitset::all(),
         }
@@ -65,10 +69,12 @@ impl Acc {
     /// Creates an accumulator with specific local constraints for a root node.
     pub fn new_with_local_constraints(local_llm: HybridBitset, local_terminals: HybridL2Bitset) -> Self {
         Self {
-            local_llm_tokens: local_llm,
+            local_union_llm_tokens: local_llm.clone(),
+            local_intersection_llm_tokens: local_llm,
             path_union_llm_tokens: HybridBitset::zeros(),
             path_intersection_llm_tokens: HybridBitset::max_ones(),
-            local_terminals: local_terminals,
+            local_union_terminals: local_terminals.clone(),
+            local_intersection_terminals: local_terminals,
             path_union_terminals: HybridL2Bitset::new(),
             path_intersection_terminals: HybridL2Bitset::all(),
         }
@@ -100,20 +106,22 @@ impl Acc {
         }
 
         Self {
-            local_llm_tokens: local.local_llm_tokens.clone(),
+            local_union_llm_tokens: local.local_union_llm_tokens.clone(),
+            local_intersection_llm_tokens: local.local_intersection_llm_tokens.clone(),
             path_union_llm_tokens,
             path_intersection_llm_tokens,
-            local_terminals: local.local_terminals.clone(),
+            local_union_terminals: local.local_union_terminals.clone(),
+            local_intersection_terminals: local.local_intersection_terminals.clone(),
             path_union_terminals,
             path_intersection_terminals,
         }
     }
 
     // --- Accessors for final computed sets ---
-    pub fn union_llm_tokens(&self) -> HybridBitset { &self.path_union_llm_tokens | &self.local_llm_tokens }
-    pub fn intersection_llm_tokens(&self) -> HybridBitset { &self.path_intersection_llm_tokens & &self.local_llm_tokens }
-    pub fn union_terminals(&self) -> HybridL2Bitset { &self.path_union_terminals | &self.local_terminals }
-    pub fn intersection_terminals(&self) -> HybridL2Bitset { &self.path_intersection_terminals & &self.local_terminals }
+    pub fn union_llm_tokens(&self) -> HybridBitset { &self.path_union_llm_tokens | &self.local_union_llm_tokens }
+    pub fn intersection_llm_tokens(&self) -> HybridBitset { &self.path_intersection_llm_tokens & &self.local_intersection_llm_tokens }
+    pub fn union_terminals(&self) -> HybridL2Bitset { &self.path_union_terminals | &self.local_union_terminals }
+    pub fn intersection_terminals(&self) -> HybridL2Bitset { &self.path_intersection_terminals & &self.local_intersection_terminals }
 
 
     // --- Compatibility Wrappers ---
@@ -156,8 +164,10 @@ fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
 
 fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-    acc.local_llm_tokens.hash(&mut hasher);
-    acc.local_terminals.hash(&mut hasher);
+    acc.local_union_llm_tokens.hash(&mut hasher);
+    acc.local_intersection_llm_tokens.hash(&mut hasher);
+    acc.local_union_terminals.hash(&mut hasher);
+    acc.local_intersection_terminals.hash(&mut hasher);
     for ((edge_val, dest_key), pred_arc) in predecessors {
         edge_val.hash(&mut hasher);
         dest_key.hash(&mut hasher);
@@ -281,14 +291,19 @@ impl GSSNode {
         for ((edge_val, dest_key), pred_arc) in &self.predecessors {
             let mut new_pred_node = (**pred_arc).clone();
 
-            let new_local_llm = &pred_arc.acc.local_llm_tokens & &parent_acc.local_llm_tokens;
-            let new_local_terminals = &pred_arc.acc.local_terminals & &parent_acc.local_terminals;
+            let new_local_union_llm = &pred_arc.acc.local_union_llm_tokens & &parent_acc.local_union_llm_tokens;
+            let new_local_intersection_llm = &pred_arc.acc.local_intersection_llm_tokens & &parent_acc.local_intersection_llm_tokens;
+
+            let new_local_union_terminals = &pred_arc.acc.local_union_terminals & &parent_acc.local_union_terminals;
+            let new_local_intersection_terminals = &pred_arc.acc.local_intersection_terminals & &parent_acc.local_intersection_terminals;
 
             let new_acc = Arc::new(Acc {
-                local_llm_tokens: new_local_llm,
+                local_union_llm_tokens: new_local_union_llm,
+                local_intersection_llm_tokens: new_local_intersection_llm,
                 path_union_llm_tokens: pred_arc.acc.path_union_llm_tokens.clone(),
                 path_intersection_llm_tokens: pred_arc.acc.path_intersection_llm_tokens.clone(),
-                local_terminals: new_local_terminals,
+                local_union_terminals: new_local_union_terminals,
+                local_intersection_terminals: new_local_intersection_terminals,
                 path_union_terminals: pred_arc.acc.path_union_terminals.clone(),
                 path_intersection_terminals: pred_arc.acc.path_intersection_terminals.clone(),
             });
@@ -321,15 +336,23 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        if other.predecessors.is_empty() && other.acc.local_llm_tokens == HybridBitset::max_ones() { return; }
-        if self.predecessors.is_empty() && self.acc.local_llm_tokens == HybridBitset::max_ones() {
+        if other.predecessors.is_empty() && other.acc.local_union_llm_tokens == HybridBitset::max_ones() { return; }
+        if self.predecessors.is_empty() && self.acc.local_union_llm_tokens == HybridBitset::max_ones() {
             *self = other.clone();
             return;
         }
 
-        let merged_local_llm = &self.acc.local_llm_tokens | &other.acc.local_llm_tokens;
-        let merged_local_terminals = &self.acc.local_terminals | &other.acc.local_terminals;
-        let merged_local_acc = Arc::new(Acc::new_with_local_constraints(merged_local_llm, merged_local_terminals));
+        let merged_local_union_llm = &self.acc.local_union_llm_tokens | &other.acc.local_union_llm_tokens;
+        let merged_local_intersection_llm = &self.acc.local_intersection_llm_tokens & &other.acc.local_intersection_llm_tokens;
+        let merged_local_union_terminals = &self.acc.local_union_terminals | &other.acc.local_union_terminals;
+        let merged_local_intersection_terminals = &self.acc.local_intersection_terminals & &other.acc.local_intersection_terminals;
+        let merged_local_acc = Arc::new(Acc {
+            local_union_llm_tokens: merged_local_union_llm,
+            local_intersection_llm_tokens: merged_local_intersection_llm,
+            local_union_terminals: merged_local_union_terminals,
+            local_intersection_terminals: merged_local_intersection_terminals,
+            ..Acc::new_fresh()
+        });
         
         let mut new_predecessors = self.predecessors.clone();
         merge_node_maps(&mut new_predecessors, other.predecessors.clone());
@@ -498,7 +521,8 @@ pub fn allow_only_llm_tokens_and_prune_arc(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
-        new_acc.local_llm_tokens &= allowed_tokens;
+        new_acc.local_union_llm_tokens &= allowed_tokens;
+        new_acc.local_intersection_llm_tokens &= allowed_tokens;
 
         if new_acc.union_llm_tokens().is_empty() {
             None
@@ -528,8 +552,9 @@ pub fn reset_llm_tokens(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
-        let continue_recursion = new_acc.local_llm_tokens != HybridBitset::max_ones();
-        new_acc.local_llm_tokens = HybridBitset::max_ones();
+        let continue_recursion = new_acc.local_union_llm_tokens != HybridBitset::max_ones() || new_acc.local_intersection_llm_tokens != HybridBitset::max_ones();
+        new_acc.local_union_llm_tokens = HybridBitset::max_ones();
+        new_acc.local_intersection_llm_tokens = HybridBitset::max_ones();
         Some((new_acc, continue_recursion))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -546,7 +571,8 @@ pub fn disallow_terminals_and_prune_arc(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
-        new_acc.local_terminals = &new_acc.local_terminals - disallowed_terminals;
+        new_acc.local_union_terminals = &new_acc.local_union_terminals - disallowed_terminals;
+        new_acc.local_intersection_terminals = &new_acc.local_intersection_terminals - disallowed_terminals;
         Some((new_acc, true))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -591,23 +617,32 @@ pub fn map_allowed_terminals_tokenizer_states(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
-        let mut new_local_terminals = HybridL2Bitset::new();
-        let mut changed = false;
 
-        for (old_id_val, bv) in new_acc.local_terminals.iter_l1_bitsets() {
-            let old_id = TokenizerStateID(old_id_val);
-            if let Some(&new_id) = map.get(&old_id) {
-                new_local_terminals.insert_l2_bitset(new_id.0, bv.clone());
-                if old_id != new_id {
-                    changed = true;
+        let mut map_one = |terminals: &HybridL2Bitset| -> (HybridL2Bitset, bool) {
+            let mut new_terminals = HybridL2Bitset::new();
+            let mut changed = false;
+
+            for (old_id_val, bv) in terminals.iter_l1_bitsets() {
+                let old_id = TokenizerStateID(old_id_val);
+                if let Some(&new_id) = map.get(&old_id) {
+                    new_terminals.insert_l2_bitset(new_id.0, bv.clone());
+                    if old_id != new_id {
+                        changed = true;
+                    }
+                } else {
+                    changed = true; // a mapping was removed
                 }
-            } else {
-                changed = true;
             }
-        }
-        
-        new_acc.local_terminals = new_local_terminals;
-        Some((new_acc, changed))
+            (new_terminals, changed)
+        };
+
+        let (new_local_union, changed_union) = map_one(&new_acc.local_union_terminals);
+        let (new_local_intersection, changed_intersection) = map_one(&new_acc.local_intersection_terminals);
+
+        new_acc.local_union_terminals = new_local_union;
+        new_acc.local_intersection_terminals = new_local_intersection;
+
+        Some((new_acc, changed_union || changed_intersection))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -1032,11 +1067,12 @@ fn format_acc(
         }
     };
 
-    let local_llm_str = format_allowed_llm(&node.acc.local_llm_tokens, "LocalLLM");
+    let local_union_llm_str = format_allowed_llm(&node.acc.local_union_llm_tokens, "LocalUnionLLM");
+    let local_intersection_llm_str = format_allowed_llm(&node.acc.local_intersection_llm_tokens, "LocalIntersectionLLM");
     let union_llm_str = format_allowed_llm(&node.acc.union_llm_tokens(), "UnionLLM");
     let disallowed_terminals_str = format_disallowed_terminals(&node.acc.intersection_terminals());
 
-    format!("[{}, {}, {}]", local_llm_str, union_llm_str, disallowed_terminals_str)
+    format!("[{}, {}, {}, {}]", local_union_llm_str, local_intersection_llm_str, union_llm_str, disallowed_terminals_str)
 }
 
 
@@ -1065,7 +1101,8 @@ mod tests {
     fn test_gss_new_node() {
         let acc = mock_acc(1);
         let node = GSSNode::new(acc.clone());
-        assert_eq!(node.acc.local_llm_tokens, acc.local_llm_tokens);
+        assert_eq!(node.acc.local_union_llm_tokens, acc.local_union_llm_tokens);
+        assert_eq!(node.acc.local_intersection_llm_tokens, acc.local_intersection_llm_tokens);
         assert!(node.acc.path_union_llm_tokens.is_empty());
         assert_eq!(node.acc.path_intersection_llm_tokens, HybridBitset::max_ones());
         assert!(node.predecessors.is_empty());
@@ -1078,7 +1115,8 @@ mod tests {
         let pushed = root.push(mock_edge(10), mock_acc(2)); // Allows all but 2
 
         assert_eq!(pushed.max_depth, 1);
-        assert_eq!(pushed.acc.local_llm_tokens, mock_acc(2).local_llm_tokens);
+        assert_eq!(pushed.acc.local_union_llm_tokens, mock_acc(2).local_union_llm_tokens);
+        assert_eq!(pushed.acc.local_intersection_llm_tokens, mock_acc(2).local_intersection_llm_tokens);
         
         let expected_path_union = root.acc.union_llm_tokens();
         assert_eq!(pushed.acc.path_union_llm_tokens, expected_path_union);
@@ -1103,14 +1141,16 @@ mod tests {
         
         let popped_node_arc = pop_result.node_map.values().next().unwrap();
         
-        let expected_local = &root.acc.local_llm_tokens & &pushed.acc.local_llm_tokens;
-        assert_eq!(popped_node_arc.acc.local_llm_tokens, expected_local);
+        let expected_local_union = &root.acc.local_union_llm_tokens & &pushed.acc.local_union_llm_tokens;
+        assert_eq!(popped_node_arc.acc.local_union_llm_tokens, expected_local_union);
+        let expected_local_intersection = &root.acc.local_intersection_llm_tokens & &pushed.acc.local_intersection_llm_tokens;
+        assert_eq!(popped_node_arc.acc.local_intersection_llm_tokens, expected_local_intersection);
         
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
         disallowed.insert(2);
         let expected_allowed = HybridBitset::max_ones() - disallowed;
-        assert_eq!(popped_node_arc.acc.local_llm_tokens, expected_allowed);
+        assert_eq!(popped_node_arc.acc.local_union_llm_tokens, expected_allowed);
     }
 
     #[test]
@@ -1122,7 +1162,8 @@ mod tests {
         let mut merged = (*n1).clone();
         merged.merge(&n2);
 
-        assert_eq!(merged.acc.local_llm_tokens, HybridBitset::max_ones());
+        assert_eq!(merged.acc.local_union_llm_tokens, HybridBitset::max_ones());
+        assert_ne!(merged.acc.local_intersection_llm_tokens, HybridBitset::max_ones());
 
         assert_eq!(merged.num_predecessors(), 1);
 
@@ -1156,7 +1197,8 @@ mod tests {
         assert_eq!(root.num_predecessors(), 1);
         let fused_pred_arc = root.predecessors().values().next().unwrap();
 
-        assert_eq!(fused_pred_arc.acc.local_llm_tokens, HybridBitset::max_ones());
+        assert_eq!(fused_pred_arc.acc.local_union_llm_tokens, HybridBitset::max_ones());
+        assert_ne!(fused_pred_arc.acc.local_intersection_llm_tokens, HybridBitset::max_ones());
         assert_eq!(fused_pred_arc.num_predecessors(), 2);
     }
 
