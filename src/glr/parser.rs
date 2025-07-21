@@ -676,7 +676,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
                     crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
                     crate::debug!(6, "Popped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
-
                     let popped_peek_node = timeit!("GLRParserState::reduce_and_goto::process_peaks::to_node", { popped_peek.to_node() });
                     let new_gss_node = timeit!("GLRParserState::reduce_and_goto::process_peaks::push_with_existing_acc", { popped_peek_node.push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id }) });
                     crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], None, 30, &self.parser.terminal_map, None, None));
