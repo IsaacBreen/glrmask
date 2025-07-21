@@ -603,7 +603,7 @@ impl Display for GLRParser {
                 writeln!(f, "      - None (Merge state)")?;
             }
             if row.phase3_default_reduce.clone_and_merge {
-                writeln!(f, "      - Clone and merge after shift")?;
+                writeln!(f, "      - Clone and merge")?;
             } else {
                 writeln!(f, "      - No clone and merge")?;
             }
