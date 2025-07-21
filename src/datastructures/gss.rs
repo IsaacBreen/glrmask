@@ -244,7 +244,7 @@ impl GSSNode {
         Self::new_with_map(Arc::new(local_acc), predecessors_map)
     }
 
-    pub fn fresh_from_existing(_node: &GSSNode) -> Self {
+    pub fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
 

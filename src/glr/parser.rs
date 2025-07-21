@@ -103,7 +103,7 @@ impl ParseState {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh())) }
     }
     pub fn from_existing(existing: &Self) -> Self {
-        ParseState { stack: Arc::new(GSSNode::fresh_from_existing(&existing.stack)) }
+        ParseState { stack: Arc::new(GSSNode::new_fresh()) }
     }
 }
 
