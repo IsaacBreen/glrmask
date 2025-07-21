@@ -1074,7 +1074,7 @@ mod tests {
 
         assert_eq!(pushed.max_depth, 1);
         
-        let full_union = pushed.acc.llm_tokens;
+        let full_union = pushed.acc.llm_tokens.clone();
         assert_eq!(full_union, HybridBitset::max_ones());
 
     }
