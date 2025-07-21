@@ -249,33 +249,7 @@ impl GSSNode {
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The constraints of this node are applied to its predecessors.
     pub fn pop(&self) -> GSSPop {
-        let mut new_node_map = NodeMap::new();
-        let parent_acc = &self.acc;
-
-        for ((edge_val, dest_key), pred_arc) in &self.predecessors {
-            let mut new_pred_node = (**pred_arc).clone();
-
-            let new_llm_tokens = &pred_arc.acc.llm_tokens & &parent_acc.llm_tokens;
-            let new_terminals = &pred_arc.acc.terminals & &parent_acc.terminals;
-
-            let new_acc = Arc::new(Acc {
-                llm_tokens: new_llm_tokens,
-                terminals: new_terminals,
-            });
-
-            if new_acc.llm_tokens.is_empty() {
-                crate::debug!(6, "Dead path after pop");
-                continue;
-            }
-
-            new_pred_node.acc = new_acc;
-            new_pred_node.hash_key_cache = compute_hash_key(&new_pred_node.predecessors, &new_pred_node.acc);
-
-            let new_pred_arc = Arc::new(new_pred_node);
-            new_node_map.insert((edge_val.clone(), *dest_key), new_pred_arc);
-        }
-
-        GSSPop { parent_node: self, node_map: new_node_map }
+        GSSPop { parent_node: self, node_map: self.predecessors.clone() }
     }
 
     /// Pops `n` levels from the GSS.
