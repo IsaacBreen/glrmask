@@ -669,7 +669,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut out = Vec::new();
         // timeit!("GLRParserState::reduce_and_goto::process_peeks", {
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
-            let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
+            let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal `{}` not found in gotos for {:?} (processing predecessor ??)", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
