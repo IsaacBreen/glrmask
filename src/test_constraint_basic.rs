@@ -37,7 +37,7 @@ use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
 
 #[test]
 fn test_trivial() {
-    // Grammar: S -> "a"
+    // Grammar: S -> "a" "$"
     // Tokenizer: "a", "$"
     // LLM Vocab: "a", "$"
 
