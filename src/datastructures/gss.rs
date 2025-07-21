@@ -32,6 +32,10 @@ type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
 pub type TerminalInfo = HybridL2Bitset;
 
+// New struct for pop results
+#[derive(Debug, Clone, Default)]
+pub struct GSSPopResult(pub BTreeMap<Arc<GSSNode>, Arc<Acc>>);
+
 
 // --- Accumulator (Acc) ---
 
@@ -90,6 +94,38 @@ impl Acc {
     // --- Accessors for final computed sets ---
     pub fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens.clone() }
     pub fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals.clone() }
+
+    pub fn new_conservative_for_path_union() -> Self {
+        Self {
+            llm_tokens: HybridBitset::zeros(),
+            terminals: HybridL2Bitset::new(), // empty, not all()
+        }
+    }
+
+    pub fn path_union(&mut self, other: &Acc) {
+        self.llm_tokens |= &other.llm_tokens;
+        self.terminals |= &other.terminals;
+    }
+}
+
+impl<'a> BitAnd for &'a Acc {
+    type Output = Acc;
+    fn bitand(self, rhs: &'a Acc) -> Self::Output {
+        Acc {
+            llm_tokens: &self.llm_tokens & &rhs.llm_tokens,
+            terminals: &self.terminals & &rhs.terminals,
+        }
+    }
+}
+
+impl<'a> BitOr for &'a Acc {
+    type Output = Acc;
+    fn bitor(self, rhs: &'a Acc) -> Self::Output {
+        Acc {
+            llm_tokens: &self.llm_tokens | &rhs.llm_tokens,
+            terminals: &self.terminals | &rhs.terminals,
+        }
+    }
 }
 
 
@@ -104,19 +140,19 @@ pub struct GSSNode {
     max_depth: MaxDepth,
 }
 
-/// Represents the result of a `pop` operation on a `GSSNode` or another `GSSPop`.
-#[derive(Debug, Clone)]
-pub struct GSSPop<'a> {
-    pub parent_node: &'a GSSNode,
-    pub node_map: NodeMap,
-}
-
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
     pub(crate) parent_node: &'a GSSNode,
     edge_value: &'a ParseStateEdgeContent,
     pub(crate) predecessor_node: &'a Arc<GSSNode>,
+}
+
+impl GSSPopResult {
+    pub fn new() -> Self { Self::default() }
+    pub fn iter(&self) -> impl Iterator<Item = (&Arc<GSSNode>, &Arc<Acc>)> {
+        self.0.iter()
+    }
 }
 
 // Helper functions for GSSNode construction
@@ -246,17 +282,31 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, local_acc_for_new_node)
     }
 
-    /// Pops the top state from the stack(s), returning a `GSSPop` structure.
-    /// The constraints of this node are applied to its predecessors.
-    pub fn make_popper(&self) -> GSSPop {
-        GSSPop { parent_node: self, node_map: self.predecessors.clone() }
-    }
-
     /// Pops `n` levels from the GSS.
-    pub fn popn(&self, n: usize) -> GSSPop {
-        let popper = self.make_popper();
-        popper.popn(n);
-        popper
+    pub fn popn(&self, n: usize) -> GSSPopResult {
+        let mut current_pop = BTreeMap::new();
+        current_pop.insert(Arc::new(self.clone()), Arc::new(Acc::new_fresh()));
+
+        for _i in 0..n {
+            let mut next_pop = BTreeMap::new();
+            for (p_node, p_acc) in current_pop {
+                // The acc to propagate is the intersection of the parent's accumulated constraints
+                // and the constraints of the node itself.
+                let acc_for_children = Arc::new(p_acc.as_ref() & p_node.acc.as_ref());
+
+                for c_node in p_node.predecessors.values() {
+                    let entry = next_pop.entry(c_node.clone()).or_insert_with(|| Arc::new(Acc::new_conservative_for_path_union()));
+                    
+                    // Merge the possibilities. If a node is reachable via multiple paths,
+                    // its final Acc is the union of Accs from each path.
+                    let mut existing_acc = (**entry).clone();
+                    existing_acc.path_union(&acc_for_children);
+                    *entry = Arc::new(existing_acc);
+                }
+            }
+            current_pop = next_pop;
+        }
+        GSSPopResult(current_pop)
     }
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
@@ -306,47 +356,6 @@ impl GSSNode {
     }
 }
 
-impl GSSPop<'_> {
-    fn _pop(node_map: &NodeMap) -> NodeMap {
-        let mut combined_node_map = NodeMap::new();
-        for node_arc in node_map.values() {
-            let popped = node_arc.make_popper();
-            merge_node_maps(&mut combined_node_map, popped.node_map);
-        }
-        combined_node_map
-    }
-
-    pub fn pop(&self) -> GSSPop {
-        let node_map = Self::_pop(&self.node_map);
-        GSSPop { parent_node: self.parent_node, node_map }
-    }
-
-    pub fn popn(&self, n: usize) -> GSSPop {
-        if n == 0 {
-            return self.clone();
-        }
-        let mut current = self.node_map.clone();
-        for _ in 0..n {
-            current = Self::_pop(&current);
-        }
-        GSSPop { parent_node: self.parent_node, node_map: current }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (ParseStateEdgeContent, Arc<GSSNode>)> {
-        self.node_map.iter().map(|((edge_val, _dest_key), pred_arc)| (edge_val.clone(), pred_arc.clone()))
-    }
-
-    /// Converts the `GSSPop` into a single `GSSNode`.
-    pub fn to_node(&self) -> GSSNode {
-        let local_acc = Arc::new(Acc::new_conservative());
-        GSSNode::new_with_map(local_acc, self.node_map.clone())
-    }
-
-    pub fn num_predecessors(&self) -> usize {
-        self.node_map.len()
-    }
-}
-
 impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
     pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
@@ -363,7 +372,7 @@ impl<'a> GSSPeek<'a> {
         Arc::new(self.to_node())
     }
 
-    pub fn popn(&self, n: usize) -> GSSPop {
+    pub fn popn(&self, n: usize) -> GSSPopResult {
         self.to_arc_node().popn(n)
     }
 }
