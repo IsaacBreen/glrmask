@@ -33,13 +33,10 @@ impl TokenizerTerminalMap {
         Self(map)
     }
     pub fn is_empty(&self) -> bool { self.0.is_empty() || self.0.values().all(|v| v.is_empty()) }
-    pub fn get_l2_bitset(&self, key: usize) -> Option<&TerminalBV> { self.0.get(&TokenizerStateID(key)) }
-    pub fn insert_l2_bitset(&mut self, key: usize, bv: TerminalBV) { self.0.insert(TokenizerStateID(key), bv); }
-    pub fn iter_l1_bitsets(&self) -> impl Iterator<Item = (usize, &TerminalBV)> {
-        self.0.iter().map(|(k, v)| (k.0, v))
-    }
-    pub fn range_values(&self) -> impl Iterator<Item = (std::ops::RangeInclusive<usize>, &TerminalBV)> {
-        self.0.iter().map(|(k, v)| (k.0..=k.0, v))
+    pub fn get_terminals_for_state(&self, key: usize) -> Option<&TerminalBV> { self.0.get(&TokenizerStateID(key)) }
+    pub fn insert_terminals_for_state(&mut self, key: usize, bv: TerminalBV) { self.0.insert(TokenizerStateID(key), bv); }
+    pub fn iter(&self) -> impl Iterator<Item = (&TokenizerStateID, &TerminalBV)> {
+        self.0.iter()
     }
 }
 
@@ -675,7 +672,7 @@ pub fn prune_disallowed_terminals(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let allowed_by_all_paths = node.acc.intersection_terminals();
         for (state_id, matched_bv) in matched_terminals {
-            if let Some(allowed_l2) = allowed_by_all_paths.get_l2_bitset(state_id.0) {
+            if let Some(allowed_l2) = allowed_by_all_paths.get_terminals_for_state(state_id.0) {
                 if !matched_bv.is_subset(allowed_l2) {
                     return None;
                 }
@@ -710,7 +707,7 @@ pub fn map_allowed_terminals_tokenizer_states(
             for (old_id_val, bv) in terminals.0.iter() {
                 let old_id = old_id_val;
                 if let Some(&new_id) = map.get(&old_id) {
-                    new_terminals.insert_l2_bitset(new_id.0, bv.clone());
+                    new_terminals.insert_terminals_for_state(new_id.0, bv.clone());
                     if *old_id != TokenizerStateID(new_id.0) {
                         changed = true;
                     }
@@ -1119,36 +1116,34 @@ fn format_acc(
         if allowed_terminals.is_empty() {
             return "Terminals(All Disallowed)".to_string();
         }
-        let mut parts = Vec::new();
-        const MAX_PARTS: usize = 5;
-        for (range, allowed_bv) in allowed_terminals.range_values() {
-            if parts.len() >= MAX_PARTS {
-                parts.push("...".to_string());
+        let mut all_disallowed_info = Vec::new();
+        const MAX_STATE_PARTS: usize = 2; // Limit for number of tokenizer states to show
+        const MAX_TERMINAL_SAMPLES: usize = 3; // Limit for number of terminals per state
+
+        let mut state_count = 0;
+        for (tokenizer_state_id, allowed_bv) in allowed_terminals.iter() {
+            if state_count >= MAX_STATE_PARTS {
+                all_disallowed_info.push("...".to_string());
                 break;
             }
-            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+
+            let disallowed_bv = HybridBitset::max_ones() - allowed_bv; // Terminals NOT allowed for this state
+
             if !disallowed_bv.is_empty() {
-                const MAX_NAMES: usize = 3;
-                let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES)
-                    .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
-                        .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
-                    .collect();
-                let names_str = names.join(", ");
-                let ellipsis = if disallowed_bv.len() > MAX_NAMES { ", ..." } else { "" };
-
-                let range_str = if range.start() == range.end() {
-                    format!("{}", range.start())
-                } else {
-                    format!("{}..={}", range.start(), range.end())
-                };
-
-                parts.push(format!("State(s) {}:[{}{}]", range_str, names_str, ellipsis));
+                let mut terminal_names = Vec::new();
+                for (idx, terminal_id_val) in disallowed_bv.iter().enumerate() {
+                    if idx >= MAX_TERMINAL_SAMPLES { terminal_names.push("...".to_string()); break; }
+                    let terminal_name = terminal_map.get_by_right(&TerminalID(terminal_id_val)).map(|t| t.to_string()).unwrap_or_else(|| format!("UNKNOWN_TERM({})", terminal_id_val));
+                    terminal_names.push(terminal_name);
+                }
+                all_disallowed_info.push(format!("TS{}: [{}]", tokenizer_state_id.0, terminal_names.join(", ")));
+                state_count += 1;
             }
         }
-        if parts.is_empty() {
+        if all_disallowed_info.is_empty() {
             "Terminals(None Disallowed)".to_string()
         } else {
-            format!("Terminals({})", parts.join("; "))
+            format!("Terminals({})", all_disallowed_info.join("; "))
         }
     };
 
