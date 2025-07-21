@@ -64,6 +64,7 @@ fn test_super_simple_grammar() {
     ];
 
     let parser = generate_glr_parser(&productions, 0, None);
+    println!("Parser: {}", parser);
     
     let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
     let eof_token = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
