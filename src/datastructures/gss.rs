@@ -24,7 +24,6 @@ use profiler_macro::{time_it, timeit};
 pub struct TokenizerTerminalMap(pub BTreeMap<TokenizerStateID, TerminalBV>);
 
 impl TokenizerTerminalMap {
-    pub fn new() -> Self { Self::default() }
     pub fn all() -> Self { Self::default() } // Represents universal set, handled by ops.
     pub fn complement(&self) -> Self {
         // This is a tricky operation without a defined universe of keys.
@@ -143,7 +142,7 @@ impl Acc {
             path_intersection_llm_tokens: HybridBitset::max_ones(),
             local_union_terminals: TokenizerTerminalMap::all(),
             local_intersection_terminals: TokenizerTerminalMap::all(),
-            path_union_terminals: TokenizerTerminalMap::new(),
+            path_union_terminals: TokenizerTerminalMap::all(),
             path_intersection_terminals: TokenizerTerminalMap::all(),
         }
     }
