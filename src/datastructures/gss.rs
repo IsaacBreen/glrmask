@@ -540,7 +540,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
 
-        let mut map_one = |terminals: &HybridL2Bitset| -> (HybridL2Bitset, bool) {
+        let map_one = |terminals: &HybridL2Bitset| -> (HybridL2Bitset, bool) {
             let mut new_terminals = HybridL2Bitset::new();
             let mut changed = false;
 
