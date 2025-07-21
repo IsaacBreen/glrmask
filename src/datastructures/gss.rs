@@ -1011,19 +1011,21 @@ fn format_acc(
 ) -> String {
     let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
         if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-            const MAX_SAMPLES: usize = 3;
-            let token_samples: Vec<_> = bv.iter().take(MAX_SAMPLES)
+            const MAX_TO_SHOW: usize = 5;
+            let total_tokens = bv.len();
+            let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
                 .filter_map(|internal_id| bimap.get_by_right(&internal_id))
                 .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
                 .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
                 .collect();
 
             let samples_str = token_samples.join(", ");
-            let total_tokens = bv.len();
-            if total_tokens > MAX_SAMPLES {
+            if total_tokens > MAX_TO_SHOW {
                 format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
+            } else if total_tokens > 0 {
+                format!("{}([{}])", label, samples_str)
             } else {
-                format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
+                format!("{}(0 tokens)", label)
             }
         } else {
             format!("{}({} tokens)", label, bv.len())
@@ -1035,35 +1037,38 @@ fn format_acc(
             return "Terminals(All Disallowed)".to_string();
         }
         let mut parts = Vec::new();
-        const MAX_PARTS: usize = 5;
+        const MAX_RANGES_TO_SHOW: usize = 5;
         for (range, allowed_bv) in allowed_terminals.range_values() {
-            if parts.len() >= MAX_PARTS {
+            if parts.len() >= MAX_RANGES_TO_SHOW {
                 parts.push("...".to_string());
                 break;
             }
             let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
             if !disallowed_bv.is_empty() {
-                const MAX_NAMES: usize = 3;
-                let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES)
+                const MAX_NAMES_TO_SHOW: usize = 5;
+                let num_disallowed = disallowed_bv.len();
+                let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
                     .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
                         .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
                     .collect();
                 let names_str = names.join(", ");
-                let ellipsis = if disallowed_bv.len() > MAX_NAMES { ", ..." } else { "" };
 
                 let range_str = if range.start() == range.end() {
                     format!("{}", range.start())
                 } else {
                     format!("{}..={}", range.start(), range.end())
                 };
-
-                parts.push(format!("State(s) {}:[{}{}]", range_str, names_str, ellipsis));
+                if num_disallowed > MAX_NAMES_TO_SHOW {
+                    parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
+                } else {
+                    parts.push(format!("State(s) {}: [{}]", range_str, names_str));
+                }
             }
         }
         if parts.is_empty() {
             "Terminals(None Disallowed)".to_string()
         } else {
-            format!("Terminals({})", parts.join("; "))
+            format!("Disallowed Terminals({})", parts.join("; "))
         }
     };
 
