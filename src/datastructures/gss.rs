@@ -544,11 +544,10 @@ pub fn map_allowed_terminals_tokenizer_states(
             let mut new_terminals = HybridL2Bitset::new();
             let mut changed = false;
 
-            for (old_id_val, bv) in terminals.iter_l1_bitsets() {
-                let old_id = TokenizerStateID(old_id_val);
-                if let Some(&new_id) = map.get(&old_id) {
-                    new_terminals.insert_l2_bitset(new_id.0, bv.clone());
-                    if old_id != new_id {
+            for (old_state_id, new_state_id) in map {
+                if let Some(bv) = terminals.get_l2_bitset(old_state_id.0) {
+                    new_terminals.insert_l2_bitset(new_state_id.0, bv.clone());
+                    if old_state_id != new_state_id {
                         changed = true;
                     }
                 } else {
