@@ -12,14 +12,73 @@ use rand::{Rng, SeedableRng};
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
-use std::ops::{BitAnd, BitOr};
+use std::ops::{BitAnd, BitOr, Sub, BitAndAssign, BitOrAssign, SubAssign};
 use profiler_macro::{time_it, timeit};
 
 // --- Type Aliases ---
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct TokenizerTerminalMap(pub BTreeMap<TokenizerStateID, TerminalBV>);
+
+impl TokenizerTerminalMap {
+    pub fn new() -> Self { Self::default() }
+    pub fn all() -> Self { Self::default() } // Represents universal set, handled by ops.
+    pub fn complement(&self) -> Self {
+        // This is a tricky operation without a defined universe of keys.
+        // We'll assume it complements the values for existing keys.
+        let map = self.0.iter().map(|(k, v)| (*k, HybridBitset::max_ones() - v)).collect();
+        Self(map)
+    }
+    pub fn is_empty(&self) -> bool { self.0.is_empty() || self.0.values().all(|v| v.is_empty()) }
+    pub fn get_l2_bitset(&self, key: usize) -> Option<&TerminalBV> { self.0.get(&TokenizerStateID(key)) }
+    pub fn insert_l2_bitset(&mut self, key: usize, bv: TerminalBV) { self.0.insert(TokenizerStateID(key), bv); }
+    pub fn iter_l1_bitsets(&self) -> impl Iterator<Item = (usize, &TerminalBV)> {
+        self.0.iter().map(|(k, v)| (k.0, v))
+    }
+    pub fn range_values(&self) -> impl Iterator<Item = (std::ops::RangeInclusive<usize>, &TerminalBV)> {
+        self.0.iter().map(|(k, v)| (k.0..=k.0, v))
+    }
+}
+
+impl BitOr for &TokenizerTerminalMap {
+    type Output = TokenizerTerminalMap;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        let mut new_map = self.0.clone();
+        for (k, v) in &rhs.0 {
+            *new_map.entry(*k).or_default() |= v;
+        }
+        TokenizerTerminalMap(new_map)
+    }
+}
+
+impl BitAnd for &TokenizerTerminalMap {
+    type Output = TokenizerTerminalMap;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let mut new_map = BTreeMap::new();
+        for (k, v1) in &self.0 {
+            if let Some(v2) = rhs.0.get(k) {
+                new_map.insert(*k, v1 & v2);
+            }
+        }
+        TokenizerTerminalMap(new_map)
+    }
+}
+
+impl Sub for &TokenizerTerminalMap {
+    type Output = TokenizerTerminalMap;
+    fn sub(self, rhs: Self) -> Self::Output {
+        let mut new_map = self.0.clone();
+        for (k, v_rhs) in &rhs.0 {
+            if let Some(v_lhs) = new_map.get_mut(k) {
+                *v_lhs -= v_rhs;
+            }
+        }
+        TokenizerTerminalMap(new_map)
+    }
+}
 
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
@@ -30,7 +89,7 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-pub type TerminalInfo = HybridL2Bitset;
+pub type TerminalInfo = TokenizerTerminalMap;
 
 
 // --- Accumulator (Acc) ---
@@ -45,10 +104,10 @@ pub struct Acc {
     path_intersection_llm_tokens: HybridBitset,
 
     // Allowed Terminals
-    local_union_terminals: HybridL2Bitset,
-    local_intersection_terminals: HybridL2Bitset,
-    path_union_terminals: HybridL2Bitset,
-    path_intersection_terminals: HybridL2Bitset,
+    local_union_terminals: TokenizerTerminalMap,
+    local_intersection_terminals: TokenizerTerminalMap,
+    path_union_terminals: TokenizerTerminalMap,
+    path_intersection_terminals: TokenizerTerminalMap,
 }
 
 impl Acc {
@@ -59,15 +118,15 @@ impl Acc {
             local_intersection_llm_tokens: HybridBitset::max_ones(),
             path_union_llm_tokens: HybridBitset::zeros(),
             path_intersection_llm_tokens: HybridBitset::max_ones(),
-            local_union_terminals: HybridL2Bitset::all(),
-            local_intersection_terminals: HybridL2Bitset::all(),
-            path_union_terminals: HybridL2Bitset::new(),
-            path_intersection_terminals: HybridL2Bitset::all(),
+            local_union_terminals: TokenizerTerminalMap::all(),
+            local_intersection_terminals: TokenizerTerminalMap::all(),
+            path_union_terminals: TokenizerTerminalMap::new(),
+            path_intersection_terminals: TokenizerTerminalMap::all(),
         }
     }
 
     /// Creates an accumulator with specific local constraints for a root node.
-    pub fn new_with_local_constraints(local_llm: HybridBitset, local_terminals: HybridL2Bitset) -> Self {
+    pub fn new_with_local_constraints(local_llm: HybridBitset, local_terminals: TokenizerTerminalMap) -> Self {
         Self {
             local_union_llm_tokens: local_llm.clone(),
             local_intersection_llm_tokens: local_llm,
@@ -75,8 +134,8 @@ impl Acc {
             path_intersection_llm_tokens: HybridBitset::max_ones(),
             local_union_terminals: local_terminals.clone(),
             local_intersection_terminals: local_terminals,
-            path_union_terminals: HybridL2Bitset::new(),
-            path_intersection_terminals: HybridL2Bitset::all(),
+            path_union_terminals: TokenizerTerminalMap::new(),
+            path_intersection_terminals: TokenizerTerminalMap::all(),
         }
     }
 
@@ -84,8 +143,8 @@ impl Acc {
     fn from_preds<'a>(local: &Acc, pred_accs: impl IntoIterator<Item = &'a Arc<Acc>>) -> Self {
         let mut path_union_llm_tokens = HybridBitset::zeros();
         let mut path_intersection_llm_tokens = HybridBitset::max_ones();
-        let mut path_union_terminals = HybridL2Bitset::new();
-        let mut path_intersection_terminals = HybridL2Bitset::all();
+        let mut path_union_terminals = TokenizerTerminalMap::new();
+        let mut path_intersection_terminals = TokenizerTerminalMap::all();
         let mut has_preds = false;
 
         for p_acc in pred_accs {
@@ -120,8 +179,8 @@ impl Acc {
     // --- Accessors for final computed sets ---
     pub fn union_llm_tokens(&self) -> HybridBitset { &self.path_union_llm_tokens | &self.local_union_llm_tokens }
     pub fn intersection_llm_tokens(&self) -> HybridBitset { &self.path_intersection_llm_tokens & &self.local_intersection_llm_tokens }
-    pub fn union_terminals(&self) -> HybridL2Bitset { &self.path_union_terminals | &self.local_union_terminals }
-    pub fn intersection_terminals(&self) -> HybridL2Bitset { &self.path_intersection_terminals & &self.local_intersection_terminals }
+    pub fn union_terminals(&self) -> TokenizerTerminalMap { &self.path_union_terminals | &self.local_union_terminals }
+    pub fn intersection_terminals(&self) -> TokenizerTerminalMap { &self.path_intersection_terminals & &self.local_intersection_terminals }
 
 
     // --- Compatibility Wrappers ---
@@ -566,7 +625,7 @@ pub fn reset_llm_tokens(
 
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    disallowed_terminals: &HybridL2Bitset,
+    disallowed_terminals: &TokenizerTerminalMap,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
@@ -618,11 +677,11 @@ pub fn map_allowed_terminals_tokenizer_states(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
 
-        let mut map_one = |terminals: &HybridL2Bitset| -> (HybridL2Bitset, bool) {
-            let mut new_terminals = HybridL2Bitset::new();
+        let mut map_one = |terminals: &TokenizerTerminalMap| -> (TokenizerTerminalMap, bool) {
+            let mut new_terminals = TokenizerTerminalMap::new();
             let mut changed = false;
 
-            for (old_id_val, bv) in terminals.iter_l1_bitsets() {
+            for (old_id_val, bv) in terminals.0.iter() {
                 let old_id = TokenizerStateID(old_id_val);
                 if let Some(&new_id) = map.get(&old_id) {
                     new_terminals.insert_l2_bitset(new_id.0, bv.clone());
@@ -1030,7 +1089,7 @@ fn format_acc(
         }
     };
 
-    let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset| -> String {
+    let format_disallowed_terminals = |allowed_terminals: &TokenizerTerminalMap| -> String {
         if allowed_terminals.is_empty() {
             return "Terminals(All Disallowed)".to_string();
         }
@@ -1086,7 +1145,7 @@ mod tests {
         let mut disallowed_bv = LLMTokenBV::zeros();
         disallowed_bv.insert(val);
         let allowed_bv = HybridBitset::max_ones() - disallowed_bv;
-        Acc::new_with_local_constraints(allowed_bv, HybridL2Bitset::all())
+        Acc::new_with_local_constraints(allowed_bv, TokenizerTerminalMap::all())
     }
 
     fn empty_acc() -> Acc {

@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
@@ -19,7 +18,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc};
+use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, print_gss_forest, reset_llm_tokens, GSSNode, TokenizerTerminalMap};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1315,7 +1314,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                        let mut disallowed_terminals = TokenizerTerminalMap::new();
                         if let Some(end_state_id) = exec_result.end_state {
                             let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                             // Disallow this token from being matched again immediately.
