@@ -88,6 +88,24 @@ impl Sub for &TokenizerTerminalMap {
     }
 }
 
+impl BitAndAssign for TokenizerTerminalMap {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self = &*self & &rhs;
+    }
+}
+
+impl BitOrAssign for TokenizerTerminalMap {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = &*self | &rhs;
+    }
+}
+
+impl SubAssign for TokenizerTerminalMap {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = &*self - &rhs;
+    }
+}
+
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
 /// Maps a node's depth to its predecessors at that depth.
@@ -163,9 +181,9 @@ impl Acc {
             path_intersection_llm_tokens &= &p_intersection_llm;
 
             let p_union_terminals = p_acc.union_terminals();
-            path_union_terminals |= &p_union_terminals;
+            path_union_terminals |= p_union_terminals;
             let p_intersection_terminals = p_acc.intersection_terminals();
-            path_intersection_terminals &= &p_intersection_terminals;
+            path_intersection_terminals &= p_intersection_terminals;
         }
 
         if !has_preds {
@@ -690,10 +708,10 @@ pub fn map_allowed_terminals_tokenizer_states(
             let mut changed = false;
 
             for (old_id_val, bv) in terminals.0.iter() {
-                let old_id = TokenizerStateID(old_id_val);
+                let old_id = old_id_val;
                 if let Some(&new_id) = map.get(&old_id) {
                     new_terminals.insert_l2_bitset(new_id.0, bv.clone());
-                    if old_id != new_id {
+                    if *old_id != TokenizerStateID(new_id.0) {
                         changed = true;
                     }
                 } else {
