@@ -277,7 +277,6 @@ impl GLRParser {
             cycled_states: ParseState::new(),
             phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
         };
-        parser_state.log_gss("init_glr_parser_with_acc", TerminalID(0));
         parser_state.do_phase3();
         parser_state
     }
