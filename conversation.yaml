@@ -3448,16 +3448,19 @@ local_system:
                   const MAX_TO_SHOW: usize = 5;
                   let total_tokens = bv.len();
                   let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                      .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-                      .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                      .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                      .map(|internal_id| {
+                          bimap.get_by_right(&internal_id)
+                              .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
+                              .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                              .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
+                      })
                       .collect();
 
                   let samples_str = token_samples.join(", ");
                   if total_tokens > MAX_TO_SHOW {
                       format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
                   } else if total_tokens > 0 {
-                      format!("{}([{}])", label, samples_str)
+                      format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
                   } else {
                       format!("{}(0 tokens)", label)
                   }
@@ -3495,7 +3498,7 @@ local_system:
                       if num_disallowed > MAX_NAMES_TO_SHOW {
                           parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                       } else {
-                          parts.push(format!("State(s) {}: [{}]", range_str, names_str));
+                          parts.push(format!("State(s) {} ({} disallowed): [{}]", range_str, num_disallowed, names_str));
                       }
                   }
               }
@@ -7110,16 +7113,19 @@ local_system:
                   const MAX_TO_SHOW: usize = 5;
                   let total_tokens = bv.len();
                   let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                      .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-                      .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                      .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                      .map(|internal_id| {
+                          bimap.get_by_right(&internal_id)
+                              .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
+                              .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                              .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
+                      })
                       .collect();
 
                   let samples_str = token_samples.join(", ");
                   if total_tokens > MAX_TO_SHOW {
                       format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
                   } else if total_tokens > 0 {
-                      format!("{}([{}])", label, samples_str)
+                      format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
                   } else {
                       format!("{}(0 tokens)", label)
                   }
@@ -7157,7 +7163,7 @@ local_system:
                       if num_disallowed > MAX_NAMES_TO_SHOW {
                           parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                       } else {
-                          parts.push(format!("State(s) {}: [{}]", range_str, names_str));
+                          parts.push(format!("State(s) {} ({} disallowed): [{}]", range_str, num_disallowed, names_str));
                       }
                   }
               }
@@ -10805,16 +10811,19 @@ messages:
                   const MAX_TO_SHOW: usize = 5;
                   let total_tokens = bv.len();
                   let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                      .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-                      .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                      .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                      .map(|internal_id| {
+                          bimap.get_by_right(&internal_id)
+                              .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
+                              .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                              .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
+                      })
                       .collect();
 
                   let samples_str = token_samples.join(", ");
                   if total_tokens > MAX_TO_SHOW {
                       format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
                   } else if total_tokens > 0 {
-                      format!("{}([{}])", label, samples_str)
+                      format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
                   } else {
                       format!("{}(0 tokens)", label)
                   }
@@ -10852,7 +10861,7 @@ messages:
                       if num_disallowed > MAX_NAMES_TO_SHOW {
                           parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                       } else {
-                          parts.push(format!("State(s) {}: [{}]", range_str, names_str));
+                          parts.push(format!("State(s) {} ({} disallowed): [{}]", range_str, num_disallowed, names_str));
                       }
                   }
               }
@@ -11028,64 +11037,64 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: Improve format_acc so that if there's a small number of items in a set,
-      it shows them explicitly.
+  - user: |-
+      Often we allow the full range from 0 to usize::MAX of LLM tokens/terminals in the bitsets. But of course this isn't realistic. And it doesn't mean much to see `UnionLLM(18446744073709551615 tokens)`.
+      Improve format_acc so that it ignores the 'additional' indices and shows it more clearly.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed your request to improve the formatting of accumulator data for debugging. Specifically, you wanted to see the explicit items in a set when the number of items is small. I've made changes to `src/datastructures/gss.rs` to enhance the `format_acc` function.
+      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with large bitsets in debug output can indeed be tricky. Here are the suggested changes to improve the formatting for clarity.
 
-      Here are the patches for the modified file:
+      I'll adjust the `format_acc` function in `src/datastructures/gss.rs` to provide a more readable output when dealing with bitsets representing all possible tokens.
 
-      In `src/datastructures/gss.rs`, I've updated `format_acc` and its helper closures to:
-      1.  Always show the number of tokens/terminals for consistency.
-      2.  Display the contents of sets with a small number of items more explicitly.
-      3.  Handle cases where a token's string representation might not be found, falling back to its internal ID.
-
-      This should make the GSS printout much more informative for debugging.
-
-      ### `src/datastructures/gss.rs`
+      Here is the patch for `src/datastructures/gss.rs`:
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -1001,17 +1001,18 @@
+      @@ -1230,6 +1230,9 @@
+           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+       ) -> String {
+           let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+      +        if *bv == HybridBitset::max_ones() {
+      +            return format!("{}(All)", label);
+      +        }
                if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
                    const MAX_TO_SHOW: usize = 5;
                    let total_tokens = bv.len();
-                   let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-      -                .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-      -                .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-      -                .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-      +                .map(|internal_id| {
-      +                    bimap.get_by_right(&internal_id)
-      +                        .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-      +                        .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-      +                        .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
-      +                })
-                       .collect();
-       
-                   let samples_str = token_samples.join(", ");
-                   if total_tokens > MAX_TO_SHOW {
-                       format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-                   } else if total_tokens > 0 {
-      -                format!("{}([{}])", label, samples_str)
-      +                format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
-                   } else {
-                       format!("{}(0 tokens)", label)
+      @@ -1268,6 +1271,19 @@
                    }
-      @@ -1045,7 +1046,7 @@
+                   let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+                   if !disallowed_bv.is_empty() {
+      +                let range_str = if range.start() == range.end() {
+      +                    format!("{}", range.start())
+      +                } else {
+      +                    format!("{}..={}", range.start(), range.end())
+      +                };
+      +
+      +                if disallowed_bv == HybridBitset::max_ones() {
+      +                    parts.push(format!("State(s) {}: All disallowed", range_str));
+      +                    continue;
+      +                }
+      +
+                       const MAX_NAMES_TO_SHOW: usize = 5;
+                       let num_disallowed = disallowed_bv.len();
+                       let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+      @@ -1276,12 +1292,6 @@
+                           .collect();
+                       let names_str = names.join(", ");
+       
+      -                let range_str = if range.start() == range.end() {
+      -                    format!("{}", range.start())
+      -                } else {
+      -                    format!("{}..={}", range.start(), range.end())
+      -                };
                        if num_disallowed > MAX_NAMES_TO_SHOW {
                            parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                        } else {
-      -                    parts.push(format!("State(s) {}: [{}]", range_str, names_str));
-      +                    parts.push(format!("State(s) {} ({} disallowed): [{}]", range_str, num_disallowed, names_str));
-                       }
-                   }
-               }
 
       ```
 
-      I have not made any changes to `src/constraint.rs` or `src/datastructures/hybrid_bitset.rs` as the requested improvements were specific to the formatting logic within `src/datastructures/gss.rs`.
+      These changes introduce special handling for bitsets that contain all possible values (`HybridBitset::max_ones()`). Instead of printing a very large number for the count, it will now simply print "(All)" for LLM tokens or "All disallowed" for terminals within a specific tokenizer state range. This should make your debug output much more intuitive.
 
       Let me know if you have any other questions
     metadata:

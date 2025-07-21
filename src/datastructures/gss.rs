@@ -1029,6 +1029,9 @@ fn format_acc(
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
     let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+        if *bv == HybridBitset::max_ones() {
+            return format!("{}(All)", label);
+        }
         if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
             const MAX_TO_SHOW: usize = 5;
             let total_tokens = bv.len();
@@ -1067,6 +1070,17 @@ fn format_acc(
             }
             let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
             if !disallowed_bv.is_empty() {
+                let range_str = if range.start() == range.end() {
+                    format!("{}", range.start())
+                } else {
+                    format!("{}..={}", range.start(), range.end())
+                };
+
+                if disallowed_bv == HybridBitset::max_ones() {
+                    parts.push(format!("State(s) {}: All disallowed", range_str));
+                    continue;
+                }
+
                 const MAX_NAMES_TO_SHOW: usize = 5;
                 let num_disallowed = disallowed_bv.len();
                 let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
@@ -1075,11 +1089,6 @@ fn format_acc(
                     .collect();
                 let names_str = names.join(", ");
 
-                let range_str = if range.start() == range.end() {
-                    format!("{}", range.start())
-                } else {
-                    format!("{}..={}", range.start(), range.end())
-                };
                 if num_disallowed > MAX_NAMES_TO_SHOW {
                     parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                 } else {
