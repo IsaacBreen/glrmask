@@ -248,16 +248,15 @@ impl GSSNode {
 
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The constraints of this node are applied to its predecessors.
-    pub fn pop(&self) -> GSSPop {
+    pub fn make_popper(&self) -> GSSPop {
         GSSPop { parent_node: self, node_map: self.predecessors.clone() }
     }
 
     /// Pops `n` levels from the GSS.
-    pub fn popn(&self, n: usize) -> Self {
-        if n == 0 {
-            return self.clone();
-        }
-        self.pop().popn(n - 1).to_node()
+    pub fn popn(&self, n: usize) -> GSSPop {
+        let popper = self.make_popper();
+        popper.popn(n);
+        popper
     }
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
@@ -311,7 +310,7 @@ impl GSSPop<'_> {
     fn _pop(node_map: &NodeMap) -> NodeMap {
         let mut combined_node_map = NodeMap::new();
         for node_arc in node_map.values() {
-            let popped = node_arc.pop();
+            let popped = node_arc.make_popper();
             merge_node_maps(&mut combined_node_map, popped.node_map);
         }
         combined_node_map
@@ -333,10 +332,18 @@ impl GSSPop<'_> {
         GSSPop { parent_node: self.parent_node, node_map: current }
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (ParseStateEdgeContent, Arc<GSSNode>)> {
+        self.node_map.iter().map(|((edge_val, _dest_key), pred_arc)| (edge_val.clone(), pred_arc.clone()))
+    }
+
     /// Converts the `GSSPop` into a single `GSSNode`.
     pub fn to_node(&self) -> GSSNode {
         let local_acc = Arc::new(Acc::new_conservative());
         GSSNode::new_with_map(local_acc, self.node_map.clone())
+    }
+
+    pub fn num_predecessors(&self) -> usize {
+        self.node_map.len()
     }
 }
 
@@ -356,8 +363,8 @@ impl<'a> GSSPeek<'a> {
         Arc::new(self.to_node())
     }
 
-    pub fn popn(&self, n: usize) -> Arc<GSSNode> {
-        Arc::new(self.to_arc_node().popn(n))
+    pub fn popn(&self, n: usize) -> GSSPop {
+        self.to_arc_node().popn(n)
     }
 }
 
@@ -1055,7 +1062,7 @@ mod tests {
         let root = Arc::new(GSSNode::new(mock_acc(1)));
         let pushed = Arc::new(root.push(mock_edge(10), mock_acc(2)));
         
-        let pop_result = pushed.pop();
+        let pop_result = pushed.make_popper();
         assert_eq!(pop_result.node_map.len(), 1);
         
         let popped_node_arc = pop_result.node_map.values().next().unwrap();
