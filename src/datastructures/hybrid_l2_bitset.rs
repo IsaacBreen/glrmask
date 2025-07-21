@@ -1,7 +1,7 @@
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use range_set_blaze::prelude::*;
 use range_set_blaze::RangeMapBlaze;
-use std::ops::RangeInclusive;
+use std::ops::{RangeInclusive, SubAssign};
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub};
@@ -402,6 +402,18 @@ impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
     }
 }
 
+impl SubAssign for HybridL2Bitset {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = &*self - &rhs;
+    }
+}
+
+impl SubAssign<&HybridL2Bitset> for HybridL2Bitset {
+    fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
+        *self = &*self - rhs;
+    }
+}
+
 // --- Operations on owned values ---
 impl<'a> BitAnd<&'a HybridL2Bitset> for HybridL2Bitset {
     type Output = HybridL2Bitset;
@@ -414,6 +426,20 @@ impl<'a> BitOr<&'a HybridL2Bitset> for HybridL2Bitset {
     type Output = HybridL2Bitset;
     fn bitor(self, rhs: &'a HybridL2Bitset) -> Self::Output {
         &self | rhs
+    }
+}
+
+impl<'a> BitXor<&'a HybridL2Bitset> for HybridL2Bitset {
+    type Output = HybridL2Bitset;
+    fn bitxor(self, rhs: &'a HybridL2Bitset) -> Self::Output {
+        &self ^ rhs
+    }
+}
+
+impl<'a> Sub<&'a HybridL2Bitset> for HybridL2Bitset {
+    type Output = HybridL2Bitset;
+    fn sub(self, rhs: &'a HybridL2Bitset) -> Self::Output {
+        &self - rhs
     }
 }
 
