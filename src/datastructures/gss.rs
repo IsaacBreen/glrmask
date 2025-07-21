@@ -947,10 +947,8 @@ fn format_acc(
             let samples_str = token_samples.join(", ");
             if total_tokens > MAX_TO_SHOW {
                 format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-            } else if total_tokens > 0 {
-                format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
             } else {
-                format!("{}(0 tokens)", label)
+                format!("{}([{}])", label, samples_str)
             }
         } else {
             format!("{}({} tokens)", label, bv.len())
@@ -992,7 +990,7 @@ fn format_acc(
                 if num_disallowed > MAX_NAMES_TO_SHOW {
                     parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                 } else {
-                    parts.push(format!("State(s) {} ({} disallowed): [{}]", range_str, num_disallowed, names_str));
+                    parts.push(format!("State(s) {}: [{}]", range_str, names_str));
                 }
             }
         }
