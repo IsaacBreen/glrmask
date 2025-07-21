@@ -52,7 +52,7 @@ fn test_trivial() {
     llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
 
     let productions = vec![
-        prod("S", vec![t("A")]),
+        prod("S", vec![t("A"), t("EOF")]),
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
