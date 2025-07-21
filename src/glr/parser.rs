@@ -600,7 +600,7 @@ impl Display for GLRParser {
                 let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
                 writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
             } else {
-                writeln!(f, "      - None (Merge state)")?;
+                writeln!(f, "      - None")?;
             }
             if row.phase3_default_reduce.clone_and_merge {
                 writeln!(f, "      - Clone and merge")?;
