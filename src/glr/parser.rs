@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
@@ -660,25 +660,33 @@ impl<'a> GLRParserState<'a> { // No longer generic
         nt: NonTerminalID,
         len: usize,
     ) -> Arc<GSSNode> {
-        let popped = timeit!(peek.popn(len));
+        if len == 0 {
+            // For a length-0 reduction, we are effectively pushing a new non-terminal state
+            // on top of the current stack paths without popping anything.
+            // The `peek` gives us the current top-of-stack states.
+            let goto = self.parser.stage_7_table.get(&peek.edge_value().state_id)
+                .and_then(|row| row.gotos.get(&nt))
+                .unwrap_or_else(|| panic!("Goto not found for NT {:?} in state {:?}", nt, peek.edge_value().state_id));
+
+            return match goto {
+                Goto::State(goto_state_id) => {
+                    // Create a new node representing the GOTO state, with the peek's parent as predecessor.
+                    Arc::new(peek.isolated_parent().push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative()))
+                }
+                Goto::Accept => Arc::new(GSSNode::new_conservative()), // Should not happen for len 0 reduce
+            };
+        }
+
+        let popped = timeit!(peek.popn(len)); // Pops len-1 from predecessor
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
-        crate::debug!(6, "Reducing by {} with parent node: {}", len, print_gss_forest(&[Arc::new(peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
-        crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
-        crate::debug!(6, "...and popped peek node: {}", print_gss_forest(&[Arc::new(popped.to_node())], None, 30, &self.parser.terminal_map, None, None));
-        // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
+
         let mut out = Vec::new();
-        // timeit!("GLRParserState::reduce_and_goto::process_peeks", {
-        for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
-            let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal `{}` not found in gotos for {:?} (processing predecessor ??)", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
+        for popper_item in popped.iter() {
+            let goto = self.parser.stage_7_table.get(&popper_item.edge.state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
-                    // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
-                    crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
-                    crate::debug!(6, "Popped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
-                    let popped_peek_node = timeit!("GLRParserState::reduce_and_goto::process_peaks::to_node", { popped_peek.to_node() });
-                    let new_gss_node = timeit!("GLRParserState::reduce_and_goto::process_peaks::push_with_existing_acc", { popped_peek_node.push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id }) });
-                    crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], None, 30, &self.parser.terminal_map, None, None));
-                    crate::debug!(6, "New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], None, 30, &self.parser.terminal_map, None, None));
+                    let resolved_node = popper_item.resolved_node();
+                    let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
                     out.push(new_gss_node);
                 }
                 Goto::Accept => {
@@ -686,8 +694,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
-        // });
-        // timeit!("GLRParserState::reduce_and_goto::merge_results", {
+
         if out.is_empty() {
             Arc::new(GSSNode::new_conservative())
         } else if out.len() == 1 {
@@ -700,7 +707,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
             Arc::new(out_node)
         }
-        // })
     }
 
     #[time_it("GLRParserState::do_phase1_and_2")]
@@ -732,7 +738,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                                let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
@@ -744,7 +750,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                    let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
@@ -771,7 +777,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                                let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
@@ -782,7 +788,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    let new_parse_state = self.push_state(&peek.to_arc_node(), ParseStateEdgeContent { state_id: *to });
+                                    let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
@@ -835,7 +841,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     }
                     if row.phase3_default_reduce.clone_and_merge {
-                        next.merge(ParseState { stack: peek.to_arc_node() });
+                        next.merge(ParseState { stack: Arc::new(peek.isolated_parent()) });
                     }
                 }
             }
