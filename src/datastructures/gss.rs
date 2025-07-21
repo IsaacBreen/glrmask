@@ -55,11 +55,11 @@ impl Acc {
     /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
     pub fn new_fresh() -> Self {
         Self {
-            local_union_llm_tokens: HybridBitset::max_ones(),
+            local_union_llm_tokens: HybridBitset::zeros(),
             local_intersection_llm_tokens: HybridBitset::max_ones(),
             path_union_llm_tokens: HybridBitset::zeros(),
             path_intersection_llm_tokens: HybridBitset::max_ones(),
-            local_union_terminals: HybridL2Bitset::all(),
+            local_union_terminals: HybridL2Bitset::new(),
             local_intersection_terminals: HybridL2Bitset::all(),
             path_union_terminals: HybridL2Bitset::new(),
             path_intersection_terminals: HybridL2Bitset::all(),
