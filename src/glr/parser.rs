@@ -691,7 +691,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // });
         // timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
-            Arc::new(GSSNode::new(Acc::new_conservative()))
+            Arc::new(GSSNode::new_conservative())
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {
