@@ -122,12 +122,6 @@ impl Acc {
     pub fn intersection_llm_tokens(&self) -> HybridBitset { &self.path_intersection_llm_tokens & &self.local_intersection_llm_tokens }
     pub fn union_terminals(&self) -> HybridL2Bitset { &self.path_union_terminals | &self.local_union_terminals }
     pub fn intersection_terminals(&self) -> HybridL2Bitset { &self.path_intersection_terminals & &self.local_intersection_terminals }
-
-
-    // --- Compatibility Wrappers ---
-    pub fn new_fresh_without_vocab() -> Self { Self::new_fresh() }
-    pub fn new_fresh_from_existing(_acc: &Acc) -> Self { Self::new_fresh() }
-    pub fn new_fresh_from_existing_stack(_stack: &GSSNode) -> Self { Self::new_fresh() }
 }
 
 
