@@ -246,15 +246,10 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, local_acc_for_new_node)
     }
 
-    fn make_popper(&self) -> GSSPop {
-        GSSPop { parent_node: self, node_map: self.predecessors.clone() }
-    }
-
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The constraints of this node are applied to its predecessors.
     pub fn pop(&self) -> GSSPop {
-        GSSPop { parent_node: self, node_map: GSSPop::_pop(&self.predecessors) }
-        // self.make_popper()
+        GSSPop { parent_node: self, node_map: self.predecessors.clone() }
     }
 
     /// Pops `n` levels from the GSS.
