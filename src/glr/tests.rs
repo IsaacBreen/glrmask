@@ -57,6 +57,30 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
 // --- Tests for Full Parser Generation and Parsing ---
 
 #[test]
+fn test_super_simple_grammar() {
+    // Grammar: S -> "a" "$"
+    let productions = vec![
+        prod("S", vec![t("a"), t("$")]), // Start rule
+    ];
+
+    let parser = generate_glr_parser(&productions, 0, None);
+    
+    let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+    let eof_token = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+
+    // Test case 1: Valid input "a$"
+    let mut state_ok = parser.init_glr_parser(None);
+    state_ok.step(a_token);
+    state_ok.step(eof_token);
+    assert!(state_ok.is_ok(), "Parse should succeed for 'a$'");
+
+    // Test case 2: Invalid input "$"
+    let mut state_fail = parser.init_glr_parser(None);
+    state_fail.step(eof_token); // wrong token
+    assert!(!state_fail.is_ok(), "Parse should fail for input '$'");
+}
+
+#[test]
 fn test_simple_parse_table_generation_and_parse() {
     // This test now implicitly checks that the simple grammar passes validation.
     let parser = create_simple_parser();
