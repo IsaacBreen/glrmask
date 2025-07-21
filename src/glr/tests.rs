@@ -98,6 +98,7 @@ fn test_simple_parse_table_generation_and_parse() {
     ];
 
     for (input, expected_match) in test_cases {
+        println!("Testing input: '{}'", input);
         let tokens = tokenize(&parser, input);
         let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
         state.parse(&tokens);
