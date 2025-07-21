@@ -255,7 +255,7 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(Acc::new_conservative())
+        self.init_glr_parser_with_acc(Acc::new_fresh())
     }
 
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -293,15 +293,14 @@ impl GLRParser {
     }
 
     pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(Acc::new_conservative())
+        self.init_parse_state_with_acc(Acc::new_fresh())
     }
 
     pub fn init_parse_state_with_acc(&self, initial_acc: Acc) -> ParseState { // No longer generic
-        let initial_user_data: Arc<dyn UserDataTrait> = Arc::new(());
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(Acc::new_conservative())); // root has empty acc
+        let root = Arc::new(GSSNode::new(initial_acc.clone()));
         let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
     }
