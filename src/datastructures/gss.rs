@@ -1033,16 +1033,19 @@ fn format_acc(
             const MAX_TO_SHOW: usize = 5;
             let total_tokens = bv.len();
             let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-                .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                .map(|internal_id| {
+                    bimap.get_by_right(&internal_id)
+                        .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
+                        .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                        .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
+                })
                 .collect();
 
             let samples_str = token_samples.join(", ");
             if total_tokens > MAX_TO_SHOW {
                 format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
             } else if total_tokens > 0 {
-                format!("{}([{}])", label, samples_str)
+                format!("{}({} tokens: [{}])", label, total_tokens, samples_str)
             } else {
                 format!("{}(0 tokens)", label)
             }
@@ -1080,7 +1083,7 @@ fn format_acc(
                 if num_disallowed > MAX_NAMES_TO_SHOW {
                     parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
                 } else {
-                    parts.push(format!("State(s) {}: [{}]", range_str, names_str));
+                    parts.push(format!("State(s) {} ({} disallowed): [{}]", range_str, num_disallowed, names_str));
                 }
             }
         }
