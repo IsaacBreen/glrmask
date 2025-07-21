@@ -109,7 +109,7 @@ pub struct GSSNode {
 pub struct GSSPeek<'a> {
     pub(crate) parent_node: &'a GSSNode,
     edge_value: &'a ParseStateEdgeContent,
-    pub(crate) predecessor_node: &'a Arc<GSSNode>,
+    pub predecessor_node: &'a Arc<GSSNode>,
 }
 
 /// Represents the result of a `pop` operation, containing a map of resulting nodes
@@ -873,7 +873,7 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
 
         path.push(chosen_peek.edge_value().clone());
 
-        temp_arc_storage = chosen_peek.predecessor().clone();
+        temp_arc_storage = chosen_peek.predecessor_node.clone();
         current_node = &temp_arc_storage;
     }
 
@@ -1107,21 +1107,36 @@ mod tests {
 
     #[test]
     fn test_gss_pop() {
-        let root = Arc::new(GSSNode::new(mock_acc(1)));
-        let pushed = Arc::new(root.push(mock_edge(10), mock_acc(2)));
-        
-        let pop_result = pushed.make_popper();
-        assert_eq!(pop_result.node_map.len(), 1);
-        
-        let popped_node_arc = pop_result.node_map.values().next().unwrap();
-        
-        let expected_llm_tokens = &root.acc.llm_tokens & &pushed.acc.llm_tokens;
-        assert_eq!(popped_node_arc.acc.llm_tokens, expected_llm_tokens);
-        
+        let root = Arc::new(GSSNode::new(mock_acc(1))); // Allows all but 1
+        let pushed = Arc::new(root.push(mock_edge(10), mock_acc(2))); // Allows all but 2
+
+        // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path.
+        let pop_result = pushed.popn(1, Arc::new(Acc::new_fresh()));
+        assert_eq!(pop_result.paths.len(), 1);
+
+        // The result of the pop is one path, ending at `root` via `mock_edge(10)`.
+        let ((popped_node_arc, popped_edge), path_acc) = pop_result.paths.iter().next().unwrap();
+
+        // The node we landed on is the original root.
+        assert!(Arc::ptr_eq(popped_node_arc, &root));
+        // The edge we traversed "backwards" is the one we pushed with.
+        assert_eq!(*popped_edge, mock_edge(10));
+
+        // The `path_acc` is the `acc` from the node we popped from (`pushed`).
+        assert_eq!(*path_acc, pushed.acc);
+
+        // The `resolved_acc` for this path is the intersection of the path's constraints
+        // and the destination node's own constraints.
+        let popper_item = pop_result.iter().next().unwrap();
+        let resolved_acc = popper_item.resolved_acc();
+
+        // `pushed.acc` allows all but 2. `root.acc` allows all but 1.
+        // The intersection should allow all but 1 and 2.
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
+        disallowed.insert(2);
         let expected_allowed = HybridBitset::max_ones() - disallowed;
-        assert_eq!(popped_node_arc.acc.llm_tokens, expected_allowed);
+        assert_eq!(resolved_acc.llm_tokens, expected_allowed);
     }
 
     #[test]
