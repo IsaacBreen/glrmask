@@ -100,10 +100,10 @@ pub struct ParseState { // No longer generic
 
 impl ParseState {
     pub fn new_without_vocab() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_conservative())) }
+        ParseState { stack: Arc::new(GSSNode::new_fresh()) }
     }
     pub fn from_existing(existing: &Self) -> Self {
-        ParseState { stack: Arc::new(GSSNode::new_conservative()) }
+        ParseState::new_without_vocab()
     }
 }
 

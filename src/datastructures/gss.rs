@@ -262,6 +262,10 @@ impl GSSNode {
         Self::new(Acc::new_conservative())
     }
 
+    pub fn new_fresh() -> Self {
+        Self::new(Acc::new_fresh())
+    }
+
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
