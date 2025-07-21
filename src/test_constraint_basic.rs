@@ -60,6 +60,7 @@ fn test_trivial() {
     grammar_token_map.insert(terminal("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
     token_name_map.insert(terminal("A"), 0);
