@@ -48,7 +48,7 @@ impl BitOr for &TokenizerTerminalMap {
     fn bitor(self, rhs: Self) -> Self::Output {
         let mut new_map = self.0.clone();
         for (k, v) in &rhs.0 {
-            *new_map.entry(*k).or_default() |= v;
+            new_map.entry(*k).and_modify(|existing_bv| { *existing_bv |= v; }).or_insert_with(|| v.clone());
         }
         TokenizerTerminalMap(new_map)
     }
@@ -60,7 +60,10 @@ impl BitAnd for &TokenizerTerminalMap {
         let mut new_map = BTreeMap::new();
         for (k, v1) in &self.0 {
             if let Some(v2) = rhs.0.get(k) {
-                new_map.insert(*k, v1 & v2);
+                let intersection = v1 & v2;
+                if !intersection.is_empty() {
+                    new_map.insert(*k, intersection);
+                }
             }
         }
         TokenizerTerminalMap(new_map)
@@ -70,10 +73,15 @@ impl BitAnd for &TokenizerTerminalMap {
 impl Sub for &TokenizerTerminalMap {
     type Output = TokenizerTerminalMap;
     fn sub(self, rhs: Self) -> Self::Output {
-        let mut new_map = self.0.clone();
-        for (k, v_rhs) in &rhs.0 {
-            if let Some(v_lhs) = new_map.get_mut(k) {
-                *v_lhs -= v_rhs;
+        let mut new_map = BTreeMap::new();
+        for (k, v1) in &self.0 {
+            if let Some(v2) = rhs.0.get(k) {
+                let difference = v1 - v2;
+                if !difference.is_empty() {
+                    new_map.insert(*k, difference);
+                }
+            } else {
+                new_map.insert(*k, v1.clone());
             }
         }
         TokenizerTerminalMap(new_map)
