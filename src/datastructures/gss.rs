@@ -256,7 +256,7 @@ impl GSSNode {
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on *every* path to this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
-        self.acc.intersection_terminals().complement()
+        self.acc.union_terminals().complement()
     }
 
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
