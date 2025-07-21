@@ -318,7 +318,8 @@ impl GSSPop<'_> {
     }
 
     pub fn pop(&self) -> GSSPop {
-        GSSPop { parent_node: self.parent_node, node_map: Self::_pop(&self.node_map) }
+        let node_map = Self::_pop(&self.node_map);
+        GSSPop { parent_node: self.parent_node, node_map }
     }
 
     pub fn popn(&self, n: usize) -> GSSPop {
