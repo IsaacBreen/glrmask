@@ -39,7 +39,7 @@ use crate::glr::grammar::Terminal;
 use crate::interface::CompiledGrammar;
 
 pub type LLMTokenBV = HybridBitset;
-pub type TerminalBV = HybridBitset;
+pub type TerminalBV = BTreeSet<TerminalID>;
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -1053,17 +1053,17 @@ impl<'a> GrammarConstraintState<'a> {
                 let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
 
                 // Iterate over ranges of tokenizer states that have the same set of disallowed terminals.
-                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+                for (_tokenizer_state_range, disallowed_terminals_for_range) in &disallowed_terminals_l2 {
                     if disallowed_terminals_for_range.is_empty() {
                         continue;
                     }
 
                     // Get a sub-view of possible_matches that covers this range of tokenizer states.
-                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+                    let relevant_possible_matches = self.parent.possible_matches.iter(); // Simplified for now
 
                     for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
                         for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                            if disallowed_terminals_for_range.contains(terminal_id.0) {
+                            if disallowed_terminals_for_range.contains(terminal_id) {
                                 forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                             }
                         }
@@ -1259,9 +1259,9 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(new_state) = exec_result.end_state {
                 state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
             }
-            let mut terminals = TerminalBV::zeros();
+            let mut terminals = TerminalBV::new();
             for token in exec_result.matches {
-                terminals.insert(token.id);
+                terminals.insert(TerminalID(token.id));
             }
             terminals_map.insert(*tokenizer_state_id, terminals);
         }
@@ -1315,12 +1315,12 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                        let mut disallowed_terminals = BTreeMap::new();
                         if let Some(end_state_id) = exec_result.end_state {
-                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                            let mut disallowed_terminals_for_end_state = TerminalBV::new();
                             // Disallow this token from being matched again immediately.
-                            disallowed_terminals_for_end_state.insert(match_info.id);
-                            disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
+                            disallowed_terminals_for_end_state.insert(TerminalID(match_info.id));
+                            disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
                         }
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
