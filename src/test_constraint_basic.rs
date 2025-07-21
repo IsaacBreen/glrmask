@@ -36,6 +36,67 @@ use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
 // For the symbol removal helper
 
 #[test]
+fn test_trivial() {
+    // Grammar: S -> "a"
+    // Tokenizer: "a", "$"
+    // LLM Vocab: "a", "$"
+
+    let tokenizer_expr = groups![
+        eat_u8(b'a'), // ID 0
+        eat_u8(b'$'), // ID 1
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+
+    let productions = vec![
+        prod("S", vec![t("A")]),
+    ];
+
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(terminal("A"), TerminalID(0));
+    grammar_token_map.insert(terminal("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(terminal("A"), 0);
+    token_name_map.insert(terminal("EOF"), 1);
+
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        1, // max_original_llm_token_id
+    );
+
+    let mut state = constraint.init();
+
+    // Initial mask should allow "a"
+    let mask1 = state.get_mask();
+    assert_eq!(mask1, HybridBitset::from_iter(vec![0]));
+
+    // Commit "a"
+    state.commit(LLMTokenID(0));
+    assert!(state.is_active());
+
+    // Mask should now allow "$"
+    let mask2 = state.get_mask();
+    assert_eq!(mask2, HybridBitset::from_iter(vec![1]));
+
+    // Commit "$"
+    state.commit(LLMTokenID(1));
+    assert!(state.is_active());
+
+    // Mask should now be empty as we've reached the end of a valid parse
+    let mask3 = state.get_mask();
+    assert!(mask3.is_empty());
+}
+
+#[test]
 fn test_constraint_simple() {
     // LLM tokens: "ab", "ac", "$"
     // Grammar tokens: "a", "ab", "b|c", "$" (EOF)
