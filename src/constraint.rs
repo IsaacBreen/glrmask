@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
@@ -18,7 +19,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, print_gss_forest, reset_llm_tokens, GSSNode, TokenizerTerminalMap};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -33,7 +34,6 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
-use crate::datastructures::ordered_hash_map::Retain;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
 use crate::glr::grammar::Terminal;
 use crate::interface::CompiledGrammar;
@@ -387,6 +387,10 @@ impl GrammarConstraint {
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
+        // for internal_id_val in internal_bv.iter() {
+        //     let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV from internal BV: {:?}", internal_id_val, internal_bv).as_str());
+        //     original_bv.insert(*original_id_val as usize);
+        // }
         for i in 0..=self.llm_vocab.internal_max_llm_token {
             if internal_bv.contains(i) {
                 if let Some(original_id_val) = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&i) {
@@ -1046,13 +1050,22 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::max_ones();
-                let disallowed_terminals_for_gss = glr_state.active_state.stack.disallowed_terminals();
-                for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss.iter() {
-                    let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
-                    for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if disallowed_terminals_for_state.contains(terminal_id.0) {
-                            // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
-                            forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
+
+                // Iterate over ranges of tokenizer states that have the same set of disallowed terminals.
+                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+                    if disallowed_terminals_for_range.is_empty() {
+                        continue;
+                    }
+
+                    // Get a sub-view of possible_matches that covers this range of tokenizer states.
+                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+
+                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
+                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                            if disallowed_terminals_for_range.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                            }
                         }
                     }
                 }
@@ -1302,12 +1315,12 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                        let mut disallowed_terminals = TokenizerTerminalMap::all();
+                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
                         if let Some(end_state_id) = exec_result.end_state {
                             let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                             // Disallow this token from being matched again immediately.
                             disallowed_terminals_for_end_state.insert(match_info.id);
-                            disallowed_terminals.insert_terminals_for_state(end_state_id, disallowed_terminals_for_end_state);
+                            disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
                         }
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
