@@ -72,6 +72,7 @@ fn test_trivial() {
         token_name_map,
         1, // max_original_llm_token_id
     );
+    constraint.dump_precomputed();
 
     let mut state = constraint.init();
 
