@@ -99,11 +99,8 @@ pub struct ParseState { // No longer generic
 }
 
 impl ParseState {
-    pub fn new_without_vocab() -> Self {
+    pub fn new() -> Self {
         ParseState { stack: Arc::new(GSSNode::new_fresh()) }
-    }
-    pub fn from_existing(existing: &Self) -> Self {
-        ParseState::new_without_vocab()
     }
 }
 
@@ -264,9 +261,9 @@ impl GLRParser {
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
-            active_state: ParseState::new_without_vocab(),
-            action_not_found_states: ParseState::new_without_vocab(),
-            cycled_states: ParseState::new_without_vocab(),
+            active_state: ParseState::new(),
+            action_not_found_states: ParseState::new(),
+            cycled_states: ParseState::new(),
             phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
         }
     }
@@ -276,8 +273,8 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
-            action_not_found_states: ParseState::new_without_vocab(),
-            cycled_states: ParseState::new_without_vocab(),
+            action_not_found_states: ParseState::new(),
+            cycled_states: ParseState::new(),
             phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
         };
         parser_state.do_phase3();
@@ -287,8 +284,8 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
-            action_not_found_states: ParseState::new_without_vocab(),
-            cycled_states: ParseState::new_without_vocab(),
+            action_not_found_states: ParseState::new(),
+            cycled_states: ParseState::new(),
             phase: ParserPhase::ReadyForPhase3,
         };
         parser_state.do_phase3();
@@ -807,7 +804,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
 
         // Consolidate all shifted states into the new active_state for phase 3
-        let mut next_active = ParseState::new_without_vocab();
+        let mut next_active = ParseState::new();
         for state in shifted_states_todo {
             next_active.merge(state);
         }
@@ -828,7 +825,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             phase3_todo.push_back(self.active_state.clone());
         }
 
-        let mut next = ParseState::new_without_vocab();
+        let mut next = ParseState::new();
 
         timeit!("GLRParserState::step::phase3", {
             while let Some(state) = phase3_todo.pop_front() {
