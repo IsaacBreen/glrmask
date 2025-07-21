@@ -257,8 +257,8 @@ impl GSSNode {
     fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
-    pub fn max_depth(&self) -> MaxDepth { self.max_depth }
-    pub fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
+    fn max_depth(&self) -> MaxDepth { self.max_depth }
+    fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
     
     /// Returns the set of LLM tokens allowed by *any* path ending at this node.
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.acc.union_llm_tokens() }
@@ -266,7 +266,7 @@ impl GSSNode {
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on *every* path to this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
-        self.acc.union_terminals().complement()
+        self.acc.intersection_terminals().complement()
     }
 
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
