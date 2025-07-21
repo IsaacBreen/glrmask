@@ -253,8 +253,7 @@ impl GSSNode {
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The constraints of this node are applied to its predecessors.
     pub fn pop(&self) -> GSSPop {
-        let pop = self.make_popper();
-        let node_map = GSSPop::_pop(&pop.node_map);
+        let node_map = GSSPop::_pop(&self.predecessors);
         let popped = GSSPop { parent_node: self, node_map };
         popped
         // self.make_popper()
