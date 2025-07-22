@@ -585,6 +585,47 @@ fn test_hidden_left_recursion() {
 }
 
 #[test]
+fn test_right_recursive_grammar_parse() {
+    // Grammar: S' -> S $
+    //          S  -> 'a' S | 'b'
+    // This grammar is right-recursive. The `generate_glr_parser` function should
+    // transform it into a left-recursive equivalent, and the resulting parser
+    // should correctly parse the language (a*b).
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start rule
+        prod("S", vec![t("a"), nt("S")]),
+        prod("S", vec![t("b")]),
+    ];
+
+    // The generation process automatically resolves the right recursion.
+    let parser = generate_glr_parser(&productions, 0, None);
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+
+    let test_cases = [
+        ("b", true),
+        ("ab", true),
+        ("aab", true),
+        ("aaab", true),
+        ("a", false),   // Must end in 'b'
+        ("ba", false),  // Cannot have 'a' after 'b'
+        ("bb", false),  // Cannot have two 'b's
+    ];
+
+    for (input, expected_match) in test_cases {
+        let tokens = tokenize(&parser, input);
+        let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+        state.parse(&tokens);
+        state.step(eof);
+        assert_eq!(
+            state.is_ok(),
+            expected_match,
+            "Parse check failed for right-recursive input: '{}'",
+            input
+        );
+    }
+}
+
+#[test]
 fn test_hidden_right_recursion() {
     // Grammar: S' -> S $
     //          S  -> a S B | b
