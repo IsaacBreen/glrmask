@@ -37,11 +37,14 @@ impl DynHash for () {
     fn dyn_hash(&self, _state: &mut dyn std::hash::Hasher) { }
 }
 
+pub trait UserDataTrait: Any + Send + Sync + Debug + DynEq + DynOrd + DynHash {}
+impl UserDataTrait for () {}
+
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
 #[derive(Debug, Clone)]
-pub struct ParseStateEdgeContent {
+pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
 impl PartialEq for ParseStateEdgeContent {
@@ -394,7 +397,7 @@ impl GLRParser {
                     sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
 
                     for (terminal_id, action) in sorted_actions {
-                        let terminal = self.terminal_map.get_by_right(terminal_id).unwrap();
+                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
                         write!(&mut result, "    - On '{}': ", terminal).unwrap();
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
@@ -642,7 +645,7 @@ pub struct GLRParserState<'a> { // No longer generic
 impl<'a> GLRParserState<'a> { // No longer generic
     fn push_state(
         &self,
-        stack: &Arc<GSSNode>,
+        stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
@@ -658,37 +661,42 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
     ) -> Arc<GSSNode> {
         if len == 0 {
-            // Special-case zero-length reduction: just push on the same node.
+            // For a length-0 reduction, we are effectively pushing a new non-terminal state
+            // on top of the current stack paths without popping anything.
+            // The `peek` gives us the current top-of-stack states.
             let goto = self.parser.stage_7_table.get(&peek.edge_value().state_id)
                 .and_then(|row| row.gotos.get(&nt))
                 .unwrap_or_else(|| panic!("Goto not found for NT {:?} in state {:?}", nt, peek.edge_value().state_id));
 
             return match goto {
                 Goto::State(goto_state_id) => {
-                    Arc::new(peek.isolated_parent()
-                        .push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative()))
+                    // Create a new node representing the GOTO state, with the peek's parent as predecessor.
+                    Arc::new(peek.isolated_parent().push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative()))
                 }
-                Goto::Accept => Arc::new(GSSNode::new_conservative()),
+                Goto::Accept => Arc::new(GSSNode::new_conservative()), // Should not happen for len 0 reduce
             };
         }
 
         let popped = timeit!(peek.popn(len)); // Pops len-1 from predecessor
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
-        // Remove verbose debug …
 
         let mut out = Vec::new();
         for popper_item in popped.iter() {
-            let goto = self.parser.stage_7_table
-                .get(&popper_item.edge.state_id)
-                .and_then(|row| row.gotos.get(&nt))
-                .unwrap();
-
-            let resolved_node = popper_item.resolved_node();
-            let new_gss_node = resolved_node.push(
-                ParseStateEdgeContent { state_id: *goto },
-                Acc::new_conservative(),
-            );
-            out.push(new_gss_node);
+            let goto = self.parser.stage_7_table.get(&popper_item.edge.state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
+            match goto {
+                Goto::State(goto_state_id) => {
+                    // Get the resolved node from the pop operation's result.
+                    let resolved_node = popper_item.resolved_node();
+                    
+                    // Push the new GOTO state onto this resolved node. This is equivalent to
+                    // the convenience method `popper_item.push(...)`.
+                    let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                    out.push(new_gss_node);
+                }
+                Goto::Accept => {
+                    // No action needed for Accept
+                }
+            }
         }
 
         if out.is_empty() {
@@ -753,7 +761,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     for (nt, _prod_ids) in nts {
                                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                             if !s_new_arc.is_empty() {
-                                                phase2_todo.push_back(ParseState { stack: s_new_arc });
+                                                let new_parse_state = ParseState { stack: s_new_arc };
+                                                phase2_todo.push_back(new_parse_state);
                                             }
                                     }
                                 }
@@ -909,7 +918,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
                                        stats.unique_nodes,
                                        p.len(),
-                                       p.iter().map(|(ec, _n)| ec.state_id.0)
+                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                             .map(|id| id.to_string())
                                             .collect::<Vec<_>>()
                                             .join(" → ")),
