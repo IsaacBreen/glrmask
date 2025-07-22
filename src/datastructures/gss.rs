@@ -320,7 +320,7 @@ impl GSSNode {
     }
 
     /// Performs a multi-level pop operation on this node.
-    pub fn popn(&self, n: usize, initial_acc: Arc<Acc>) -> GSSPopper {
+    pub fn popn(&self, n: usize) -> GSSPopper {
         let mut popper = GSSPopper::new_from_node(Arc::new(self.clone()), Arc::new(Acc::new_fresh()));
         popper.popn(n);
         popper
@@ -1113,7 +1113,7 @@ mod tests {
         let pushed = Arc::new(root.push(mock_edge(10), mock_acc(2))); // Allows all but 2
 
         // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path.
-        let pop_result = pushed.popn(1, Arc::new(Acc::new_fresh()));
+        let pop_result = pushed.popn(1);
         assert_eq!(pop_result.paths.len(), 1);
 
         // The result of the pop is one path, ending at `root`.
