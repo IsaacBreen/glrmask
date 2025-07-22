@@ -63,7 +63,7 @@ def main():
     # Pane width configuration: flex-grow ratio for code vs details panes.
     # For 1/3 code vs 2/3 details split, use 1 and 2. For 50/50, use 1 and 1.
     code_pane_flex_ratio = 1
-    details_pane_flex_ratio = 1
+    details_pane_flex_ratio = 5
 
     full_text = source_path.read_text(encoding='utf-8')
     log_content = log_path.read_text(encoding='utf-8')
