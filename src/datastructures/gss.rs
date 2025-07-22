@@ -132,7 +132,7 @@ pub struct GSSPopperItem<'a> {
 impl GSSPopper {
     /// Creates a new, empty `GSSPopper`.
     pub fn new() -> Self {
-        Self::default()
+        Self { paths: Default::default() }
     }
 
     /// Returns an iterator over the items in the popper.
@@ -144,6 +144,7 @@ impl GSSPopper {
         })
     }
 
+    /// Number of resulting paths.
     pub fn num_predecessors(&self) -> usize {
         self.paths.len()
     }
@@ -164,7 +165,7 @@ impl<'a> GSSPopperItem<'a> {
         GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.node.predecessors.clone())
     }
 
-    /// Pushes a new state onto the resolved node from this popper item.
+    /// Pushes a new state onto this resolved node.
     pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         self.resolved_node().push(edge_value, local_acc)
     }
@@ -182,7 +183,7 @@ fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
     for ((edge_val, dest_key), pred_arc) in predecessors {
         edge_val.hash(&mut hasher);
         dest_key.hash(&mut hasher);
-        pred_arc.hash_key_cache.hash(&mut hasher);
+        pred_arc.hash_key_cache.hash(hasher);
     }
     hasher.finish()
 }
@@ -195,7 +196,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 
     for (pred_arc, edge_val) in incoming {
         grouped
-            .entry((edge_val.clone(), pred_arc.dest_key()))
+            .entry((edge_val.clone(), pred_arc.max_depth()))
             .or_default()
             .push(pred_arc.clone());
     }
@@ -274,10 +275,10 @@ impl GSSNode {
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
     fn max_depth(&self) -> MaxDepth { self.max_depth }
     fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
-    
+
     /// Returns the set of LLM tokens allowed by *any* path ending at this node.
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.acc.llm_tokens.clone() }
-    
+
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on *every* path to this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
@@ -285,7 +286,7 @@ impl GSSNode {
     }
 
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
-    
+
     /// A path is alive if it allows at least one LLM token.
     pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
 }
@@ -343,15 +344,15 @@ impl GSSNode {
 
         let new_llm_tokens = &self.acc.llm_tokens | &other.acc.llm_tokens;
         let new_terminals = &self.acc.terminals & &other.acc.terminals;
-        
+
         let merged_acc = Arc::new(Acc {
             llm_tokens: new_llm_tokens,
             terminals: new_terminals,
         });
-        
+
         let mut new_predecessors = self.predecessors.clone();
         merge_node_maps(&mut new_predecessors, other.predecessors.clone());
-        
+
         *self = GSSNode::new_with_map(merged_acc, new_predecessors);
     }
 
@@ -364,7 +365,7 @@ impl GSSNode {
         let acc = (*self.acc).clone();
         self.push(edge_value, acc)
     }
-    
+
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
         self.predecessors.iter().map(|((edge_val, _dest_key), pred_arc)| {
@@ -430,7 +431,6 @@ impl<'a> GSSPeek<'a> {
             (*self.parent_node.acc).clone(),
         )
     }
-
 }
 
 // Trait implementations for GSSNode
@@ -1224,3 +1224,4 @@ mod tests {
         assert_eq!(path1, path1_again);
     }
 }
+
