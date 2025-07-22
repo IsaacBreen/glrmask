@@ -677,24 +677,37 @@ impl<'a> GLRParserState<'a> { // No longer generic
             };
         }
 
-        let popped = timeit!(peek.popn(len)); // Pops len from predecessor
-        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+        let popped = timeit!(peek.popn(len));
+        crate::debug!(4, "Popped with {} results...", popped.paths.len());
 
         let mut out = Vec::new();
         for popper_item in popped.iter() {
-            let goto = self.parser.stage_7_table.get(&popper_item.edge.state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
-            match goto {
-                Goto::State(goto_state_id) => {
-                    // Get the resolved node from the pop operation's result.
-                    let resolved_node = popper_item.resolved_node();
-                    
-                    // Push the new GOTO state onto this resolved node. This is equivalent to
-                    // the convenience method `popper_item.push(...)`.
-                    let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
-                    out.push(new_gss_node);
+            let resolved_node = popper_item.resolved_node();
+
+            if resolved_node.predecessors().is_empty() {
+                let state_id = self.parser.start_state_id;
+                if let Some(goto) = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)) {
+                     match goto {
+                        Goto::State(goto_state_id) => {
+                            let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                            out.push(new_gss_node);
+                        }
+                        Goto::Accept => {}
+                    }
+                } else {
+                    panic!("Goto not found for NT {:?} in start state {:?}", nt, state_id);
                 }
-                Goto::Accept => {
-                    // No action needed for Accept
+            } else {
+                for ((edge_content, _), _pred_arc) in resolved_node.predecessors() {
+                    let state_id = edge_content.state_id;
+                    let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
+                    match goto {
+                        Goto::State(goto_state_id) => {
+                            let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                            out.push(new_gss_node);
+                        }
+                        Goto::Accept => {}
+                    }
                 }
             }
         }
