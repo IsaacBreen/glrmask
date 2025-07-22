@@ -725,7 +725,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                                let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
@@ -737,7 +737,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
@@ -764,7 +764,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                                let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
@@ -775,7 +775,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
