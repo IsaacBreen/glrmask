@@ -129,9 +129,10 @@ pub struct GSSPopperItem<'a> {
 }
 
 impl GSSPopper {
-    /// Creates a new, empty `GSSPopper`.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
+        let mut popper = Self::default();
+        popper.paths.insert(node, acc);
+        popper
     }
 
     /// Returns an iterator over the items in the popper.
@@ -144,6 +145,29 @@ impl GSSPopper {
 
     pub fn num_predecessors(&self) -> usize {
         self.paths.len()
+    }
+
+    pub fn popn(&mut self, n: usize) {
+        for _ in 0..n {
+            let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
+            for (parent, path_acc) in std::mem::take(&mut self.paths) {
+                for child in parent.predecessors.values() {
+                    let new_path_acc = Arc::new(Acc {
+                        llm_tokens: &path_acc.llm_tokens & &child.acc.llm_tokens,
+                        terminals: &path_acc.terminals & &child.acc.terminals,
+                    });
+                    if let Some(existing_acc) = new_paths.get_mut(child) {
+                        *existing_acc = Arc::new(Acc {
+                            llm_tokens: &existing_acc.llm_tokens | &new_path_acc.llm_tokens,
+                            terminals: &existing_acc.terminals | &new_path_acc.terminals,
+                        });
+                    } else {
+                        new_paths.insert(child.clone(), new_path_acc);
+                    }
+                }
+            }
+            self.paths = new_paths;
+        }
     }
 }
 
@@ -297,37 +321,9 @@ impl GSSNode {
 
     /// Performs a multi-level pop operation on this node.
     pub fn popn(&self, n: usize, initial_acc: Arc<Acc>) -> GSSPopper {
-        let mut popper = GSSPopper::new();
-        if n == 0 {
-            popper.paths.insert(Arc::new(self.clone()), Arc::new(Acc::new_fresh()));
-            return popper;
-        }
-        self._popn_recursive(n, initial_acc, &mut popper);
+        let mut popper = GSSPopper::new_from_node(Arc::new(self.clone()), Arc::new(Acc::new_fresh()));
+        popper.popn(n);
         popper
-    }
-
-    /// The recursive implementation for `popn`.
-    fn _popn_recursive(&self, n: usize, path_acc: Arc<Acc>, popper: &mut GSSPopper) {
-        let new_path_acc = Arc::new(Acc {
-            llm_tokens: &path_acc.llm_tokens & &self.acc.llm_tokens,
-            terminals: &path_acc.terminals & &self.acc.terminals,
-        });
-
-        if n == 1 {
-            for pred_arc in self.predecessors.values() {
-                popper.paths.entry(pred_arc.clone())
-                    .and_modify(|existing_acc| {
-                        let new_llm = &existing_acc.llm_tokens | &new_path_acc.llm_tokens;
-                        let new_terminals = &existing_acc.terminals & &new_path_acc.terminals;
-                        *Arc::make_mut(existing_acc) = Acc { llm_tokens: new_llm, terminals: new_terminals };
-                    })
-                    .or_insert(new_path_acc.clone());
-            }
-        } else { // n > 1
-            for pred_arc in self.predecessors.values() {
-                pred_arc._popn_recursive(n - 1, new_path_acc.clone(), popper);
-            }
-        }
     }
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
@@ -403,24 +399,10 @@ impl<'a> GSSPeek<'a> {
     /// Performs a multi-level pop starting from this peek's predecessor.
     /// A pop of length `len` from a peek corresponds to `len-1` pops from the predecessor node.
     pub fn popn(&self, len: usize) -> GSSPopper {
-        if len == 0 {
-            let mut popper = GSSPopper::new();
-            let isolated_parent = Arc::new(self.isolated_parent());
-            popper.paths.insert(isolated_parent, Arc::new(Acc::new_fresh()));
-            return popper;
-        }
-        // A pop of length 1 from a peek reveals the predecessor node itself.
-        // The path's accumulated Acc is the parent's Acc.
-        if len == 1 {
-            let mut popper = GSSPopper::new();
-            popper.paths.insert(
-                self.predecessor_node.clone(),
-                self.parent_node.acc.clone(),
-            );
-            return popper;
-        }
-        // For pops longer than 1, we continue popping n-1 times from the predecessor.
-        self.predecessor_node.popn(len - 1, self.parent_node.acc.clone())
+        let isolated_parent = Arc::new(self.isolated_parent());
+        let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
+        popper.popn(len - 1);
+        return popper;
     }
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
@@ -908,7 +890,7 @@ pub fn print_gss_forest(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    return "".to_string();
+    // return "".to_string();
     // Recursive helper to print predecessors.
     fn print_predecessors_recursive(
         node_arc: &Arc<GSSNode>,
