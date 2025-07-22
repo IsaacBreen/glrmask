@@ -650,13 +650,12 @@ pub fn map_allowed_terminals_tokenizer_states(
             let mut changed = false;
 
             for (old_state_id, new_state_id) in map {
-                if let Some(bv) = terminals.get_l2_bitset(old_state_id.0) {
-                    new_terminals.insert_l2_bitset(new_state_id.0, bv.clone());
-                    if old_state_id != new_state_id {
-                        changed = true;
-                    }
-                } else {
-                    changed = true; // a mapping was removed
+                let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
+                let bv_dst_existing = new_terminals.get_l2_bitset(new_state_id.0).unwrap();
+                let bv_dst_combined = bv_source | bv_dst_existing;
+                new_terminals.insert_l2_bitset(new_state_id.0, bv_dst_combined);
+                if old_state_id != new_state_id && bv_dst_combined.is_full() {
+                    changed = true;
                 }
             }
             (new_terminals, changed)

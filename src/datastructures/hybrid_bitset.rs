@@ -126,6 +126,9 @@ impl HybridBitset {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+    pub fn is_full(&self) -> bool {
+        self == &HybridBitset::max_ones()
+    }
 
     /// Checks if a specific index is set.
     pub fn contains(&self, index: usize) -> bool {
