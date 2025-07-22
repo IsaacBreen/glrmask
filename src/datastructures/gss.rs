@@ -643,7 +643,6 @@ pub fn map_allowed_terminals_tokenizer_states(
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
-    println!("Mapping allowed terminals to tokenizer states with map: {:?}", map);
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
 
@@ -671,9 +670,6 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         new_acc.terminals_union = new_terminals_union;
         new_acc.terminals_intersection = new_terminals_intersection;
-
-        println!("Accs before: {:?}", node.acc);
-        println!("Accs after: {:?}", new_acc);
 
         Some((new_acc, true))
     };
