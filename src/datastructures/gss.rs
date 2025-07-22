@@ -76,7 +76,7 @@ impl Acc {
         }
     }
 
-    pub fn rejoin(&self, rhs: &Self) -> Self {
+    pub fn narrow(&self, rhs: &Self) -> Self {
         Acc {
             llm_tokens_union: &self.llm_tokens_union & &rhs.llm_tokens_union,
             llm_tokens_intersection: &self.llm_tokens_intersection & &rhs.llm_tokens_intersection,
@@ -103,7 +103,7 @@ impl Acc {
             for p_acc in pred_iter {
                 combined_preds_acc = combined_preds_acc.merge(p_acc.as_ref());
             }
-            local.rejoin(&combined_preds_acc)
+            local.narrow(&combined_preds_acc)
         } else {
             // No predecessors, just use local constraints.
             local.clone()
@@ -183,7 +183,7 @@ impl GSSPopper {
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
                 for child in parent.predecessors.values() {
-                    let new_path_acc = Arc::new(path_acc.rejoin(&child.acc));
+                    let new_path_acc = Arc::new(path_acc.narrow(&child.acc));
                     if let Some(existing_acc) = new_paths.get_mut(child) {
                         *existing_acc = Arc::new(existing_acc.merge(&new_path_acc));
                     } else {
@@ -199,7 +199,7 @@ impl GSSPopper {
 impl<'a> GSSPopperItem<'a> {
     /// Returns the combined `Acc` of the path and the destination node.
     pub fn resolved_acc(&self) -> Acc {
-        self.path_acc.rejoin(&self.node.acc)
+        self.path_acc.narrow(&self.node.acc)
     }
 
     /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
@@ -230,7 +230,7 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Returns the combined `Acc` of the path and the predecessor node.
     pub fn resolved_acc(&self) -> Acc {
-        self.path_acc.rejoin(self.parent_acc).rejoin(&self.predecessor_node.acc)
+        self.path_acc.narrow(self.parent_acc).narrow(&self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -242,7 +242,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         let resolved_acc = self.resolved_acc();
-        let acc = resolved_acc.rejoin(&local_acc);
+        let acc = resolved_acc.narrow(&local_acc);
         self.predecessor_node.push(edge_value, acc)
     }
 
@@ -258,7 +258,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> GSSNode {
-        let acc = self.path_acc.rejoin(self.parent_acc);
+        let acc = self.path_acc.narrow(self.parent_acc);
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
@@ -449,7 +449,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns the combined `Acc` of the parent and the predecessor.
     pub fn resolved_acc(&self) -> Acc {
-        self.parent_acc.rejoin(&self.predecessor_node.acc)
+        self.parent_acc.narrow(&self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -462,7 +462,7 @@ impl<'a> GSSPeek<'a> {
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         let resolved_acc = self.resolved_acc();
-        let acc = resolved_acc.rejoin(&local_acc);
+        let acc = resolved_acc.narrow(&local_acc);
         self.predecessor_node.push(edge_value, acc)
     }
 
