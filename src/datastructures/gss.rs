@@ -195,7 +195,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 
     for (pred_arc, edge_val) in incoming {
         grouped
-            .entry((edge_val.clone(), pred_arc.dest_key()))
+            .entry((edge_val.clone(), pred_arc.max_depth()))
             .or_default()
             .push(pred_arc.clone());
     }
