@@ -607,19 +607,27 @@ pub fn prune_disallowed_terminals(
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let allowed_by_all_paths = &node.acc.terminals_intersection;
+        // If any of the matched terminals is disallowed, that's a problem.
+        // If any of the matched terminals is missing from the union of allowed terminals, then this entire node is pruned.
+        // (In other words, since the union is the union of all sub-nodes, if it's missing from the union then it's missing from all the sub-nodes.)
         for (state_id, matched_bv) in matched_terminals {
-            if let Some(allowed_l2) = allowed_by_all_paths.get_l2_bitset(state_id.0) {
-                if !matched_bv.is_subset(allowed_l2) {
-                    return None;
-                }
-            } else {
-                if !matched_bv.is_empty() {
-                    return None;
-                }
+            let allowed_terminals_union = node.acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
+            if !matched_bv.is_subset(allowed_terminals_union) {
+                // If the matched terminal is not a subset of the allowed terminals, we prune this node.
+                return None;
             }
         }
-        Some(((*node.acc).clone(), true))
+        // If any of the matched terminals is missing from the intersection of allowed terminals, we continue recursion,
+        // because this means it's missing from one of the subnode's union of allowed terminals.
+        // (In other words, since the intersection is the intersection of all sub-nodes, if it's missing from the intersection then it's missing from at least one sub-node.)
+        for (state_id, matched_bv) in matched_terminals {
+            let allowed_terminals_intersection = node.acc.terminals_intersection.get_l2_bitset(state_id.0).unwrap();
+            if !matched_bv.is_subset(allowed_terminals_intersection) {
+                // If the matched terminal is not a subset of the allowed terminals, we continue recursion.
+                return Some(((*node.acc).clone(), true));
+            }
+        }
+        Some(((*node.acc).clone(), false))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
