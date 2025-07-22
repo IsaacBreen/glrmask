@@ -210,8 +210,8 @@ impl<'a> GSSPopperItem<'a> {
     }
 
     /// Pushes a new state onto the resolved node from this popper item.
-    pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        self.resolved_node().push(edge_value, local_acc)
+    pub fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+        self.resolved_node().push(edge_value)
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
@@ -241,16 +241,14 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     /// Pushes a new state onto the resolved predecessor.
-    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
+    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let resolved_acc = self.resolved_acc();
-        let acc = Acc::narrow(&resolved_acc, &local_acc);
-        self.predecessor_node.push(edge_value, acc)
+        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        self.isolated_parent().push(edge_value, local_acc)
+    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+        self.isolated_parent().push(edge_value)
     }
-
     pub fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = Arc::new(self.isolated_parent());
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
@@ -393,8 +391,8 @@ impl GSSNode {
 // Core GSS operations
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
-    pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc_for_new_node: Acc) -> Self {
-        Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, local_acc_for_new_node)
+    pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
+        Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, Acc::new_conservative())
     }
 
     /// Performs a multi-level pop operation on this node.
@@ -430,7 +428,7 @@ impl GSSNode {
 
     pub fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let acc = (*self.acc).clone();
-        self.push(edge_value, acc)
+        Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
     }
     
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
@@ -461,16 +459,14 @@ impl<'a> GSSPeek<'a> {
     }
 
     /// Pushes a new state onto the resolved predecessor.
-    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
+    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let resolved_acc = self.resolved_acc();
-        let acc = Acc::narrow(&resolved_acc, &local_acc);
-        self.predecessor_node.push(edge_value, acc)
+        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        self.isolated_parent().push(edge_value, local_acc)
+    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+        self.isolated_parent().push(edge_value)
     }
-
     pub fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = Arc::new(self.isolated_parent());
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
@@ -1177,22 +1173,18 @@ mod tests {
     #[test]
     fn test_gss_push() {
         let root = Arc::new(GSSNode::new(mock_acc(1))); // Allows all but 1
-        let pushed = root.push(mock_edge(10), mock_acc(2)); // Allows all but 2
+        let pushed = root.push(mock_edge(10));
 
         assert_eq!(pushed.max_depth, 1);
 
-        // The new logic intersects constraints along a path.
-        let mut disallowed = HybridBitset::zeros();
-        disallowed.insert(1);
-        disallowed.insert(2);
-        assert_eq!(pushed.acc.llm_tokens_union, HybridBitset::max_ones() - disallowed);
-
+        // The new logic for `push` is to inherit the predecessor's acc, as the local acc is fresh.
+        assert_eq!(*pushed.acc, *root.acc);
     }
 
     #[test]
     fn test_gss_pop() {
         let root = Arc::new(GSSNode::new(mock_acc(1))); // Allows all but 1
-        let pushed = Arc::new(root.push(mock_edge(10), mock_acc(2))); // Allows all but 2
+        let pushed = Arc::new(root.push(mock_edge(10))); // Now inherits root's acc.
 
         // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path.
         let pop_result = pushed.popn(1);
@@ -1212,11 +1204,10 @@ mod tests {
         let popper_item = pop_result.iter().next().unwrap();
         let resolved_acc = popper_item.resolved_acc();
 
-        // `pushed.acc` allows all but 2. `root.acc` allows all but 1.
-        // The intersection should allow all but 1 and 2.
+        // `pushed.acc` (same as `root.acc`) allows all but 1.
+        // The intersection should allow all but 1.
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
-        disallowed.insert(2);
         let expected_allowed = HybridBitset::max_ones() - disallowed;
         assert_eq!(resolved_acc.llm_tokens_union, expected_allowed);
     }
@@ -1224,8 +1215,8 @@ mod tests {
     #[test]
     fn test_gss_merge() {
         let n0 = Arc::new(GSSNode::new(empty_acc()));
-        let n1 = Arc::new(n0.push(mock_edge(0), mock_acc(1)));
-        let n2 = Arc::new(n0.push(mock_edge(0), mock_acc(2)));
+        let n1 = Arc::new(n0.push(mock_edge(0)));
+        let n2 = Arc::new(n0.push(mock_edge(0)));
 
         let mut merged = (*n1).clone();
         merged.merge(&n2);
@@ -1239,10 +1230,10 @@ mod tests {
     fn test_gss_fuse_predecessors() {
         let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
         let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
-        let b = Arc::new(leaf1.push(mock_edge(1), empty_acc()));
-        let c_tmp = Arc::new(leaf2.push(mock_edge(2), empty_acc()));
-        let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3), empty_acc()));
-        let c = Arc::new(c_tmp2.push(mock_edge(4), empty_acc()));
+        let b = Arc::new(leaf1.push(mock_edge(1)));
+        let c_tmp = Arc::new(leaf2.push(mock_edge(2)));
+        let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3)));
+        let c = Arc::new(c_tmp2.push(mock_edge(4)));
 
         assert_eq!(b.max_depth, 1);
         assert_eq!(c.max_depth, 3);
@@ -1274,8 +1265,8 @@ mod tests {
         let c_preds_map = process_predecessors(&c_preds);
         let c = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), c_preds_map));
 
-        let b = Arc::new(c.push(mock_edge(20), empty_acc()));
-        let root = b.push(mock_edge(10), empty_acc());
+        let b = Arc::new(c.push(mock_edge(20)));
+        let root = b.push(mock_edge(10));
 
         let path1 = sample_path(&[&root], 0).unwrap();
         let path2 = sample_path(&[&root], 1).unwrap();
