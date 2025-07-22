@@ -648,16 +648,22 @@ pub fn map_allowed_terminals_tokenizer_states(
         let mut new_acc = (*node.acc).clone();
 
         let map_one = |terminals: &HybridL2Bitset| -> (HybridL2Bitset, bool) {
-            let mut new_terminals = HybridL2Bitset::all();
+            let mut new_terminals_btreemap = BTreeMap::new();
 
             for (old_state_id, new_state_id) in map {
                 let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
-                let bv_dst_existing = new_terminals.get_l2_bitset(new_state_id.0).unwrap();
-                let bv_dst_combined = bv_source | bv_dst_existing;
-                new_terminals.insert_l2_bitset(new_state_id.0, bv_dst_combined);
+                new_terminals_btreemap.entry(*new_state_id)
+                    .and_modify(|bv| *bv |= bv_source)
+                    .or_insert_with(|| bv_source.clone());
             }
-            let changed = new_terminals != *terminals;
-            (new_terminals, changed)
+
+            let mut new_terminals_l2_bitset = HybridL2Bitset::all();
+            for (state_id, bv) in new_terminals_btreemap {
+                new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
+            }
+
+            let changed = new_terminals_l2_bitset != *terminals;
+            (new_terminals_l2_bitset, changed)
         };
 
         let (new_terminals_union, changed_union) = map_one(&new_acc.terminals_union);
