@@ -155,12 +155,12 @@ impl GSSPopper {
         for _ in 0..n {
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
+                let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
                 for child in parent.predecessors.values() {
-                    let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
                     if let Some(existing_acc) = new_paths.get_mut(child) {
                         *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
                     } else {
-                        new_paths.insert(child.clone(), new_path_acc);
+                        new_paths.insert(child.clone(), new_path_acc.clone());
                     }
                 }
             }
