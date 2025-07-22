@@ -645,11 +645,11 @@ pub struct GLRParserState<'a> { // No longer generic
 impl<'a> GLRParserState<'a> { // No longer generic
     fn push_state(
         &self,
-        stack: &Arc<GSSNode>, 
+        peek: &GSSPeek,
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_conservative());
+        let new_gss_node_instance = peek.push_on_parent(new_content, Acc::new_conservative());
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -672,7 +672,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 );
                 match goto {
                     Goto::State(goto_state_id) => {
-                        let new_gss_node = peek2.isol.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
                         out.push(new_gss_node);
                     }
                     Goto::Accept => {}
@@ -723,7 +723,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                                let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
@@ -735,7 +735,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
@@ -762,7 +762,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                                let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
@@ -773,7 +773,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
-                                    let new_parse_state = self.push_state(&Arc::new(peek.isolated_parent()), ParseStateEdgeContent { state_id: *to });
+                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
                                 }
                                 for (len, nts) in reduces {
