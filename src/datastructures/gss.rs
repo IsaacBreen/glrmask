@@ -107,9 +107,9 @@ pub struct GSSNode {
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
-    pub(crate) parent_acc: &'a Arc<Acc>,
+    parent_acc: &'a Arc<Acc>,
     edge_value: &'a ParseStateEdgeContent,
-    pub predecessor_node: &'a Arc<GSSNode>,
+    predecessor_node: &'a Arc<GSSNode>,
 }
 
 /// Represents the result of a `pop` operation, containing a map of resulting nodes
@@ -126,6 +126,14 @@ pub struct GSSPopper {
 pub struct GSSPopperItem<'a> {
     pub node: &'a Arc<GSSNode>,
     path_acc: &'a Arc<Acc>,
+}
+
+#[derive(Clone, Copy)]
+pub struct GSSPopperItemPeekIter<'a> {
+    path_acc: &'a Arc<Acc>,
+    parent_acc: &'a Arc<Acc>,
+    edge_value: &'a ParseStateEdgeContent,
+    predecessor_node: &'a Arc<GSSNode>,
 }
 
 impl GSSPopper {
@@ -191,8 +199,12 @@ impl<'a> GSSPopperItem<'a> {
         self.resolved_node().push(edge_value, local_acc)
     }
 
-    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'a>> {
-        self.node.peek_iter()
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeekIter<'a>> {
+        self.node.peek_iter().map(|peek| GSSPeek {
+            parent_acc: peek.parent_acc,
+            edge_value: peek.edge_value,
+            predecessor_node: peek.predecessor_node,
+        })
     }
 }
 
