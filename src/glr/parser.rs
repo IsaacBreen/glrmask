@@ -682,20 +682,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut out = Vec::new();
         for popper_item in popped.iter() {
-            let goto = self.parser.stage_7_table.get(&popper_item.edge.state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
-            match goto {
-                Goto::State(goto_state_id) => {
-                    // Get the resolved node from the pop operation's result.
-                    let resolved_node = popper_item.resolved_node();
-                    
-                    // Push the new GOTO state onto this resolved node. This is equivalent to
-                    // the convenience method `popper_item.push(...)`.
-                    let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
-                    out.push(new_gss_node);
-                }
-                Goto::Accept => {
-                    // No action needed for Accept
-                }
+            let goto = self.parser.stage_7_table
+                .get(&popper_item.edge.state_id)
+                .and_then(|row| row.gotos.get(&nt))
+                .unwrap();
+
+            if let Goto::State(state_id) = *goto {
+                let resolved_node = popper_item.resolved_node();
+                let new_gss_node = resolved_node.push(
+                    ParseStateEdgeContent { state_id },
+                    Acc::new_conservative(),
+                );
+                out.push(new_gss_node);
             }
         }
 
