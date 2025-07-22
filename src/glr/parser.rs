@@ -853,6 +853,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         self.active_state = next;
         self.phase = ParserPhase::ReadyForPhase1;
+        self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
     }
 
     #[time_it("GLRParserState::step")]
