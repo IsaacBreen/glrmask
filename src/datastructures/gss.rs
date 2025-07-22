@@ -107,7 +107,7 @@ pub struct GSSNode {
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
-    pub(crate) parent_node: &'a GSSNode,
+    pub(crate) parent_acc: &'a Arc<Acc>,
     edge_value: &'a ParseStateEdgeContent,
     pub predecessor_node: &'a Arc<GSSNode>,
 }
@@ -189,6 +189,10 @@ impl<'a> GSSPopperItem<'a> {
     /// Pushes a new state onto the resolved node from this popper item.
     pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         self.resolved_node().push(edge_value, local_acc)
+    }
+
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'a>> {
+        self.node.peek_iter()
     }
 }
 
@@ -365,7 +369,7 @@ impl GSSNode {
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
         self.predecessors.iter().map(|((edge_val, _dest_key), pred_arc)| {
             GSSPeek {
-                parent_node: self,
+                parent_acc: &self.acc,
                 edge_value: edge_val,
                 predecessor_node: pred_arc,
             }
@@ -379,8 +383,8 @@ impl<'a> GSSPeek<'a> {
     /// Returns the combined `Acc` of the parent and the predecessor.
     pub fn resolved_acc(&self) -> Acc {
         Acc {
-            llm_tokens: &self.parent_node.acc.llm_tokens & &self.predecessor_node.acc.llm_tokens,
-            terminals: &self.parent_node.acc.terminals & &self.predecessor_node.acc.terminals,
+            llm_tokens: &self.parent_acc.llm_tokens & &self.predecessor_node.acc.llm_tokens,
+            terminals: &self.parent_acc.terminals & &self.predecessor_node.acc.terminals,
         }
     }
 
@@ -409,7 +413,7 @@ impl<'a> GSSPeek<'a> {
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
-            (*self.parent_node.acc).clone(),
+            (**self.parent_acc).clone(),
         )
     }
 
