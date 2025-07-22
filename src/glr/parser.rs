@@ -820,7 +820,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::do_phase3")]
     pub fn do_phase3(&mut self) {
+        self.log_gss("Phase3-start", TerminalID(0)); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForPhase1 {
+            crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
             return;
         }
         assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
