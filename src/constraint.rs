@@ -1049,7 +1049,6 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::max_ones();
                 let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
 
                 // Iterate over ranges of tokenizer states that have the same set of disallowed terminals.
