@@ -700,7 +700,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             } else {
                 for ((edge_content, _), _pred_arc) in resolved_node.predecessors().iter() {
                     let state_id = edge_content.state_id;
-                    let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
+                    let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+                        format!("Goto not found for NT {:?} in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+                    );
                     match goto {
                         Goto::State(goto_state_id) => {
                             let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
