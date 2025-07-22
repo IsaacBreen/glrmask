@@ -677,7 +677,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             };
         }
 
-        let popped = timeit!(peek.popn(len)); // Pops len-1 from predecessor
+        let popped = timeit!(peek.popn(len)); // Pops len from predecessor
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
 
         let mut out = Vec::new();
