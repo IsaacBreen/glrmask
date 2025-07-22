@@ -660,23 +660,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         nt: NonTerminalID,
         len: usize,
     ) -> Arc<GSSNode> {
-        if len == 0 {
-            // For a length-0 reduction, we are effectively pushing a new non-terminal state
-            // on top of the current stack paths without popping anything.
-            // The `peek` gives us the current top-of-stack states.
-            let goto = self.parser.stage_7_table.get(&peek.edge_value().state_id)
-                .and_then(|row| row.gotos.get(&nt))
-                .unwrap_or_else(|| panic!("Goto not found for NT {:?} in state {:?}", nt, peek.edge_value().state_id));
-
-            return match goto {
-                Goto::State(goto_state_id) => {
-                    // Create a new node representing the GOTO state, with the peek's parent as predecessor.
-                    Arc::new(peek.isolated_parent().push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative()))
-                }
-                Goto::Accept => Arc::new(GSSNode::new_conservative()), // Should not happen for len 0 reduce
-            };
-        }
-
         let popped = timeit!(peek.popn(len));
         crate::debug!(4, "Popped with {} results...", popped.paths.len());
 
