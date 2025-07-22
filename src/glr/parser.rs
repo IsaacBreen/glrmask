@@ -649,9 +649,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let stack = Arc::new(peek.isolated_parent());
-        let new_gss_node_instance = stack.as_ref().push(new_content);
-        // let new_gss_node_instance = peek.push_on_parent(new_content, Acc::new_conservative());
+        let new_gss_node_instance = peek.push_on_parent(new_content);
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
