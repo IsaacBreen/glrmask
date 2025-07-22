@@ -94,23 +94,6 @@ impl Acc {
         }
     }
 
-
-    /// Creates an accumulator for a new node from its local constraints and predecessors.
-    fn from_preds<'a>(local: &Acc, pred_accs: impl IntoIterator<Item = &'a Arc<Acc>>) -> Self {
-        let mut pred_iter = pred_accs.into_iter();
-
-        if let Some(first_pred) = pred_iter.next() {
-            let mut combined_preds_acc = (**first_pred).clone();
-            for p_acc in pred_iter {
-                combined_preds_acc = Acc::merge(&combined_preds_acc, p_acc.as_ref());
-            }
-            Acc::narrow(local, &combined_preds_acc)
-        } else {
-            // No predecessors, just use local constraints.
-            local.clone()
-        }
-    }
-
     // --- Accessors for final computed sets ---
     pub fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens_union.clone() }
     pub fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals_intersection.clone() }
@@ -336,27 +319,26 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
 // Basic node creation and manipulation
 impl GSSNode {
     /// Creates a new GSS root node with the given local constraints.
-    pub fn new(local_acc: Acc) -> Self {
+    pub fn new(acc: Acc) -> Self {
         let predecessors = NodeMap::new();
-        let acc = Arc::new(local_acc);
-        let hash_key_cache = compute_hash_key(&predecessors, &acc);
-        Self { acc, predecessors, hash_key_cache, max_depth: 0 }
+        let arc_acc = Arc::new(acc);
+        let hash_key_cache = compute_hash_key(&predecessors, &arc_acc);
+        Self { acc: arc_acc, predecessors, hash_key_cache, max_depth: 0 }
     }
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
-    fn new_with_map(local_acc: Arc<Acc>, predecessors: NodeMap) -> Self {
+    fn new_with_map(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
         let pred_accs = predecessors.values().map(|p| &p.acc);
-        let acc = Arc::new(Acc::from_preds(local_acc.as_ref(), pred_accs));
         let hash_key_cache = compute_hash_key(&predecessors, &acc);
         let max_depth = compute_max_depth(&predecessors);
         Self { acc, predecessors, hash_key_cache, max_depth }
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
-    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, local_acc: Acc) -> Self {
+    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
         let mut predecessors_map = NodeMap::new();
         predecessors_map.insert((edge_value, predecessor_arc.max_depth()), predecessor_arc.clone());
-        Self::new_with_map(Arc::new(local_acc), predecessors_map)
+        Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
     pub fn new_conservative() -> Self {
