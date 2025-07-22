@@ -571,8 +571,7 @@ pub fn reset_llm_tokens(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
-        let continue_recursion = new_acc.llm_tokens_union != HybridBitset::max_ones()
-            || new_acc.llm_tokens_intersection != HybridBitset::max_ones();
+        let continue_recursion = new_acc.llm_tokens_intersection != HybridBitset::max_ones();
         new_acc.llm_tokens_union = HybridBitset::max_ones();
         new_acc.llm_tokens_intersection = HybridBitset::max_ones();
         Some((new_acc, continue_recursion))
