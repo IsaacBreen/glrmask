@@ -558,6 +558,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         }
 
         let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
+        let promoted_reduce_key = None;
 
         let (phase1_shifts_and_reduces, phase3_default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
