@@ -217,8 +217,8 @@ impl<'a> GSSPopperItemPeek<'a> {
     /// Returns the combined `Acc` of the path and the predecessor node.
     pub fn resolved_acc(&self) -> Acc {
         Acc {
-            llm_tokens: &self.path_acc.llm_tokens & &self.predecessor_node.acc.llm_tokens,
-            terminals: &self.path_acc.terminals & &self.predecessor_node.acc.terminals,
+            llm_tokens: &self.path_acc.llm_tokens & &self.parent_acc.llm_tokens & &self.predecessor_node.acc.llm_tokens,
+            terminals: &self.path_acc.terminals & &self.parent_acc.terminals & &self.predecessor_node.acc.terminals,
         }
     }
 
@@ -241,10 +241,14 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> GSSNode {
+        let acc = Acc {
+            llm_tokens: &self.path_acc.llm_tokens & &self.parent_acc.llm_tokens,
+            terminals: &self.path_acc.terminals & &self.parent_acc.terminals,
+        };
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
-            (**self.path_acc).clone(),
+            acc.clone()
         )
     }
 }
