@@ -403,9 +403,21 @@ impl<'a> GSSPeek<'a> {
     /// Performs a multi-level pop starting from this peek's predecessor.
     /// A pop of length `len` from a peek corresponds to `len-1` pops from the predecessor node.
     pub fn popn(&self, len: usize) -> GSSPopper {
+        // A pop of length 0 is not a valid operation in this context as it doesn't traverse any edge.
         if len == 0 {
             return GSSPopper::new();
         }
+        // A pop of length 1 from a peek reveals the predecessor node itself.
+        // The path's accumulated Acc is the parent's Acc.
+        if len == 1 {
+            let mut popper = GSSPopper::new();
+            popper.paths.insert(
+                (self.predecessor_node.clone(), self.edge_value.clone()),
+                self.parent_node.acc.clone(),
+            );
+            return popper;
+        }
+        // For pops longer than 1, we continue popping n-1 times from the predecessor.
         self.predecessor_node.popn(len - 1, self.parent_node.acc.clone())
     }
 
