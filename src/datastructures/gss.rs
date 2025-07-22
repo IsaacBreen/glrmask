@@ -246,8 +246,12 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        // This is the cleanest semantic interpretation, though it may create intermediate nodes.
-        self.resolved_predecessor_node().push(edge_value, local_acc)
+        let resolved_acc = self.resolved_acc();
+        let acc = Acc {
+            llm_tokens: &resolved_acc.llm_tokens | &local_acc.llm_tokens,
+            terminals: &resolved_acc.terminals & &local_acc.terminals,
+        };
+        self.predecessor_node.push(edge_value, acc)
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
@@ -384,7 +388,7 @@ impl GSSNode {
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on *every* path to this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
-        self.acc.terminals_intersection.complement()
+        self.acc.terminals.complement()
     }
 
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
@@ -465,8 +469,12 @@ impl<'a> GSSPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        // This is the cleanest semantic interpretation, though it may create intermediate nodes.
-        self.resolved_predecessor_node().push(edge_value, local_acc)
+        let resolved_acc = self.resolved_acc();
+        let acc = Acc {
+            llm_tokens: &resolved_acc.llm_tokens | &local_acc.llm_tokens,
+            terminals: &resolved_acc.terminals & &local_acc.terminals,
+        };
+        self.predecessor_node.push(edge_value, acc)
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
