@@ -81,12 +81,13 @@ impl Acc {
 
     /// Creates a conservative accumulator (local union zeros, intersection ones).
     pub fn new_conservative() -> Self {
-        Self {
-            llm_tokens_union: HybridBitset::zeros(),
-            llm_tokens_intersection: HybridBitset::max_ones(),
-            terminals_union: HybridL2Bitset::new(),
-            terminals_intersection: HybridL2Bitset::all(),
-        }
+        // Self {
+        //     llm_tokens_union: HybridBitset::zeros(),
+        //     llm_tokens_intersection: HybridBitset::max_ones(),
+        //     terminals_union: HybridL2Bitset::new(),
+        //     terminals_intersection: HybridL2Bitset::all(),
+        // }
+        Self::new_fresh()
     }
 
     /// Creates an accumulator with specific local constraints for a root node.
