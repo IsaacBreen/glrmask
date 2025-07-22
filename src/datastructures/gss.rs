@@ -239,15 +239,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        let acc = Acc {
-            llm_tokens: (&self.path_acc.llm_tokens & &self.parent_acc.llm_tokens) | &local_acc.llm_tokens,
-            terminals: &self.path_acc.terminals & &self.parent_acc.terminals & &local_acc.terminals,
-        };
-        GSSNode::new_with_single_predecessor(
-            self.predecessor_node.clone(),
-            edge_value,
-            acc,
-        )
+        self.isolated_parent().push(edge_value, local_acc)
     }
 
     pub fn popn(&self, len: usize) -> GSSPopper {
@@ -480,15 +472,7 @@ impl<'a> GSSPeek<'a> {
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        let acc = Acc {
-            llm_tokens: &self.parent_acc.llm_tokens | &local_acc.llm_tokens,
-            terminals: &self.parent_acc.terminals & &local_acc.terminals,
-        };
-        GSSNode::new_with_single_predecessor(
-            self.predecessor_node.clone(),
-            edge_value,
-            acc,
-        )
+        self.isolated_parent().push(edge_value, local_acc)
     }
 
     pub fn popn(&self, len: usize) -> GSSPopper {
