@@ -672,7 +672,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 );
                 match goto {
                     Goto::State(goto_state_id) => {
-                        let new_gss_node = popper_item.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                        let new_gss_node = peek2.isol.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
                         out.push(new_gss_node);
                     }
                     Goto::Accept => {}
