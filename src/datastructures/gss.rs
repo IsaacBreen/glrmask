@@ -396,7 +396,6 @@ impl<'a> GSSPeek<'a> {
         self.resolved_predecessor_node().push(edge_value, local_acc)
     }
 
-    /// Performs a multi-level pop starting from this peek's predecessor.
     pub fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = Arc::new(self.isolated_parent());
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
