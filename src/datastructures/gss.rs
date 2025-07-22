@@ -546,7 +546,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
         if new_acc.llm_tokens_union.is_empty() {
             None
         } else {
-            Some((new_acc, true))
+            Some((new_acc, false))
         }
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
