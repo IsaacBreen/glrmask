@@ -129,7 +129,7 @@ pub struct GSSPopperItem<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub struct GSSPopperItemPeekIter<'a> {
+pub struct GSSPopperItemPeek<'a> {
     path_acc: &'a Arc<Acc>,
     parent_acc: &'a Arc<Acc>,
     edge_value: &'a ParseStateEdgeContent,
@@ -199,12 +199,53 @@ impl<'a> GSSPopperItem<'a> {
         self.resolved_node().push(edge_value, local_acc)
     }
 
-    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeekIter<'a>> {
-        self.node.peek_iter().map(|peek| GSSPeek {
-            parent_acc: peek.parent_acc,
-            edge_value: peek.edge_value,
-            predecessor_node: peek.predecessor_node,
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+        self.node.predecessors.iter().map(|((edge_val, _dest_key), pred_arc)| {
+            GSSPopperItemPeek {
+                path_acc: &self.path_acc,
+                parent_acc: &self.path_acc,
+                edge_value: edge_val,
+                predecessor_node: pred_arc,
+            }
         })
+    }
+}
+
+impl<'a> GSSPopperItemPeek<'a> {
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+
+    /// Returns the combined `Acc` of the path and the predecessor node.
+    pub fn resolved_acc(&self) -> Acc {
+        Acc {
+            llm_tokens: &self.path_acc.llm_tokens & &self.predecessor_node.acc.llm_tokens,
+            terminals: &self.path_acc.terminals & &self.predecessor_node.acc.terminals,
+        }
+    }
+
+    /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
+    /// resolved against the path's `Acc`.
+    pub fn resolved_predecessor_node(&self) -> GSSNode {
+        GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.predecessor_node.predecessors.clone())
+    }
+
+    /// Pushes a new state onto the resolved predecessor.
+    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
+        self.resolved_predecessor_node().push(edge_value, local_acc)
+    }
+
+    pub fn popn(&self, len: usize) -> GSSPopper {
+        let isolated_parent = Arc::new(self.isolated_parent());
+        let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
+        popper.popn(len);
+        popper
+    }
+
+    pub fn isolated_parent(&self) -> GSSNode {
+        GSSNode::new_with_single_predecessor(
+            self.predecessor_node.clone(),
+            self.edge_value.clone(),
+            (**self.path_acc).clone(),
+        )
     }
 }
 
@@ -428,7 +469,6 @@ impl<'a> GSSPeek<'a> {
             (**self.parent_acc).clone(),
         )
     }
-
 }
 
 // Trait implementations for GSSNode
