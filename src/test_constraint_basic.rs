@@ -559,13 +559,13 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
 
     println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
     constraint_state3.commit(llm_a);
-    println!("{}", &constraint_state3);
+    println!("Scenario 1 state:\n{}", &constraint_state3);
 
     // Scenario 2: Commit "#a"
     let mut constraint_state4 = constraint.init();
     println!("\nScenario 2: Committing LLM Token '#a' (ID {})", llm_hash_aa.0);
     constraint_state4.commit_bytes(b"#a");
-    println!("{}", &constraint_state4);
+    println!("Scenario 2 state:\n{}", &constraint_state4);
 
     // Assert equivalence
     assert_eq!(constraint_state3.state(), constraint_state4.state(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
