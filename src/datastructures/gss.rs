@@ -401,7 +401,7 @@ impl<'a> GSSPeek<'a> {
     pub fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = Arc::new(self.isolated_parent());
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
-        popper.popn(len - 1);
+        popper.popn(len);
         return popper;
     }
 
