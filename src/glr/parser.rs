@@ -698,7 +698,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     panic!("Goto not found for NT {:?} in start state {:?}", nt, state_id);
                 }
             } else {
-                for ((edge_content, _), _pred_arc) in resolved_node.predecessors() {
+                for ((edge_content, _), _pred_arc) in resolved_node.predecessors().iter() {
                     let state_id = edge_content.state_id;
                     let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).unwrap();
                     match goto {

@@ -267,7 +267,7 @@ impl GSSNode {
         Self::new(Acc::new_fresh())
     }
 
-    fn predecessors(&self) -> &NodeMap { &self.predecessors }
+    pub fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
     fn max_depth(&self) -> MaxDepth { self.max_depth }
@@ -1133,14 +1133,12 @@ mod tests {
         let pop_result = pushed.popn(1, Arc::new(Acc::new_fresh()));
         assert_eq!(pop_result.paths.len(), 1);
 
-        // The result of the pop is one path, ending at `root` via `mock_edge(10)`.
-        let ((popped_node_arc, popped_edge), path_acc) = pop_result.paths.iter().next().unwrap();
+        // The result of the pop is one path, ending at `root`.
+        let (popped_node_arc, path_acc) = pop_result.paths.iter().next().unwrap();
 
         // The node we landed on is the original root.
         assert!(Arc::ptr_eq(popped_node_arc, &root));
-        // The edge we traversed "backwards" is the one we pushed with.
-        assert_eq!(*popped_edge, mock_edge(10));
-
+        
         // The `path_acc` is the `acc` from the node we popped from (`pushed`).
         assert_eq!(*path_acc, pushed.acc);
 
