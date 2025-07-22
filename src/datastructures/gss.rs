@@ -44,30 +44,6 @@ pub struct Acc {
     pub terminals_intersection: HybridL2Bitset,
 }
 
-impl<'a> BitAnd for &'a Acc {
-    type Output = Acc;
-    fn bitand(self, rhs: Self) -> Self::Output {
-        Acc {
-            llm_tokens_union: &self.llm_tokens_union & &rhs.llm_tokens_union,
-            llm_tokens_intersection: &self.llm_tokens_intersection & &rhs.llm_tokens_intersection,
-            terminals_union: &self.terminals_union & &rhs.terminals_union,
-            terminals_intersection: &self.terminals_intersection & &rhs.terminals_intersection,
-        }
-    }
-}
-
-impl<'a> BitOr for &'a Acc {
-    type Output = Acc;
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Acc {
-            llm_tokens_union: &self.llm_tokens_union | &rhs.llm_tokens_union,
-            llm_tokens_intersection: &self.llm_tokens_intersection & &rhs.llm_tokens_intersection,
-            terminals_union: &self.terminals_union | &rhs.terminals_union,
-            terminals_intersection: &self.terminals_intersection & &rhs.terminals_intersection,
-        }
-    }
-}
-
 impl Acc {
     /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
     pub fn new_fresh() -> Self {
@@ -100,6 +76,24 @@ impl Acc {
         }
     }
 
+    pub fn and(&self, rhs: &Self) -> Self {
+        Acc {
+            llm_tokens_union: &self.llm_tokens_union & &rhs.llm_tokens_union,
+            llm_tokens_intersection: &self.llm_tokens_intersection & &rhs.llm_tokens_intersection,
+            terminals_union: &self.terminals_union & &rhs.terminals_union,
+            terminals_intersection: &self.terminals_intersection & &rhs.terminals_intersection,
+        }
+    }
+
+    pub fn or(&self, rhs: &Self) -> Self {
+        Acc {
+            llm_tokens_union: &self.llm_tokens_union | &rhs.llm_tokens_union,
+            llm_tokens_intersection: &self.llm_tokens_intersection & &rhs.llm_tokens_intersection,
+            terminals_union: &self.terminals_union | &rhs.terminals_union,
+            terminals_intersection: &self.terminals_intersection & &rhs.terminals_intersection,
+        }
+    }
+
     /// Creates an accumulator for a new node from its local constraints and predecessors.
     fn from_preds<'a>(local: &Acc, pred_accs: impl IntoIterator<Item = &'a Arc<Acc>>) -> Self {
         let mut pred_iter = pred_accs.into_iter();
@@ -107,9 +101,9 @@ impl Acc {
         if let Some(first_pred) = pred_iter.next() {
             let mut combined_preds_acc = (**first_pred).clone();
             for p_acc in pred_iter {
-                combined_preds_acc = &combined_preds_acc | p_acc.as_ref();
+                combined_preds_acc = combined_preds_acc.or(p_acc.as_ref());
             }
-            local & &combined_preds_acc
+            local.and(&combined_preds_acc)
         } else {
             // No predecessors, just use local constraints.
             local.clone()
@@ -189,9 +183,9 @@ impl GSSPopper {
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
                 for child in parent.predecessors.values() {
-                    let new_path_acc = Arc::new(&*path_acc & &*child.acc);
+                    let new_path_acc = Arc::new(path_acc.and(&child.acc));
                     if let Some(existing_acc) = new_paths.get_mut(child) {
-                        *existing_acc = Arc::new(&**existing_acc | &*new_path_acc);
+                        *existing_acc = Arc::new(existing_acc.or(&new_path_acc));
                     } else {
                         new_paths.insert(child.clone(), new_path_acc);
                     }
@@ -205,7 +199,7 @@ impl GSSPopper {
 impl<'a> GSSPopperItem<'a> {
     /// Returns the combined `Acc` of the path and the destination node.
     pub fn resolved_acc(&self) -> Acc {
-        &**self.path_acc & &*self.node.acc
+        self.path_acc.and(&self.node.acc)
     }
 
     /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
@@ -236,7 +230,7 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Returns the combined `Acc` of the path and the predecessor node.
     pub fn resolved_acc(&self) -> Acc {
-        &(&**self.path_acc & &*self.parent_acc) & &*self.predecessor_node.acc
+        self.path_acc.and(self.parent_acc).and(&self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -248,7 +242,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         let resolved_acc = self.resolved_acc();
-        let acc = &resolved_acc & &local_acc;
+        let acc = resolved_acc.and(&local_acc);
         self.predecessor_node.push(edge_value, acc)
     }
 
@@ -264,7 +258,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> GSSNode {
-        let acc = &**self.path_acc & &*self.parent_acc;
+        let acc = self.path_acc.and(self.parent_acc);
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
@@ -420,7 +414,7 @@ impl GSSNode {
             return;
         }
 
-        let merged_acc = Arc::new(&*self.acc | &*other.acc);
+        let merged_acc = Arc::new(self.acc.or(&other.acc));
         
         let mut new_predecessors = self.predecessors.clone();
         merge_node_maps(&mut new_predecessors, other.predecessors.clone());
@@ -455,7 +449,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns the combined `Acc` of the parent and the predecessor.
     pub fn resolved_acc(&self) -> Acc {
-        &**self.parent_acc & &*self.predecessor_node.acc
+        self.parent_acc.and(&self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -468,7 +462,7 @@ impl<'a> GSSPeek<'a> {
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         let resolved_acc = self.resolved_acc();
-        let acc = &resolved_acc & &local_acc;
+        let acc = resolved_acc.and(&local_acc);
         self.predecessor_node.push(edge_value, acc)
     }
 
