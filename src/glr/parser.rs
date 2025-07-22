@@ -661,7 +661,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
     ) -> Arc<GSSNode> {
         let popped = timeit!(peek.popn(len));
-        crate::debug!(4, "Popped with {} results...", popped.paths.len());
+        // crate::debug!(4, "Popped with {} results...", popped.paths.len());
 
         let mut out = Vec::new();
         for popper_item in popped.iter() {
