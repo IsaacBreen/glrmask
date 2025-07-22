@@ -681,7 +681,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         if out.is_empty() {
-            Arc::new(GSSNode::new_conservative())
+            Arc::new(GSSNode::new_fresh())
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {

@@ -55,17 +55,6 @@ impl Acc {
         }
     }
 
-    /// Creates a conservative accumulator (local union zeros, intersection ones).
-    pub fn new_conservative() -> Self {
-        // Self {
-        //     llm_tokens_union: HybridBitset::zeros(),
-        //     llm_tokens_intersection: HybridBitset::max_ones(),
-        //     terminals_union: HybridL2Bitset::new(),
-        //     terminals_intersection: HybridL2Bitset::all(),
-        // }
-        Self::new_fresh()
-    }
-
     /// Creates an accumulator with specific local constraints for a root node.
     pub fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
         Self {
@@ -341,10 +330,6 @@ impl GSSNode {
         Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
-    pub fn new_conservative() -> Self {
-        Self::new(Acc::new_conservative())
-    }
-
     pub fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
@@ -374,7 +359,8 @@ impl GSSNode {
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
     pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
-        Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, Acc::new_conservative())
+        let acc = (*self.acc).clone();
+        Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
     }
 
     /// Performs a multi-level pop operation on this node.
@@ -565,7 +551,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_conservative());
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -593,7 +579,7 @@ pub fn reset_llm_tokens(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_conservative());
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -611,7 +597,7 @@ pub fn disallow_terminals_and_prune_arc(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_conservative());
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -639,7 +625,7 @@ pub fn prune_disallowed_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_conservative());
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -679,7 +665,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_conservative());
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -1136,7 +1122,7 @@ mod tests {
     }
 
     fn empty_acc() -> Acc {
-        Acc::new_conservative()
+        Acc::new_fresh()
     }
 
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
