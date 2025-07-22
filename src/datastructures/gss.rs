@@ -204,7 +204,7 @@ impl GSSPopper {
 impl<'a> GSSPopperItem<'a> {
     /// Returns the combined `Acc` of the path and the destination node.
     pub fn resolved_acc(&self) -> Acc {
-        &*self.path_acc & &*self.node.acc
+        &**self.path_acc & &*self.node.acc
     }
 
     /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
@@ -235,7 +235,7 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Returns the combined `Acc` of the path and the predecessor node.
     pub fn resolved_acc(&self) -> Acc {
-        &(&*self.path_acc & &*self.parent_acc) & &*self.predecessor_node.acc
+        &(&**self.path_acc & &*self.parent_acc) & &*self.predecessor_node.acc
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -262,7 +262,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> GSSNode {
-        let acc = &*self.path_acc & &*self.parent_acc;
+        let acc = &**self.path_acc & &*self.parent_acc;
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
@@ -453,7 +453,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns the combined `Acc` of the parent and the predecessor.
     pub fn resolved_acc(&self) -> Acc {
-        &*self.parent_acc & &*self.predecessor_node.acc
+        &**self.parent_acc & &*self.predecessor_node.acc
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -1207,7 +1207,7 @@ mod tests {
         assert!(Arc::ptr_eq(popped_node_arc, &root));
         
         // The `path_acc` is the `acc` from the node we popped from (`pushed`).
-        assert_eq!(*path_acc, *pushed.acc);
+        assert_eq!(*path_acc, pushed.acc);
 
         // The `resolved_acc` for this path is the intersection of the path's constraints
         // and the destination node's own constraints.
