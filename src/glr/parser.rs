@@ -645,11 +645,13 @@ pub struct GLRParserState<'a> { // No longer generic
 impl<'a> GLRParserState<'a> { // No longer generic
     fn push_state(
         &self,
-        stack: &Arc<GSSNode>, 
+        peek: &GSSPeek,
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
+        let stack = Arc::new(peek.isolated_parent());
         let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_conservative());
+        // let new_gss_node_instance = peek.push_on_parent(new_content, Acc::new_conservative());
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -672,7 +674,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 );
                 match goto {
                     Goto::State(goto_state_id) => {
-                        let new_gss_node = popper_item.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
                         out.push(new_gss_node);
                     }
                     Goto::Accept => {}
