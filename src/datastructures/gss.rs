@@ -65,12 +65,12 @@ impl Acc {
         }
     }
 
-    pub fn narrow(lhs: &Self, rhs: &Self) -> Self {
+    pub fn narrow(from: &Self, to: &Self) -> Self {
         Acc {
-            llm_tokens_union: &lhs.llm_tokens_union & &rhs.llm_tokens_union,
-            llm_tokens_intersection: &lhs.llm_tokens_intersection & &rhs.llm_tokens_intersection,
-            terminals_union: &lhs.terminals_union & &rhs.terminals_union,
-            terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
+            llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
+            llm_tokens_intersection: &from.llm_tokens_union & &to.llm_tokens_intersection,
+            terminals_union: &from.terminals_union & &to.terminals_union,
+            terminals_intersection: &from.terminals_union & &to.terminals_intersection,
         }
     }
 
@@ -156,7 +156,7 @@ impl GSSPopper {
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
                 for child in parent.predecessors.values() {
-                    let new_path_acc = Arc::new(Acc::narrow(&path_acc, &child.acc));
+                    let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
                     if let Some(existing_acc) = new_paths.get_mut(child) {
                         *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
                     } else {
@@ -190,7 +190,7 @@ impl<'a> GSSPopperItem<'a> {
         self.node.predecessors.iter().map(|((edge_val, _dest_key), pred_arc)| {
             GSSPopperItemPeek {
                 path_acc: &self.path_acc,
-                parent_acc: &self.path_acc,
+                parent_acc: &self.node.acc,
                 edge_value: edge_val,
                 predecessor_node: pred_arc,
             }
@@ -229,7 +229,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> GSSNode {
-        let acc = Acc::narrow(self.path_acc, self.parent_acc);
+        let acc = Acc::narrow(&Acc::narrow(self.path_acc, self.parent_acc), &self.predecessor_node.acc);
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
