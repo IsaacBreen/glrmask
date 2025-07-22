@@ -445,10 +445,11 @@ impl<'a> GSSPeek<'a> {
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     /// The new node has the parent's `Acc` and a single predecessor (the one from this peek).
     pub fn isolated_parent(&self) -> GSSNode {
+        let acc = Acc::narrow(self.parent_acc, &self.predecessor_node.acc);
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
-            (**self.parent_acc).clone(),
+            acc.clone()
         )
     }
 }
