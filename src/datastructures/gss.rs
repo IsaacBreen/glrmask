@@ -163,6 +163,11 @@ impl<'a> GSSPopperItem<'a> {
     pub fn resolved_node(&self) -> GSSNode {
         GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.node.predecessors.clone())
     }
+
+    /// Pushes a new state onto the resolved node from this popper item.
+    pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
+        self.resolved_node().push(edge_value, local_acc)
+    }
 }
 
 // Helper functions for GSSNode construction
