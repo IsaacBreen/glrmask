@@ -665,34 +665,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut out = Vec::new();
         for popper_item in popped.iter() {
-            let resolved_node = popper_item.resolved_node();
-
-            if resolved_node.predecessors().is_empty() {
-                let state_id = self.parser.start_state_id;
-                if let Some(goto) = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)) {
-                     match goto {
-                        Goto::State(goto_state_id) => {
-                            let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
-                            out.push(new_gss_node);
-                        }
-                        Goto::Accept => {}
+            for peek2 in popper_item.peek_iter() {
+                let state_id = peek2.edge_value().state_id;
+                let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+                );
+                match goto {
+                    Goto::State(goto_state_id) => {
+                        let new_gss_node = popper_item.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
+                        out.push(new_gss_node);
                     }
-                } else {
-                    panic!("Goto not found for NT {:?} in start state {:?}", nt, state_id);
-                }
-            } else {
-                for ((edge_content, _), _pred_arc) in resolved_node.predecessors().iter() {
-                    let state_id = edge_content.state_id;
-                    let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                    );
-                    match goto {
-                        Goto::State(goto_state_id) => {
-                            let new_gss_node = resolved_node.push(ParseStateEdgeContent { state_id: *goto_state_id }, Acc::new_conservative());
-                            out.push(new_gss_node);
-                        }
-                        Goto::Accept => {}
-                    }
+                    Goto::Accept => {}
                 }
             }
         }
