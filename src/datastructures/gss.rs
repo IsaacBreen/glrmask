@@ -230,13 +230,18 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        self.resolved_predecessor_node().push(edge_value, local_acc)
+        let resolved_acc = self.resolved_acc();
+        let acc = Acc {
+            llm_tokens: &resolved_acc.llm_tokens | &local_acc.llm_tokens,
+            terminals: &resolved_acc.terminals & &local_acc.terminals,
+        };
+        self.predecessor_node.push(edge_value, acc)
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
         let acc = Acc {
-            llm_tokens: &self.parent_acc.llm_tokens | &local_acc.llm_tokens,
-            terminals: &self.parent_acc.terminals & &local_acc.terminals,
+            llm_tokens: (&self.path_acc.llm_tokens & &self.parent_acc.llm_tokens) | &local_acc.llm_tokens,
+            terminals: &self.path_acc.terminals & &self.parent_acc.terminals & &local_acc.terminals,
         };
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
@@ -466,7 +471,12 @@ impl<'a> GSSPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
-        self.resolved_predecessor_node().push(edge_value, local_acc)
+        let resolved_acc = self.resolved_acc();
+        let acc = Acc {
+            llm_tokens: &resolved_acc.llm_tokens | &local_acc.llm_tokens,
+            terminals: &resolved_acc.terminals & &local_acc.terminals,
+        };
+        self.predecessor_node.push(edge_value, acc)
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent, local_acc: Acc) -> GSSNode {
