@@ -449,6 +449,11 @@ fn test_ambiguous_arithmetic() {
 
     // Limitation/Capability: GLR succeeds on ambiguous arithmetic.
     assert!(state.is_ok(), "GLR parser should accept ambiguous arithmetic input");
+
+    let mut state2: GLRParserState<'_> = parser.init_glr_parser(None);
+    state2.parse(&tokens);
+    state2.step(eof);
+    assert_eq!(state, state2, "GLR parser should produce the same state for the same input");
 }
 
 #[test]
