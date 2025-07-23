@@ -811,7 +811,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
-        return None;
+        // return None;
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
             let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
@@ -820,6 +820,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 ParserPhase::ReadyForPhase3 => &row.phase2_shifts_and_reduces,
             };
             if let Some(action) = shifts_and_reduces.get(&token_id) {
+                crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
+                              self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                              peek.edge_value().state_id.0, action);
                 // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
                 llm_tokens = &llm_tokens | &peek.resolved_acc().union_llm_tokens();
             }
