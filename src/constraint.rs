@@ -1117,6 +1117,11 @@ impl<'a> GrammarConstraintState<'a> {
                         if glr_s.is_ok() {
                             entry.successful += 1;
                         }
+
+                        if !glr_s.is_ok() {
+                            return results;
+                        }
+
                         crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
                     }
 
@@ -1135,7 +1140,12 @@ impl<'a> GrammarConstraintState<'a> {
                         // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
-                        if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
+                        if !glr_s.is_ok() {
+                            crate::debug!(4, "GLR state is not alive after step, skipping.");
+                            continue;
+                        }
+
+                        if child_node_trie_data.as_arc().lock().unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                             crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
                             // timeit!("get_mask final_mask update", {
@@ -1143,9 +1153,7 @@ impl<'a> GrammarConstraintState<'a> {
                             // });
                         }
 
-                        if glr_s.is_ok() {
-                            results.push((child_node_trie_data.clone(), glr_s));
-                        }
+                        results.push((child_node_trie_data.clone(), glr_s));
                     }
                     crate::debug!(4, "Step function results len: {}", results.len());
                     results
