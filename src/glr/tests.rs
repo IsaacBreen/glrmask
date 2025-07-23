@@ -1035,6 +1035,50 @@ fn test_parser_stats_conflicts() {
     assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
 }
 // --- Notes on Limitations Not Easily Tested Here ---
+
+#[test]
+fn test_lr1_not_lalr1_grammar() {
+    // This grammar is a classic example of a grammar that is LR(1) but not LALR(1).
+    // An LALR(1) parser would merge states and create a reduce/reduce conflict.
+    // A canonical LR(1) parser should handle it without conflicts.
+    // S' -> S $
+    // S  -> a E c | a F d | b F c | b E d
+    // E  -> e
+    // F  -> e
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start rule
+        prod("S", vec![t("a"), nt("E"), t("c")]),
+        prod("S", vec![t("a"), nt("F"), t("d")]),
+        prod("S", vec![t("b"), nt("F"), t("c")]),
+        prod("S", vec![t("b"), nt("E"), t("d")]),
+        prod("E", vec![t("e")]),
+        prod("F", vec![t("e")]),
+    ];
+
+    // Validation should pass
+    assert!(analyze::validate(&productions).is_ok());
+
+    // Parser generation should succeed without conflicts for an LR(1) generator
+    let parser = generate_glr_parser(&productions, 0, None);
+
+    // Check stats to be sure there are no conflicts
+    let stats = stats::get_stats(&parser);
+    assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+    assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+
+    let test_cases = [("aec", true), ("afd", true), ("bfc", true), ("bed", true), ("aed", false), ("afc", false), ("bec", false), ("bfd", false), ("e", false), ("ac", false)];
+
+    for (input, expected_match) in test_cases {
+        let tokens = tokenize(&parser, input);
+        let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+        state.parse(&tokens);
+        state.step(eof);
+        assert_eq!(state.is_ok(), expected_match, "Parse check failed for LR(1)-specific input: '{}'", input);
+    }
+}
+
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
 //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
