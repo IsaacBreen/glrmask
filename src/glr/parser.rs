@@ -811,6 +811,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+        return None;
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
             let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
