@@ -673,6 +673,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 );
                 match goto {
                     Goto::State(goto_state_id) => {
+                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                         let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
                         out.push(new_gss_node);
                     }
@@ -830,7 +831,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
         timeit!("GLRParserState::step::phase3", {
             while let Some(state) = phase3_todo.pop_front() {
-                crate::debug!(4, "Processing state with {} predecessors", state.stack.num_predecessors());
+                crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
                 for peek in state.stack.peek_iter() {
                     crate::debug!(4, "Processing peek with state ID {}", peek.edge_value().state_id.0);
                     let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
