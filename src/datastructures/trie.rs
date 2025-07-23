@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
-use std::hash::{DefaultHasher, Hash, Hasher}; // Added for Hash implementation
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 use ordered_hash_map::OrderedHashMap;
 
@@ -16,6 +16,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
+use ordered_hash_map::OrderedHashSet;
 use profiler_macro::time_it;
 // Added for derive macro pattern
 
@@ -866,7 +867,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
         let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut todo     : BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
@@ -958,7 +959,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values: HashMap<*const Mutex<Self>, V> = HashMap::new();
         let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
-        let mut todo: BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {

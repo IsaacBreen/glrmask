@@ -336,7 +336,7 @@ pub fn calculate_final_stats(
     crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
 
     // Custom implementation of all_nodes using *const PrecomputeNode for visited set
-    let mut all_reachable_nodes: HashMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
     let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
     let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
 
