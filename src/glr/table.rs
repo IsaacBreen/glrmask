@@ -1,5 +1,5 @@
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal, terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -290,35 +290,48 @@ type Stage7Result = (
     StateID,
 );
 
-fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+fn stage_1(
+    productions: &[Production],
+    start_production_id: usize,
+    eof_terminal: &Terminal,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    nullable_set: &BTreeSet<NonTerminal>,
+) -> Stage1Result {
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
+        lookahead: eof_terminal.clone(),
     };
-    let initial_closure = BTreeSet::from([initial_item]);
-    let mut worklist = VecDeque::from([initial_closure.clone()]);
+    let initial_item_set = BTreeSet::from([initial_item]);
+    let initial_closure = compute_closure(&initial_item_set, productions, first_sets, nullable_set);
 
+    let mut states = BTreeSet::from([initial_closure.clone()]);
+    let mut worklist = VecDeque::from([initial_closure.clone()]);
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
     while let Some(items) = worklist.pop_front() {
-        if transitions.contains_key(&items) {
-            continue;
-        }
-
-        let closure = compute_closure(&items, productions);
-        let splits = split_on_dot(&closure);
+        let splits = split_on_dot(&items);
         let mut row = BTreeMap::new();
 
-        for (symbol, items) in splits {
+        for (symbol, items_with_symbol_after_dot) in splits {
             if symbol.is_none() {
+                continue; // Reduce items, no goto from them.
+            }
+            let goto_items = compute_goto(&items_with_symbol_after_dot);
+            if goto_items.is_empty() {
                 continue;
             }
-            let goto_set = compute_goto(&items);
-            row.insert(symbol.clone(), goto_set.clone());
-            worklist.push_back(goto_set);
+            let goto_closure = compute_closure(&goto_items, productions, first_sets, nullable_set);
+
+            if !goto_closure.is_empty() {
+                if states.insert(goto_closure.clone()) {
+                    worklist.push_back(goto_closure.clone());
+                }
+                row.insert(symbol.clone(), goto_closure);
+            }
         }
 
-        transitions.insert(items.clone(), row);
+        transitions.insert(items, row);
     }
 
     transitions
@@ -331,7 +344,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
         let mut gotos = BTreeMap::new();
         let mut reduces = BTreeSet::new();
 
-        let closure = compute_closure(&item_set, productions);
+        let closure = &item_set; // With LR(1), item_set is already the full closure.
         for item in &closure { // Check the full closure for reductions
             if item.dot_position == item.production.rhs.len() {
                 reduces.insert(item.clone());
@@ -370,28 +383,22 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     stage_2_table
 }
 
-fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-    let follow_sets = compute_follow_sets(productions);
-    crate::debug!(3, "Follow sets:");
-    for (nt, follow_set) in &follow_sets {
-        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-    }
-
+fn stage_3(stage_2_table: Stage2Table, _productions: &[Production]) -> Stage3Result {
+    // With LR(1) items, FOLLOW sets are not needed for reductions.
+    // The lookahead is part of the item itself.
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
         let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
         for item in &row.reduces {
-            let lhs = &item.production.lhs;
-            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-
-            for terminal in lookaheads {
-                reduces
-                    .entry(terminal.clone())
-                    .or_default()
-                    .insert(item.clone());
-            }
+            // item is [A -> α ., a]
+            // The reduction is valid on lookahead 'a'.
+            let lookahead_terminal = &item.lookahead;
+            reduces
+                .entry(lookahead_terminal.clone())
+                .or_default()
+                .insert(item.clone());
         }
 
         stage_3_table.insert(
@@ -665,8 +672,12 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     // crate::debug!(2, "Validating");
     // validate(&productions).expect("Validation error");
 
+    let nullable_set = crate::glr::analyze::compute_nullable_nonterminals(&productions);
+    let first_sets = compute_first_sets(&productions);
+    let eof_terminal = terminal("$");
+
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions, start_production_id);
+    let stage_1_table = stage_1(&productions, start_production_id, &eof_terminal, &first_sets, &nullable_set);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
