@@ -495,10 +495,12 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
+pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) -> Option<Arc<GSSNode>> {
     let node_ptr = Arc::as_ptr(node_arc);
     if let Some(cached_result) = memo.get(&node_ptr) {
@@ -539,7 +541,7 @@ fn prune_and_transform_recursive(
 pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
@@ -563,7 +565,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
 pub fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let allowed_mask = HybridBitset::max_ones() - tokens_to_disallow.clone();
     allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
@@ -571,7 +573,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
 
 pub fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
@@ -590,7 +592,7 @@ pub fn reset_llm_tokens(
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &HybridL2Bitset,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
@@ -608,7 +610,7 @@ pub fn disallow_terminals_and_prune_arc(
 pub fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         // If any of the matched terminals is disallowed, that's a problem.
@@ -644,7 +646,7 @@ pub fn prune_disallowed_terminals(
 pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
