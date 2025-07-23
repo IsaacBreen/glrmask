@@ -723,8 +723,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                                timeit!("GLRParserState::step::phase1::shift", {
                                 let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
+                                });
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
@@ -735,10 +737,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(to) = shift {
+                                    timeit!("GLRParserState::step::phase1::split_shift", {
                                     let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                     shifted_states_todo.push_back(new_parse_state);
+                                    })
                                 }
                                 for (len, nts) in reduces {
+                                    timeit!("GLRParserState::step::phase1::split_reduce", {
                                     for (nt, _prod_ids) in nts {
                                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                             if !s_new_arc.is_empty() {
@@ -746,6 +751,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 phase2_todo.push_back(new_parse_state);
                                             }
                                     }
+                                    });
                                 }
                             }
                         }
