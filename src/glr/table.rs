@@ -636,26 +636,19 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 }
 
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
-    let original_productions = productions.to_vec();
+    // Simplify the grammar through a series of transformations
+    println!("Original productions:\n{}", display_productions(productions));
+    let (mut productions, start_production_id) = simplify_grammar(productions, start_production_id);
+    println!("Simplified productions:\n{}", display_productions(&productions));
 
-    crate::debug!(2, "Removing productions with undefined non-terminals");
-    println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
-    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
-    // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
-
-    // Resolve right-recursion
-    let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
-    let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
-    let mut productions = productions.to_vec();
-    println!("Before recursion resolution:\n{}", display_productions(&productions));
-    // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
-    crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
-    println!("After direct right recursion:\n{}", display_productions(&productions));
-
-    // After recursion resolution, new non-terminals may have been added.
+    // After simplification (especially recursion resolution), new non-terminals may have been added.
     // We need to update the non_terminal_map.
     let mut next_non_terminal_id = non_terminal_map.len();
     for p in &productions {
+        if !non_terminal_map.contains_left(&p.lhs) {
+            non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+            next_non_terminal_id += 1;
+        }
         if !non_terminal_map.contains_left(&p.lhs) {
             non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
             next_non_terminal_id += 1;

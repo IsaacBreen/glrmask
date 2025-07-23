@@ -1,7 +1,7 @@
 use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
-use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion, eliminate_unit_productions}; // Import the analyze module
 use crate::glr::stats;
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
@@ -773,6 +773,41 @@ fn test_filter_productions_selectivity() {
     // Specifically check that "X -> B" is NOT in the filtered set.
     let prod_x_b = prod("X", vec![nt("B")]);
     assert!(!filtered_set.contains(&prod_x_b), "Production 'X -> B' should have been filtered out.");
+}
+
+#[test]
+fn test_eliminate_unit_productions() {
+    // S' -> S
+    // S -> E
+    // E -> E + T | T
+    // T -> i
+    let productions = vec![
+        prod("S'", vec![nt("S")]),      // 0, start
+        prod("S", vec![nt("E")]),       // 1, unit
+        prod("E", vec![nt("E"), t("+"), nt("T")]), // 2
+        prod("E", vec![nt("T")]),       // 3, unit
+        prod("T", vec![t("i")]),        // 4
+    ];
+
+    let (new_prods, new_start_id) = eliminate_unit_productions(&productions, 0);
+
+    let expected_prods = BTreeSet::from([
+        // S' -> S is kept as it's the start rule
+        prod("S'", vec![nt("S")]),
+        // E -> E + T is expanded for S', S, E
+        prod("S'", vec![nt("E"), t("+"), nt("T")]),
+        prod("S", vec![nt("E"), t("+"), nt("T")]),
+        prod("E", vec![nt("E"), t("+"), nt("T")]),
+        // T -> i is expanded for S', S, E, T
+        prod("S'", vec![t("i")]),
+        prod("S", vec![t("i")]),
+        prod("E", vec![t("i")]),
+        prod("T", vec![t("i")]),
+    ]);
+
+    let new_prods_set: BTreeSet<_> = new_prods.iter().cloned().collect();
+    assert_eq!(new_prods_set, expected_prods, "Unit production elimination result is incorrect.");
+    assert_eq!(new_prods[new_start_id], productions[0], "Start production was not preserved correctly.");
 }
 
 #[test]

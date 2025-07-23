@@ -518,8 +518,125 @@ pub fn filter_productions_by_reachability(
     kept_productions
 }
 
+/// Eliminates unit productions (rules of the form `A -> B`) from the grammar.
+///
+/// This transformation is a key optimization. For every original rule `B -> α` (where `α` is not
+/// a single non-terminal) and every non-terminal `A` that can derive `B` through a chain of
+/// unit productions (`A ->* B`), a new rule `A -> α` is created. The original unit productions
+/// are then discarded. The start production is preserved even if it's a unit rule.
+///
+/// # Arguments
+/// * `productions` - The list of productions to transform.
+/// * `start_production_id` - The index of the start production, which is exempt from elimination.
+///
+/// # Returns
+/// A tuple containing the new list of productions and the new index of the start production.
+pub fn eliminate_unit_productions(
+    productions: &[Production],
+    start_production_id: usize,
+) -> (Vec<Production>, usize) {
+    crate::debug!(2, "Eliminating unit productions (A -> B).");
+
+    // 1. Identify unit productions (A -> B) and other productions.
+    // The start production is never considered a unit production to be eliminated.
+    let mut unit_prod_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    let mut other_prods = Vec::new();
+    let mut all_nts = BTreeSet::new();
+
+    for (i, p) in productions.iter().enumerate() {
+        all_nts.insert(p.lhs.clone());
+        for s in &p.rhs {
+            if let Symbol::NonTerminal(nt) = s {
+                all_nts.insert(nt.clone());
+            }
+        }
+
+        if i != start_production_id && p.rhs.len() == 1 {
+            if let Symbol::NonTerminal(rhs_nt) = &p.rhs[0] {
+                unit_prod_graph.entry(p.lhs.clone()).or_default().insert(rhs_nt.clone());
+                continue; // This production will be eliminated.
+            }
+        }
+        other_prods.push(p.clone());
+    }
+
+    // 2. Compute the transitive closure of the unit production graph.
+    // `chains[A]` will contain all `B` such that `A ->* B` via unit productions.
+    let mut chains: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    for nt in &all_nts {
+        chains.entry(nt.clone()).or_default().insert(nt.clone());
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for nt_i in all_nts.iter() {
+            let to_add: Vec<_> = chains.get(nt_i).unwrap().iter()
+                .filter_map(|nt_j| unit_prod_graph.get(nt_j))
+                .flat_map(|successors| successors.clone())
+                .collect();
+            
+            let chain_i = chains.get_mut(nt_i).unwrap();
+            let old_len = chain_i.len();
+            chain_i.extend(to_add);
+            if chain_i.len() != old_len {
+                changed = true;
+            }
+        }
+    }
+
+    // 3. Construct the new set of productions.
+    let mut new_productions = BTreeSet::new();
+    for prod in &other_prods {
+        let b = &prod.lhs;
+        for (a, a_chain) in &chains {
+            if a_chain.contains(b) {
+                new_productions.insert(Production { lhs: a.clone(), rhs: prod.rhs.clone() });
+            }
+        }
+    }
+
+    let final_productions: Vec<Production> = new_productions.into_iter().collect();
+
+    // 4. Find the new start production ID.
+    let original_start_prod = &productions[start_production_id];
+    let new_start_id = final_productions.iter().position(|p| p == original_start_prod)
+        .expect("Start production was lost during unit production elimination. This should not happen.");
+
+    (final_productions, new_start_id)
+}
+
+/// Applies a series of simplification transformations to a grammar.
+///
+/// The pipeline includes:
+/// 1. Removing productions with undefined non-terminals.
+/// 2. Eliminating unit productions (`A -> B`).
+/// 3. Resolving direct right-recursion into left-recursion.
 pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
-    todo!()
+    // A pipeline of grammar simplification steps.
+    let mut productions = initial_productions.to_vec();
+    let mut current_start_id = start_production_id;
+
+    // 1. Remove productions with undefined non-terminals.
+    crate::debug!(1, "Simplifying grammar: Removing productions with undefined non-terminals.");
+    productions = remove_productions_with_undefined_nonterminals(&productions, &[current_start_id]);
+
+    // 2. Eliminate unit productions (A -> B).
+    crate::debug!(1, "Simplifying grammar: Eliminating unit productions.");
+    let (new_prods, new_start_id) = eliminate_unit_productions(&productions, current_start_id);
+    productions = new_prods;
+    current_start_id = new_start_id;
+
+    // 3. Resolve direct right-recursion into left-recursion.
+    crate::debug!(1, "Simplifying grammar: Resolving direct right-recursion.");
+    let all_nonterminals: BTreeSet<_> = productions.iter().flat_map(|p| {
+        let mut nts = vec![p.lhs.clone()];
+        nts.extend(p.rhs.iter().filter_map(|s| if let Symbol::NonTerminal(nt) = s { Some(nt.clone()) } else { None }));
+        nts
+    }).collect();
+    let mut name_generator = create_unique_name_generator(&all_nonterminals);
+    resolve_direct_right_recursion(&mut productions, &mut name_generator);
+
+    (productions, current_start_id)
 }
 
 /// Helper function to find the last symbol in a rule's RHS that is not a nullable non-terminal.
