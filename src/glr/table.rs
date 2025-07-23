@@ -1,5 +1,5 @@
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal, terminal};
+use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -290,48 +290,35 @@ type Stage7Result = (
     StateID,
 );
 
-fn stage_1(
-    productions: &[Production],
-    start_production_id: usize,
-    eof_terminal: &Terminal,
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-    nullable_set: &BTreeSet<NonTerminal>,
-) -> Stage1Result {
+fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
-        lookahead: eof_terminal.clone(),
     };
-    let initial_item_set = BTreeSet::from([initial_item]);
-    let initial_closure = compute_closure(&initial_item_set, productions, first_sets, nullable_set);
-
-    let mut states = BTreeSet::from([initial_closure.clone()]);
+    let initial_closure = BTreeSet::from([initial_item]);
     let mut worklist = VecDeque::from([initial_closure.clone()]);
+
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
     while let Some(items) = worklist.pop_front() {
-        let splits = split_on_dot(&items);
-        let mut row = BTreeMap::new();
-
-        for (symbol, items_with_symbol_after_dot) in splits {
-            if symbol.is_none() {
-                continue; // Reduce items, no goto from them.
-            }
-            let goto_items = compute_goto(&items_with_symbol_after_dot);
-            if goto_items.is_empty() {
-                continue;
-            }
-            let goto_closure = compute_closure(&goto_items, productions, first_sets, nullable_set);
-
-            if !goto_closure.is_empty() {
-                if states.insert(goto_closure.clone()) {
-                    worklist.push_back(goto_closure.clone());
-                }
-                row.insert(symbol.clone(), goto_closure);
-            }
+        if transitions.contains_key(&items) {
+            continue;
         }
 
-        transitions.insert(items, row);
+        let closure = compute_closure(&items, productions);
+        let splits = split_on_dot(&closure);
+        let mut row = BTreeMap::new();
+
+        for (symbol, items) in splits {
+            if symbol.is_none() {
+                continue;
+            }
+            let goto_set = compute_goto(&items);
+            row.insert(symbol.clone(), goto_set.clone());
+            worklist.push_back(goto_set);
+        }
+
+        transitions.insert(items.clone(), row);
     }
 
     transitions
@@ -344,8 +331,8 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
         let mut gotos = BTreeMap::new();
         let mut reduces = BTreeSet::new();
 
-        let closure = &item_set; // With LR(1), item_set is already the full closure.
-        for item in closure { // Check the full closure for reductions
+        let closure = compute_closure(&item_set, productions);
+        for item in &closure { // Check the full closure for reductions
             if item.dot_position == item.production.rhs.len() {
                 reduces.insert(item.clone());
             }
@@ -364,7 +351,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
             }
         }
 
-        for item in closure {
+        for item in &closure {
             // e.g. start rules
             if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
                 gotos.insert(item.production.lhs.clone(), BTreeSet::new());
@@ -383,22 +370,28 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     stage_2_table
 }
 
-fn stage_3(stage_2_table: Stage2Table, _productions: &[Production]) -> Stage3Result {
-    // With LR(1) items, FOLLOW sets are not needed for reductions.
-    // The lookahead is part of the item itself.
+fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+    let follow_sets = compute_follow_sets(productions);
+    crate::debug!(3, "Follow sets:");
+    for (nt, follow_set) in &follow_sets {
+        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
+    }
+
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
         let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
         for item in &row.reduces {
-            // item is [A -> α ., a]
-            // The reduction is valid on lookahead 'a'.
-            let lookahead_terminal = &item.lookahead;
-            reduces
-                .entry(lookahead_terminal.clone())
-                .or_default()
-                .insert(item.clone());
+            let lhs = &item.production.lhs;
+            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
+
+            for terminal in lookaheads {
+                reduces
+                    .entry(terminal.clone())
+                    .or_default()
+                    .insert(item.clone());
+            }
         }
 
         stage_3_table.insert(
@@ -488,15 +481,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(
-    stage_6_table: Stage6Table,
-    productions: &[Production],
-    start_production_id: usize,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-    eof_terminal: &Terminal,
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-    nullable_set: &BTreeSet<NonTerminal>) -> Stage7Result {
+fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
@@ -640,14 +625,12 @@ fn stage_7(
         });
     }
 
-    let initial_item = Item {
+    let start_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
-        lookahead: eof_terminal.clone(),
     };
-    let initial_item_set = BTreeSet::from([initial_item]);
-    let start_state_closure = compute_closure(&initial_item_set, productions, first_sets, nullable_set);
-    let start_state_id = *item_set_map.get_by_left(&start_state_closure).unwrap();
+    let start_item_set = BTreeSet::from([start_item]);
+    let start_state_id = *item_set_map.get_by_left(&start_item_set).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)
 }
@@ -682,12 +665,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     // crate::debug!(2, "Validating");
     // validate(&productions).expect("Validation error");
 
-    let nullable_set = crate::glr::analyze::compute_nullable_nonterminals(&productions);
-    let first_sets = compute_first_sets(&productions);
-    let eof_terminal = terminal("$");
-
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions, start_production_id, &eof_terminal, &first_sets, &nullable_set);
+    let stage_1_table = stage_1(&productions, start_production_id);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
@@ -705,12 +684,12 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map, &eof_terminal, &first_sets, &nullable_set);
+    let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
 
     crate::debug!(2, "Done generating GLR parser");
 
-    GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id, first_sets, nullable_set)
+    GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
