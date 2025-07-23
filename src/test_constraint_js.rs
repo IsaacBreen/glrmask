@@ -787,6 +787,19 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
             pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Constraint states should remain equal after committing byte {}.", i + 1);
             assert_eq!(constraint_state1.state, constraint_state2.state, "Constraint states should remain equal after committing byte {}.", i + 1);
         }
+
+        let mut constraint_state1 = grammar_constraint.init();
+        let mut constraint_state2 = grammar_constraint.init();
+        pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Initial constraint states should be equal after initialization.");
+        assert_eq!(constraint_state1.state, constraint_state2.state, "Initial constraint states should be equal after initialization.");
+        for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+            let current_token_str = &tokenized_strs_for_logging[i];
+            println!("Committing token {}/{}: '{}' (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+            constraint_state1.commit(llm_token_id);
+            constraint_state2.commit(llm_token_id);
+            pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Constraint states should remain equal after committing token {}.", i + 1);
+            assert_eq!(constraint_state1.state, constraint_state2.state, "Constraint states should remain equal after committing token {}.", i + 1);
+        }
     }
 
     // 5. Basic Interaction with the GrammarConstraintState
