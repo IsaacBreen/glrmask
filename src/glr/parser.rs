@@ -318,22 +318,13 @@ impl GLRParser {
             writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
 
             // Get and print items
-            if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-                let full_closure = compute_closure(core_items, &self.productions);
-                let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-
-                writeln!(&mut result, "  Core Items:").unwrap();
-                if core_items.is_empty() {
+            if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                // For LR(1), the item set in the map is the full state (closure).
+                writeln!(&mut result, "  Items:").unwrap();
+                if items.is_empty() {
                     writeln!(&mut result, "    (None)").unwrap();
                 } else {
-                    for item in core_items {
-                        writeln!(&mut result, "    - {}", item).unwrap();
-                    }
-                }
-
-                if !closure_only_items.is_empty() {
-                    writeln!(&mut result, "  Closure-only Items:").unwrap();
-                    for item in &closure_only_items {
+                    for item in items {
                         writeln!(&mut result, "    - {}", item).unwrap();
                     }
                 }
@@ -488,45 +479,10 @@ impl Display for GLRParser {
         for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
             writeln!(f, "  State {}:", state_id.0)?;
 
-            let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-            let full_closure = compute_closure(core_item_set, &self.productions);
-
-            writeln!(f, "    Core Items:")?;
-            for item in core_item_set {
-                write!(f, "      - {} ->", item.production.lhs.0)?;
-                for (i, symbol) in item.production.rhs.iter().enumerate() {
-                    if i == item.dot_position {
-                        write!(f, " •")?;
-                    }
-                    match symbol {
-                        Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                    }?;
-                }
-                if item.dot_position == item.production.rhs.len() {
-                    write!(f, " •")?;
-                }
-                writeln!(f)?;
-            }
-
-            let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-            if !closure_only_items.is_empty() {
-                writeln!(f, "    Closure Items:")?;
-                for item in &closure_only_items {
-                    write!(f, "      - {} ->", item.production.lhs.0)?;
-                    for (i, symbol) in item.production.rhs.iter().enumerate() {
-                        if i == item.dot_position {
-                            write!(f, " •")?;
-                        }
-                        match symbol {
-                            Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                        }?;
-                    }
-                    if item.dot_position == item.production.rhs.len() {
-                        write!(f, " •")?;
-                    }
-                    writeln!(f)?;
+            if let Some(items) = item_set_map.get_by_right(&state_id) {
+                writeln!(f, "    Items:")?;
+                for item in items {
+                    writeln!(f, "      - {}", item)?;
                 }
             }
 

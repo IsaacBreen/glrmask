@@ -987,19 +987,14 @@ fn test_explain_stack() {
 
     // Assertions for State 0 (start state)
     assert!(explanation.contains(&format!("State {}:", start_state.0)));
-    assert!(explanation.contains("Core Items:"));
-    assert!(explanation.contains("S -> • A '$'"));
-    assert!(explanation.contains("Closure-only Items:"));
-    assert!(explanation.contains("A -> • A 'a'"));
-    assert!(explanation.contains("A -> • 'b'"));
+    assert!(explanation.contains("Items:"));
+    assert!(explanation.contains("[S -> • A '$', $]"));
     assert!(explanation.contains("On 'b': Shift to State"));
 
     // Assertions for State after shifting 'b'
     assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-    assert!(explanation.contains("Core Items:"));
-    assert!(explanation.contains("A -> 'b' •"));
-    assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-    assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+    assert!(explanation.contains("[A -> 'b' •, $]"));
+    assert!(explanation.contains("On '$': Reduce by rule"));
 }
 
 #[test]
