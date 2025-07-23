@@ -489,6 +489,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
     }
 
     // Assert equivalence
+    pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
     assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
     println!("\nAssertion passed: States are equivalent.");
 }
@@ -660,6 +661,7 @@ fn test_a_plus_commit_equivalence() {
     println!("{}", &state2);
 
     // Assert equivalence
+    pretty_assertions::assert_eq!(state1.to_string(), state2.to_string(), "States from (commit 'a' x3) and (commit 'aaa') should be equivalent.");
     assert_eq!(state1.state(), state2.state(), "States from (commit 'a' x3) and (commit 'aaa') should be equivalent.");
     println!("\nAssertion passed: States are equivalent.");
 }
