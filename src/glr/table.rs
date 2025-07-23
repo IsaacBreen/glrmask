@@ -625,12 +625,12 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         });
     }
 
-    let start_item = Item {
+    let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
     };
-    let start_item_set = BTreeSet::from([start_item]);
-    let start_state_id = *item_set_map.get_by_left(&start_item_set).unwrap();
+    let initial_item_set = BTreeSet::from([initial_item]);
+    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)
 }
