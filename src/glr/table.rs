@@ -598,14 +598,12 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         });
     }
 
-    let first_sets = compute_first_sets(productions);
-    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
         lookahead: None,
     };
-    let initial_item_set = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
+    let initial_item_set = compute_closure(&BTreeSet::from([initial_item]), productions);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)

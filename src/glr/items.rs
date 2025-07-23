@@ -1,4 +1,4 @@
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
@@ -67,11 +67,12 @@ impl Display for Item {
 pub fn compute_closure(
     items: &BTreeSet<Item>,
     productions: &[Production],
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-    nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeSet<Item> {
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+
+    let first_sets = compute_first_sets(productions);
+    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
 
     while let Some(item) = worklist.pop_front() {
         if let Some(Symbol::NonTerminal(b)) = item.production.rhs.get(item.dot_position) {
