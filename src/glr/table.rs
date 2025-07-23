@@ -372,12 +372,6 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 }
 
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-    let follow_sets = compute_follow_sets(productions);
-    crate::debug!(3, "Follow sets:");
-    for (nt, follow_set) in &follow_sets {
-        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-    }
-
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
@@ -385,9 +379,7 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
 
         for item in &row.reduces {
             let lhs = &item.production.lhs;
-            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-
-            for terminal in lookaheads {
+            if let Some(terminal) = &item.lookahead {
                 reduces
                     .entry(terminal.clone())
                     .or_default()
