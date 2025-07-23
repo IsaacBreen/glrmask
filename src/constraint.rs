@@ -1114,15 +1114,14 @@ impl<'a> GrammarConstraintState<'a> {
                         glr_s.do_phase1_and_2(*gtid);
                         // });
 
+                        crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
+
                         if glr_s.is_ok() {
                             entry.successful += 1;
-                        }
-
-                        if !glr_s.is_ok() {
+                        } else {
                             return results;
-                        }
 
-                        crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
+                        }
                     }
 
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
