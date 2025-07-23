@@ -90,7 +90,7 @@ pub fn compute_firsts(
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeSet<Terminal> {
-    match item.production.rhs.get(item.dot_position + 1) {
+    match item.production.rhs.get(item.dot_position) {
         Some(Symbol::Terminal(t)) => {
             // If the next symbol is a terminal, the first is just that terminal
             BTreeSet::from([t.clone()])
