@@ -1,4 +1,4 @@
-use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
@@ -64,51 +64,17 @@ impl Display for Item {
     }
 }
 
-pub fn compute_closure(
-    items: &BTreeSet<Item>,
-    productions: &[Production],
-) -> BTreeSet<Item> {
+pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
+    // crate::debug!(3, "Computing closure");
+    let follow_sets = compute_follow_sets(productions);
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
-    let first_sets = compute_first_sets(productions);
-    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-
     while let Some(item) = worklist.pop_front() {
-        if let Some(Symbol::NonTerminal(b)) = item.production.rhs.get(item.dot_position) {
-            let beta = &item.production.rhs[item.dot_position + 1..];
-            let mut lookaheads = BTreeSet::new();
-
-            // Compute FIRST(beta)
-            let mut beta_is_nullable = true;
-            for symbol in beta {
-                match symbol {
-                    Symbol::Terminal(t) => {
-                        lookaheads.insert(t.clone());
-                        beta_is_nullable = false;
-                        break;
-                    }
-                    Symbol::NonTerminal(nt) => {
-                        if let Some(first_set) = first_sets.get(nt) {
-                            lookaheads.extend(first_set.iter().cloned());
-                        }
-                        if !nullable_nonterminals.contains(nt) {
-                            beta_is_nullable = false;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // If beta is nullable, add the original item's lookahead
-            if beta_is_nullable {
-                if let Some(lookahead) = &item.lookahead {
-                    lookaheads.insert(lookahead.clone());
-                }
-            }
-
-            for prod in productions.iter().filter(|p| p.lhs == *b) {
-                for lookahead in &lookaheads {
+        if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
+            for prod in productions.iter().filter(|p| p.lhs == *nt) {
+                let follows = follow_sets.get(&nt).cloned().unwrap_or_default();
+                for lookahead in follows {
                     let new_item = Item {
                         production: prod.clone(),
                         dot_position: 0,
