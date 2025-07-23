@@ -850,6 +850,9 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 // use pretty_assertions::{assert_eq, assert_ne};
                 println!("new_constraint_state:\n{}", new_constraint_state);
                 println!("constraint_state:\n{}", constraint_state);
+                pretty_assertions::assert_eq!(
+                    new_constraint_state.to_string(), constraint_state.to_string()
+                );
                 assert_eq!(
                     new_constraint_state, constraint_state,
                     "New constraint state after committing prefix bytes should match the original constraint state."
