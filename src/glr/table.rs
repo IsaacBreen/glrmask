@@ -367,21 +367,26 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 }
 
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-    // For LR(1), lookaheads are already in the items. We just group reductions by lookahead.
-    let production_ids: BTreeMap<Production, ProductionID> = productions
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.clone(), ProductionID(i)))
-        .collect();
+    let follow_sets = compute_follow_sets(productions);
+    crate::debug!(3, "Follow sets:");
+    for (nt, follow_set) in &follow_sets {
+        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
+    }
 
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
-        let mut reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+        let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
         for item in &row.reduces {
-            if let Some(lookahead) = &item.lookahead {
-                let prod_id = *production_ids.get(&item.production).unwrap();
-                reduces.entry(lookahead.clone()).or_default().insert(prod_id);
+            let lhs = &item.production.lhs;
+            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
+
+            for terminal in lookaheads {
+                reduces
+                    .entry(terminal.clone())
+                    .or_default()
+                    .insert(item.clone());
             }
         }
 
@@ -399,9 +404,37 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
 }
 
 fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-    // This stage used to convert reduce items to production IDs.
-    // This is now done in stage_3 for LR(1). So this is a pass-through.
-    stage_3_table
+    let production_ids: BTreeMap<Production, ProductionID> = productions
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.clone(), ProductionID(i)))
+        .collect();
+
+    let mut stage_4_table = BTreeMap::new();
+
+    for (item_set, row) in stage_3_table {
+        let mut reduces = BTreeMap::new();
+
+        for (terminal, items) in row.reduces {
+            let mut prod_ids = BTreeSet::new();
+            for item in items {
+                let prod_id = production_ids.get(&item.production).unwrap();
+                prod_ids.insert(*prod_id);
+            }
+            reduces.insert(terminal.clone(), prod_ids);
+        }
+
+        stage_4_table.insert(
+            item_set,
+            Stage4Row {
+                shifts: row.shifts,
+                gotos: row.gotos,
+                reduces,
+            },
+        );
+    }
+
+    stage_4_table
 }
 
 fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
