@@ -1098,7 +1098,17 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |glr_s, grammar_token_opt, dest_map| {
-                timeit!("get_mask step_fn", {
+                // Count num end nodes vs non end nodes
+                let mut num_end = 0;
+                let mut num_non_end = 0;
+                for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
+                    if child_node_trie_data.as_arc().lock().unwrap().value.end {
+                        num_end += 1;
+                    } else {
+                        num_non_end += 1;
+                    }
+                }
+                timeit!(format!("get_mask step_fn - end only? {}", num_end > 0 && num_non_end == 0), {
                     let mut results = Vec::new();
                     let mut glr_s = glr_s.clone();
 
