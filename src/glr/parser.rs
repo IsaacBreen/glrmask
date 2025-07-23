@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem, GSSNodeData};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
