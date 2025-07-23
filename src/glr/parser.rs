@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem, GSSNodeData};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
@@ -17,6 +17,7 @@ use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::glr::items::{compute_closure, Item};
 use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
+use crate::glr::analyze::compute_nullable_nonterminals;
 
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
@@ -146,6 +147,8 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
+    pub first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    pub nullable_set: BTreeSet<NonTerminal>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -158,7 +161,6 @@ impl JSONConvertible for GLRParser {
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        // Do not serialize self.actions
         JSONNode::Object(obj)
     }
 
@@ -180,6 +182,10 @@ impl JSONConvertible for GLRParser {
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
+
+                let first_sets = crate::glr::grammar::compute_first_sets(&productions);
+                let nullable_set = compute_nullable_nonterminals(&productions);
+
                 Ok(GLRParser {
                     stage_7_table,
                     productions,
@@ -188,6 +194,8 @@ impl JSONConvertible for GLRParser {
                     item_set_map,
                     start_state_id,
                     ignore_terminal_id,
+                    first_sets,
+                    nullable_set,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -205,6 +213,8 @@ impl Debug for GLRParser {
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
             .field("ignore_terminal_id", &self.ignore_terminal_id)
+            .field("first_sets", &self.first_sets)
+            .field("nullable_set", &self.nullable_set)
             .finish()
     }
 }
@@ -217,7 +227,9 @@ impl PartialEq for GLRParser {
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
         self.start_state_id == other.start_state_id &&
-        self.ignore_terminal_id == other.ignore_terminal_id
+        self.ignore_terminal_id == other.ignore_terminal_id &&
+        self.first_sets == other.first_sets &&
+        self.nullable_set == other.nullable_set
     }
 }
 
@@ -233,6 +245,8 @@ impl GLRParser {
         start_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
         ignore_terminal_id: Option<TerminalID>,
+        first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+        nullable_set: BTreeSet<NonTerminal>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -251,6 +265,8 @@ impl GLRParser {
             item_set_map,
             start_state_id,
             ignore_terminal_id,
+            first_sets,
+            nullable_set,
         }
     }
 
@@ -319,7 +335,7 @@ impl GLRParser {
 
             // Get and print items
             if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-                let full_closure = compute_closure(core_items, &self.productions);
+                let full_closure = compute_closure(core_items, &self.productions, &self.first_sets, &self.nullable_set);
                 let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
 
                 writeln!(&mut result, "  Core Items:").unwrap();
@@ -489,7 +505,7 @@ impl Display for GLRParser {
             writeln!(f, "  State {}:", state_id.0)?;
 
             let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-            let full_closure = compute_closure(core_item_set, &self.productions);
+            let full_closure = compute_closure(core_item_set, &self.productions, &self.first_sets, &self.nullable_set);
 
             writeln!(f, "    Core Items:")?;
             for item in core_item_set {
