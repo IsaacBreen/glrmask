@@ -848,8 +848,8 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 let prefix_bytes = full_text_to_tokenize.as_bytes()[..token_end_byte_in_full_text].to_vec();
                 new_constraint_state.commit_bytes(&prefix_bytes);
                 // use pretty_assertions::{assert_eq, assert_ne};
-                println!("new_constraint_state:\n{}", new_constraint_state);
-                println!("constraint_state:\n{}", constraint_state);
+                // println!("new_constraint_state:\n{}", new_constraint_state);
+                // println!("constraint_state:\n{}", constraint_state);
                 pretty_assertions::assert_eq!(
                     new_constraint_state.to_string(), constraint_state.to_string()
                 );
