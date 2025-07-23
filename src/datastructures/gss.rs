@@ -547,7 +547,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
         if new_acc.llm_tokens_union.is_empty() {
             None
         } else {
-            Some((new_acc, true))
+            Some((new_acc, false))
         }
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -575,7 +575,7 @@ pub fn reset_llm_tokens(
         let continue_recursion = new_acc.llm_tokens_intersection != HybridBitset::max_ones();
         new_acc.llm_tokens_union = HybridBitset::max_ones();
         new_acc.llm_tokens_intersection = HybridBitset::max_ones();
-        Some((new_acc, true))
+        Some((new_acc, continue_recursion))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -628,7 +628,7 @@ pub fn prune_disallowed_terminals(
                 return Some(((*node.acc).clone(), true));
             }
         }
-        Some(((*node.acc).clone(), true))
+        Some(((*node.acc).clone(), false))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -671,7 +671,7 @@ pub fn map_allowed_terminals_tokenizer_states(
         new_acc.terminals_union = new_terminals_union;
         new_acc.terminals_intersection = new_terminals_intersection;
 
-        Some((new_acc, true))
+        Some((new_acc, changed_union || changed_intersection))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
