@@ -1,3 +1,7 @@
+let myBigInt = 9007199254740991;
+let myBigInt = 9007199254740991;
+let myBigInt = 9007199254740991;
+let myBigInt = 9007199254740991;
 aaaaa;
 //=========
 // <></>
