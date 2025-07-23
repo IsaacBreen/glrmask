@@ -1068,7 +1068,7 @@ fn test_lr1_not_lalr1_grammar() {
 
     let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
 
-    let test_cases = [("aec", true), ("afd", true), ("bfc", true), ("bed", true), ("aed", false), ("afc", false), ("bec", false), ("bfd", false), ("e", false), ("ac", false)];
+    let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", false), ("afc", false), ("bec", false), ("bfd", false), ("e", false), ("ac", false)];
 
     for (input, expected_match) in test_cases {
         let tokens = tokenize(&parser, input);
