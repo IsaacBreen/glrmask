@@ -811,7 +811,6 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 2, // Show 2 lines before and 2 lines after
             );
 
-
             assert!(
                 constraint_state.is_active(),
                 "Constraint state should be active before processing token {} ('{}')",
