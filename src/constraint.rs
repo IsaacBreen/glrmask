@@ -1188,6 +1188,10 @@ impl<'a> GrammarConstraintState<'a> {
                     } else {
                         crate::debug!(4, "Processing non-end precomputed node data: {:?}", precomputed_node_data);
                         crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        // Ensure there's at least one child
+                        if precomputed_node_data.children().is_empty() {
+                            panic!("Precomputed node data has no children, but should have at least one child to process.");
+                        }
                         glr_s.do_phase3();
                         crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
