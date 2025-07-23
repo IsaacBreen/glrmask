@@ -986,7 +986,7 @@ pub fn print_gss_forest(
             let acc_child = format_acc(pred_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
             writeln!(
                 output,
-                "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                "{}{} Edge {:?} -> Node {} {}",
                 prefix, connector, edge_val.state_id, pred_id, pred_arc.max_depth, acc_child,
             )?;
             *node_count += 1;
@@ -1020,7 +1020,7 @@ pub fn print_gss_forest(
         let acc_str = format_acc(root_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
         let root_label = labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
 
-        writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
+        writeln!(&mut out_str, "{}: Node {} {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
         count += 1;
 
         let _ = print_predecessors_recursive(
