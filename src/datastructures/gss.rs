@@ -241,7 +241,7 @@ impl<'a> GSSPopperItemPeek<'a> {
 // Helper functions for GSSNode construction
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
     predecessors.values()
-        .map(|pred_arc| pred_arc.max_depth())
+        .map(|pred_arc| pred_arc.max_depth() + 1)
         .max()
         .unwrap_or(0)
 }
