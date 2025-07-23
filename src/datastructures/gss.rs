@@ -265,7 +265,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 
     for (pred_arc, edge_val) in incoming {
         grouped
-            .entry((edge_val.clone(), pred_arc.max_depth()))
+            .entry((edge_val.clone(), pred_arc.dest_key()))
             .or_default()
             .push(pred_arc.clone());
     }
@@ -326,7 +326,7 @@ impl GSSNode {
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
         let mut predecessors_map = NodeMap::new();
-        predecessors_map.insert((edge_value, predecessor_arc.max_depth()), predecessor_arc.clone());
+        predecessors_map.insert((edge_value, predecessor_arc.dest_key()), predecessor_arc.clone());
         Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
@@ -1218,8 +1218,8 @@ mod tests {
         assert_eq!(c.max_depth, 3);
 
         let mut preds_map = NodeMap::new();
-        preds_map.insert((mock_edge(100), b.max_depth()), b.clone());
-        preds_map.insert((mock_edge(100), c.max_depth()), c.clone());
+        preds_map.insert((mock_edge(100), b.dest_key()), b.clone());
+        preds_map.insert((mock_edge(100), c.dest_key()), c.clone());
 
         let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
         assert_eq!(root.num_predecessors(), 2);
