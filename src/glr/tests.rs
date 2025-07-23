@@ -1060,6 +1060,7 @@ fn test_lr1_not_lalr1_grammar() {
 
     // Parser generation should succeed without conflicts for an LR(1) generator
     let parser = generate_glr_parser(&productions, 0, None);
+    println!("Parser: {}", parser); // Useful for debugging the generated table
 
     // Check stats to be sure there are no conflicts
     let stats = stats::get_stats(&parser);
