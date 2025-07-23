@@ -1069,7 +1069,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 let mut glr_state = glr_state.clone();
-                if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::max_ones()) {
+                if !forbidden_llm_tokens.is_empty() {
                     // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
                     disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                     // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
