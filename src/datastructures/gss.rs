@@ -240,7 +240,10 @@ impl<'a> GSSPopperItemPeek<'a> {
 
 // Helper functions for GSSNode construction
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    predecessors.keys().map(|(_, dest_key)| *dest_key).max().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    predecessors.values()
+        .map(|pred_arc| pred_arc.max_depth())
+        .max()
+        .unwrap_or(0)
 }
 
 fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
@@ -986,8 +989,8 @@ pub fn print_gss_forest(
             let acc_child = format_acc(pred_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
             writeln!(
                 output,
-                "{}{} Edge {:?} -> Node {} {}",
-                prefix, connector, edge_val.state_id, pred_id, acc_child,
+                "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                prefix, connector, edge_val.state_id, pred_id, pred_arc.max_depth, acc_child,
             )?;
             *node_count += 1;
 
@@ -1020,7 +1023,7 @@ pub fn print_gss_forest(
         let acc_str = format_acc(root_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
         let root_label = labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
 
-        writeln!(&mut out_str, "{}: Node {} {}", root_label, root_id, acc_str).unwrap();
+        writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
         count += 1;
 
         let _ = print_predecessors_recursive(
