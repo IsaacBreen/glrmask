@@ -778,11 +778,13 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     if true {
         let mut constraint_state1 = grammar_constraint.init();
         let mut constraint_state2 = grammar_constraint.init();
+        pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Initial constraint states should be equal after initialization.");
         assert_eq!(constraint_state1.state, constraint_state2.state, "Initial constraint states should be equal after initialization.");
         for (i, byte) in full_text_to_tokenize.as_bytes().iter().enumerate() {
             println!("Committing byte {}: '{}'", i + 1, *byte as char);
             constraint_state1.commit_bytes(&[*byte]);
             constraint_state2.commit_bytes(&[*byte]);
+            pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Constraint states should remain equal after committing byte {}.", i + 1);
             assert_eq!(constraint_state1.state, constraint_state2.state, "Constraint states should remain equal after committing byte {}.", i + 1);
         }
     }
