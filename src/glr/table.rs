@@ -35,12 +35,7 @@ struct Stage3Row {
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
-#[derive(Debug)]
-struct Stage4Row {
-    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-    reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-}
+type Stage4Row = Stage3Row;
 type Stage5Row = Stage4Row;
 #[derive(Debug)]
 struct Stage6Row {
