@@ -716,6 +716,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
         // --- Phase 1 ---
+        crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
             while let Some(state) = phase1_todo.pop_front() {
                 for peek in state.stack.peek_iter() {
@@ -761,6 +762,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
 
         // --- Phase 2 ---
+        crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             while let Some(state) = phase2_todo.pop_front() {
                 for peek in state.stack.peek_iter() {
@@ -798,6 +800,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
 
         // Consolidate all shifted states into the new active_state for phase 3
+        crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState::new();
         for state in shifted_states_todo {
             next_active.merge(state);
