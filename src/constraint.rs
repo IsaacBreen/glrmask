@@ -1117,12 +1117,12 @@ impl<'a> GrammarConstraintState<'a> {
                                     timeit!(format!("get_mask step_fn - has_action_for({})", gtid.0), {
                                         // This token will succeed
                                         crate::debug!(4, "Step with grammar token {:?} has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid);
-                                        crate::debug!(4, "Adding active tokens {:?} to final mask", glr_s_llm_tokens);
                                         let mut edge_llm_tokens = HybridBitset::zeros();
                                         for edge_llm_tokens_bv in dest_map.values() {
                                             edge_llm_tokens |= edge_llm_tokens_bv;
                                         }
                                         let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
+                                        crate::debug!(4, "Adding tokens {:?} to final mask", llm_tokens);
                                         *final_mask_internal.borrow_mut() |= llm_tokens;
                                         return Vec::new();
                                     });
