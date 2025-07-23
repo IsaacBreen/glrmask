@@ -661,6 +661,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
     ) -> Arc<GSSNode> {
         let popped = timeit!(peek.popn(len));
+        crate::debug!(4, "Reducing with NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, popped);
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
 
         let mut out = Vec::new();
@@ -826,6 +827,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut next = ParseState::new();
 
+        crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
         timeit!("GLRParserState::step::phase3", {
             while let Some(state) = phase3_todo.pop_front() {
                 for peek in state.stack.peek_iter() {
@@ -843,6 +845,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         });
 
+        crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next.stack.num_predecessors());
         self.active_state = next;
         self.phase = ParserPhase::ReadyForPhase1;
         self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
