@@ -847,7 +847,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 // Commit full bytes for prefix
                 let prefix_bytes = full_text_to_tokenize.as_bytes()[..token_end_byte_in_full_text].to_vec();
                 new_constraint_state.commit_bytes(&prefix_bytes);
-                use pretty_assertions::{assert_eq, assert_ne};
+                // use pretty_assertions::{assert_eq, assert_ne};
                 assert_eq!(
                     new_constraint_state, constraint_state,
                     "New constraint state after committing prefix bytes should match the original constraint state."
