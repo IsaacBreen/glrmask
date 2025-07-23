@@ -1109,6 +1109,37 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 timeit!(format!("get_mask step_fn - end only? {}", num_end > 0 && num_non_end == 0), {
+                    if num_non_end == 0 {
+                        if let Some(gtid) = grammar_token_opt {
+                            // Perhaps we can avoid stepping by calling `has_action_for`
+                            match glr_s.has_action_for(*gtid) {
+                                Some(true) => {
+                                    timeit!(format!("get_mask step_fn - has_action_for({})", gtid.0), {
+                                        // This token will succeed
+                                        crate::debug!(4, "Step with grammar token {:?} has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid);
+                                        let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                                        crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
+                                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                                        return Vec::new();
+                                    });
+                                },
+                                Some(false) => {
+                                    timeit!(format!("get_mask step_fn - has_action_for({}) - no action", gtid.0), {
+                                        // This token will fail
+                                        crate::debug!(4, "Skipping step with grammar token {:?} as it has no action.", gtid);
+                                        return Vec::new();
+                                    });
+                                },
+                                None => {
+                                    timeit!(format!("get_mask step_fn - has_action_for({}) - inconclusive", gtid.0), {
+                                        // Inconclusive
+                                        crate::debug!(4, "Inconclusive step for grammar token {:?}, no action found.", gtid);
+                                    });
+                                },
+                            }
+                        }
+                    }
+
                     let mut results = Vec::new();
                     let mut glr_s = glr_s.clone();
 
@@ -1186,17 +1217,37 @@ impl<'a> GrammarConstraintState<'a> {
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
-                        crate::debug!(4, "Processing non-end precomputed node data");
-                        crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
-                        glr_s.do_phase3();
-                        crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                        // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                        crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
-                        crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
-                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                        crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                        crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        let mut num_outgoing_edges_that_lead_to_non_end_nodes = 0;
+                        for (edge_terminal_opt, dest_map) in precomputed_node_data.children().iter() {
+                            if edge_terminal_opt.is_none() {
+                                num_outgoing_edges_that_lead_to_non_end_nodes += 1
+                            } else {
+                                for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
+                                    if !child_node_trie_data.as_arc().lock().unwrap().value.end {
+                                        num_outgoing_edges_that_lead_to_non_end_nodes += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            if num_outgoing_edges_that_lead_to_non_end_nodes >= 2 {
+                                break; // No need to check further, we have at least two non-end nodes.
+                            }
+                        }
+                        if num_outgoing_edges_that_lead_to_non_end_nodes >= 2 {
+                            // There will be a split.
+                            // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
+                            crate::debug!(4, "Processing non-end precomputed node data");
+                            crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                            glr_s.do_phase3();
+                            crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
+                            // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                            crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
+                            disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
+                            crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        }
                         !glr_s.active_state.stack.is_empty()
                     }
                 })

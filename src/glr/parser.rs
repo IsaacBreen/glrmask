@@ -810,6 +810,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
     }
 
+    pub fn has_action_for(&self, token_id: TerminalID) -> Option<bool> {
+        if self.phase == ParserPhase::ReadyForPhase1 {
+            // Check for an action in the phase 1 lookaheads.
+            
+        } else if self.phase == ParserPhase::ReadyForPhase3 {
+            // Phase 3 does not have actions, only reductions.
+            return None;
+        } else {
+            panic!("Parser is not ready for Phase 1 or Phase 3, current phase: {:?}", self.phase);
+        }
+    }
+
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         self.do_phase1_and_2(token_id);
