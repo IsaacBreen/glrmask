@@ -84,7 +84,7 @@ impl Item {
     }
 }
 
-pub fn compute_lookaheads(
+pub fn compute_firsts(
     item: &Item,
     productions: &[Production],
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
@@ -92,26 +92,26 @@ pub fn compute_lookaheads(
 ) -> BTreeSet<Terminal> {
     match item.production.rhs.get(item.dot_position + 1) {
         Some(Symbol::Terminal(t)) => {
-            // If the next symbol is a terminal, the lookahead is just that terminal
+            // If the next symbol is a terminal, the first is just that terminal
             BTreeSet::from([t.clone()])
         }
         Some(Symbol::NonTerminal(nt)) => {
             let first_set = first_sets.get(nt).cloned().unwrap_or_default();
             if nullable_nonterminals.contains(nt) {
-                // If the non-terminal is nullable, we also need to include the lookaheads for the next item
-                let next_lookaheads = compute_lookaheads(
+                // If the non-terminal is nullable, we also need to include the firsts for the next item
+                let next_firsts = compute_firsts(
                     &item.next(),
                     productions,
                     first_sets,
                     nullable_nonterminals,
                 );
-                first_set.union(&next_lookaheads).cloned().collect()
+                first_set.union(&next_firsts).cloned().collect()
             } else {
                 first_set
             }
         }
         None => {
-            // The child production is of length 0. Inherit the lookahead from the parent production.
+            // The child production is of length 0. The first is the lookahead if it exists.
             if let Some(lookahead) = &item.lookahead {
                 BTreeSet::from([lookahead.clone()])
             } else {
@@ -131,7 +131,7 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
     while let Some(item) = worklist.pop_front() {
         if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
             for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                let lookaheads = compute_lookaheads(&item.next(), productions, &first_sets, &nullable_nonterminals);
+                let lookaheads = compute_firsts(&item.next(), productions, &first_sets, &nullable_nonterminals);
                 for lookahead in lookaheads {
                     let new_item = Item {
                         production: prod.clone(),
