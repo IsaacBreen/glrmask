@@ -845,7 +845,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 println!("  Checking constraint state integrity after commit:");
                 let mut new_constraint_state = grammar_constraint.init();
                 // Commit full bytes for prefix
-                let prefix_bytes = full_text_to_tokenize.as_bytes()[..token_end_byte_in_full_text].to_vec();
+                let prefix_bytes = full_text_to_tokenize.as_bytes()[..token_end_byte_in_full_text];
                 new_constraint_state.commit_bytes(&prefix_bytes);
                 // use pretty_assertions::{assert_eq, assert_ne};
                 assert_eq!(
