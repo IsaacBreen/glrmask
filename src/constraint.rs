@@ -1113,20 +1113,12 @@ impl<'a> GrammarConstraintState<'a> {
                         if let Some(gtid) = grammar_token_opt {
                             // Perhaps we can avoid stepping by calling `has_action_for`
                             match glr_s.has_action_for(*gtid) {
-                                Some(true) => {
+                                Some(llm_tokens) => {
                                     timeit!(format!("get_mask step_fn - has_action_for({})", gtid.0), {
                                         // This token will succeed
                                         crate::debug!(4, "Step with grammar token {:?} has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid);
-                                        let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                                        crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
-                                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
-                                        return Vec::new();
-                                    });
-                                },
-                                Some(false) => {
-                                    timeit!(format!("get_mask step_fn - has_action_for({}) - no action", gtid.0), {
-                                        // This token will fail
-                                        crate::debug!(4, "Skipping step with grammar token {:?} as it has no action.", gtid);
+                                        crate::debug!(4, "Adding active tokens {:?} to final mask", llm_tokens);
+                                        *final_mask_internal.borrow_mut() |= llm_tokens;
                                         return Vec::new();
                                     });
                                 },

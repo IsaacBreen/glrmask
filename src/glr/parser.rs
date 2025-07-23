@@ -810,16 +810,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
     }
 
-    pub fn has_action_for(&self, token_id: TerminalID) -> Option<bool> {
-        if self.phase == ParserPhase::ReadyForPhase1 {
-            // Check for an action in the phase 1 lookaheads.
-            
-        } else if self.phase == ParserPhase::ReadyForPhase3 {
-            // Phase 3 does not have actions, only reductions.
-            return None;
-        } else {
-            panic!("Parser is not ready for Phase 1 or Phase 3, current phase: {:?}", self.phase);
+    pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+        let mut llm_tokens = LLMTokenBV::zeros();
+        for peek in self.active_state.stack.peek_iter() {
+            let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+            let shifts_and_reduces = match self.phase {
+                ParserPhase::ReadyForPhase1 => &row.phase1_shifts_and_reduces,
+                ParserPhase::ReadyForPhase3 => &row.phase2_shifts_and_reduces,
+            };
+            if let Some(action) = shifts_and_reduces.get(&token_id) {
+                // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                llm_tokens = &llm_tokens | &peek.resolved_acc().union_llm_tokens();
+            }
         }
+        Some(llm_tokens)
     }
 
     #[time_it("GLRParserState::step")]
