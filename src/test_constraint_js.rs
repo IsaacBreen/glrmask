@@ -800,6 +800,18 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
             pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Constraint states should remain equal after committing token {}.", i + 1);
             assert_eq!(constraint_state1.state, constraint_state2.state, "Constraint states should remain equal after committing token {}.", i + 1);
         }
+
+        let mut constraint_state1 = grammar_constraint.init();
+        for (i, byte) in full_text_to_tokenize.as_bytes().iter().enumerate() {
+            println!("Committing byte {}: '{}'", i + 1, *byte as char);
+            constraint_state1.commit_bytes(&[*byte]);
+            println!("Committing prefix up to byte {}", i + 1);
+            let mut constraint_state2 = grammar_constraint.init();
+            let prefix_bytes = full_text_to_tokenize.as_bytes()[..i + 1].to_vec();
+            constraint_state2.commit_bytes(&prefix_bytes);
+            pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Constraint states should remain equal after committing byte {}.", i + 1);
+            assert_eq!(constraint_state1.state, constraint_state2.state, "Constraint states should remain equal after committing byte {}.", i + 1);
+        }
     }
 
     // 5. Basic Interaction with the GrammarConstraintState
