@@ -575,18 +575,8 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-
-            let is_accept_state = next_item_set.iter().any(|item| {
-                item.production.lhs == productions[start_production_id].lhs &&
-                item.dot_position == item.production.rhs.len() &&
-                item.lookahead.is_none()
-            });
-
-            let goto = if is_accept_state {
-                Goto::Accept
-            } else {
-                Goto::State(*item_set_map.get_by_left(&next_item_set).expect("GOTO to an unknown state"))
-            };
+            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
+            if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
             gotos.insert(non_terminal_id, goto);
         }
 
@@ -603,7 +593,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         dot_position: 0,
         lookahead: None,
     };
-    let initial_item_set = compute_closure(&BTreeSet::from([initial_item]), productions);
+    let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)
