@@ -1100,7 +1100,26 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, dest_map| {
                 timeit!("get_mask step_fn", {
                     let mut results = Vec::new();
-                    let glr_s = glr_s.clone();
+                    let mut glr_s = glr_s.clone();
+
+                    if let Some(gtid) = grammar_token_opt {
+                        let mut counts_guard = step_counts_clone1.lock().unwrap();
+                        let entry = counts_guard.entry(*gtid).or_default();
+                        entry.total += 1;
+
+                        let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
+                            .map(|s| s.to_string())
+                            .unwrap_or("UNKNOWN_TERMINAL".to_string());
+                        // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
+                        glr_s.do_phase1_and_2(*gtid);
+                        // });
+
+                        if glr_s.is_ok() {
+                            entry.successful += 1;
+                        }
+                        crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
+                    }
+
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
                     // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
@@ -1112,23 +1131,6 @@ impl<'a> GrammarConstraintState<'a> {
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                         crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
-                        if let Some(gtid) = grammar_token_opt {
-                            let mut counts_guard = step_counts_clone1.lock().unwrap();
-                            let entry = counts_guard.entry(*gtid).or_default();
-                            entry.total += 1;
-
-                            let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
-                                .map(|s| s.to_string())
-                                .unwrap_or("UNKNOWN_TERMINAL".to_string());
-                            // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
-                            glr_s.do_phase1_and_2(*gtid);
-                            // });
-
-                            if glr_s.is_ok() {
-                                entry.successful += 1;
-                            }
-                            crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
-                        }
                         // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                         // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
