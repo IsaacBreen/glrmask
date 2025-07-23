@@ -453,6 +453,7 @@ fn test_ambiguous_arithmetic() {
     let mut state2: GLRParserState<'_> = parser.init_glr_parser(None);
     state2.parse(&tokens);
     state2.step(eof);
+    pretty_assertions::assert_eq!(state, state2, "GLR parser should produce the same state for the same input");
     assert_eq!(state, state2, "GLR parser should produce the same state for the same input");
 }
 

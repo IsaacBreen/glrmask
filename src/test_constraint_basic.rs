@@ -568,6 +568,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     println!("Scenario 2 state:\n{}", &constraint_state4);
 
     // Assert equivalence
+    pretty_assertions::assert_eq!(constraint_state3.to_string(), constraint_state4.to_string(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
     assert_eq!(constraint_state3.state(), constraint_state4.state(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
 
     // Scenario 3: Commit "#", then "a", then "a"
@@ -593,6 +594,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     // Assert equivalence
     println!("constraint_state1 state: {}", constraint_state1);
     println!("constraint_state2 state: {}", constraint_state2);
+    pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
     assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
     println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
 }
