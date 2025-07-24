@@ -429,6 +429,11 @@ impl<'a> GSSPeek<'a> {
         Acc::narrow(self.parent_acc, &self.predecessor_node.acc)
     }
 
+    /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
+    pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+        &self.parent_acc.llm_tokens_union & &self.predecessor_node.acc.llm_tokens_union
+    }
+
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the parent's `Acc`.
     pub fn resolved_predecessor_node(&self) -> GSSNode {
