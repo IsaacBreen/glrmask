@@ -237,7 +237,7 @@ pub fn validate_start_production_ends_with_terminal(
 
     let start_prod = &productions[start_production_id];
     if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
-        return Err(format!("Start production {} does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod, start_prod.rhs.last()));
+        return Err(format!("Start production [{}] does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod, start_prod.rhs.last()));
     }
 
     Ok(())
