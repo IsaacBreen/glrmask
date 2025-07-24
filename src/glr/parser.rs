@@ -866,7 +866,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                               peek.edge_value().state_id.0, action);
                 // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
                 timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
-                    llm_tokens = &llm_tokens | &peek.resolved_acc().union_llm_tokens();
+                    let peek_llm_tokens = timeit!(peek.resolved_acc().union_llm_tokens());
+                    llm_tokens |= peek_llm_tokens;
                 });
             }
         }
