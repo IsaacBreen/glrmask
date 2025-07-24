@@ -1,4 +1,4 @@
-use crate::glr::grammar::{compute_nullable_nonterminals, compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
@@ -123,10 +123,13 @@ pub fn compute_first_set_for_item(
     }
 }
 
-pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
+pub fn compute_closure(
+    items: &BTreeSet<Item>,
+    productions: &[Production],
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    nullable_nonterminals: &BTreeSet<NonTerminal>
+) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
-    let first_sets = compute_first_sets_for_nonterminals(productions);
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 

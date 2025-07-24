@@ -1,5 +1,5 @@
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-use crate::glr::grammar::{compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -315,6 +315,9 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+
     let mut i = 0;
     while let Some(item_set) = worklist.pop_front() {
         i += 1;
@@ -323,7 +326,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
             continue;
         }
 
-        let closure = compute_closure(&item_set, productions);
+        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
