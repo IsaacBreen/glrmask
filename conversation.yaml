@@ -1525,8 +1525,7 @@ local_system:
               GLRParserState {
                   parser: self,
                   active_state: ParseState::new(),
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
               }
           }
@@ -1536,8 +1535,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: initial_parse_state,
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
               };
               parser_state.do_phase3();
@@ -1547,8 +1545,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: parse_state,
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase3,
               };
               parser_state.do_phase3();
@@ -1856,8 +1853,7 @@ local_system:
       pub struct GLRParserState<'a> { // No longer generic
           pub parser: &'a GLRParser,
           pub active_state: ParseState,
-          pub action_not_found_states: ParseState,
-          pub cycled_states: ParseState,
+          accepted: bool,                // <-- NEW
           phase: ParserPhase,
       }
 
@@ -1874,7 +1870,7 @@ local_system:
 
           #[time_it("GLRParserState::reduce_and_goto")]
           fn reduce_and_goto(
-              &self,
+              &mut self,
               peek: &GSSPeek,
               nt: NonTerminalID,
               len: usize,
@@ -1896,7 +1892,10 @@ local_system:
                               let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
                               out.push(new_gss_node);
                           }
-                          Goto::Accept => {}
+                          Goto::Accept => {
+                              // Mark successful acceptance
+                              self.accepted = true;
+                          }
                       }
                   }
               }
@@ -1917,6 +1916,9 @@ local_system:
 
           #[time_it("GLRParserState::do_phase1_and_2")]
           pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+              // Reset acceptance flag for the new token
+              self.accepted = false;
+
               if self.phase == ParserPhase::ReadyForPhase3 {
                   self.do_phase3();
               }
@@ -2128,12 +2130,16 @@ local_system:
           pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
               assert!(std::ptr::eq(self.parser, other.parser));
               self.active_state.merge(other.active_state);
-              // self.action_not_found_states.merge(other.action_not_found_states);
-              // self.cycled_states.merge(other.cycled_states);
+              self.accepted |= other.accepted;
           }
 
           pub fn is_ok(&self) -> bool {
-              !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
+              self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+          }
+
+          /// Returns true if the previous step lead to an `accept` action.
+          pub fn has_accepted(&self) -> bool {
+              self.accepted
           }
 
           // #[time_it("GLRParserState::log_gss")]
@@ -5817,8 +5823,7 @@ local_system:
               GLRParserState {
                   parser: self,
                   active_state: ParseState::new(),
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
               }
           }
@@ -5828,8 +5833,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: initial_parse_state,
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
               };
               parser_state.do_phase3();
@@ -5839,8 +5843,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: parse_state,
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase3,
               };
               parser_state.do_phase3();
@@ -6148,8 +6151,7 @@ local_system:
       pub struct GLRParserState<'a> { // No longer generic
           pub parser: &'a GLRParser,
           pub active_state: ParseState,
-          pub action_not_found_states: ParseState,
-          pub cycled_states: ParseState,
+          accepted: bool,                // <-- NEW
           phase: ParserPhase,
       }
 
@@ -6166,7 +6168,7 @@ local_system:
 
           #[time_it("GLRParserState::reduce_and_goto")]
           fn reduce_and_goto(
-              &self,
+              &mut self,
               peek: &GSSPeek,
               nt: NonTerminalID,
               len: usize,
@@ -6188,7 +6190,10 @@ local_system:
                               let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
                               out.push(new_gss_node);
                           }
-                          Goto::Accept => {}
+                          Goto::Accept => {
+                              // Mark successful acceptance
+                              self.accepted = true;
+                          }
                       }
                   }
               }
@@ -6209,6 +6214,9 @@ local_system:
 
           #[time_it("GLRParserState::do_phase1_and_2")]
           pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+              // Reset acceptance flag for the new token
+              self.accepted = false;
+
               if self.phase == ParserPhase::ReadyForPhase3 {
                   self.do_phase3();
               }
@@ -6420,12 +6428,16 @@ local_system:
           pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
               assert!(std::ptr::eq(self.parser, other.parser));
               self.active_state.merge(other.active_state);
-              // self.action_not_found_states.merge(other.action_not_found_states);
-              // self.cycled_states.merge(other.cycled_states);
+              self.accepted |= other.accepted;
           }
 
           pub fn is_ok(&self) -> bool {
-              !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
+              self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+          }
+
+          /// Returns true if the previous step lead to an `accept` action.
+          pub fn has_accepted(&self) -> bool {
+              self.accepted
           }
 
           // #[time_it("GLRParserState::log_gss")]
@@ -8608,7 +8620,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - o3
+    - gp
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -10152,8 +10164,7 @@ messages:
               GLRParserState {
                   parser: self,
                   active_state: ParseState::new(),
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
               }
           }
@@ -10163,8 +10174,7 @@ messages:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: initial_parse_state,
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
               };
               parser_state.do_phase3();
@@ -10174,8 +10184,7 @@ messages:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: parse_state,
-                  action_not_found_states: ParseState::new(),
-                  cycled_states: ParseState::new(),
+                  accepted: false,
                   phase: ParserPhase::ReadyForPhase3,
               };
               parser_state.do_phase3();
@@ -10483,8 +10492,7 @@ messages:
       pub struct GLRParserState<'a> { // No longer generic
           pub parser: &'a GLRParser,
           pub active_state: ParseState,
-          pub action_not_found_states: ParseState,
-          pub cycled_states: ParseState,
+          accepted: bool,                // <-- NEW
           phase: ParserPhase,
       }
 
@@ -10501,7 +10509,7 @@ messages:
 
           #[time_it("GLRParserState::reduce_and_goto")]
           fn reduce_and_goto(
-              &self,
+              &mut self,
               peek: &GSSPeek,
               nt: NonTerminalID,
               len: usize,
@@ -10523,7 +10531,10 @@ messages:
                               let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
                               out.push(new_gss_node);
                           }
-                          Goto::Accept => {}
+                          Goto::Accept => {
+                              // Mark successful acceptance
+                              self.accepted = true;
+                          }
                       }
                   }
               }
@@ -10544,6 +10555,9 @@ messages:
 
           #[time_it("GLRParserState::do_phase1_and_2")]
           pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+              // Reset acceptance flag for the new token
+              self.accepted = false;
+
               if self.phase == ParserPhase::ReadyForPhase3 {
                   self.do_phase3();
               }
@@ -10755,12 +10769,16 @@ messages:
           pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
               assert!(std::ptr::eq(self.parser, other.parser));
               self.active_state.merge(other.active_state);
-              // self.action_not_found_states.merge(other.action_not_found_states);
-              // self.cycled_states.merge(other.cycled_states);
+              self.accepted |= other.accepted;
           }
 
           pub fn is_ok(&self) -> bool {
-              !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
+              self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+          }
+
+          /// Returns true if the previous step lead to an `accept` action.
+          pub fn has_accepted(&self) -> bool {
+              self.accepted
           }
 
           // #[time_it("GLRParserState::log_gss")]
@@ -12949,564 +12967,249 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Modify parser.rs.
-      Add a field `accepted: bool` that indicates whether it accepted prev step. Clear this each step. Ensure it's used properly on `Goto::Accept`.
-      Remove `action_not_found_states` and `cycled_states`.
-      Add a method to determine whether we accepted (prev step). is_ok should be ok if we accepted prev step, of course.
+      Split phase 1 and phase 2 into two different private functions. Keep `do_phase1_and_2`. It'll just be a simple call to those.
+      Actually, if we're in `ParserPhase::ReadyForPhase3` and we call `do_phase1_and_2`, we don't need to call phase 3 - we can just skip phase 1 and do phase 2. Much nicer.
+      Do this. It should be a lot neater.
     metadata:
-  - assistant: |
+  - assistant: |-
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the diffs for the requested changes.
+
+      I've refactored the `do_phase1_and_2` method in `src/glr/parser.rs` by splitting its logic into two new private helper functions: `_do_phase1` and `_do_phase2`. I've also updated `do_phase1_and_2` to incorporate your requested logic change for handling different parser phases.
+
+      Here are the patches for the modified files:
+
       ```diff
-      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      index 55d9a4e..4a9a87f 100644
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@
-       #[derive(Debug, Clone, PartialEq, Eq)]
-       pub struct GLRParserState<'a> { // No longer generic
-           pub parser: &'a GLRParser,
-           pub active_state: ParseState,
-      -    pub action_not_found_states: ParseState,
-      -    pub cycled_states: ParseState,
-      +    accepted: bool,                // <-- NEW
-           phase: ParserPhase,
-       }
-      @@
-               crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-               let new_gss_node_instance = peek.push_on_parent(new_content);
+      @@ -610,6 +610,102 @@
                ParseState { stack: Arc::new(new_gss_node_instance) }
            }
        
-      -    #[time_it("GLRParserState::reduce_and_goto")]
-      -    fn reduce_and_goto(
-      +    #[time_it("GLRParserState::reduce_and_goto")]
-      +    fn reduce_and_goto(
+      +    fn _do_phase1(&mut self, token_id: TerminalID, phase1_todo: &mut VecDeque<ParseState>, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+      +        let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+      +        crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
+      +        timeit!("GLRParserState::step::phase1", {
+      +            while let Some(state) = phase1_todo.pop_front() {
+      +                for peek in state.stack.peek_iter() {
+      +                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+      +                    if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      +                                timeit!("GLRParserState::step::phase1::shift", {
+      +                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      +                                shifted_states_todo.push_back(new_parse_state);
+      +                                });
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+      +                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      +                                if !s_new_arc.is_empty() {
+      +                                    let new_parse_state = ParseState { stack: s_new_arc };
+      +                                    phase2_todo.push_back(new_parse_state);
+      +                                }
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if let Some(to) = shift {
+      +                                    timeit!("GLRParserState::step::phase1::split_shift", {
+      +                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      +                                    shifted_states_todo.push_back(new_parse_state);
+      +                                    })
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    timeit!("GLRParserState::step::phase1::split_reduce", {
+      +                                    for (nt, _prod_ids) in nts {
+      +                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      +                                            if !s_new_arc.is_empty() {
+      +                                                let new_parse_state = ParseState { stack: s_new_arc };
+      +                                                phase2_todo.push_back(new_parse_state);
+      +                                            }
+      +                                    }
+      +                                    });
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        });
+      +    }
+      +
+      +    fn _do_phase2(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+      +        crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
+      +        timeit!("GLRParserState::step::phase2", {
+      +            while let Some(state) = phase2_todo.pop_front() {
+      +                for peek in state.stack.peek_iter() {
+      +                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+      +                    if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      +                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      +                                shifted_states_todo.push_back(new_parse_state);
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+      +                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      +                                if !s_new_arc.is_empty() {
+      +                                    phase2_todo.push_back(ParseState { stack: s_new_arc });
+      +                                }
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if let Some(to) = shift {
+      +                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      +                                    shifted_states_todo.push_back(new_parse_state);
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    for (nt, _prod_ids) in nts {
+      +                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      +                                            if !s_new_arc.is_empty() {
+      +                                                phase2_todo.push_back(ParseState { stack: s_new_arc });
+      +                                            }
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        });
+      +    }
+      +
+           #[time_it("GLRParserState::reduce_and_goto")]
+           fn reduce_and_goto(
                &mut self,
-               peek: &GSSPeek,
-               nt: NonTerminalID,
-               len: usize,
-           ) -> Arc<GSSNode> {
-      @@
-                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                       );
-                       match goto {
-                           Goto::State(goto_state_id) => {
-      @@
-                               let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                               out.push(new_gss_node);
-                           }
-                           Goto::Accept => {
-      +                        // Mark successful acceptance
-      +                        self.accepted = true;
-                           }
-                       }
-                   }
-               }
-      @@
-           }
-       
+      @@ -709,113 +801,35 @@
            #[time_it("GLRParserState::do_phase1_and_2")]
            pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
-      +        // Reset acceptance flag for the new token
-      +        self.accepted = false;
-      +
-               if self.phase == ParserPhase::ReadyForPhase3 {
-                   self.do_phase3();
-               }
-      @@
-                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                       if !s_new_arc.is_empty() {
-                                           let new_parse_state = ParseState { stack: s_new_arc };
-                                           phase2_todo.push_back(new_parse_state);
-                                       }
-      @@
-                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                           if !new_stack.is_empty() {
-                               phase3_todo.push_back(ParseState { stack: new_stack });
-                           }
-                       }
-      @@
-           pub fn step(&mut self, token_id: TerminalID) {
-      -        self.do_phase1_and_2(token_id);
-      +        self.do_phase1_and_2(token_id);
-               self.do_phase3();
-           }
-      @@
-           pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
-               assert!(std::ptr::eq(self.parser, other.parser));
-               self.active_state.merge(other.active_state);
-      -        // self.action_not_found_states.merge(other.action_not_found_states);
-      -        // self.cycled_states.merge(other.cycled_states);
-      +        self.accepted |= other.accepted;
-           }
+               // Reset acceptance flag for the new token
+               self.accepted = false;
        
-           pub fn is_ok(&self) -> bool {
-      -        !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
-      +        self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
-           }
-      +
-      +    /// Returns true if the previous step lead to an `accept` action.
-      +    pub fn has_accepted(&self) -> bool {
-      +        self.accepted
-      +    }
-       
-           // #[time_it("GLRParserState::log_gss")]
-           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
-      @@
-       impl GLRParser {
-      @@
-           pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-               GLRParserState {
-                   parser: self,
-                   active_state: ParseState::new(),
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
+      -        if self.phase == ParserPhase::ReadyForPhase3 {
+      -            self.do_phase3();
+      -        }
+      -        assert_eq!(self.phase, ParserPhase::ReadyForPhase1);
+      -
+               if Some(token_id) == self.parser.ignore_terminal_id {
+                   crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
+                   return;
                }
-           }
-      @@
-               let mut parser_state = GLRParserState {
-                   parser: self,
-                   active_state: initial_parse_state,
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
-               };
-               parser_state.do_phase3();
-               parser_state
-      @@
-               let mut parser_state = GLRParserState {
-                   parser: self,
-                   active_state: parse_state,
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase3,
-               };
-               parser_state.do_phase3();
-               parser_state
-      @@
-       impl GLRParserState<'_> { // No longer generic
+       
+      -        let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+               self.log_gss("Phase1/2-start", token_id);
+       
+      -        let mut phase1_todo: VecDeque<ParseState> = VecDeque::new();
+      -        phase1_todo.push_back(self.active_state.clone());
+      -
+               let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
+               let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+       
+      -        // --- Phase 1 ---
+      -        crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
+      -        timeit!("GLRParserState::step::phase1", {
+      -            while let Some(state) = phase1_todo.pop_front() {
+      -                for peek in state.stack.peek_iter() {
+      -                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+      -                    if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+      -                        match action {
+      -                            Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      -                                timeit!("GLRParserState::step::phase1::shift", {
+      -                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      -                                shifted_states_todo.push_back(new_parse_state);
+      -                                });
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+      -                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      -                                if !s_new_arc.is_empty() {
+      -                                    let new_parse_state = ParseState { stack: s_new_arc };
+      -                                    phase2_todo.push_back(new_parse_state);
+      -                                }
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      -                                if let Some(to) = shift {
+      -                                    timeit!("GLRParserState::step::phase1::split_shift", {
+      -                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      -                                    shifted_states_todo.push_back(new_parse_state);
+      -                                    })
+      -                                }
+      -                                for (len, nts) in reduces {
+      -                                    timeit!("GLRParserState::step::phase1::split_reduce", {
+      -                                    for (nt, _prod_ids) in nts {
+      -                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      -                                            if !s_new_arc.is_empty() {
+      -                                                let new_parse_state = ParseState { stack: s_new_arc };
+      -                                                phase2_todo.push_back(new_parse_state);
+      -                                            }
+      -                                    }
+      -                                    });
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -        });
+      +        if self.phase == ParserPhase::ReadyForPhase1 {
+      +            let mut phase1_todo: VecDeque<ParseState> = VecDeque::new();
+      +            phase1_todo.push_back(self.active_state.clone());
+      +            self._do_phase1(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo);
+      +        } else { // ParserPhase::ReadyForPhase3
+      +            // If we are ready for phase 3, it means we have a set of shifted states.
+      +            // Instead of performing default reductions (phase 3), we can process the next token.
+      +            // The user suggests skipping phase 1 and going straight to phase 2.
+      +            // This means we take the current active states and process them with the full action table.
+      +            phase2_todo.push_back(self.active_state.clone());
+      +        }
+       
+               // --- Phase 2 ---
+      -        crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
+      -        timeit!("GLRParserState::step::phase2", {
+      -            while let Some(state) = phase2_todo.pop_front() {
+      -                for peek in state.stack.peek_iter() {
+      -                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+      -                    if let Some(action) = row.phase2_shifts_and_reduces.get(&token_id) {
+      -                        match action {
+      -                            Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      -                                let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      -                                shifted_states_todo.push_back(new_parse_state);
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+      -                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      -                                if !s_new_arc.is_empty() {
+      -                                    phase2_todo.push_back(ParseState { stack: s_new_arc });
+      -                                }
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      -                                if let Some(to) = shift {
+      -                                    let new_parse_state = self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+      -                                    shifted_states_todo.push_back(new_parse_state);
+      -                                }
+      -                                for (len, nts) in reduces {
+      -                                    for (nt, _prod_ids) in nts {
+      -                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+      -                                            if !s_new_arc.is_empty() {
+      -                                                phase2_todo.push_back(ParseState { stack: s_new_arc });
+      -                                            }
+      -                                    }
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -        });
+      +        self._do_phase2(token_id, &mut phase2_todo, &mut shifted_states_todo);
+       
+               // Consolidate all shifted states into the new active_state for phase 3
+               crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
+
       ```
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
 
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Error applying patch to src/glr/parser.rs:
-      Hunk #2 (header: @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-              crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-              let new_gss_node_instance = peek.push_on_parent(new_content);
-              ParseState { stack: Arc::new(new_gss_node_instance) }
-          }
-
-          #[time_it("GLRParserState::reduce_and_goto")]
-          fn reduce_and_goto(
-              &mut self,
-              peek: &GSSPeek,
-              nt: NonTerminalID,
-              len: usize,
-          ) -> Arc<GSSNode> {
-      --- Expected Context (from patch, after normalization): ---
-      crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-      let new_gss_node_instance = peek.push_on_parent(new_content);
-      ParseState { stack: Arc::new(new_gss_node_instance) }
-      }
-
-
-      fn reduce_and_goto(
-      &mut self,
-      peek: &GSSPeek,
-      nt: NonTerminalID,
-      len: usize,
-      ) -> Arc<GSSNode> {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 606 with ratio 0.92 (11/12 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = peek.push_on_parent(new_content);
-        ParseState { stack: Arc::new(new_gss_node_instance) }
-        }
-        
-        
-        fn reduce_and_goto(
-      - &mut self,
-      ?  ----
-
-      + &self,
-        peek: &GSSPeek,
-        nt: NonTerminalID,
-        len: usize,
-        ) -> Arc<GSSNode> {
-      Problematic diff content:
-      ---
-      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      index 55d9a4e..4a9a87f 100644
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@
-       #[derive(Debug, Clone, PartialEq, Eq)]
-       pub struct GLRParserState<'a> { // No longer generic
-           pub parser: &'a GLRParser,
-           pub active_state: ParseState,
-      -    pub action_not_found_states: ParseState,
-      -    pub cycled_states: ParseState,
-      +    accepted: bool,                // <-- NEW
-           phase: ParserPhase,
-       }
-      @@
-               crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-               let new_gss_node_instance = peek.push_on_parent(new_content);
-               ParseState { stack: Arc::new(new_gss_node_instance) }
-           }
-       
-      -    #[time_it("GLRParserState::reduce_and_goto")]
-      -    fn reduce_and_goto(
-      +    #[time_it("GLRParserState::reduce_and_goto")]
-      +    fn reduce_and_goto(
-               &mut self,
-               peek: &GSSPeek,
-               nt: NonTerminalID,
-               len: usize,
-           ) -> Arc<GSSNode> {
-      @@
-                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                       );
-                       match goto {
-                           Goto::State(goto_state_id) => {
-      @@
-                               let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                               out.push(new_gss_node);
-                           }
-                           Goto::Accept => {
-      +                        // Mark successful acceptance
-      +                        self.accepted = true;
-                           }
-                       }
-                   }
-               }
-      @@
-           }
-       
-           #[time_it("GLRParserState::do_phase1_and_2")]
-           pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
-      +        // Reset acceptance flag for the new token
-      +        self.accepted = false;
-      +
-               if self.phase == ParserPhase::ReadyForPhase3 {
-                   self.do_phase3();
-               }
-      @@
-                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                       if !s_new_arc.is_empty() {
-                                           let new_parse_state = ParseState { stack: s_new_arc };
-                                           phase2_todo.push_back(new_parse_state);
-                                       }
-      @@
-                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                           if !new_stack.is_empty() {
-                               phase3_todo.push_back(ParseState { stack: new_stack });
-                           }
-                       }
-      @@
-           pub fn step(&mut self, token_id: TerminalID) {
-      -        self.do_phase1_and_2(token_id);
-      +        self.do_phase1_and_2(token_id);
-               self.do_phase3();
-           }
-      @@
-           pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
-               assert!(std::ptr::eq(self.parser, other.parser));
-               self.active_state.merge(other.active_state);
-      -        // self.action_not_found_states.merge(other.action_not_found_states);
-      -        // self.cycled_states.merge(other.cycled_states);
-      +        self.accepted |= other.accepted;
-           }
-       
-           pub fn is_ok(&self) -> bool {
-      -        !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
-      +        self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
-           }
-      +
-      +    /// Returns true if the previous step lead to an `accept` action.
-      +    pub fn has_accepted(&self) -> bool {
-      +        self.accepted
-      +    }
-       
-           // #[time_it("GLRParserState::log_gss")]
-           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
-      @@
-       impl GLRParser {
-      @@
-           pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-               GLRParserState {
-                   parser: self,
-                   active_state: ParseState::new(),
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
-               }
-           }
-      @@
-               let mut parser_state = GLRParserState {
-                   parser: self,
-                   active_state: initial_parse_state,
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
-               };
-               parser_state.do_phase3();
-               parser_state
-      @@
-               let mut parser_state = GLRParserState {
-                   parser: self,
-                   active_state: parse_state,
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase3,
-               };
-               parser_state.do_phase3();
-               parser_state
-      @@
-       impl GLRParserState<'_> { // No longer generic
-      ---
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+      I have only modified `src/glr/parser.rs` as requested. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Error applying patch to src/glr/parser.rs:
-      Hunk #2 (header: @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-              crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-              let new_gss_node_instance = peek.push_on_parent(new_content);
-              ParseState { stack: Arc::new(new_gss_node_instance) }
-          }
-
-          #[time_it("GLRParserState::reduce_and_goto")]
-          fn reduce_and_goto(
-              &mut self,
-              peek: &GSSPeek,
-              nt: NonTerminalID,
-              len: usize,
-          ) -> Arc<GSSNode> {
-      --- Expected Context (from patch, after normalization): ---
-      crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-      let new_gss_node_instance = peek.push_on_parent(new_content);
-      ParseState { stack: Arc::new(new_gss_node_instance) }
-      }
-
-
-      fn reduce_and_goto(
-      &mut self,
-      peek: &GSSPeek,
-      nt: NonTerminalID,
-      len: usize,
-      ) -> Arc<GSSNode> {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 606 with ratio 0.92 (11/12 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-        let new_gss_node_instance = peek.push_on_parent(new_content);
-        ParseState { stack: Arc::new(new_gss_node_instance) }
-        }
-        
-        
-        fn reduce_and_goto(
-      - &mut self,
-      ?  ----
-
-      + &self,
-        peek: &GSSPeek,
-        nt: NonTerminalID,
-        len: usize,
-        ) -> Arc<GSSNode> {
-      Problematic diff content:
-      ---
-      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      index 55d9a4e..4a9a87f 100644
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@
-       #[derive(Debug, Clone, PartialEq, Eq)]
-       pub struct GLRParserState<'a> { // No longer generic
-           pub parser: &'a GLRParser,
-           pub active_state: ParseState,
-      -    pub action_not_found_states: ParseState,
-      -    pub cycled_states: ParseState,
-      +    accepted: bool,                // <-- NEW
-           phase: ParserPhase,
-       }
-      @@
-               crate::debug!(4, "Pushing new state with content: {:?}", new_content);
-               let new_gss_node_instance = peek.push_on_parent(new_content);
-               ParseState { stack: Arc::new(new_gss_node_instance) }
-           }
-       
-      -    #[time_it("GLRParserState::reduce_and_goto")]
-      -    fn reduce_and_goto(
-      +    #[time_it("GLRParserState::reduce_and_goto")]
-      +    fn reduce_and_goto(
-               &mut self,
-               peek: &GSSPeek,
-               nt: NonTerminalID,
-               len: usize,
-           ) -> Arc<GSSNode> {
-      @@
-                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                       );
-                       match goto {
-                           Goto::State(goto_state_id) => {
-      @@
-                               let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                               out.push(new_gss_node);
-                           }
-                           Goto::Accept => {
-      +                        // Mark successful acceptance
-      +                        self.accepted = true;
-                           }
-                       }
-                   }
-               }
-      @@
-           }
-       
-           #[time_it("GLRParserState::do_phase1_and_2")]
-           pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
-      +        // Reset acceptance flag for the new token
-      +        self.accepted = false;
-      +
-               if self.phase == ParserPhase::ReadyForPhase3 {
-                   self.do_phase3();
-               }
-      @@
-                                       let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                       if !s_new_arc.is_empty() {
-                                           let new_parse_state = ParseState { stack: s_new_arc };
-                                           phase2_todo.push_back(new_parse_state);
-                                       }
-      @@
-                           let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                           if !new_stack.is_empty() {
-                               phase3_todo.push_back(ParseState { stack: new_stack });
-                           }
-                       }
-      @@
-           pub fn step(&mut self, token_id: TerminalID) {
-      -        self.do_phase1_and_2(token_id);
-      +        self.do_phase1_and_2(token_id);
-               self.do_phase3();
-           }
-      @@
-           pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
-               assert!(std::ptr::eq(self.parser, other.parser));
-               self.active_state.merge(other.active_state);
-      -        // self.action_not_found_states.merge(other.action_not_found_states);
-      -        // self.cycled_states.merge(other.cycled_states);
-      +        self.accepted |= other.accepted;
-           }
-       
-           pub fn is_ok(&self) -> bool {
-      -        !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
-      +        self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
-           }
-      +
-      +    /// Returns true if the previous step lead to an `accept` action.
-      +    pub fn has_accepted(&self) -> bool {
-      +        self.accepted
-      +    }
-       
-           // #[time_it("GLRParserState::log_gss")]
-           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
-      @@
-       impl GLRParser {
-      @@
-           pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-               GLRParserState {
-                   parser: self,
-                   active_state: ParseState::new(),
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
-               }
-           }
-      @@
-               let mut parser_state = GLRParserState {
-                   parser: self,
-                   active_state: initial_parse_state,
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
-               };
-               parser_state.do_phase3();
-               parser_state
-      @@
-               let mut parser_state = GLRParserState {
-                   parser: self,
-                   active_state: parse_state,
-      -            action_not_found_states: ParseState::new(),
-      -            cycled_states: ParseState::new(),
-      +            accepted: false,
-                   phase: ParserPhase::ReadyForPhase3,
-               };
-               parser_state.do_phase3();
-               parser_state
-      @@
-       impl GLRParserState<'_> { // No longer generic
-      ---
-
-
-      LLM apply output:
-      Using model 'gemini/gemini-2.5-flash' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/glr/parser.rs"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/glr/parser.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/glr/parser.rs
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...
