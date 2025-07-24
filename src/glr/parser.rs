@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSPeek};
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
@@ -551,7 +551,7 @@ impl Display for GLRParser {
             if let Some(reduce) = &row.phase3_default_reduce.reduce {
                 let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
                 let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
-                writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
+                writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
             } else {
                 writeln!(f, "      - No default reduce")?;
             }
@@ -590,8 +590,7 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
-    /// Indicates whether the parser reached an accepting state in the previous step.
-    pub accepted: bool,
+    accepted: bool,                // <-- NEW
     phase: ParserPhase,
 }
 
@@ -631,6 +630,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         out.push(new_gss_node);
                     }
                     Goto::Accept => {
+                        // Mark successful acceptance
                         self.accepted = true;
                     }
                 }
@@ -653,7 +653,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::do_phase1_and_2")]
     pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+        // Reset acceptance flag for the new token
         self.accepted = false;
+
         if self.phase == ParserPhase::ReadyForPhase3 {
             self.do_phase3();
         }
@@ -862,21 +864,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // This method could be used if multiple GLRParserStates are combined.
     }
 
-    pub fn merge_with(&mut self, other: Self) { // No longer generic
+    pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
         self.active_state.merge(other.active_state);
-        self.accepted = self.accepted || other.accepted;
+        self.accepted |= other.accepted;
     }
 
     pub fn is_ok(&self) -> bool {
-        self.is_accepted() || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+        self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
     }
 
-    /// Checks if the parser was in an accepting state after the last completed step.
-    pub fn is_accepted(&self) -> bool {
+    /// Returns true if the previous step lead to an `accept` action.
+    pub fn has_accepted(&self) -> bool {
         self.accepted
     }
-    
+
     // #[time_it("GLRParserState::log_gss")]
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
