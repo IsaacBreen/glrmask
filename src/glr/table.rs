@@ -672,7 +672,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
-        lookahead: Terminal::EOF,
+        lookahead: None,
     };
     let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
@@ -724,7 +724,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_4_table = stage_4(stage_3_table, &productions);
     crate::debug!(6, &stage_4_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, &productions);
+    let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);

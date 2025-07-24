@@ -30,7 +30,7 @@ impl JSONConvertible for Item {
                 let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
                                       .and_then(usize::from_json)?;
                 let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
-                                      .and_then(Terminal::from_json)?;
+                                      .and_then(Option::<Terminal>::from_json)?;
                 Ok(Item { production, dot_position, lookahead })
             }
             _ => Err("Expected JSONNode::Object for Item".to_string()),
@@ -56,7 +56,11 @@ impl Display for Item {
         }
         write!(f, ", ")?;
         // Display the lookahead
-        write!(f, "lookahead: {}", self.lookahead)?;
+        if let Some(lookahead) = &self.lookahead {
+            write!(f, "{}", lookahead)?;
+        } else {
+            write!(f, "ε")?; // Epsilon for no lookahead
+        }
         write!(f, "]")?;
         Ok(())
     }
@@ -87,14 +91,16 @@ pub fn compute_first_set_for_item(
     productions: &[Production],
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
-) -> BTreeSet<Terminal> {
+) -> BTreeSet<Option<Terminal>> {
     match item.production.rhs.get(item.dot_position) {
         Some(Symbol::Terminal(t)) => {
             // If the next symbol is a terminal, the first is just that terminal
-            BTreeSet::from([t.clone()])
+            BTreeSet::from([Some(t.clone())])
         }
         Some(Symbol::NonTerminal(nt)) => {
-            let first_set = first_sets.get(nt).cloned().unwrap_or_default();
+            let first_set = first_sets.get(nt).cloned().unwrap_or_default().into_iter()
+                .map(|t| Some(t))
+                .collect::<BTreeSet<_>>();
             if nullable_nonterminals.contains(nt) {
                 // If the non-terminal is nullable, we also need to include the firsts for the next item
                 let next_firsts = compute_first_set_for_item(
@@ -109,7 +115,7 @@ pub fn compute_first_set_for_item(
             }
         }
         None => {
-            // The child production is of length 0. The first is the lookahead.
+            // The child production is of length 0. The first is the lookahead..
             BTreeSet::from([item.lookahead.clone()])
         }
     }
