@@ -658,8 +658,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
 
     crate::debug!(2, "Validating");
     validate(&productions).expect("Validation error");
-    validate_start_production_ends_with_terminal(&productions, start_production_id)
-        .expect("Start production does not end with a terminal");
+    validate_start_production_ends_with_terminal(&productions, start_production_id).expect("Start production does not end with a terminal");
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions, start_production_id);
