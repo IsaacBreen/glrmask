@@ -146,65 +146,50 @@ local_system:
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
-          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
+          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
           for nt in &all_nonterminals { // Initialize graph with all nodes
               unit_graph.entry(nt.clone()).or_default();
           }
 
-          // --- Corrected Logic for Building Unit Graph ---
+          // --- Logic for Building Unit Graph ---
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
 
-              let mut first_non_nullable_symbol: Option<&Symbol> = None;
-              let mut first_non_nullable_idx: Option<usize> = None;
+              let non_nullable_symbols: Vec<&Symbol> = rhs
+                  .iter()
+                  .filter(|symbol| match symbol {
+                      Symbol::Terminal(_) => true,
+                      Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
+                  })
+                  .collect();
 
-              // Find the first non-nullable symbol and its index
-              for (idx, symbol) in rhs.iter().enumerate().rev() { // Changed to rev for 'last' non-nullable if we need it here
-                  match symbol {
-                      Symbol::Terminal(_) => {
-                          first_non_nullable_symbol = Some(symbol);
-                          first_non_nullable_idx = Some(idx);
-                          break; // Found first non-nullable, stop scanning
-                      }
-                      Symbol::NonTerminal(nt) => {
-                          if !nullable_nonterminals.contains(nt) {
-                              first_non_nullable_symbol = Some(symbol);
-                              first_non_nullable_idx = Some(idx);
-                              break; // Found first non-nullable, stop scanning
-                          }
-                          // It's a nullable non-terminal, continue scanning
-                      }
+              if non_nullable_symbols.len() == 1 {
+                  if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
+                      // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
+                      unit_graph
+                          .entry(lhs.clone())
+                          .or_default()
+                          .insert(target_nt.clone());
+                      crate::debug!(
+                          4,
+                          "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
+                          lhs.0,
+                          target_nt.0,
+                          lhs.0,
+                          prod.rhs
+                      );
+                  } else {
+                      // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
+                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
                   }
-              }
-
-              match first_non_nullable_symbol {
-                  Some(Symbol::NonTerminal(target_nt)) => {
-                      // Found a non-terminal B as the first non-nullable symbol at index k
-                      let k = first_non_nullable_idx.unwrap();
-
-                      // Check if B is the *last* symbol in the RHS
-                      if k == rhs.len() - 1 {
-                          // Rule is of the form A ::= Nullable* B. Add edge A -> B.
-                          unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
-                          crate::debug!(4, "Unit graph edge added ({} -> {} from rule: {} ::= {:?})", lhs.0, target_nt.0, lhs.0, prod.rhs);
-                      } else {
-                          // Rule is A ::= Nullable* B NonEmptySuffix... Does not contribute.
-                          crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Non-terminal {} followed by other symbols.", lhs.0, prod.rhs, target_nt.0);
-                      }
-                  }
-                  Some(Symbol::Terminal(_)) => {
-                      // First non-nullable symbol is a terminal. Rule is A ::= Nullable* Terminal ... Does not contribute.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): First non-nullable symbol is a terminal.", lhs.0, prod.rhs);
-                  }
-                  None => {
-                      // All symbols in RHS are nullable, or RHS is empty. Rule is A ::= Nullable*. Does not contribute.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): RHS is fully nullable or empty.", lhs.0, prod.rhs);
-                  }
+              } else {
+                  // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
+                  crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
               }
           }
-          // --- End Corrected Logic ---
+          // --- End Logic ---
 
 
           // Detect cycles in the unit graph using DFS
@@ -4341,65 +4326,50 @@ local_system:
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
-          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
+          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
           for nt in &all_nonterminals { // Initialize graph with all nodes
               unit_graph.entry(nt.clone()).or_default();
           }
 
-          // --- Corrected Logic for Building Unit Graph ---
+          // --- Logic for Building Unit Graph ---
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
 
-              let mut first_non_nullable_symbol: Option<&Symbol> = None;
-              let mut first_non_nullable_idx: Option<usize> = None;
+              let non_nullable_symbols: Vec<&Symbol> = rhs
+                  .iter()
+                  .filter(|symbol| match symbol {
+                      Symbol::Terminal(_) => true,
+                      Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
+                  })
+                  .collect();
 
-              // Find the first non-nullable symbol and its index
-              for (idx, symbol) in rhs.iter().enumerate().rev() { // Changed to rev for 'last' non-nullable if we need it here
-                  match symbol {
-                      Symbol::Terminal(_) => {
-                          first_non_nullable_symbol = Some(symbol);
-                          first_non_nullable_idx = Some(idx);
-                          break; // Found first non-nullable, stop scanning
-                      }
-                      Symbol::NonTerminal(nt) => {
-                          if !nullable_nonterminals.contains(nt) {
-                              first_non_nullable_symbol = Some(symbol);
-                              first_non_nullable_idx = Some(idx);
-                              break; // Found first non-nullable, stop scanning
-                          }
-                          // It's a nullable non-terminal, continue scanning
-                      }
+              if non_nullable_symbols.len() == 1 {
+                  if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
+                      // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
+                      unit_graph
+                          .entry(lhs.clone())
+                          .or_default()
+                          .insert(target_nt.clone());
+                      crate::debug!(
+                          4,
+                          "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
+                          lhs.0,
+                          target_nt.0,
+                          lhs.0,
+                          prod.rhs
+                      );
+                  } else {
+                      // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
+                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
                   }
-              }
-
-              match first_non_nullable_symbol {
-                  Some(Symbol::NonTerminal(target_nt)) => {
-                      // Found a non-terminal B as the first non-nullable symbol at index k
-                      let k = first_non_nullable_idx.unwrap();
-
-                      // Check if B is the *last* symbol in the RHS
-                      if k == rhs.len() - 1 {
-                          // Rule is of the form A ::= Nullable* B. Add edge A -> B.
-                          unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
-                          crate::debug!(4, "Unit graph edge added ({} -> {} from rule: {} ::= {:?})", lhs.0, target_nt.0, lhs.0, prod.rhs);
-                      } else {
-                          // Rule is A ::= Nullable* B NonEmptySuffix... Does not contribute.
-                          crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Non-terminal {} followed by other symbols.", lhs.0, prod.rhs, target_nt.0);
-                      }
-                  }
-                  Some(Symbol::Terminal(_)) => {
-                      // First non-nullable symbol is a terminal. Rule is A ::= Nullable* Terminal ... Does not contribute.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): First non-nullable symbol is a terminal.", lhs.0, prod.rhs);
-                  }
-                  None => {
-                      // All symbols in RHS are nullable, or RHS is empty. Rule is A ::= Nullable*. Does not contribute.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): RHS is fully nullable or empty.", lhs.0, prod.rhs);
-                  }
+              } else {
+                  // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
+                  crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
               }
           }
-          // --- End Corrected Logic ---
+          // --- End Logic ---
 
 
           // Detect cycles in the unit graph using DFS
@@ -8400,7 +8370,7 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -8559,65 +8529,50 @@ messages:
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
-          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
+          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
           for nt in &all_nonterminals { // Initialize graph with all nodes
               unit_graph.entry(nt.clone()).or_default();
           }
 
-          // --- Corrected Logic for Building Unit Graph ---
+          // --- Logic for Building Unit Graph ---
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
 
-              let mut first_non_nullable_symbol: Option<&Symbol> = None;
-              let mut first_non_nullable_idx: Option<usize> = None;
+              let non_nullable_symbols: Vec<&Symbol> = rhs
+                  .iter()
+                  .filter(|symbol| match symbol {
+                      Symbol::Terminal(_) => true,
+                      Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
+                  })
+                  .collect();
 
-              // Find the first non-nullable symbol and its index
-              for (idx, symbol) in rhs.iter().enumerate().rev() { // Changed to rev for 'last' non-nullable if we need it here
-                  match symbol {
-                      Symbol::Terminal(_) => {
-                          first_non_nullable_symbol = Some(symbol);
-                          first_non_nullable_idx = Some(idx);
-                          break; // Found first non-nullable, stop scanning
-                      }
-                      Symbol::NonTerminal(nt) => {
-                          if !nullable_nonterminals.contains(nt) {
-                              first_non_nullable_symbol = Some(symbol);
-                              first_non_nullable_idx = Some(idx);
-                              break; // Found first non-nullable, stop scanning
-                          }
-                          // It's a nullable non-terminal, continue scanning
-                      }
+              if non_nullable_symbols.len() == 1 {
+                  if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
+                      // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
+                      unit_graph
+                          .entry(lhs.clone())
+                          .or_default()
+                          .insert(target_nt.clone());
+                      crate::debug!(
+                          4,
+                          "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
+                          lhs.0,
+                          target_nt.0,
+                          lhs.0,
+                          prod.rhs
+                      );
+                  } else {
+                      // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
+                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
                   }
-              }
-
-              match first_non_nullable_symbol {
-                  Some(Symbol::NonTerminal(target_nt)) => {
-                      // Found a non-terminal B as the first non-nullable symbol at index k
-                      let k = first_non_nullable_idx.unwrap();
-
-                      // Check if B is the *last* symbol in the RHS
-                      if k == rhs.len() - 1 {
-                          // Rule is of the form A ::= Nullable* B. Add edge A -> B.
-                          unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
-                          crate::debug!(4, "Unit graph edge added ({} -> {} from rule: {} ::= {:?})", lhs.0, target_nt.0, lhs.0, prod.rhs);
-                      } else {
-                          // Rule is A ::= Nullable* B NonEmptySuffix... Does not contribute.
-                          crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Non-terminal {} followed by other symbols.", lhs.0, prod.rhs, target_nt.0);
-                      }
-                  }
-                  Some(Symbol::Terminal(_)) => {
-                      // First non-nullable symbol is a terminal. Rule is A ::= Nullable* Terminal ... Does not contribute.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): First non-nullable symbol is a terminal.", lhs.0, prod.rhs);
-                  }
-                  None => {
-                      // All symbols in RHS are nullable, or RHS is empty. Rule is A ::= Nullable*. Does not contribute.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): RHS is fully nullable or empty.", lhs.0, prod.rhs);
-                  }
+              } else {
+                  // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
+                  crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
               }
           }
-          // --- End Corrected Logic ---
+          // --- End Logic ---
 
 
           // Detect cycles in the unit graph using DFS
@@ -12658,139 +12613,8 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Unit graph building and 1-cycle detection isn't quite right right now.
-      ```rust
-          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
-      ```
-      This is wrong. It should be
-      ```rust
-          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
-      ```
-      And the code should be update accordingly. ie we're interested in 1-cycles. If something non-nullable comes after the B, that's not a 1-cycle anymore. (But if something non-nullable comes before (or after) the B, then it's not a 1-cycle. What matters is whether or not it *can* be null - or, equivalently, whether or not it is *always* non-null - not whether or not is *always* null.)
-    metadata:
-  - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with grammar analysis intricacies like cycle detection can be tricky. You've correctly identified that the logic for detecting length-1 cycles needed refinement to handle nullable symbols on both sides of a non-terminal.
-
-      Here is the patch that implements the corrected logic for building the unit graph. This change makes the cycle detection more accurate by correctly identifying unit-like productions of the form `A ::= Nullable* B Nullable*`.
-
-      ### `src/glr/analyze.rs`
-
-      I've updated the logic for building the unit graph to correctly identify productions that effectively reduce to a single non-terminal, which is the source of length-1 recursion cycles.
-
-      ```diff
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -140,61 +140,52 @@
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-           crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-       
-      -    // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
-      +    // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
-           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-           for nt in &all_nonterminals { // Initialize graph with all nodes
-               unit_graph.entry(nt.clone()).or_default();
-           }
-       
-      -    // --- Corrected Logic for Building Unit Graph ---
-      +    // --- Logic for Building Unit Graph ---
-           for prod in productions {
-               let lhs = &prod.lhs;
-               let rhs = &prod.rhs;
-       
-      -        let mut first_non_nullable_symbol: Option<&Symbol> = None;
-      -        let mut first_non_nullable_idx: Option<usize> = None;
-      -
-      -        // Find the first non-nullable symbol and its index
-      -        for (idx, symbol) in rhs.iter().enumerate().rev() { // Changed to rev for 'last' non-nullable if we need it here
-      -            match symbol {
-      -                Symbol::Terminal(_) => {
-      -                    first_non_nullable_symbol = Some(symbol);
-      -                    first_non_nullable_idx = Some(idx);
-      -                    break; // Found first non-nullable, stop scanning
-      -                }
-      -                Symbol::NonTerminal(nt) => {
-      -                    if !nullable_nonterminals.contains(nt) {
-      -                        first_non_nullable_symbol = Some(symbol);
-      -                        first_non_nullable_idx = Some(idx);
-      -                        break; // Found first non-nullable, stop scanning
-      -                    }
-      -                    // It's a nullable non-terminal, continue scanning
-      -                }
-      -            }
-      -        }
-      -
-      -        match first_non_nullable_symbol {
-      -            Some(Symbol::NonTerminal(target_nt)) => {
-      -                // Found a non-terminal B as the first non-nullable symbol at index k
-      -                let k = first_non_nullable_idx.unwrap();
-      -
-      -                // Check if B is the *last* symbol in the RHS
-      -                if k == rhs.len() - 1 {
-      -                    // Rule is of the form A ::= Nullable* B. Add edge A -> B.
-      -                    unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
-      -                    crate::debug!(4, "Unit graph edge added ({} -> {} from rule: {} ::= {:?})", lhs.0, target_nt.0, lhs.0, prod.rhs);
-      -                } else {
-      -                    // Rule is A ::= Nullable* B NonEmptySuffix... Does not contribute.
-      -                    crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Non-terminal {} followed by other symbols.", lhs.0, prod.rhs, target_nt.0);
-      -                }
-      -            }
-      -            Some(Symbol::Terminal(_)) => {
-      -                // First non-nullable symbol is a terminal. Rule is A ::= Nullable* Terminal ... Does not contribute.
-      -                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): First non-nullable symbol is a terminal.", lhs.0, prod.rhs);
-      -            }
-      -            None => {
-      -                // All symbols in RHS are nullable, or RHS is empty. Rule is A ::= Nullable*. Does not contribute.
-      -                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): RHS is fully nullable or empty.", lhs.0, prod.rhs);
-      -            }
-      +        let non_nullable_symbols: Vec<&Symbol> = rhs
-      +            .iter()
-      +            .filter(|symbol| match symbol {
-      +                Symbol::Terminal(_) => true,
-      +                Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
-      +            })
-      +            .collect();
-      +
-      +        if non_nullable_symbols.len() == 1 {
-      +            if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
-      +                // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
-      +                unit_graph
-      +                    .entry(lhs.clone())
-      +                    .or_default()
-      +                    .insert(target_nt.clone());
-      +                crate::debug!(
-      +                    4,
-      +                    "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
-      +                    lhs.0,
-      +                    target_nt.0,
-      +                    lhs.0,
-      +                    prod.rhs
-      +                );
-      +            } else {
-      +                // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
-      +                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
-      +            }
-      +        } else {
-      +            // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
-      +            crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
-               }
-           }
-      -    // --- End Corrected Logic ---
-      +    // --- End Logic ---
-       
-       
-           // Detect cycles in the unit graph using DFS
-
-      ```
-
-      This updated logic is not only more correct but also simpler and easier to understand. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
+      Modify `validate`/the validation 'framework'.
+      Split it into multiple functions.
+      Rather than just returning the first error, return *all* problems found. It'd be annoying if the Rust compiler just told us about the first error, wouldn't it?
     metadata:
 ...
