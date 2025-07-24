@@ -153,17 +153,10 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
 }
 
 pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-    let mut result = BTreeSet::new();
-    for item in items {
-        if item.dot_position < item.production.rhs.len() {
-            result.insert(Item {
-                production: item.production.clone(),
-                dot_position: item.dot_position + 1,
-                lookahead: item.lookahead.clone(),
-            });
-        }
-    }
-    result
+    items.iter()
+        .filter_map(|item| item.next())
+        .map(|(_, next_item)| next_item)
+        .collect()
 }
 
 pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {

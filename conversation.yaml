@@ -1148,17 +1148,18 @@ local_system:
               self.dot_position == self.production.rhs.len()
           }
 
-          pub fn next(&self) -> Self {
-              // Create a new item with the dot moved one position to the right
-              if self.dot_position < self.production.rhs.len() {
-                  Item {
+          pub fn next(&self) -> Option<(Symbol, Self)> {
+              if let Some(symbol) = self.production.rhs.get(self.dot_position) {
+                  Some((
+                      symbol.clone(),
+                      Item {
                       production: self.production.clone(),
                       dot_position: self.dot_position + 1,
                       lookahead: self.lookahead.clone(),
-                  }
+                      },
+                  ))
               } else {
-                  // If the dot is at the end, return self
-                  self.clone()
+                  None
               }
           }
       }
@@ -1169,32 +1170,33 @@ local_system:
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeSet<Option<Terminal>> {
-          match item.production.rhs.get(item.dot_position) {
-              Some(Symbol::Terminal(t)) => {
-                  // If the next symbol is a terminal, the first is just that terminal
-                  BTreeSet::from([Some(t.clone())])
-              }
-              Some(Symbol::NonTerminal(nt)) => {
-                  let first_set = first_sets.get(nt).cloned().unwrap_or_default().into_iter()
-                      .map(|t| Some(t))
-                      .collect::<BTreeSet<_>>();
-                  if nullable_nonterminals.contains(nt) {
-                      // If the non-terminal is nullable, we also need to include the firsts for the next item
-                      let next_firsts = compute_first_set_for_item(
-                          &item.next(),
-                          productions,
-                          first_sets,
-                          nullable_nonterminals,
-                      );
-                      first_set.union(&next_firsts).cloned().collect()
-                  } else {
+          if let Some((symbol, next_item)) = item.next() {
+              match symbol {
+                  Symbol::Terminal(t) => {
+                      // If the next symbol is a terminal, the first is just that terminal
+                      BTreeSet::from([Some(t)])
+                  }
+                  Symbol::NonTerminal(nt) => {
+                      let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default().into_iter()
+                          .map(Some)
+                          .collect();
+
+                      if nullable_nonterminals.contains(&nt) {
+                          // If the non-terminal is nullable, we also need to include the firsts for the next item
+                          let next_firsts = compute_first_set_for_item(
+                              &next_item,
+                              productions,
+                              first_sets,
+                              nullable_nonterminals,
+                          );
+                          first_set.extend(next_firsts);
+                      }
                       first_set
                   }
               }
-              None => {
-                  // The child production is of length 0. The first is the lookahead..
-                  BTreeSet::from([item.lookahead.clone()])
-              }
+          } else {
+              // The dot is at the end. The first is the lookahead.
+              BTreeSet::from([item.lookahead.clone()])
           }
       }
 
@@ -1206,9 +1208,9 @@ local_system:
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
-              if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-                  for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                      let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
+              if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+                  for prod in productions.iter().filter(|p| p.lhs == nt) {
+                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
                       for lookahead in lookaheads {
                           let new_item = Item {
                               production: prod.clone(),
@@ -5502,17 +5504,18 @@ local_system:
               self.dot_position == self.production.rhs.len()
           }
 
-          pub fn next(&self) -> Self {
-              // Create a new item with the dot moved one position to the right
-              if self.dot_position < self.production.rhs.len() {
-                  Item {
+          pub fn next(&self) -> Option<(Symbol, Self)> {
+              if let Some(symbol) = self.production.rhs.get(self.dot_position) {
+                  Some((
+                      symbol.clone(),
+                      Item {
                       production: self.production.clone(),
                       dot_position: self.dot_position + 1,
                       lookahead: self.lookahead.clone(),
-                  }
+                      },
+                  ))
               } else {
-                  // If the dot is at the end, return self
-                  self.clone()
+                  None
               }
           }
       }
@@ -5523,32 +5526,33 @@ local_system:
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeSet<Option<Terminal>> {
-          match item.production.rhs.get(item.dot_position) {
-              Some(Symbol::Terminal(t)) => {
-                  // If the next symbol is a terminal, the first is just that terminal
-                  BTreeSet::from([Some(t.clone())])
-              }
-              Some(Symbol::NonTerminal(nt)) => {
-                  let first_set = first_sets.get(nt).cloned().unwrap_or_default().into_iter()
-                      .map(|t| Some(t))
-                      .collect::<BTreeSet<_>>();
-                  if nullable_nonterminals.contains(nt) {
-                      // If the non-terminal is nullable, we also need to include the firsts for the next item
-                      let next_firsts = compute_first_set_for_item(
-                          &item.next(),
-                          productions,
-                          first_sets,
-                          nullable_nonterminals,
-                      );
-                      first_set.union(&next_firsts).cloned().collect()
-                  } else {
+          if let Some((symbol, next_item)) = item.next() {
+              match symbol {
+                  Symbol::Terminal(t) => {
+                      // If the next symbol is a terminal, the first is just that terminal
+                      BTreeSet::from([Some(t)])
+                  }
+                  Symbol::NonTerminal(nt) => {
+                      let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default().into_iter()
+                          .map(Some)
+                          .collect();
+
+                      if nullable_nonterminals.contains(&nt) {
+                          // If the non-terminal is nullable, we also need to include the firsts for the next item
+                          let next_firsts = compute_first_set_for_item(
+                              &next_item,
+                              productions,
+                              first_sets,
+                              nullable_nonterminals,
+                          );
+                          first_set.extend(next_firsts);
+                      }
                       first_set
                   }
               }
-              None => {
-                  // The child production is of length 0. The first is the lookahead..
-                  BTreeSet::from([item.lookahead.clone()])
-              }
+          } else {
+              // The dot is at the end. The first is the lookahead.
+              BTreeSet::from([item.lookahead.clone()])
           }
       }
 
@@ -5560,9 +5564,9 @@ local_system:
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
-              if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-                  for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                      let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
+              if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+                  for prod in productions.iter().filter(|p| p.lhs == nt) {
+                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
                       for lookahead in lookaheads {
                           let new_item = Item {
                               production: prod.clone(),
@@ -9889,17 +9893,18 @@ messages:
               self.dot_position == self.production.rhs.len()
           }
 
-          pub fn next(&self) -> Self {
-              // Create a new item with the dot moved one position to the right
-              if self.dot_position < self.production.rhs.len() {
-                  Item {
+          pub fn next(&self) -> Option<(Symbol, Self)> {
+              if let Some(symbol) = self.production.rhs.get(self.dot_position) {
+                  Some((
+                      symbol.clone(),
+                      Item {
                       production: self.production.clone(),
                       dot_position: self.dot_position + 1,
                       lookahead: self.lookahead.clone(),
-                  }
+                      },
+                  ))
               } else {
-                  // If the dot is at the end, return self
-                  self.clone()
+                  None
               }
           }
       }
@@ -9910,32 +9915,33 @@ messages:
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeSet<Option<Terminal>> {
-          match item.production.rhs.get(item.dot_position) {
-              Some(Symbol::Terminal(t)) => {
-                  // If the next symbol is a terminal, the first is just that terminal
-                  BTreeSet::from([Some(t.clone())])
-              }
-              Some(Symbol::NonTerminal(nt)) => {
-                  let first_set = first_sets.get(nt).cloned().unwrap_or_default().into_iter()
-                      .map(|t| Some(t))
-                      .collect::<BTreeSet<_>>();
-                  if nullable_nonterminals.contains(nt) {
-                      // If the non-terminal is nullable, we also need to include the firsts for the next item
-                      let next_firsts = compute_first_set_for_item(
-                          &item.next(),
-                          productions,
-                          first_sets,
-                          nullable_nonterminals,
-                      );
-                      first_set.union(&next_firsts).cloned().collect()
-                  } else {
+          if let Some((symbol, next_item)) = item.next() {
+              match symbol {
+                  Symbol::Terminal(t) => {
+                      // If the next symbol is a terminal, the first is just that terminal
+                      BTreeSet::from([Some(t)])
+                  }
+                  Symbol::NonTerminal(nt) => {
+                      let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default().into_iter()
+                          .map(Some)
+                          .collect();
+
+                      if nullable_nonterminals.contains(&nt) {
+                          // If the non-terminal is nullable, we also need to include the firsts for the next item
+                          let next_firsts = compute_first_set_for_item(
+                              &next_item,
+                              productions,
+                              first_sets,
+                              nullable_nonterminals,
+                          );
+                          first_set.extend(next_firsts);
+                      }
                       first_set
                   }
               }
-              None => {
-                  // The child production is of length 0. The first is the lookahead..
-                  BTreeSet::from([item.lookahead.clone()])
-              }
+          } else {
+              // The dot is at the end. The first is the lookahead.
+              BTreeSet::from([item.lookahead.clone()])
           }
       }
 
@@ -9947,9 +9953,9 @@ messages:
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
-              if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-                  for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                      let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
+              if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+                  for prod in productions.iter().filter(|p| p.lhs == nt) {
+                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
                       for lookahead in lookaheads {
                           let new_item = Item {
                               production: prod.clone(),
@@ -13134,122 +13140,48 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: |-
-      Modify `Item::next` so it returns `Option<(Symbol, Self)>`, where the symbol is the symbol at the dot (before it's moved).
-      Do an `if let Some(` on the symbol at the dot position.
-      Make `compute_first_set_for_item` more concise accordingly. Can avoid calling `match item.production.rhs.get(item.dot_position)` here.
+  - user: Make `compute_goto` more concise by using `Item::next`.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the diffs for the requested changes.
+      Hello! As a helpful assistant, I'd be happy to help you make your code more concise. Using `Item::next` in `compute_goto` is a great idea for improving readability and leveraging your existing helper methods. Here is the suggested change:
 
-      I've refactored `Item::next` to return an `Option<(Symbol, Self)>`, which simplifies the logic in `compute_first_set_for_item` and `compute_closure` by allowing them to destructure the symbol and the next item state in a single `if let` statement. This makes the code more concise and idiomatic.
+      I'll apply the change to `src/glr/items.rs` to make `compute_goto` more idiomatic.
 
-      Here is the diff for `src/glr/items.rs`:
+      ### `src/glr/items.rs`
+
+      I've updated `compute_goto` to use a functional style with `filter_map` and `map`, which is more concise and expresses the intent clearly.
 
       ```diff
       --- a/src/glr/items.rs
       +++ b/src/glr/items.rs
-      @@ -68,19 +68,17 @@
-               self.dot_position == self.production.rhs.len()
-           }
-       
-      -    pub fn next(&self) -> Self {
-      -        // Create a new item with the dot moved one position to the right
-      -        if self.dot_position < self.production.rhs.len() {
-      -            Item {
-      +    pub fn next(&self) -> Option<(Symbol, Self)> {
-      +        if let Some(symbol) = self.production.rhs.get(self.dot_position) {
-      +            Some((
-      +                symbol.clone(),
-      +                Item {
-                       production: self.production.clone(),
-                       dot_position: self.dot_position + 1,
-                       lookahead: self.lookahead.clone(),
-      -            }
-      +                },
-      +            ))
-               } else {
-      -            // If the dot is at the end, return self
-      -            self.clone()
-      +            None
-               }
-           }
-       }
-      @@ -91,31 +89,29 @@
-           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-           nullable_nonterminals: &BTreeSet<NonTerminal>,
-       ) -> BTreeSet<Option<Terminal>> {
-      -    match item.production.rhs.get(item.dot_position) {
-      -        Some(Symbol::Terminal(t)) => {
-      -            // If the next symbol is a terminal, the first is just that terminal
-      -            BTreeSet::from([Some(t.clone())])
-      -        }
-      -        Some(Symbol::NonTerminal(nt)) => {
-      -            let first_set = first_sets.get(nt).cloned().unwrap_or_default().into_iter()
-      -                .map(|t| Some(t))
-      -                .collect::<BTreeSet<_>>();
-      -            if nullable_nonterminals.contains(nt) {
-      -                // If the non-terminal is nullable, we also need to include the firsts for the next item
-      -                let next_firsts = compute_first_set_for_item(
-      -                    &item.next(),
-      -                    productions,
-      -                    first_sets,
-      -                    nullable_nonterminals,
-      -                );
-      -                first_set.union(&next_firsts).cloned().collect()
-      -            } else {
-      -                first_set
-      +    if let Some((symbol, next_item)) = item.next() {
-      +        match symbol {
-      +            Symbol::Terminal(t) => {
-      +                // If the next symbol is a terminal, the first is just that terminal
-      +                BTreeSet::from([Some(t)])
-      +            }
-      +            Symbol::NonTerminal(nt) => {
-      +                let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default().into_iter()
-      +                    .map(Some)
-      +                    .collect();
-      +
-      +                if nullable_nonterminals.contains(&nt) {
-      +                    // If the non-terminal is nullable, we also need to include the firsts for the next item
-      +                    let next_firsts = compute_first_set_for_item(
-      +                        &next_item,
-      +                        productions,
-      +                        first_sets,
-      +                        nullable_nonterminals,
-      +                    );
-      +                    first_set.extend(next_firsts);
-      +                }
-      +                first_set
-                   }
-               }
-      -        None => {
-      -            // The child production is of length 0. The first is the lookahead..
-      -            BTreeSet::from([item.lookahead.clone()])
-      -        }
-      +    } else {
-      +        // The dot is at the end. The first is the lookahead.
-      +        BTreeSet::from([item.lookahead.clone()])
-           }
+      @@ -130,17 +130,9 @@
        }
        
-      @@ -127,9 +123,9 @@
-           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+       pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
+      -    let mut result = BTreeSet::new();
+      -    for item in items {
+      -        if item.dot_position < item.production.rhs.len() {
+      -            result.insert(Item {
+      -                production: item.production.clone(),
+      -                dot_position: item.dot_position + 1,
+      -                lookahead: item.lookahead.clone(),
+      -            });
+      -        }
+      -    }
+      -    result
+      +    items.iter()
+      +        .filter_map(|item| item.next())
+      +        .map(|(_, next_item)| next_item)
+      +        .collect()
+       }
        
-           while let Some(item) = worklist.pop_front() {
-      -        if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-      -            for prod in productions.iter().filter(|p| p.lhs == *nt) {
-      -                let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
-      +        if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
-      +            for prod in productions.iter().filter(|p| p.lhs == nt) {
-      +                let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
-                       for lookahead in lookaheads {
-                           let new_item = Item {
-                               production: prod.clone(),
+       pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
 
       ```
 
-      Let me know if you have any other questions
+      This change replaces the manual loop with an iterator chain that achieves the same result more succinctly. It filters out items where the dot is at the end (as `item.next()` will return `None`) and then collects the resulting advanced items into a new `BTreeSet`.
+
+      Let me know if you have any other questions or need further assistance
     metadata:
   - user: |
       Apply result (git-llm mode):
