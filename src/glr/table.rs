@@ -309,7 +309,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let mut i = 0;
     while let Some(items) = worklist.pop_front() {
         i += 1;
-        println!("Processing item set {}: {:?}", i, items);
+        println!("Processing item set {}", i);
         if transitions.contains_key(&items) {
             continue;
         }
