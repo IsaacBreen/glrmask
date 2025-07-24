@@ -625,11 +625,6 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
 
-    // Ensure at least one row has more than one item
-    if !stage_7_table.values().any(|row| row.phase2_shifts_and_reduces.len() > 1) {
-        panic!("Generated GLR parser has no state with multiple items. This is likely an error in the grammar or the parser generation logic.");
-    }
-
     (stage_7_table, item_set_map, start_state_id)
 }
 
