@@ -851,6 +851,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+        if Some(token_id) == self.parser.ignore_terminal_id {
+            crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
+            // return Some(self.active_state.stack.allowed_llm_tokens());
+            return Some(LLMTokenBV::max_ones());
+        }
         // return None;
         self.log_gss("has_action_for-start", token_id);
         let mut llm_tokens = LLMTokenBV::zeros();
