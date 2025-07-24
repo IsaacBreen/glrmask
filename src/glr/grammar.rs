@@ -257,9 +257,7 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
     first_sets
 }
 
-pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-    let first_sets = compute_first_sets_for_nonterminals(productions);
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+pub fn compute_follow_sets(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
     for production in productions {

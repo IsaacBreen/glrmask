@@ -514,7 +514,7 @@ fn find_last_non_nullable_symbol<'a>(
 pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let nonterminal_follow_sets = compute_follow_sets(productions);
+    let nonterminal_follow_sets = compute_follow_sets(productions, &first_sets, &nullable_nonterminals);
 
     let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
