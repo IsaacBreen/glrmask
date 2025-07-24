@@ -662,6 +662,118 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
+/// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+///
+/// This function takes a table and a list of compatible state pairs. It merges these
+/// pairs and transitively merges states. For example, if (s1, s2) and (s2, s3) are
+/// compatible, all three states will be merged into one.
+///
+/// The process involves:
+/// 1.  Finding the canonical representative for each state using a disjoint-set union (DSU) approach.
+/// 2.  Creating a new, smaller parse table where each row corresponds to a representative state.
+/// 3.  Merging the goto maps of the merged states.
+/// 4.  Updating all StateID references (in shifts and gotos) throughout the new table to point
+///     to the new representative state IDs.
+///
+/// # Arguments
+/// * `table` - The `Stage7Table` to be compacted.
+/// * `item_set_map` - The mapping from item sets to their `StateID`s.
+/// * `start_state_id` - The initial state ID of the parser.
+/// * `compatible_pairs` - A list of state pairs that have been identified as compatible for merging.
+///
+/// # Returns
+/// A tuple containing:
+/// * The new, compacted `Stage7Table`.
+/// * The new `BiBTreeMap` mapping merged item sets to the new `StateID`s.
+/// * The new start state ID.
+fn merge_compatible_states(
+    table: &Stage7Table,
+    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+    start_state_id: StateID,
+    compatible_pairs: &[(StateID, StateID)],
+) -> (Stage7Table, BiBTreeMap<BTreeSet<Item>, StateID>, StateID) {
+    if compatible_pairs.is_empty() {
+        return (table.clone(), item_set_map.clone(), start_state_id);
+    }
+
+    crate::debug!(2, "Merging {} compatible state pairs.", compatible_pairs.len());
+
+    // 1. DSU structure to manage state merging.
+    let mut parent: BTreeMap<StateID, StateID> = table.keys().map(|&id| (id, id)).collect();
+    fn find_set(parent: &mut BTreeMap<StateID, StateID>, i: StateID) -> StateID {
+        if parent[&i] == i {
+            i
+        } else {
+            let root = find_set(parent, parent[&i]);
+            parent.insert(i, root); // Path compression
+            root
+        }
+    }
+    fn unite_sets(parent: &mut BTreeMap<StateID, StateID>, mut a: StateID, mut b: StateID) {
+        a = find_set(parent, a);
+        b = find_set(parent, b);
+        if a != b {
+            // A simple union, could be optimized by rank/size
+            parent.insert(b, a);
+        }
+    }
+
+    for &(s1, s2) in compatible_pairs {
+        unite_sets(&mut parent, s1, s2);
+    }
+
+    // Create final mapping from old state ID to its representative.
+    let mut state_map: BTreeMap<StateID, StateID> = BTreeMap::new();
+    for &old_id in table.keys() {
+        state_map.insert(old_id, find_set(&mut parent, old_id));
+    }
+
+    // 2. Create the new merged table.
+    let mut new_table: Stage7Table = BTreeMap::new();
+    let mut new_item_sets: BTreeMap<StateID, BTreeSet<Item>> = BTreeMap::new();
+
+    let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter_by_right().collect();
+
+    for (&old_id, row) in table.iter() {
+        let new_id = state_map[&old_id];
+        new_item_sets.entry(new_id).or_default().extend(state_to_items[&old_id].iter().cloned());
+
+        let new_row = new_table.entry(new_id).or_insert_with(|| Stage7Row {
+            phase1_shifts_and_reduces: row.phase1_shifts_and_reduces.clone(),
+            phase2_shifts_and_reduces: row.phase2_shifts_and_reduces.clone(),
+            phase3_default_reduce: row.phase3_default_reduce.clone(),
+            gotos: BTreeMap::new(),
+        });
+
+        for (nt_id, goto) in &row.gotos {
+            new_row.gotos.insert(*nt_id, *goto);
+        }
+    }
+
+    fn remap_action_state_ids(action: &mut Stage7ShiftsAndReducesLookaheadValue, map: &BTreeMap<StateID, StateID>) {
+        match action {
+            Stage7ShiftsAndReducesLookaheadValue::Shift(ref mut sid) => *sid = map[sid],
+            Stage7ShiftsAndReducesLookaheadValue::Split { ref mut shift, .. } => {
+                if let Some(ref mut sid) = shift { *sid = map[sid]; }
+            }
+            _ => {}
+        }
+    }
+
+    for row in new_table.values_mut() {
+        row.phase1_shifts_and_reduces.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+        row.phase2_shifts_and_reduces.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+        row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
+    }
+
+    let new_item_set_map: BiBTreeMap<_, _> = new_item_sets.into_iter().collect();
+    let new_start_state_id = state_map[&start_state_id];
+
+    crate::debug!(2, "Merged states. Original: {}, New: {}", table.len(), new_table.len());
+
+    (new_table, new_item_set_map, new_start_state_id)
+}
+
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
@@ -712,11 +824,13 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
 
-    let compatible_states = find_compatible_states(&mut stage_7_table);
-    assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
+    let compatible_states = find_compatible_states(&stage_7_table);
+    if !compatible_states.is_empty() {
+        (stage_7_table, item_set_map, start_state_id) = merge_compatible_states(&stage_7_table, &item_set_map, start_state_id, &compatible_states);
+    }
 
     crate::debug!(2, "Done generating GLR parser");
 

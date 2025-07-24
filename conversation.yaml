@@ -16,6 +16,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
       use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
 
 
       /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -726,6 +727,72 @@ local_system:
           // 4. Replace the original productions with the new set.
           productions.clear();
           productions.extend(new_productions);
+      }
+
+      /// Checks if two goto maps are compatible.
+      ///
+      /// Two goto maps are compatible if, for all non-terminal IDs they have in common,
+      /// the corresponding `Goto` actions are identical.
+      fn are_gotos_compatible(
+          gotos1: &BTreeMap<NonTerminalID, Goto>,
+          gotos2: &BTreeMap<NonTerminalID, Goto>,
+      ) -> bool {
+          // Iterate over the keys of the first map.
+          for (nt_id, goto1) in gotos1 {
+              // If the second map also contains this key, check if the values are equal.
+              if let Some(goto2) = gotos2.get(nt_id) {
+                  if goto1 != goto2 {
+                      // Incompatibility found.
+                      return false;
+                  }
+              }
+          }
+          // No incompatibilities found.
+          true
+      }
+
+      /// Finds pairs of states in a parse table that have identical actions but only
+      /// "compatible" gotos.
+      ///
+      /// This is useful for identifying states that might be candidates for merging in
+      /// LALR(1) parsers, or for general table analysis.
+      ///
+      /// A pair of states is reported if:
+      /// 1. Their shift/reduce actions are identical across all phases (including default reduces).
+      /// 2. Their `goto` maps are "compatible". Two goto maps are compatible if for every
+      ///    non-terminal key they have in common, the target `Goto` action is also identical.
+      ///
+      /// # Arguments
+      /// * `table` - The `Stage7Table` to analyze.
+      ///
+      /// # Returns
+      /// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
+      /// compatible states.
+      pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
+          let mut compatible_pairs = Vec::new();
+          let states_and_rows: Vec<_> = table.iter().collect();
+
+          // Iterate over all unique pairs of states.
+          for i in 0..states_and_rows.len() {
+              for j in (i + 1)..states_and_rows.len() {
+                  let (state_id1, row1) = states_and_rows[i];
+                  let (state_id2, row2) = states_and_rows[j];
+
+                  // Condition 1: Check for identical actions across all phases.
+                  let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
+                      && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
+                      && row1.phase3_default_reduce == row2.phase3_default_reduce;
+
+                  if actions_are_identical {
+                      // Condition 2: Check for compatible gotos.
+                      if are_gotos_compatible(&row1.gotos, &row2.gotos) {
+                          compatible_pairs.push((*state_id1, *state_id2));
+                      }
+                  }
+              }
+          }
+
+          compatible_pairs
       }
 
     src/glr/grammar.rs: |
@@ -1981,15 +2048,12 @@ local_system:
                       );
 
                       if goto.accept {
+                          crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
                           self.accepted = true;
                       }
 
                       if let Some(goto_state_id) = goto.state_id {
-                          if goto.accept {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                          } else {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                          }
+                          crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                           let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                               out.push(new_gss_node);
                       }
@@ -2406,7 +2470,7 @@ local_system:
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -2618,7 +2682,7 @@ local_system:
       }
 
 
-      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
       pub struct Goto {
           pub state_id: Option<StateID>,
           pub accept: bool,
@@ -3058,22 +3122,7 @@ local_system:
 
           // Goto for initial production
           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
-              std::collections::btree_map::Entry::Vacant(entry) => {
-                  entry.insert(Goto {
-                      state_id: None,
-                      accept: true,
-                  });
-              }
-              std::collections::btree_map::Entry::Occupied(mut entry) => {
-                  let goto = entry.get_mut();
-                  if goto.accept {
-                      // We can use the `goto` reference here for the panic message.
-                      panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                  }
-                  goto.accept = true;
-              }
-          }
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
           (stage_7_table, item_set_map, start_state_id)
       }
@@ -3128,8 +3177,11 @@ local_system:
           let stage_6_table = stage_6(stage_5_table);
           crate::debug!(6, &stage_6_table);
           crate::debug!(2, "Stage 7");
-          let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
           crate::debug!(6, &stage_7_table);
+
+          let compatible_states = find_compatible_states(&mut stage_7_table);
+          assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
 
           crate::debug!(2, "Done generating GLR parser");
 
@@ -4344,6 +4396,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
       use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
 
 
       /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -5054,6 +5107,72 @@ local_system:
           // 4. Replace the original productions with the new set.
           productions.clear();
           productions.extend(new_productions);
+      }
+
+      /// Checks if two goto maps are compatible.
+      ///
+      /// Two goto maps are compatible if, for all non-terminal IDs they have in common,
+      /// the corresponding `Goto` actions are identical.
+      fn are_gotos_compatible(
+          gotos1: &BTreeMap<NonTerminalID, Goto>,
+          gotos2: &BTreeMap<NonTerminalID, Goto>,
+      ) -> bool {
+          // Iterate over the keys of the first map.
+          for (nt_id, goto1) in gotos1 {
+              // If the second map also contains this key, check if the values are equal.
+              if let Some(goto2) = gotos2.get(nt_id) {
+                  if goto1 != goto2 {
+                      // Incompatibility found.
+                      return false;
+                  }
+              }
+          }
+          // No incompatibilities found.
+          true
+      }
+
+      /// Finds pairs of states in a parse table that have identical actions but only
+      /// "compatible" gotos.
+      ///
+      /// This is useful for identifying states that might be candidates for merging in
+      /// LALR(1) parsers, or for general table analysis.
+      ///
+      /// A pair of states is reported if:
+      /// 1. Their shift/reduce actions are identical across all phases (including default reduces).
+      /// 2. Their `goto` maps are "compatible". Two goto maps are compatible if for every
+      ///    non-terminal key they have in common, the target `Goto` action is also identical.
+      ///
+      /// # Arguments
+      /// * `table` - The `Stage7Table` to analyze.
+      ///
+      /// # Returns
+      /// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
+      /// compatible states.
+      pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
+          let mut compatible_pairs = Vec::new();
+          let states_and_rows: Vec<_> = table.iter().collect();
+
+          // Iterate over all unique pairs of states.
+          for i in 0..states_and_rows.len() {
+              for j in (i + 1)..states_and_rows.len() {
+                  let (state_id1, row1) = states_and_rows[i];
+                  let (state_id2, row2) = states_and_rows[j];
+
+                  // Condition 1: Check for identical actions across all phases.
+                  let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
+                      && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
+                      && row1.phase3_default_reduce == row2.phase3_default_reduce;
+
+                  if actions_are_identical {
+                      // Condition 2: Check for compatible gotos.
+                      if are_gotos_compatible(&row1.gotos, &row2.gotos) {
+                          compatible_pairs.push((*state_id1, *state_id2));
+                      }
+                  }
+              }
+          }
+
+          compatible_pairs
       }
 
     src/glr/grammar.rs: |
@@ -6309,15 +6428,12 @@ local_system:
                       );
 
                       if goto.accept {
+                          crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
                           self.accepted = true;
                       }
 
                       if let Some(goto_state_id) = goto.state_id {
-                          if goto.accept {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                          } else {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                          }
+                          crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                           let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                               out.push(new_gss_node);
                       }
@@ -6734,7 +6850,7 @@ local_system:
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -6946,7 +7062,7 @@ local_system:
       }
 
 
-      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
       pub struct Goto {
           pub state_id: Option<StateID>,
           pub accept: bool,
@@ -7386,22 +7502,7 @@ local_system:
 
           // Goto for initial production
           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
-              std::collections::btree_map::Entry::Vacant(entry) => {
-                  entry.insert(Goto {
-                      state_id: None,
-                      accept: true,
-                  });
-              }
-              std::collections::btree_map::Entry::Occupied(mut entry) => {
-                  let goto = entry.get_mut();
-                  if goto.accept {
-                      // We can use the `goto` reference here for the panic message.
-                      panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                  }
-                  goto.accept = true;
-              }
-          }
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
           (stage_7_table, item_set_map, start_state_id)
       }
@@ -7456,8 +7557,11 @@ local_system:
           let stage_6_table = stage_6(stage_5_table);
           crate::debug!(6, &stage_6_table);
           crate::debug!(2, "Stage 7");
-          let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
           crate::debug!(6, &stage_7_table);
+
+          let compatible_states = find_compatible_states(&mut stage_7_table);
+          assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
 
           crate::debug!(2, "Done generating GLR parser");
 
@@ -8695,6 +8799,7 @@ messages:
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
       use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
 
 
       /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -9405,6 +9510,72 @@ messages:
           // 4. Replace the original productions with the new set.
           productions.clear();
           productions.extend(new_productions);
+      }
+
+      /// Checks if two goto maps are compatible.
+      ///
+      /// Two goto maps are compatible if, for all non-terminal IDs they have in common,
+      /// the corresponding `Goto` actions are identical.
+      fn are_gotos_compatible(
+          gotos1: &BTreeMap<NonTerminalID, Goto>,
+          gotos2: &BTreeMap<NonTerminalID, Goto>,
+      ) -> bool {
+          // Iterate over the keys of the first map.
+          for (nt_id, goto1) in gotos1 {
+              // If the second map also contains this key, check if the values are equal.
+              if let Some(goto2) = gotos2.get(nt_id) {
+                  if goto1 != goto2 {
+                      // Incompatibility found.
+                      return false;
+                  }
+              }
+          }
+          // No incompatibilities found.
+          true
+      }
+
+      /// Finds pairs of states in a parse table that have identical actions but only
+      /// "compatible" gotos.
+      ///
+      /// This is useful for identifying states that might be candidates for merging in
+      /// LALR(1) parsers, or for general table analysis.
+      ///
+      /// A pair of states is reported if:
+      /// 1. Their shift/reduce actions are identical across all phases (including default reduces).
+      /// 2. Their `goto` maps are "compatible". Two goto maps are compatible if for every
+      ///    non-terminal key they have in common, the target `Goto` action is also identical.
+      ///
+      /// # Arguments
+      /// * `table` - The `Stage7Table` to analyze.
+      ///
+      /// # Returns
+      /// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
+      /// compatible states.
+      pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
+          let mut compatible_pairs = Vec::new();
+          let states_and_rows: Vec<_> = table.iter().collect();
+
+          // Iterate over all unique pairs of states.
+          for i in 0..states_and_rows.len() {
+              for j in (i + 1)..states_and_rows.len() {
+                  let (state_id1, row1) = states_and_rows[i];
+                  let (state_id2, row2) = states_and_rows[j];
+
+                  // Condition 1: Check for identical actions across all phases.
+                  let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
+                      && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
+                      && row1.phase3_default_reduce == row2.phase3_default_reduce;
+
+                  if actions_are_identical {
+                      // Condition 2: Check for compatible gotos.
+                      if are_gotos_compatible(&row1.gotos, &row2.gotos) {
+                          compatible_pairs.push((*state_id1, *state_id2));
+                      }
+                  }
+              }
+          }
+
+          compatible_pairs
       }
 
 
@@ -10680,15 +10851,12 @@ messages:
                       );
 
                       if goto.accept {
+                          crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
                           self.accepted = true;
                       }
 
                       if let Some(goto_state_id) = goto.state_id {
-                          if goto.accept {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                          } else {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                          }
+                          crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                           let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                               out.push(new_gss_node);
                       }
@@ -11115,7 +11283,7 @@ messages:
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -11327,7 +11495,7 @@ messages:
       }
 
 
-      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
       pub struct Goto {
           pub state_id: Option<StateID>,
           pub accept: bool,
@@ -11767,22 +11935,7 @@ messages:
 
           // Goto for initial production
           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
-              std::collections::btree_map::Entry::Vacant(entry) => {
-                  entry.insert(Goto {
-                      state_id: None,
-                      accept: true,
-                  });
-              }
-              std::collections::btree_map::Entry::Occupied(mut entry) => {
-                  let goto = entry.get_mut();
-                  if goto.accept {
-                      // We can use the `goto` reference here for the panic message.
-                      panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                  }
-                  goto.accept = true;
-              }
-          }
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
           (stage_7_table, item_set_map, start_state_id)
       }
@@ -11837,8 +11990,11 @@ messages:
           let stage_6_table = stage_6(stage_5_table);
           crate::debug!(6, &stage_6_table);
           crate::debug!(2, "Stage 7");
-          let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
           crate::debug!(6, &stage_7_table);
+
+          let compatible_states = find_compatible_states(&mut stage_7_table);
+          assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
 
           crate::debug!(2, "Done generating GLR parser");
 
@@ -13057,110 +13213,167 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Add a function to analyze.rs that looks at a parse table and sees whether any two states have exactly the same shifts and reduces but 'compatible' gotos and reports them. Check all phases. Reduces include the default reduce.
-      Let's define 'compatible' gotos. Gotos are a map from nonterminal to Goto. Two goto maps are considered to be 'compatible' if for all keys they have in common, the values are exactly matching as well.
+      I've introduced a notion of 'compatible' states.
+      If any are found, an assertion error will be raised.
+      Now we must take the next step: merge compatible states.
+      Write the code to do this and modify `generate_glr_parser_with_maps` to do it instead of asserting.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the diffs for the requested changes.
+      Of course. Merging compatible states is the core of LALR(1) parser generation, which can significantly reduce the size of the parse table compared to a canonical LR(1) parser. Here are the necessary changes to implement this state merging.
 
-      I've added a new function `find_compatible_states` to `src/glr/analyze.rs`. This function identifies pairs of states in the parse table that have identical actions across all phases but "compatible" goto maps, as you defined. This can be a useful tool for analyzing the structure of the generated parse table.
+      I will add a function to merge the compatible states and then call it during parser generation. This involves creating a new, smaller parse table and re-mapping all state transitions to point to the new, merged states.
 
-      Here are the changes:
+      Here is the patch for `src/glr/table.rs`:
 
       ```diff
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -1,7 +1,8 @@
-       use std::cmp::PartialEq;
-       use std::collections::{BTreeMap, BTreeSet, VecDeque};
-       use kdam::{tqdm, BarExt};
-       use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
-      +use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
-       
-       
-       /// Checks for non-terminals used in rule RHS but never defined in LHS.
-      @@ -690,3 +691,63 @@
-           productions.clear();
-           productions.extend(new_productions);
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -1000,6 +1000,109 @@
+           (stage_7_table, item_set_map, start_state_id)
        }
-      +
-      +/// Checks if two goto maps are compatible.
+       
+      +/// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
       +///
-      +/// Two goto maps are compatible if, for all non-terminal IDs they have in common,
-      +/// the corresponding `Goto` actions are identical.
-      +fn are_gotos_compatible(
-      +    gotos1: &BTreeMap<NonTerminalID, Goto>,
-      +    gotos2: &BTreeMap<NonTerminalID, Goto>,
-      +) -> bool {
-      +    // Iterate over the keys of the first map.
-      +    for (nt_id, goto1) in gotos1 {
-      +        // If the second map also contains this key, check if the values are equal.
-      +        if let Some(goto2) = gotos2.get(nt_id) {
-      +            if goto1 != goto2 {
-      +                // Incompatibility found.
-      +                return false;
-      +            }
-      +        }
-      +    }
-      +    // No incompatibilities found.
-      +    true
-      +}
-      +
-      +/// Finds pairs of states in a parse table that have identical actions but only
-      +/// "compatible" gotos.
+      +/// This function takes a table and a list of compatible state pairs. It merges these
+      +/// pairs and transitively merges states. For example, if (s1, s2) and (s2, s3) are
+      +/// compatible, all three states will be merged into one.
       +///
-      +/// This is useful for identifying states that might be candidates for merging in
-      +/// LALR(1) parsers, or for general table analysis.
-      +///
-      +/// A pair of states is reported if:
-      +/// 1. Their shift/reduce actions are identical across all phases (including default reduces).
-      +/// 2. Their `goto` maps are "compatible". Two goto maps are compatible if for every
-      +///    non-terminal key they have in common, the target `Goto` action is also identical.
+      +/// The process involves:
+      +/// 1.  Finding the canonical representative for each state using a disjoint-set union (DSU) approach.
+      +/// 2.  Creating a new, smaller parse table where each row corresponds to a representative state.
+      +/// 3.  Merging the goto maps of the merged states.
+      +/// 4.  Updating all StateID references (in shifts and gotos) throughout the new table to point
+      +///     to the new representative state IDs.
       +///
       +/// # Arguments
-      +/// * `table` - The `Stage7Table` to analyze.
+      +/// * `table` - The `Stage7Table` to be compacted.
+      +/// * `item_set_map` - The mapping from item sets to their `StateID`s.
+      +/// * `start_state_id` - The initial state ID of the parser.
+      +/// * `compatible_pairs` - A list of state pairs that have been identified as compatible for merging.
       +///
       +/// # Returns
-      +/// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
-      +/// compatible states.
-      +pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
-      +    let mut compatible_pairs = Vec::new();
-      +    let states_and_rows: Vec<_> = table.iter().collect();
+      +/// A tuple containing:
+      +/// * The new, compacted `Stage7Table`.
+      +/// * The new `BiBTreeMap` mapping merged item sets to the new `StateID`s.
+      +/// * The new start state ID.
+      +fn merge_compatible_states(
+      +    table: &Stage7Table,
+      +    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+      +    start_state_id: StateID,
+      +    compatible_pairs: &[(StateID, StateID)],
+      +) -> (Stage7Table, BiBTreeMap<BTreeSet<Item>, StateID>, StateID) {
+      +    if compatible_pairs.is_empty() {
+      +        return (table.clone(), item_set_map.clone(), start_state_id);
+      +    }
       +
-      +    // Iterate over all unique pairs of states.
-      +    for i in 0..states_and_rows.len() {
-      +        for j in (i + 1)..states_and_rows.len() {
-      +            let (state_id1, row1) = states_and_rows[i];
-      +            let (state_id2, row2) = states_and_rows[j];
+      +    crate::debug!(2, "Merging {} compatible state pairs.", compatible_pairs.len());
       +
-      +            // Condition 1: Check for identical actions across all phases.
-      +            let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
-      +                && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
-      +                && row1.phase3_default_reduce == row2.phase3_default_reduce;
-      +
-      +            if actions_are_identical {
-      +                // Condition 2: Check for compatible gotos.
-      +                if are_gotos_compatible(&row1.gotos, &row2.gotos) {
-      +                    compatible_pairs.push((*state_id1, *state_id2));
-      +                }
-      +            }
+      +    // 1. DSU structure to manage state merging.
+      +    let mut parent: BTreeMap<StateID, StateID> = table.keys().map(|&id| (id, id)).collect();
+      +    fn find_set(parent: &mut BTreeMap<StateID, StateID>, i: StateID) -> StateID {
+      +        if parent[&i] == i {
+      +            i
+      +        } else {
+      +            let root = find_set(parent, parent[&i]);
+      +            parent.insert(i, root); // Path compression
+      +            root
+      +        }
+      +    }
+      +    fn unite_sets(parent: &mut BTreeMap<StateID, StateID>, mut a: StateID, mut b: StateID) {
+      +        a = find_set(parent, a);
+      +        b = find_set(parent, b);
+      +        if a != b {
+      +            // A simple union, could be optimized by rank/size
+      +            parent.insert(b, a);
       +        }
       +    }
       +
-      +    compatible_pairs
+      +    for &(s1, s2) in compatible_pairs {
+      +        unite_sets(&mut parent, s1, s2);
+      +    }
+      +
+      +    // Create final mapping from old state ID to its representative.
+      +    let mut state_map: BTreeMap<StateID, StateID> = BTreeMap::new();
+      +    for &old_id in table.keys() {
+      +        state_map.insert(old_id, find_set(&mut parent, old_id));
+      +    }
+      +
+      +    // 2. Create the new merged table.
+      +    let mut new_table: Stage7Table = BTreeMap::new();
+      +    let mut new_item_sets: BTreeMap<StateID, BTreeSet<Item>> = BTreeMap::new();
+      +
+      +    let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter_by_right().collect();
+      +
+      +    for (&old_id, row) in table.iter() {
+      +        let new_id = state_map[&old_id];
+      +        new_item_sets.entry(new_id).or_default().extend(state_to_items[&old_id].iter().cloned());
+      +
+      +        let new_row = new_table.entry(new_id).or_insert_with(|| Stage7Row {
+      +            phase1_shifts_and_reduces: row.phase1_shifts_and_reduces.clone(),
+      +            phase2_shifts_and_reduces: row.phase2_shifts_and_reduces.clone(),
+      +            phase3_default_reduce: row.phase3_default_reduce.clone(),
+      +            gotos: BTreeMap::new(),
+      +        });
+      +
+      +        for (nt_id, goto) in &row.gotos {
+      +            new_row.gotos.insert(*nt_id, *goto);
+      +        }
+      +    }
+      +
+      +    fn remap_action_state_ids(action: &mut Stage7ShiftsAndReducesLookaheadValue, map: &BTreeMap<StateID, StateID>) {
+      +        match action {
+      +            Stage7ShiftsAndReducesLookaheadValue::Shift(ref mut sid) => *sid = map[sid],
+      +            Stage7ShiftsAndReducesLookaheadValue::Split { ref mut shift, .. } => {
+      +                if let Some(ref mut sid) = shift { *sid = map[sid]; }
+      +            }
+      +            _ => {}
+      +        }
+      +    }
+      +
+      +    for row in new_table.values_mut() {
+      +        row.phase1_shifts_and_reduces.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+      +        row.phase2_shifts_and_reduces.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+      +        row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
+      +    }
+      +
+      +    let new_item_set_map: BiBTreeMap<_, _> = new_item_sets.into_iter().collect();
+      +    let new_start_state_id = state_map[&start_state_id];
+      +
+      +    crate::debug!(2, "Merged states. Original: {}, New: {}", table.len(), new_table.len());
+      +
+      +    (new_table, new_item_set_map, new_start_state_id)
       +}
+      +
+       pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
+           let original_productions = productions.to_vec();
+       
+      @@ -1042,11 +1145,12 @@
+           let stage_6_table = stage_6(stage_5_table);
+           crate::debug!(6, &stage_6_table);
+           crate::debug!(2, "Stage 7");
+      -    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+      +    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+       
+      -    let compatible_states = find_compatible_states(&mut stage_7_table);
+      -    assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
+      +    let compatible_states = find_compatible_states(&stage_7_table);
+      +    if !compatible_states.is_empty() {
+      +        (stage_7_table, item_set_map, start_state_id) = merge_compatible_states(&stage_7_table, &item_set_map, start_state_id, &compatible_states);
+      +    }
+       
+           crate::debug!(2, "Done generating GLR parser");
+       
 
       ```
-
-      Let me know if you have any other questions or need further assistance
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
 ...
