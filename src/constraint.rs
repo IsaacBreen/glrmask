@@ -1114,7 +1114,7 @@ impl<'a> GrammarConstraintState<'a> {
                             // Perhaps we can avoid stepping by calling `has_action_for`
                             match glr_s.has_action_for(*gtid) {
                                 Some(glr_s_llm_tokens) => {
-                                    timeit!(format!("get_mask step_fn - has_action_for({})", gtid.0), {
+                                    timeit!(format!("get_mask step_fn - has_action_for"), {
                                         // This token will succeed
                                         crate::debug!(4, "Step with grammar token {:?} has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid);
                                         let mut edge_llm_tokens = HybridBitset::zeros();
@@ -1128,7 +1128,7 @@ impl<'a> GrammarConstraintState<'a> {
                                     });
                                 },
                                 None => {
-                                    timeit!(format!("get_mask step_fn - has_action_for({}) - inconclusive", gtid.0), {
+                                    timeit!(format!("get_mask step_fn - has_action_for - inconclusive"), {
                                         // Inconclusive
                                         crate::debug!(4, "Inconclusive step for grammar token {:?}, no action found.", gtid);
                                     });
