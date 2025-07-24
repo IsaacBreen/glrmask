@@ -732,7 +732,7 @@ fn merge_compatible_states(
     let mut new_table: Stage7Table = BTreeMap::new();
     let mut new_item_sets: BTreeMap<StateID, BTreeSet<Item>> = BTreeMap::new();
 
-    let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter_by_right().collect();
+    let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter().map(|(k, v)| (*v, k)).collect();
 
     for (&old_id, row) in table.iter() {
         let new_id = state_map[&old_id];
@@ -766,7 +766,7 @@ fn merge_compatible_states(
         row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
     }
 
-    let new_item_set_map: BiBTreeMap<_, _> = new_item_sets.into_iter().collect();
+    let new_item_set_map: BiBTreeMap<BTreeSet<Item>, StateID> = new_item_sets.into_iter().map(|(state_id, item_set)| (item_set, state_id)).collect();
     let new_start_state_id = state_map[&start_state_id];
 
     crate::debug!(2, "Merged states. Original: {}, New: {}", table.len(), new_table.len());
