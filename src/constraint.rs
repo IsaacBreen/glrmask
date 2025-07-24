@@ -1230,6 +1230,9 @@ impl<'a> GrammarConstraintState<'a> {
                                 break; // No need to check further, we have at least two non-end nodes.
                             }
                         }
+                        // Print GSS stats
+                        let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                        crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         if num_outgoing_edges_that_lead_to_non_end_nodes >= 2 {
                             // There will be a split.
                             // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
