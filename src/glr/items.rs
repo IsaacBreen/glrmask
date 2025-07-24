@@ -126,7 +126,7 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
         if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
             for prod in productions.iter().filter(|p| p.lhs == *nt) {
                 let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
-                dbg!(&item, &prod, &lookaheads); // Debugging line to inspect item and production
+                for lookahead in lookaheads {
                     let new_item = Item {
                         production: prod.clone(),
                         dot_position: 0,
