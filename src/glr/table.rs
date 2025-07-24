@@ -217,7 +217,7 @@ impl JSONConvertible for Stage7Row {
 }
 
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Goto {
     pub state_id: Option<StateID>,
     pub accept: bool,
@@ -657,22 +657,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
     // Goto for initial production
     let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-    match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(Goto {
-                state_id: None,
-                accept: true,
-            });
-        }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            let goto = entry.get_mut();
-            if goto.accept {
-                // We can use the `goto` reference here for the panic message.
-                panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-            }
-            goto.accept = true;
-        }
-    }
+    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
     (stage_7_table, item_set_map, start_state_id)
 }

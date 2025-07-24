@@ -746,15 +746,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 );
 
                 if goto.accept {
+                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
                     self.accepted = true;
                 }
 
                 if let Some(goto_state_id) = goto.state_id {
-                    if goto.accept {
-                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                    } else {
-                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                    }
+                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                     let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                         out.push(new_gss_node);
                 }
