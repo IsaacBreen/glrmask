@@ -66,11 +66,17 @@ impl Acc {
     }
 
     pub fn narrow(from: &Self, to: &Self) -> Self {
+        // Acc {
+        //     llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
+        //     llm_tokens_intersection: &from.llm_tokens_union & &to.llm_tokens_intersection,
+        //     terminals_union: &from.terminals_union & &to.terminals_union,
+        //     terminals_intersection: &from.terminals_union & &to.terminals_intersection,
+        // }
         Acc {
-            llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
-            llm_tokens_intersection: &from.llm_tokens_union & &to.llm_tokens_intersection,
-            terminals_union: &from.terminals_union & &to.terminals_union,
-            terminals_intersection: &from.terminals_union & &to.terminals_intersection,
+            llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
+            llm_tokens_intersection: timeit!(&from.llm_tokens_union & &to.llm_tokens_intersection),
+            terminals_union: timeit!(&from.terminals_union & &to.terminals_union),
+            terminals_intersection: timeit!(&from.terminals_union & &to.terminals_intersection),
         }
     }
 
