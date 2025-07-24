@@ -784,7 +784,6 @@ local_system:
       pub enum Terminal {
           Regex(String),
           Literal(Vec<u8>),
-          EOF,
       }
 
       impl JSONConvertible for Terminal {
@@ -800,12 +799,6 @@ local_system:
                       let mut obj = StdMap::new();
                       obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                       obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
-                      obj
-                  }),
-                  Terminal::EOF => JSONNode::Object({
-                      let mut obj = StdMap::new();
-                      obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
-                      obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                       obj
                   }),
               }
@@ -832,7 +825,6 @@ local_system:
               match self {
                   Terminal::Regex(name) => write!(f, "{}", name),
                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
-                  Terminal::EOF => write!(f, "EOF"),
               }
           }
       }
@@ -1095,7 +1087,7 @@ local_system:
       pub struct Item {
           pub production: Production,
           pub dot_position: usize,
-          pub lookahead: Terminal,
+          pub lookahead: Option<Terminal>,
       }
 
       // Manual impl for Item (could be derived)
@@ -2398,15 +2390,20 @@ local_system:
       struct Stage3Row {
           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
       }
       #[derive(Debug)]
       struct Stage4Row {
           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+      }
+      #[derive(Debug)]
+      struct Stage5Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
           reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
       }
-      type Stage5Row = Stage4Row;
       #[derive(Debug)]
       struct Stage6Row {
           shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
@@ -2659,7 +2656,7 @@ local_system:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
-              lookahead: Terminal::EOF,
+              lookahead: None,
           };
           let initial_closure = BTreeSet::from([initial_item]);
           let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -2740,7 +2737,7 @@ local_system:
           let mut stage_3_table = BTreeMap::new();
 
           for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+              let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
 
               for item in &row.reduces {
                   reduces
@@ -2796,9 +2793,15 @@ local_system:
           stage_4_table
       }
 
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-          // todo: remove this
-          stage_4_table
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+          // Stage 5 turns
+          //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+          // into
+          //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+          // ie it removes the None entries, which represent EOF.
+          // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+          // merging with any existing production ID sets in the reduces map.
+          todo!()
       }
 
       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
@@ -2854,9 +2857,6 @@ local_system:
               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
-                  if *terminal == Terminal::EOF {
-                      continue; // Skip EOF terminal
-                  }
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
                   let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
@@ -3105,9 +3105,75 @@ local_system:
       // --- Helper Functions for Tests ---
 
       fn create_simple_parser() -> GLRParser {
-          // S -> A $
-          // A -> A a
-          // A -> b
+      // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+      //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+      //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+      #[test]
+      fn test_repetition_no_eof() {
+          // Grammar: S -> S 'a' | 'a'
+          // This grammar defines a sequence of one or more 'a's.
+          // We will parse inputs without a final EOF token and check the state.
+          let productions = vec![
+              prod("S", vec![nt("S"), t("a")]), // Start rule is recursive
+              prod("S", vec![t("a")]),
+          ];
+
+          // The start production is the first one, index 0.
+          // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
+          // but the grammar itself and the inputs we test will not use an EOF/dollar token.
+          let parser = generate_glr_parser(&productions, 0, None);
+          println!("Parser: {}", parser);
+
+          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+          // Test case 1: "a"
+          let tokens1 = vec![a_token];
+          let mut state1 = parser.init_glr_parser(None);
+          state1.parse(&tokens1);
+          // After parsing "a", the parser should be in a valid state, having recognized an 'S'.
+          // The active state should contain stacks that have successfully parsed 'S'.
+          assert!(state1.is_ok(), "Parse should be ok after 'a'");
+
+          // Test case 2: "aaa"
+          let tokens2 = vec![a_token, a_token, a_token];
+          let mut state2 = parser.init_glr_parser(None);
+          state2.parse(&tokens2);
+          assert!(state2.is_ok(), "Parse should be ok after 'aaa'");
+
+          // Test case 3: "" (empty)
+          let tokens3 = vec![];
+          let mut state3 = parser.init_glr_parser(None);
+          state3.parse(&tokens3);
+          // The initial state is ok because it's ready to parse.
+          // After parsing nothing, it's still in that same ready state.
+          assert!(state3.is_ok(), "State should still be ok after parsing empty input");
+          // However, if we were to check for *acceptance*, it would fail because S is not nullable.
+          // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+
+          // Test case 4: "b" (invalid token)
+          // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
+          let productions_with_b = vec![
+              prod("S", vec![nt("S"), t("a")]),
+              prod("S", vec![t("a")]),
+              prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+          ];
+          let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+          let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
+          let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+          let tokens4 = vec![b_token];
+          let mut state4 = parser_with_b.init_glr_parser(None);
+          state4.parse(&tokens4);
+          // After parsing 'b', there should be no valid active states.
+          assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
+
+          // Test case 5: "ab"
+          let tokens5 = vec![a_token_b, b_token];
+          let mut state5 = parser_with_b.init_glr_parser(None);
+          state5.parse(&tokens5);
+          assert!(!state5.is_ok(), "Parse should fail for 'ab'");
+      }
           // This grammar is left-recursive but does NOT have length-1 cycles.
           let productions = vec![
               prod("S", vec![nt("A"), t("$")]), // Start rule
@@ -4961,7 +5027,6 @@ local_system:
       pub enum Terminal {
           Regex(String),
           Literal(Vec<u8>),
-          EOF,
       }
 
       impl JSONConvertible for Terminal {
@@ -4977,12 +5042,6 @@ local_system:
                       let mut obj = StdMap::new();
                       obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                       obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
-                      obj
-                  }),
-                  Terminal::EOF => JSONNode::Object({
-                      let mut obj = StdMap::new();
-                      obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
-                      obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                       obj
                   }),
               }
@@ -5009,7 +5068,6 @@ local_system:
               match self {
                   Terminal::Regex(name) => write!(f, "{}", name),
                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
-                  Terminal::EOF => write!(f, "EOF"),
               }
           }
       }
@@ -5272,7 +5330,7 @@ local_system:
       pub struct Item {
           pub production: Production,
           pub dot_position: usize,
-          pub lookahead: Terminal,
+          pub lookahead: Option<Terminal>,
       }
 
       // Manual impl for Item (could be derived)
@@ -6575,15 +6633,20 @@ local_system:
       struct Stage3Row {
           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
       }
       #[derive(Debug)]
       struct Stage4Row {
           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+      }
+      #[derive(Debug)]
+      struct Stage5Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
           reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
       }
-      type Stage5Row = Stage4Row;
       #[derive(Debug)]
       struct Stage6Row {
           shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
@@ -6836,7 +6899,7 @@ local_system:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
-              lookahead: Terminal::EOF,
+              lookahead: None,
           };
           let initial_closure = BTreeSet::from([initial_item]);
           let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -6917,7 +6980,7 @@ local_system:
           let mut stage_3_table = BTreeMap::new();
 
           for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+              let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
 
               for item in &row.reduces {
                   reduces
@@ -6973,9 +7036,15 @@ local_system:
           stage_4_table
       }
 
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-          // todo: remove this
-          stage_4_table
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+          // Stage 5 turns
+          //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+          // into
+          //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+          // ie it removes the None entries, which represent EOF.
+          // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+          // merging with any existing production ID sets in the reduces map.
+          todo!()
       }
 
       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
@@ -7031,9 +7100,6 @@ local_system:
               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
-                  if *terminal == Terminal::EOF {
-                      continue; // Skip EOF terminal
-                  }
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
                   let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
@@ -7282,9 +7348,75 @@ local_system:
       // --- Helper Functions for Tests ---
 
       fn create_simple_parser() -> GLRParser {
-          // S -> A $
-          // A -> A a
-          // A -> b
+      // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+      //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+      //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+      #[test]
+      fn test_repetition_no_eof() {
+          // Grammar: S -> S 'a' | 'a'
+          // This grammar defines a sequence of one or more 'a's.
+          // We will parse inputs without a final EOF token and check the state.
+          let productions = vec![
+              prod("S", vec![nt("S"), t("a")]), // Start rule is recursive
+              prod("S", vec![t("a")]),
+          ];
+
+          // The start production is the first one, index 0.
+          // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
+          // but the grammar itself and the inputs we test will not use an EOF/dollar token.
+          let parser = generate_glr_parser(&productions, 0, None);
+          println!("Parser: {}", parser);
+
+          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+          // Test case 1: "a"
+          let tokens1 = vec![a_token];
+          let mut state1 = parser.init_glr_parser(None);
+          state1.parse(&tokens1);
+          // After parsing "a", the parser should be in a valid state, having recognized an 'S'.
+          // The active state should contain stacks that have successfully parsed 'S'.
+          assert!(state1.is_ok(), "Parse should be ok after 'a'");
+
+          // Test case 2: "aaa"
+          let tokens2 = vec![a_token, a_token, a_token];
+          let mut state2 = parser.init_glr_parser(None);
+          state2.parse(&tokens2);
+          assert!(state2.is_ok(), "Parse should be ok after 'aaa'");
+
+          // Test case 3: "" (empty)
+          let tokens3 = vec![];
+          let mut state3 = parser.init_glr_parser(None);
+          state3.parse(&tokens3);
+          // The initial state is ok because it's ready to parse.
+          // After parsing nothing, it's still in that same ready state.
+          assert!(state3.is_ok(), "State should still be ok after parsing empty input");
+          // However, if we were to check for *acceptance*, it would fail because S is not nullable.
+          // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+
+          // Test case 4: "b" (invalid token)
+          // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
+          let productions_with_b = vec![
+              prod("S", vec![nt("S"), t("a")]),
+              prod("S", vec![t("a")]),
+              prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+          ];
+          let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+          let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
+          let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+          let tokens4 = vec![b_token];
+          let mut state4 = parser_with_b.init_glr_parser(None);
+          state4.parse(&tokens4);
+          // After parsing 'b', there should be no valid active states.
+          assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
+
+          // Test case 5: "ab"
+          let tokens5 = vec![a_token_b, b_token];
+          let mut state5 = parser_with_b.init_glr_parser(None);
+          state5.parse(&tokens5);
+          assert!(!state5.is_ok(), "Parse should fail for 'ab'");
+      }
           // This grammar is left-recursive but does NOT have length-1 cycles.
           let productions = vec![
               prod("S", vec![nt("A"), t("$")]), // Start rule
@@ -8378,7 +8510,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gp
+    - o3
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -9166,7 +9298,6 @@ messages:
       pub enum Terminal {
           Regex(String),
           Literal(Vec<u8>),
-          EOF,
       }
 
       impl JSONConvertible for Terminal {
@@ -9182,12 +9313,6 @@ messages:
                       let mut obj = StdMap::new();
                       obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                       obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
-                      obj
-                  }),
-                  Terminal::EOF => JSONNode::Object({
-                      let mut obj = StdMap::new();
-                      obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
-                      obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                       obj
                   }),
               }
@@ -9214,7 +9339,6 @@ messages:
               match self {
                   Terminal::Regex(name) => write!(f, "{}", name),
                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
-                  Terminal::EOF => write!(f, "EOF"),
               }
           }
       }
@@ -9482,7 +9606,7 @@ messages:
       pub struct Item {
           pub production: Production,
           pub dot_position: usize,
-          pub lookahead: Terminal,
+          pub lookahead: Option<Terminal>,
       }
 
       // Manual impl for Item (could be derived)
@@ -10805,15 +10929,20 @@ messages:
       struct Stage3Row {
           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
       }
       #[derive(Debug)]
       struct Stage4Row {
           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+      }
+      #[derive(Debug)]
+      struct Stage5Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
           reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
       }
-      type Stage5Row = Stage4Row;
       #[derive(Debug)]
       struct Stage6Row {
           shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
@@ -11066,7 +11195,7 @@ messages:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
-              lookahead: Terminal::EOF,
+              lookahead: None,
           };
           let initial_closure = BTreeSet::from([initial_item]);
           let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -11147,7 +11276,7 @@ messages:
           let mut stage_3_table = BTreeMap::new();
 
           for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+              let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
 
               for item in &row.reduces {
                   reduces
@@ -11203,9 +11332,15 @@ messages:
           stage_4_table
       }
 
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-          // todo: remove this
-          stage_4_table
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+          // Stage 5 turns
+          //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+          // into
+          //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+          // ie it removes the None entries, which represent EOF.
+          // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+          // merging with any existing production ID sets in the reduces map.
+          todo!()
       }
 
       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
@@ -11261,9 +11396,6 @@ messages:
               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
-                  if *terminal == Terminal::EOF {
-                      continue; // Skip EOF terminal
-                  }
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
                   let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
@@ -11517,9 +11649,75 @@ messages:
       // --- Helper Functions for Tests ---
 
       fn create_simple_parser() -> GLRParser {
-          // S -> A $
-          // A -> A a
-          // A -> b
+      // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+      //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+      //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+      #[test]
+      fn test_repetition_no_eof() {
+          // Grammar: S -> S 'a' | 'a'
+          // This grammar defines a sequence of one or more 'a's.
+          // We will parse inputs without a final EOF token and check the state.
+          let productions = vec![
+              prod("S", vec![nt("S"), t("a")]), // Start rule is recursive
+              prod("S", vec![t("a")]),
+          ];
+
+          // The start production is the first one, index 0.
+          // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
+          // but the grammar itself and the inputs we test will not use an EOF/dollar token.
+          let parser = generate_glr_parser(&productions, 0, None);
+          println!("Parser: {}", parser);
+
+          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+          // Test case 1: "a"
+          let tokens1 = vec![a_token];
+          let mut state1 = parser.init_glr_parser(None);
+          state1.parse(&tokens1);
+          // After parsing "a", the parser should be in a valid state, having recognized an 'S'.
+          // The active state should contain stacks that have successfully parsed 'S'.
+          assert!(state1.is_ok(), "Parse should be ok after 'a'");
+
+          // Test case 2: "aaa"
+          let tokens2 = vec![a_token, a_token, a_token];
+          let mut state2 = parser.init_glr_parser(None);
+          state2.parse(&tokens2);
+          assert!(state2.is_ok(), "Parse should be ok after 'aaa'");
+
+          // Test case 3: "" (empty)
+          let tokens3 = vec![];
+          let mut state3 = parser.init_glr_parser(None);
+          state3.parse(&tokens3);
+          // The initial state is ok because it's ready to parse.
+          // After parsing nothing, it's still in that same ready state.
+          assert!(state3.is_ok(), "State should still be ok after parsing empty input");
+          // However, if we were to check for *acceptance*, it would fail because S is not nullable.
+          // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+
+          // Test case 4: "b" (invalid token)
+          // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
+          let productions_with_b = vec![
+              prod("S", vec![nt("S"), t("a")]),
+              prod("S", vec![t("a")]),
+              prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+          ];
+          let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+          let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
+          let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+          let tokens4 = vec![b_token];
+          let mut state4 = parser_with_b.init_glr_parser(None);
+          state4.parse(&tokens4);
+          // After parsing 'b', there should be no valid active states.
+          assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
+
+          // Test case 5: "ab"
+          let tokens5 = vec![a_token_b, b_token];
+          let mut state5 = parser_with_b.init_glr_parser(None);
+          state5.parse(&tokens5);
+          assert!(!state5.is_ok(), "Parse should fail for 'ab'");
+      }
           // This grammar is left-recursive but does NOT have length-1 cycles.
           let productions = vec![
               prod("S", vec![nt("A"), t("$")]), // Start rule
@@ -12603,100 +12801,79 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: Add a test where the start production is a repetition, no EOF token.
+  - user: Implement `stage_5`.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to add the requested test case to your project. This test will verify that the parser can handle a grammar designed for repetition without an explicit EOF token in the input stream.
-
-      Here is the git diff for the changes:
-
       ```diff
-      --- a/src/glr/tests.rs
-      +++ b/src/glr/tests.rs
-      @@ -721,3 +721,55 @@
-       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
-       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
-       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+      diff --git a/src/glr/table.rs b/src/glr/table.rs
+      @@
+       }
+       
+       fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+           // Stage 5 turns
+           //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+           // into
+           //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+           // ie it removes the None entries, which represent EOF.
+           // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+           // merging with any existing production ID sets in the reduces map.
+      -    todo!()
+      +    let _ = productions; // Currently unused – kept for potential future needs / signature consistency
       +
-      +#[test]
-      +fn test_repetition_no_eof() {
-      +    // Grammar: S -> S 'a' | 'a'
-      +    // This grammar defines a sequence of one or more 'a's.
-      +    // We will parse inputs without a final EOF token and check the state.
-      +    let productions = vec![
-      +        prod("S", vec![nt("S"), t("a")]), // Start rule is recursive
-      +        prod("S", vec![t("a")]),
-      +    ];
+      +    let mut stage_5_table = BTreeMap::new();
       +
-      +    // The start production is the first one, index 0.
-      +    // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
-      +    // but the grammar itself and the inputs we test will not use an EOF/dollar token.
-      +    let parser = generate_glr_parser(&productions, 0, None);
-      +    println!("Parser: {}", parser);
+      +    for (item_set, row) in stage_4_table {
+      +        let Stage4Row { shifts, gotos, reduces } = row;
       +
-      +    let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+      +        // 1. Extract the production IDs associated with EOF (None).
+      +        let eof_prod_ids_opt = reduces.get(&None).cloned();
       +
-      +    // Test case 1: "a"
-      +    let tokens1 = vec![a_token];
-      +    let mut state1 = parser.init_glr_parser(None);
-      +    state1.parse(&tokens1);
-      +    // After parsing "a", the parser should be in a valid state, having recognized an 'S'.
-      +    // The active state should contain stacks that have successfully parsed 'S'.
-      +    assert!(state1.is_ok(), "Parse should be ok after 'a'");
+      +        // 2. Start building the new reduces map keyed by concrete terminals.
+      +        let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
       +
-      +    // Test case 2: "aaa"
-      +    let tokens2 = vec![a_token, a_token, a_token];
-      +    let mut state2 = parser.init_glr_parser(None);
-      +    state2.parse(&tokens2);
-      +    assert!(state2.is_ok(), "Parse should be ok after 'aaa'");
+      +        // 2a. Copy over entries that already have a concrete terminal key.
+      +        for (opt_term, prod_ids) in reduces {
+      +            if let Some(term) = opt_term {
+      +                new_reduces
+      +                    .entry(term)
+      +                    .or_default()
+      +                    .extend(prod_ids.into_iter());
+      +            }
+      +        }
       +
-      +    // Test case 3: "" (empty)
-      +    let tokens3 = vec![];
-      +    let mut state3 = parser.init_glr_parser(None);
-      +    state3.parse(&tokens3);
-      +    // The initial state is ok because it's ready to parse.
-      +    // After parsing nothing, it's still in that same ready state.
-      +    assert!(state3.is_ok(), "State should still be ok after parsing empty input");
-      +    // However, if we were to check for *acceptance*, it would fail because S is not nullable.
-      +    // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+      +        // 2b. Propagate EOF (None) reductions to every terminal in the terminal map.
+      +        if let Some(eof_prod_ids) = eof_prod_ids_opt {
+      +            for (term, _) in terminal_map.iter() {
+      +                new_reduces
+      +                    .entry(term.clone())
+      +                    .or_default()
+      +                    .extend(eof_prod_ids.iter().cloned());
+      +            }
+      +        }
       +
-      +    // Test case 4: "b" (invalid token)
-      +    // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
-      +    let productions_with_b = vec![
-      +        prod("S", vec![nt("S"), t("a")]),
-      +        prod("S", vec![t("a")]),
-      +        prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
-      +    ];
-      +    let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
-      +    let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
-      +    let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+      +        stage_5_table.insert(
+      +            item_set,
+      +            Stage5Row {
+      +                shifts,
+      +                gotos,
+      +                reduces: new_reduces,
+      +            },
+      +        );
+      +    }
       +
-      +    let tokens4 = vec![b_token];
-      +    let mut state4 = parser_with_b.init_glr_parser(None);
-      +    state4.parse(&tokens4);
-      +    // After parsing 'b', there should be no valid active states.
-      +    assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
-      +
-      +    // Test case 5: "ab"
-      +    let tokens5 = vec![a_token_b, b_token];
-      +    let mut state5 = parser_with_b.init_glr_parser(None);
-      +    state5.parse(&tokens5);
-      +    assert!(!state5.is_ok(), "Parse should fail for 'ab'");
-      +}
-
+      +    stage_5_table
+       }
+       
+       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
       ```
-
-      I've added the new test case `test_repetition_no_eof` to `src/glr/tests.rs`. This test defines a simple left-recursive grammar for a sequence of one or more `'a'`s and verifies that the parser correctly handles valid and invalid inputs without requiring a special end-of-file token in the parsed string.
-
-      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/tests.rs
-      Applying patch to 'src/glr/tests.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/tests.rs.
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
 ...

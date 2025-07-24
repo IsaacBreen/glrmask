@@ -444,7 +444,50 @@ fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map:
     // ie it removes the None entries, which represent EOF.
     // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
     // merging with any existing production ID sets in the reduces map.
-    todo!()
+    let _ = productions; // Currently unused – kept for potential future needs / signature consistency
+
+    let mut stage_5_table = BTreeMap::new();
+
+    for (item_set, row) in stage_4_table {
+        let Stage4Row { shifts, gotos, reduces } = row;
+
+        // 1. Extract the production IDs associated with EOF (None).
+        let eof_prod_ids_opt = reduces.get(&None).cloned();
+
+        // 2. Start building the new reduces map keyed by concrete terminals.
+        let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+
+        // 2a. Copy over entries that already have a concrete terminal key.
+        for (opt_term, prod_ids) in reduces {
+            if let Some(term) = opt_term {
+                new_reduces
+                    .entry(term)
+                    .or_default()
+                    .extend(prod_ids.into_iter());
+            }
+        }
+
+        // 2b. Propagate EOF (None) reductions to every terminal in the terminal map.
+        if let Some(eof_prod_ids) = eof_prod_ids_opt {
+            for (term, _) in terminal_map.iter() {
+                new_reduces
+                    .entry(term.clone())
+                    .or_default()
+                    .extend(eof_prod_ids.iter().cloned());
+            }
+        }
+
+        stage_5_table.insert(
+            item_set,
+            Stage5Row {
+                shifts,
+                gotos,
+                reduces: new_reduces,
+            },
+        );
+    }
+
+    stage_5_table
 }
 
 fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
