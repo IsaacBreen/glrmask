@@ -33,15 +33,20 @@ struct Stage2Row {
 struct Stage3Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-    reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+    reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
 }
 #[derive(Debug)]
 struct Stage4Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+    reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+}
+#[derive(Debug)]
+struct Stage5Row {
+    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
-type Stage5Row = Stage4Row;
 #[derive(Debug)]
 struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
@@ -294,7 +299,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
-        lookahead: Terminal::EOF,
+        lookahead: None,
     };
     let initial_closure = BTreeSet::from([initial_item]);
     let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -375,7 +380,7 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
-        let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+        let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
 
         for item in &row.reduces {
             reduces
@@ -431,9 +436,15 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     stage_4_table
 }
 
-fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-    // todo: remove this
-    stage_4_table
+fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+    // Stage 5 turns
+    //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+    // into
+    //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+    // ie it removes the None entries, which represent EOF.
+    // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+    // merging with any existing production ID sets in the reduces map.
+    todo!()
 }
 
 fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {

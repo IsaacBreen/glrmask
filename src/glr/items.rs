@@ -10,7 +10,7 @@ use std::fmt::{Display, Formatter};
 pub struct Item {
     pub production: Production,
     pub dot_position: usize,
-    pub lookahead: Terminal,
+    pub lookahead: Option<Terminal>,
 }
 
 // Manual impl for Item (could be derived)
