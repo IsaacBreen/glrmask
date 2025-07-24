@@ -262,8 +262,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_state: ParseState::new(),
-            action_not_found_states: ParseState::new(),
-            cycled_states: ParseState::new(),
+            accepted: false,
             phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
         }
     }
@@ -273,8 +272,7 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
-            action_not_found_states: ParseState::new(),
-            cycled_states: ParseState::new(),
+            accepted: false,
             phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
         };
         parser_state.do_phase3();
@@ -284,8 +282,7 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
-            action_not_found_states: ParseState::new(),
-            cycled_states: ParseState::new(),
+            accepted: false,
             phase: ParserPhase::ReadyForPhase3,
         };
         parser_state.do_phase3();
@@ -593,8 +590,7 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
-    pub action_not_found_states: ParseState,
-    pub cycled_states: ParseState,
+    accepted: bool,                // <-- NEW
     phase: ParserPhase,
 }
 
@@ -611,7 +607,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::reduce_and_goto")]
     fn reduce_and_goto(
-        &self,
+        &mut self,
         peek: &GSSPeek,
         nt: NonTerminalID,
         len: usize,
@@ -633,7 +629,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
                         out.push(new_gss_node);
                     }
-                    Goto::Accept => {}
+                    Goto::Accept => {
+                        // Mark successful acceptance
+                        self.accepted = true;
+                    }
                 }
             }
         }
@@ -654,6 +653,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::do_phase1_and_2")]
     pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+        // Reset acceptance flag for the new token
+        self.accepted = false;
+
         if self.phase == ParserPhase::ReadyForPhase3 {
             self.do_phase3();
         }
@@ -865,12 +867,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
         self.active_state.merge(other.active_state);
-        // self.action_not_found_states.merge(other.action_not_found_states);
-        // self.cycled_states.merge(other.cycled_states);
+        self.accepted |= other.accepted;
     }
 
     pub fn is_ok(&self) -> bool {
-        !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
+        self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+    }
+
+    /// Returns true if the previous step lead to an `accept` action.
+    pub fn has_accepted(&self) -> bool {
+        self.accepted
     }
 
     // #[time_it("GLRParserState::log_gss")]
