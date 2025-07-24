@@ -607,20 +607,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     /// Shared inner loop for phase 1 and phase 2.
     ///
-    /// `push_reduce` - A closure that decides where to push reduce results
+    /// `reduce_queue_opt`
+    ///   • `Some(queue)` – reduces are pushed onto `queue`
+    ///   • `None`        – reduces are pushed back onto `work_queue` (the LR(1) classic behaviour)
     ///
     /// `action_selector` chooses between the phase-1 or phase-2 action map.
-    fn process_action_queue<F, P>(
+    fn process_action_queue<F>(
         &mut self,
         token_id: TerminalID,
         work_queue: &mut VecDeque<ParseState>,
+        mut reduce_queue_opt: Option<&mut VecDeque<ParseState>>,
         shifted_states_todo: &mut VecDeque<ParseState>,
-        mut push_reduce: P,
         action_selector: F,
     ) where
         F: Fn(&Stage7Row)
             -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-        P: FnMut(ParseState),
     {
         while let Some(state) = work_queue.pop_front() {
             for peek in state.stack.peek_iter() {
@@ -640,7 +641,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
-                                push_reduce(new_parse_state);
+                                match reduce_queue_opt {
+                                    Some(ref mut queue) => queue.push_back(new_parse_state),
+                                    None => work_queue.push_back(new_parse_state),
+                                }
                             }
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -654,7 +658,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
-                                        push_reduce(new_parse_state);
+                                        match reduce_queue_opt {
+                                            Some(ref mut queue) => queue.push_back(new_parse_state),
+                                            None => work_queue.push_back(new_parse_state),
+                                        }
                                     }
                                 }
                             }
@@ -672,8 +679,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             self.process_action_queue(
                 token_id,
                 phase1_todo,
+                Some(phase2_todo),
                 shifted_states_todo,
-                |state| phase2_todo.push_back(state),
                 |row| &row.phase1_shifts_and_reduces,
             );
         });
@@ -682,12 +689,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn _do_phase2(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
-            // Reduces are pushed back onto the same queue
+            // Reduces are pushed back onto the same queue (`None`).
             self.process_action_queue(
                 token_id,
                 phase2_todo,
+                None,
                 shifted_states_todo,
-                |state| phase2_todo.push_back(state),
                 |row| &row.phase2_shifts_and_reduces,
             );
         });
