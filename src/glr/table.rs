@@ -316,26 +316,26 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
     let mut i = 0;
-    while let Some(items) = worklist.pop_front() {
+    while let Some(item_set) = worklist.pop_front() {
         i += 1;
         println!("Processing item set {}", i);
-        if transitions.contains_key(&items) {
+        if transitions.contains_key(&item_set) {
             continue;
         }
 
-        let closure = compute_closure(&items, productions);
+        let closure = compute_closure(&item_set, productions);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
-        for (symbol, items) in splits {
-            row.insert(symbol.clone(), items.clone());
+        for (symbol, item_set) in splits {
+            row.insert(symbol.clone(), item_set.clone());
             if symbol.is_some() {
-                let goto_set = compute_goto(&items);
+                let goto_set = compute_goto(&item_set);
                 worklist.push_back(goto_set);
             }
         }
 
-        transitions.insert(items.clone(), row);
+        transitions.insert(item_set.clone(), row);
     }
 
     transitions
@@ -348,16 +348,16 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
         let mut gotos = BTreeMap::new();
         let mut reduces = BTreeSet::new();
 
-        for (symbol_opt, next_item_set) in &transitions {
+        for (symbol_opt, item_set) in &transitions {
             match symbol_opt {
                 Some(Symbol::Terminal(t)) => {
-                    shifts.insert(t.clone(), next_item_set.clone());
+                    shifts.insert(t.clone(), compute_goto(item_set));
                 }
                 Some(Symbol::NonTerminal(nt)) => {
-                    gotos.insert(nt.clone(), next_item_set.clone());
+                    gotos.insert(nt.clone(), compute_goto(item_set));
                 }
                 None => {
-                    for item in next_item_set {
+                    for item in item_set {
                         assert_eq!(item.dot_position, item.production.rhs.len());
                         reduces.insert(item.clone());
                     }
@@ -415,9 +415,9 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     for (item_set, row) in stage_3_table {
         let mut reduces = BTreeMap::new();
 
-        for (terminal, items) in row.reduces {
+        for (terminal, item_set) in row.reduces {
             let mut prod_ids = BTreeSet::new();
-            for item in items {
+            for item in item_set {
                 let prod_id = production_ids.get(&item.production).unwrap();
                 prod_ids.insert(*prod_id);
             }
