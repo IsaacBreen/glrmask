@@ -289,7 +289,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
         };
-        parser_state.do_phase3();
         parser_state
     }
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
@@ -299,7 +298,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForPhase3,
         };
-        parser_state.do_phase3();
         parser_state
     }
 
