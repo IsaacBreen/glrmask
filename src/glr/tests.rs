@@ -9,6 +9,16 @@ use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
 fn create_simple_parser() -> GLRParser {
+    // This grammar is left-recursive but does NOT have length-1 cycles.
+    let productions = vec![
+        prod("S", vec![nt("A"), t("$")]), // Start rule
+        prod("A", vec![nt("A"), t("a")]),
+        prod("A", vec![t("b")]),
+    ];
+
+    generate_glr_parser(&productions, 0, None)
+}
+
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
@@ -77,15 +87,6 @@ fn test_repetition_no_eof() {
     let mut state5 = parser_with_b.init_glr_parser(None);
     state5.parse(&tokens5);
     assert!(!state5.is_ok(), "Parse should fail for 'ab'");
-}
-    // This grammar is left-recursive but does NOT have length-1 cycles.
-    let productions = vec![
-        prod("S", vec![nt("A"), t("$")]), // Start rule
-        prod("A", vec![nt("A"), t("a")]),
-        prod("A", vec![t("b")]),
-    ];
-
-    generate_glr_parser(&productions, 0, None)
 }
 
 fn create_expression_parser() -> GLRParser {
