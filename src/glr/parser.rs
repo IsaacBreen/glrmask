@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7Row, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
@@ -616,7 +616,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &mut self,
         token_id: TerminalID,
         work_queue: &mut VecDeque<ParseState>,
-        reduce_queue_opt: Option<&mut VecDeque<ParseState>>,
+        mut reduce_queue_opt: Option<&mut VecDeque<ParseState>>,
         shifted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
     ) where
@@ -642,7 +642,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
                                 match reduce_queue_opt {
-                                    Some(queue) => queue.push_back(new_parse_state),
+                                    Some(ref mut queue) => queue.push_back(new_parse_state),
                                     None => work_queue.push_back(new_parse_state),
                                 }
                             }
@@ -659,7 +659,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
                                         match reduce_queue_opt {
-                                            Some(queue) => queue.push_back(new_parse_state),
+                                            Some(ref mut queue) => queue.push_back(new_parse_state),
                                             None => work_queue.push_back(new_parse_state),
                                         }
                                     }
