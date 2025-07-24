@@ -8,14 +8,14 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |+
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 
       /// Computes the set of non-terminals that can derive the empty string (epsilon).
       pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -253,6 +253,22 @@ local_system:
           }
 
           // --- Validation Successful ---
+          Ok(())
+      }
+
+      pub fn validate_start_production_ends_with_terminal(
+          productions: &[Production],
+          start_production_id: usize,
+      ) -> Result<(), String> {
+          if start_production_id >= productions.len() {
+              return Err(format!("Invalid start production ID: {}. Must be less than the number of productions: {}", start_production_id, productions.len()));
+          }
+
+          let start_prod = &productions[start_production_id];
+          if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
+              return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+          }
+
           Ok(())
       }
 
@@ -555,7 +571,7 @@ local_system:
       }
 
       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-          let first_sets = compute_first_sets(productions);
+          let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let nonterminal_follow_sets = compute_follow_sets(productions);
 
@@ -785,6 +801,7 @@ local_system:
       pub enum Terminal {
           Regex(String),
           Literal(Vec<u8>),
+          EOF,
       }
 
       impl JSONConvertible for Terminal {
@@ -800,6 +817,12 @@ local_system:
                       let mut obj = StdMap::new();
                       obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                       obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                      obj
+                  }),
+                  Terminal::EOF => JSONNode::Object({
+                      let mut obj = StdMap::new();
+                      obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
+                      obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                       obj
                   }),
               }
@@ -826,6 +849,7 @@ local_system:
               match self {
                   Terminal::Regex(name) => write!(f, "{}", name),
                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+                  Terminal::EOF => write!(f, "EOF"),
               }
           }
       }
@@ -966,7 +990,7 @@ local_system:
           epsilon_nonterminals
       }
 
-      pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+      pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
           let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -1014,7 +1038,7 @@ local_system:
       }
 
       pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let first_sets = compute_first_sets(productions);
+          let first_sets = compute_first_sets_for_nonterminals(productions);
           let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -1076,7 +1100,7 @@ local_system:
           follow_sets
       }
     src/glr/items.rs: |+
-      use crate::glr::grammar::{Production, Symbol};
+      use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -1088,6 +1112,7 @@ local_system:
       pub struct Item {
           pub production: Production,
           pub dot_position: usize,
+          pub lookahead: Terminal,
       }
 
       // Manual impl for Item (could be derived)
@@ -1096,6 +1121,7 @@ local_system:
               let mut obj = StdMap::new();
               obj.insert("production".to_string(), self.production.to_json());
               obj.insert("dot_position".to_string(), self.dot_position.to_json());
+              obj.insert("lookahead".to_string(), self.lookahead.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -1105,7 +1131,9 @@ local_system:
                                           .and_then(Production::from_json)?;
                       let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
                                             .and_then(usize::from_json)?;
-                      Ok(Item { production, dot_position })
+                      let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
+                                            .and_then(Terminal::from_json)?;
+                      Ok(Item { production, dot_position, lookahead })
                   }
                   _ => Err("Expected JSONNode::Object for Item".to_string()),
               }
@@ -1115,7 +1143,7 @@ local_system:
       impl Display for Item {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
               // Display the production and dot position
-              write!(f, "{} ->", self.production.lhs.0)?;
+              write!(f, "[{} ->", self.production.lhs.0)?;
               for (i, symbol) in self.production.rhs.iter().enumerate() {
                   if i == self.dot_position {
                       write!(f, " •")?;
@@ -1128,24 +1156,87 @@ local_system:
               if self.dot_position == self.production.rhs.len() {
                   write!(f, " •")?;
               }
+              write!(f, ", ")?;
+              // Display the lookahead
+              write!(f, "lookahead: {}", self.lookahead)?;
+              write!(f, "]")?;
               Ok(())
+          }
+      }
+
+      impl Item {
+          pub fn dot_at_end(&self) -> bool {
+              self.dot_position == self.production.rhs.len()
+          }
+
+          pub fn next(&self) -> Self {
+              // Create a new item with the dot moved one position to the right
+              if self.dot_position < self.production.rhs.len() {
+                  Item {
+                      production: self.production.clone(),
+                      dot_position: self.dot_position + 1,
+                      lookahead: self.lookahead.clone(),
+                  }
+              } else {
+                  // If the dot is at the end, return self
+                  self.clone()
+              }
+          }
+      }
+
+      pub fn compute_first_set_for_item(
+          item: &Item,
+          productions: &[Production],
+          first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
+      ) -> BTreeSet<Terminal> {
+          match item.production.rhs.get(item.dot_position) {
+              Some(Symbol::Terminal(t)) => {
+                  // If the next symbol is a terminal, the first is just that terminal
+                  BTreeSet::from([t.clone()])
+              }
+              Some(Symbol::NonTerminal(nt)) => {
+                  let first_set = first_sets.get(nt).cloned().unwrap_or_default();
+                  if nullable_nonterminals.contains(nt) {
+                      // If the non-terminal is nullable, we also need to include the firsts for the next item
+                      let next_firsts = compute_first_set_for_item(
+                          &item.next(),
+                          productions,
+                          first_sets,
+                          nullable_nonterminals,
+                      );
+                      first_set.union(&next_firsts).cloned().collect()
+                  } else {
+                      first_set
+                  }
+              }
+              None => {
+                  // The child production is of length 0. The first is the lookahead.
+                  BTreeSet::from([item.lookahead.clone()])
+              }
           }
       }
 
       pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
+          let first_sets = compute_first_sets_for_nonterminals(productions);
+          let nullable_nonterminals = compute_epsilon_nonterminals(productions);
           let mut closure = items.clone();
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
               if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
                   for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                      let new_item = Item {
-                          production: prod.clone(),
-                          dot_position: 0,
-                      };
-                      if closure.insert(new_item.clone()) {
-                          worklist.push_back(new_item);
+                      let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
+                      for lookahead in lookaheads {
+                          let new_item = Item {
+                              production: prod.clone(),
+                              dot_position: 0,
+                              lookahead,
+                          };
+                          if closure.insert(new_item.clone()) {
+                              worklist.push_back(new_item);
+                          }
                       }
                   }
               }
@@ -1162,6 +1253,7 @@ local_system:
                   result.insert(Item {
                       production: item.production.clone(),
                       dot_position: item.dot_position + 1,
+                      lookahead: item.lookahead.clone(),
                   });
               }
           }
@@ -1508,22 +1600,13 @@ local_system:
                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
 
                   // Get and print items
-                  if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-                      let full_closure = compute_closure(core_items, &self.productions);
-                      let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-
-                      writeln!(&mut result, "  Core Items:").unwrap();
-                      if core_items.is_empty() {
+                  if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                      // For LR(1), the item set in the map is the full state (closure).
+                      writeln!(&mut result, "  Items:").unwrap();
+                      if items.is_empty() {
                           writeln!(&mut result, "    (None)").unwrap();
                       } else {
-                          for item in core_items {
-                              writeln!(&mut result, "    - {}", item).unwrap();
-                          }
-                      }
-
-                      if !closure_only_items.is_empty() {
-                          writeln!(&mut result, "  Closure-only Items:").unwrap();
-                          for item in &closure_only_items {
+                          for item in items {
                               writeln!(&mut result, "    - {}", item).unwrap();
                           }
                       }
@@ -1678,45 +1761,10 @@ local_system:
               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
                   writeln!(f, "  State {}:", state_id.0)?;
 
-                  let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-                  let full_closure = compute_closure(core_item_set, &self.productions);
-
-                  writeln!(f, "    Core Items:")?;
-                  for item in core_item_set {
-                      write!(f, "      - {} ->", item.production.lhs.0)?;
-                      for (i, symbol) in item.production.rhs.iter().enumerate() {
-                          if i == item.dot_position {
-                              write!(f, " •")?;
-                          }
-                          match symbol {
-                              Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                              Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                          }?;
-                      }
-                      if item.dot_position == item.production.rhs.len() {
-                          write!(f, " •")?;
-                      }
-                      writeln!(f)?;
-                  }
-
-                  let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-                  if !closure_only_items.is_empty() {
-                      writeln!(f, "    Closure Items:")?;
-                      for item in &closure_only_items {
-                          write!(f, "      - {} ->", item.production.lhs.0)?;
-                          for (i, symbol) in item.production.rhs.iter().enumerate() {
-                              if i == item.dot_position {
-                                  write!(f, " •")?;
-                              }
-                              match symbol {
-                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                              }?;
-                          }
-                          if item.dot_position == item.production.rhs.len() {
-                              write!(f, " •")?;
-                          }
-                          writeln!(f)?;
+                  if let Some(items) = item_set_map.get_by_right(&state_id) {
+                      writeln!(f, "    Items:")?;
+                      for item in items {
+                          writeln!(f, "      - {}", item)?;
                       }
                   }
 
@@ -2044,6 +2092,27 @@ local_system:
               self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
           }
 
+          pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+              return None;
+              self.log_gss("has_action_for-start", token_id);
+              let mut llm_tokens = LLMTokenBV::zeros();
+              for peek in self.active_state.stack.peek_iter() {
+                  let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                  let shifts_and_reduces = match self.phase {
+                      ParserPhase::ReadyForPhase1 => &row.phase1_shifts_and_reduces,
+                      ParserPhase::ReadyForPhase3 => &row.phase2_shifts_and_reduces,
+                  };
+                  if let Some(action) = shifts_and_reduces.get(&token_id) {
+                      crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
+                                    self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                                    peek.edge_value().state_id.0, action);
+                      // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                      llm_tokens = &llm_tokens | &peek.resolved_acc().union_llm_tokens();
+                  }
+              }
+              Some(llm_tokens)
+          }
+
           #[time_it("GLRParserState::step")]
           pub fn step(&mut self, token_id: TerminalID) {
               self.do_phase1_and_2(token_id);
@@ -2089,7 +2158,7 @@ local_system:
           // #[time_it("GLRParserState::log_gss")]
           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-              return;
+              // return;
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 10000;
 
@@ -2312,13 +2381,13 @@ local_system:
       }
     src/glr/table.rs: |
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, ActionFn};
       use bimap::BiBTreeMap;
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -2607,6 +2676,7 @@ local_system:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
+              lookahead: Terminal::EOF,
           };
           let initial_closure = BTreeSet::from([initial_item]);
           let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -2684,27 +2754,16 @@ local_system:
       }
 
       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let follow_sets = compute_follow_sets(productions);
-          crate::debug!(3, "Follow sets:");
-          for (nt, follow_set) in &follow_sets {
-              crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-          }
-
           let mut stage_3_table = BTreeMap::new();
 
           for (item_set, row) in stage_2_table {
               let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
               for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-
-                  for terminal in lookaheads {
-                      reduces
-                          .entry(terminal.clone())
-                          .or_default()
-                          .insert(item.clone());
-                  }
+                  reduces
+                      .entry(item.lookahead.clone())
+                      .or_default()
+                      .insert(item.clone());
               }
 
               stage_3_table.insert(
@@ -2812,6 +2871,9 @@ local_system:
               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
+                  if *terminal == Terminal::EOF {
+                      continue; // Skip EOF terminal
+                  }
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
                   let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
@@ -2941,6 +3003,7 @@ local_system:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
+              lookahead: Terminal::EOF,
           };
           let initial_item_set = BTreeSet::from([initial_item]);
           let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
@@ -2975,8 +3038,10 @@ local_system:
               }
           }
 
-          // crate::debug!(2, "Validating");
-          // validate(&productions).expect("Validation error");
+          crate::debug!(2, "Validating");
+          validate(&productions).expect("Validation error");
+          validate_start_production_ends_with_terminal(&productions, start_production_id)
+              .expect("Start production does not end with a terminal");
 
           crate::debug!(2, "Stage 1");
           let stage_1_table = stage_1(&productions, start_production_id);
@@ -4036,19 +4101,14 @@ local_system:
 
           // Assertions for State 0 (start state)
           assert!(explanation.contains(&format!("State {}:", start_state.0)));
-          assert!(explanation.contains("Core Items:"));
-          assert!(explanation.contains("S -> • A '$'"));
-          assert!(explanation.contains("Closure-only Items:"));
-          assert!(explanation.contains("A -> • A 'a'"));
-          assert!(explanation.contains("A -> • 'b'"));
+          assert!(explanation.contains("Items:"));
+          assert!(explanation.contains("[S -> • A '$', $]"));
           assert!(explanation.contains("On 'b': Shift to State"));
 
           // Assertions for State after shifting 'b'
           assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-          assert!(explanation.contains("Core Items:"));
-          assert!(explanation.contains("A -> 'b' •"));
-          assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-          assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+          assert!(explanation.contains("[A -> 'b' •, $]"));
+          assert!(explanation.contains("On '$': Reduce by rule"));
       }
 
       #[test]
@@ -4089,6 +4149,51 @@ local_system:
           assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
       }
       // --- Notes on Limitations Not Easily Tested Here ---
+
+      #[test]
+      fn test_lr1_not_lalr1_grammar() {
+          // This grammar is a classic example of a grammar that is LR(1) but not LALR(1).
+          // An LALR(1) parser would merge states and create a reduce/reduce conflict.
+          // A canonical LR(1) parser should handle it without conflicts.
+          // S' -> S $
+          // S  -> a E c | a F d | b F c | b E d
+          // E  -> e
+          // F  -> e
+          let productions = vec![
+              prod("S'", vec![nt("S"), t("$")]), // Start rule
+              prod("S", vec![t("a"), nt("E"), t("c")]),
+              prod("S", vec![t("a"), nt("F"), t("d")]),
+              prod("S", vec![t("b"), nt("F"), t("c")]),
+              prod("S", vec![t("b"), nt("E"), t("d")]),
+              prod("E", vec![t("e")]),
+              prod("F", vec![t("e")]),
+          ];
+
+          // Validation should pass
+          assert!(analyze::validate(&productions).is_ok());
+
+          // Parser generation should succeed without conflicts for an LR(1) generator
+          let parser = generate_glr_parser(&productions, 0, None);
+          println!("Parser: {}", parser); // Useful for debugging the generated table
+
+          // Check stats to be sure there are no conflicts
+          let stats = stats::get_stats(&parser);
+          assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+          assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+
+          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+
+          let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+
+          for (input, expected_match) in test_cases {
+              let tokens = tokenize(&parser, input);
+              let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+              state.parse(&tokens);
+              state.step(eof);
+              assert_eq!(state.is_ok(), expected_match, "Parse check failed for LR(1)-specific input: '{}'", input);
+          }
+      }
+
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
       //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
@@ -4105,7 +4210,7 @@ local_system:
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 
       /// Computes the set of non-terminals that can derive the empty string (epsilon).
       pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -4343,6 +4448,22 @@ local_system:
           }
 
           // --- Validation Successful ---
+          Ok(())
+      }
+
+      pub fn validate_start_production_ends_with_terminal(
+          productions: &[Production],
+          start_production_id: usize,
+      ) -> Result<(), String> {
+          if start_production_id >= productions.len() {
+              return Err(format!("Invalid start production ID: {}. Must be less than the number of productions: {}", start_production_id, productions.len()));
+          }
+
+          let start_prod = &productions[start_production_id];
+          if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
+              return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+          }
+
           Ok(())
       }
 
@@ -4645,7 +4766,7 @@ local_system:
       }
 
       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-          let first_sets = compute_first_sets(productions);
+          let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let nonterminal_follow_sets = compute_follow_sets(productions);
 
@@ -4875,6 +4996,7 @@ local_system:
       pub enum Terminal {
           Regex(String),
           Literal(Vec<u8>),
+          EOF,
       }
 
       impl JSONConvertible for Terminal {
@@ -4890,6 +5012,12 @@ local_system:
                       let mut obj = StdMap::new();
                       obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                       obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                      obj
+                  }),
+                  Terminal::EOF => JSONNode::Object({
+                      let mut obj = StdMap::new();
+                      obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
+                      obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                       obj
                   }),
               }
@@ -4916,6 +5044,7 @@ local_system:
               match self {
                   Terminal::Regex(name) => write!(f, "{}", name),
                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+                  Terminal::EOF => write!(f, "EOF"),
               }
           }
       }
@@ -5056,7 +5185,7 @@ local_system:
           epsilon_nonterminals
       }
 
-      pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+      pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
           let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -5104,7 +5233,7 @@ local_system:
       }
 
       pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let first_sets = compute_first_sets(productions);
+          let first_sets = compute_first_sets_for_nonterminals(productions);
           let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -5166,7 +5295,7 @@ local_system:
           follow_sets
       }
     src/glr/items.rs: |+
-      use crate::glr::grammar::{Production, Symbol};
+      use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -5178,6 +5307,7 @@ local_system:
       pub struct Item {
           pub production: Production,
           pub dot_position: usize,
+          pub lookahead: Terminal,
       }
 
       // Manual impl for Item (could be derived)
@@ -5186,6 +5316,7 @@ local_system:
               let mut obj = StdMap::new();
               obj.insert("production".to_string(), self.production.to_json());
               obj.insert("dot_position".to_string(), self.dot_position.to_json());
+              obj.insert("lookahead".to_string(), self.lookahead.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -5195,7 +5326,9 @@ local_system:
                                           .and_then(Production::from_json)?;
                       let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
                                             .and_then(usize::from_json)?;
-                      Ok(Item { production, dot_position })
+                      let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
+                                            .and_then(Terminal::from_json)?;
+                      Ok(Item { production, dot_position, lookahead })
                   }
                   _ => Err("Expected JSONNode::Object for Item".to_string()),
               }
@@ -5205,7 +5338,7 @@ local_system:
       impl Display for Item {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
               // Display the production and dot position
-              write!(f, "{} ->", self.production.lhs.0)?;
+              write!(f, "[{} ->", self.production.lhs.0)?;
               for (i, symbol) in self.production.rhs.iter().enumerate() {
                   if i == self.dot_position {
                       write!(f, " •")?;
@@ -5218,24 +5351,87 @@ local_system:
               if self.dot_position == self.production.rhs.len() {
                   write!(f, " •")?;
               }
+              write!(f, ", ")?;
+              // Display the lookahead
+              write!(f, "lookahead: {}", self.lookahead)?;
+              write!(f, "]")?;
               Ok(())
+          }
+      }
+
+      impl Item {
+          pub fn dot_at_end(&self) -> bool {
+              self.dot_position == self.production.rhs.len()
+          }
+
+          pub fn next(&self) -> Self {
+              // Create a new item with the dot moved one position to the right
+              if self.dot_position < self.production.rhs.len() {
+                  Item {
+                      production: self.production.clone(),
+                      dot_position: self.dot_position + 1,
+                      lookahead: self.lookahead.clone(),
+                  }
+              } else {
+                  // If the dot is at the end, return self
+                  self.clone()
+              }
+          }
+      }
+
+      pub fn compute_first_set_for_item(
+          item: &Item,
+          productions: &[Production],
+          first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
+      ) -> BTreeSet<Terminal> {
+          match item.production.rhs.get(item.dot_position) {
+              Some(Symbol::Terminal(t)) => {
+                  // If the next symbol is a terminal, the first is just that terminal
+                  BTreeSet::from([t.clone()])
+              }
+              Some(Symbol::NonTerminal(nt)) => {
+                  let first_set = first_sets.get(nt).cloned().unwrap_or_default();
+                  if nullable_nonterminals.contains(nt) {
+                      // If the non-terminal is nullable, we also need to include the firsts for the next item
+                      let next_firsts = compute_first_set_for_item(
+                          &item.next(),
+                          productions,
+                          first_sets,
+                          nullable_nonterminals,
+                      );
+                      first_set.union(&next_firsts).cloned().collect()
+                  } else {
+                      first_set
+                  }
+              }
+              None => {
+                  // The child production is of length 0. The first is the lookahead.
+                  BTreeSet::from([item.lookahead.clone()])
+              }
           }
       }
 
       pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
+          let first_sets = compute_first_sets_for_nonterminals(productions);
+          let nullable_nonterminals = compute_epsilon_nonterminals(productions);
           let mut closure = items.clone();
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
               if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
                   for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                      let new_item = Item {
-                          production: prod.clone(),
-                          dot_position: 0,
-                      };
-                      if closure.insert(new_item.clone()) {
-                          worklist.push_back(new_item);
+                      let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
+                      for lookahead in lookaheads {
+                          let new_item = Item {
+                              production: prod.clone(),
+                              dot_position: 0,
+                              lookahead,
+                          };
+                          if closure.insert(new_item.clone()) {
+                              worklist.push_back(new_item);
+                          }
                       }
                   }
               }
@@ -5252,6 +5448,7 @@ local_system:
                   result.insert(Item {
                       production: item.production.clone(),
                       dot_position: item.dot_position + 1,
+                      lookahead: item.lookahead.clone(),
                   });
               }
           }
@@ -5598,22 +5795,13 @@ local_system:
                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
 
                   // Get and print items
-                  if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-                      let full_closure = compute_closure(core_items, &self.productions);
-                      let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-
-                      writeln!(&mut result, "  Core Items:").unwrap();
-                      if core_items.is_empty() {
+                  if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                      // For LR(1), the item set in the map is the full state (closure).
+                      writeln!(&mut result, "  Items:").unwrap();
+                      if items.is_empty() {
                           writeln!(&mut result, "    (None)").unwrap();
                       } else {
-                          for item in core_items {
-                              writeln!(&mut result, "    - {}", item).unwrap();
-                          }
-                      }
-
-                      if !closure_only_items.is_empty() {
-                          writeln!(&mut result, "  Closure-only Items:").unwrap();
-                          for item in &closure_only_items {
+                          for item in items {
                               writeln!(&mut result, "    - {}", item).unwrap();
                           }
                       }
@@ -5768,45 +5956,10 @@ local_system:
               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
                   writeln!(f, "  State {}:", state_id.0)?;
 
-                  let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-                  let full_closure = compute_closure(core_item_set, &self.productions);
-
-                  writeln!(f, "    Core Items:")?;
-                  for item in core_item_set {
-                      write!(f, "      - {} ->", item.production.lhs.0)?;
-                      for (i, symbol) in item.production.rhs.iter().enumerate() {
-                          if i == item.dot_position {
-                              write!(f, " •")?;
-                          }
-                          match symbol {
-                              Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                              Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                          }?;
-                      }
-                      if item.dot_position == item.production.rhs.len() {
-                          write!(f, " •")?;
-                      }
-                      writeln!(f)?;
-                  }
-
-                  let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-                  if !closure_only_items.is_empty() {
-                      writeln!(f, "    Closure Items:")?;
-                      for item in &closure_only_items {
-                          write!(f, "      - {} ->", item.production.lhs.0)?;
-                          for (i, symbol) in item.production.rhs.iter().enumerate() {
-                              if i == item.dot_position {
-                                  write!(f, " •")?;
-                              }
-                              match symbol {
-                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                              }?;
-                          }
-                          if item.dot_position == item.production.rhs.len() {
-                              write!(f, " •")?;
-                          }
-                          writeln!(f)?;
+                  if let Some(items) = item_set_map.get_by_right(&state_id) {
+                      writeln!(f, "    Items:")?;
+                      for item in items {
+                          writeln!(f, "      - {}", item)?;
                       }
                   }
 
@@ -6134,6 +6287,27 @@ local_system:
               self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
           }
 
+          pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+              return None;
+              self.log_gss("has_action_for-start", token_id);
+              let mut llm_tokens = LLMTokenBV::zeros();
+              for peek in self.active_state.stack.peek_iter() {
+                  let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                  let shifts_and_reduces = match self.phase {
+                      ParserPhase::ReadyForPhase1 => &row.phase1_shifts_and_reduces,
+                      ParserPhase::ReadyForPhase3 => &row.phase2_shifts_and_reduces,
+                  };
+                  if let Some(action) = shifts_and_reduces.get(&token_id) {
+                      crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
+                                    self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                                    peek.edge_value().state_id.0, action);
+                      // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                      llm_tokens = &llm_tokens | &peek.resolved_acc().union_llm_tokens();
+                  }
+              }
+              Some(llm_tokens)
+          }
+
           #[time_it("GLRParserState::step")]
           pub fn step(&mut self, token_id: TerminalID) {
               self.do_phase1_and_2(token_id);
@@ -6179,7 +6353,7 @@ local_system:
           // #[time_it("GLRParserState::log_gss")]
           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-              return;
+              // return;
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 10000;
 
@@ -6402,13 +6576,13 @@ local_system:
       }
     src/glr/table.rs: |
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, ActionFn};
       use bimap::BiBTreeMap;
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -6697,6 +6871,7 @@ local_system:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
+              lookahead: Terminal::EOF,
           };
           let initial_closure = BTreeSet::from([initial_item]);
           let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -6774,27 +6949,16 @@ local_system:
       }
 
       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let follow_sets = compute_follow_sets(productions);
-          crate::debug!(3, "Follow sets:");
-          for (nt, follow_set) in &follow_sets {
-              crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-          }
-
           let mut stage_3_table = BTreeMap::new();
 
           for (item_set, row) in stage_2_table {
               let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
               for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-
-                  for terminal in lookaheads {
-                      reduces
-                          .entry(terminal.clone())
-                          .or_default()
-                          .insert(item.clone());
-                  }
+                  reduces
+                      .entry(item.lookahead.clone())
+                      .or_default()
+                      .insert(item.clone());
               }
 
               stage_3_table.insert(
@@ -6902,6 +7066,9 @@ local_system:
               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
+                  if *terminal == Terminal::EOF {
+                      continue; // Skip EOF terminal
+                  }
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
                   let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
@@ -7031,6 +7198,7 @@ local_system:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
+              lookahead: Terminal::EOF,
           };
           let initial_item_set = BTreeSet::from([initial_item]);
           let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
@@ -7065,8 +7233,10 @@ local_system:
               }
           }
 
-          // crate::debug!(2, "Validating");
-          // validate(&productions).expect("Validation error");
+          crate::debug!(2, "Validating");
+          validate(&productions).expect("Validation error");
+          validate_start_production_ends_with_terminal(&productions, start_production_id)
+              .expect("Start production does not end with a terminal");
 
           crate::debug!(2, "Stage 1");
           let stage_1_table = stage_1(&productions, start_production_id);
@@ -8126,19 +8296,14 @@ local_system:
 
           // Assertions for State 0 (start state)
           assert!(explanation.contains(&format!("State {}:", start_state.0)));
-          assert!(explanation.contains("Core Items:"));
-          assert!(explanation.contains("S -> • A '$'"));
-          assert!(explanation.contains("Closure-only Items:"));
-          assert!(explanation.contains("A -> • A 'a'"));
-          assert!(explanation.contains("A -> • 'b'"));
+          assert!(explanation.contains("Items:"));
+          assert!(explanation.contains("[S -> • A '$', $]"));
           assert!(explanation.contains("On 'b': Shift to State"));
 
           // Assertions for State after shifting 'b'
           assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-          assert!(explanation.contains("Core Items:"));
-          assert!(explanation.contains("A -> 'b' •"));
-          assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-          assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+          assert!(explanation.contains("[A -> 'b' •, $]"));
+          assert!(explanation.contains("On '$': Reduce by rule"));
       }
 
       #[test]
@@ -8179,6 +8344,51 @@ local_system:
           assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
       }
       // --- Notes on Limitations Not Easily Tested Here ---
+
+      #[test]
+      fn test_lr1_not_lalr1_grammar() {
+          // This grammar is a classic example of a grammar that is LR(1) but not LALR(1).
+          // An LALR(1) parser would merge states and create a reduce/reduce conflict.
+          // A canonical LR(1) parser should handle it without conflicts.
+          // S' -> S $
+          // S  -> a E c | a F d | b F c | b E d
+          // E  -> e
+          // F  -> e
+          let productions = vec![
+              prod("S'", vec![nt("S"), t("$")]), // Start rule
+              prod("S", vec![t("a"), nt("E"), t("c")]),
+              prod("S", vec![t("a"), nt("F"), t("d")]),
+              prod("S", vec![t("b"), nt("F"), t("c")]),
+              prod("S", vec![t("b"), nt("E"), t("d")]),
+              prod("E", vec![t("e")]),
+              prod("F", vec![t("e")]),
+          ];
+
+          // Validation should pass
+          assert!(analyze::validate(&productions).is_ok());
+
+          // Parser generation should succeed without conflicts for an LR(1) generator
+          let parser = generate_glr_parser(&productions, 0, None);
+          println!("Parser: {}", parser); // Useful for debugging the generated table
+
+          // Check stats to be sure there are no conflicts
+          let stats = stats::get_stats(&parser);
+          assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+          assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+
+          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+
+          let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+
+          for (input, expected_match) in test_cases {
+              let tokens = tokenize(&parser, input);
+              let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+              state.parse(&tokens);
+              state.step(eof);
+              assert_eq!(state.is_ok(), expected_match, "Parse check failed for LR(1)-specific input: '{}'", input);
+          }
+      }
+
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
       //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
@@ -8190,7 +8400,7 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -8204,7 +8414,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - cp
+    - gp
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -8218,7 +8428,7 @@ messages:
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 
       /// Computes the set of non-terminals that can derive the empty string (epsilon).
       pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -8456,6 +8666,22 @@ messages:
           }
 
           // --- Validation Successful ---
+          Ok(())
+      }
+
+      pub fn validate_start_production_ends_with_terminal(
+          productions: &[Production],
+          start_production_id: usize,
+      ) -> Result<(), String> {
+          if start_production_id >= productions.len() {
+              return Err(format!("Invalid start production ID: {}. Must be less than the number of productions: {}", start_production_id, productions.len()));
+          }
+
+          let start_prod = &productions[start_production_id];
+          if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
+              return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+          }
+
           Ok(())
       }
 
@@ -8758,7 +8984,7 @@ messages:
       }
 
       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-          let first_sets = compute_first_sets(productions);
+          let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let nonterminal_follow_sets = compute_follow_sets(productions);
 
@@ -8993,6 +9219,7 @@ messages:
       pub enum Terminal {
           Regex(String),
           Literal(Vec<u8>),
+          EOF,
       }
 
       impl JSONConvertible for Terminal {
@@ -9008,6 +9235,12 @@ messages:
                       let mut obj = StdMap::new();
                       obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                       obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                      obj
+                  }),
+                  Terminal::EOF => JSONNode::Object({
+                      let mut obj = StdMap::new();
+                      obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
+                      obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                       obj
                   }),
               }
@@ -9034,6 +9267,7 @@ messages:
               match self {
                   Terminal::Regex(name) => write!(f, "{}", name),
                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+                  Terminal::EOF => write!(f, "EOF"),
               }
           }
       }
@@ -9174,7 +9408,7 @@ messages:
           epsilon_nonterminals
       }
 
-      pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+      pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
           let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -9222,7 +9456,7 @@ messages:
       }
 
       pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let first_sets = compute_first_sets(productions);
+          let first_sets = compute_first_sets_for_nonterminals(productions);
           let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -9289,7 +9523,7 @@ messages:
       filename: src/glr/grammar.rs
   - user: |-
       ```rust 'src/glr/items.rs'
-      use crate::glr::grammar::{Production, Symbol};
+      use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -9301,6 +9535,7 @@ messages:
       pub struct Item {
           pub production: Production,
           pub dot_position: usize,
+          pub lookahead: Terminal,
       }
 
       // Manual impl for Item (could be derived)
@@ -9309,6 +9544,7 @@ messages:
               let mut obj = StdMap::new();
               obj.insert("production".to_string(), self.production.to_json());
               obj.insert("dot_position".to_string(), self.dot_position.to_json());
+              obj.insert("lookahead".to_string(), self.lookahead.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -9318,7 +9554,9 @@ messages:
                                           .and_then(Production::from_json)?;
                       let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
                                             .and_then(usize::from_json)?;
-                      Ok(Item { production, dot_position })
+                      let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
+                                            .and_then(Terminal::from_json)?;
+                      Ok(Item { production, dot_position, lookahead })
                   }
                   _ => Err("Expected JSONNode::Object for Item".to_string()),
               }
@@ -9328,7 +9566,7 @@ messages:
       impl Display for Item {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
               // Display the production and dot position
-              write!(f, "{} ->", self.production.lhs.0)?;
+              write!(f, "[{} ->", self.production.lhs.0)?;
               for (i, symbol) in self.production.rhs.iter().enumerate() {
                   if i == self.dot_position {
                       write!(f, " •")?;
@@ -9341,24 +9579,87 @@ messages:
               if self.dot_position == self.production.rhs.len() {
                   write!(f, " •")?;
               }
+              write!(f, ", ")?;
+              // Display the lookahead
+              write!(f, "lookahead: {}", self.lookahead)?;
+              write!(f, "]")?;
               Ok(())
+          }
+      }
+
+      impl Item {
+          pub fn dot_at_end(&self) -> bool {
+              self.dot_position == self.production.rhs.len()
+          }
+
+          pub fn next(&self) -> Self {
+              // Create a new item with the dot moved one position to the right
+              if self.dot_position < self.production.rhs.len() {
+                  Item {
+                      production: self.production.clone(),
+                      dot_position: self.dot_position + 1,
+                      lookahead: self.lookahead.clone(),
+                  }
+              } else {
+                  // If the dot is at the end, return self
+                  self.clone()
+              }
+          }
+      }
+
+      pub fn compute_first_set_for_item(
+          item: &Item,
+          productions: &[Production],
+          first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
+      ) -> BTreeSet<Terminal> {
+          match item.production.rhs.get(item.dot_position) {
+              Some(Symbol::Terminal(t)) => {
+                  // If the next symbol is a terminal, the first is just that terminal
+                  BTreeSet::from([t.clone()])
+              }
+              Some(Symbol::NonTerminal(nt)) => {
+                  let first_set = first_sets.get(nt).cloned().unwrap_or_default();
+                  if nullable_nonterminals.contains(nt) {
+                      // If the non-terminal is nullable, we also need to include the firsts for the next item
+                      let next_firsts = compute_first_set_for_item(
+                          &item.next(),
+                          productions,
+                          first_sets,
+                          nullable_nonterminals,
+                      );
+                      first_set.union(&next_firsts).cloned().collect()
+                  } else {
+                      first_set
+                  }
+              }
+              None => {
+                  // The child production is of length 0. The first is the lookahead.
+                  BTreeSet::from([item.lookahead.clone()])
+              }
           }
       }
 
       pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
+          let first_sets = compute_first_sets_for_nonterminals(productions);
+          let nullable_nonterminals = compute_epsilon_nonterminals(productions);
           let mut closure = items.clone();
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
               if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
                   for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                      let new_item = Item {
-                          production: prod.clone(),
-                          dot_position: 0,
-                      };
-                      if closure.insert(new_item.clone()) {
-                          worklist.push_back(new_item);
+                      let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
+                      for lookahead in lookaheads {
+                          let new_item = Item {
+                              production: prod.clone(),
+                              dot_position: 0,
+                              lookahead,
+                          };
+                          if closure.insert(new_item.clone()) {
+                              worklist.push_back(new_item);
+                          }
                       }
                   }
               }
@@ -9375,6 +9676,7 @@ messages:
                   result.insert(Item {
                       production: item.production.clone(),
                       dot_position: item.dot_position + 1,
+                      lookahead: item.lookahead.clone(),
                   });
               }
           }
@@ -9731,22 +10033,13 @@ messages:
                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
 
                   // Get and print items
-                  if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-                      let full_closure = compute_closure(core_items, &self.productions);
-                      let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-
-                      writeln!(&mut result, "  Core Items:").unwrap();
-                      if core_items.is_empty() {
+                  if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                      // For LR(1), the item set in the map is the full state (closure).
+                      writeln!(&mut result, "  Items:").unwrap();
+                      if items.is_empty() {
                           writeln!(&mut result, "    (None)").unwrap();
                       } else {
-                          for item in core_items {
-                              writeln!(&mut result, "    - {}", item).unwrap();
-                          }
-                      }
-
-                      if !closure_only_items.is_empty() {
-                          writeln!(&mut result, "  Closure-only Items:").unwrap();
-                          for item in &closure_only_items {
+                          for item in items {
                               writeln!(&mut result, "    - {}", item).unwrap();
                           }
                       }
@@ -9901,45 +10194,10 @@ messages:
               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
                   writeln!(f, "  State {}:", state_id.0)?;
 
-                  let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-                  let full_closure = compute_closure(core_item_set, &self.productions);
-
-                  writeln!(f, "    Core Items:")?;
-                  for item in core_item_set {
-                      write!(f, "      - {} ->", item.production.lhs.0)?;
-                      for (i, symbol) in item.production.rhs.iter().enumerate() {
-                          if i == item.dot_position {
-                              write!(f, " •")?;
-                          }
-                          match symbol {
-                              Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                              Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                          }?;
-                      }
-                      if item.dot_position == item.production.rhs.len() {
-                          write!(f, " •")?;
-                      }
-                      writeln!(f)?;
-                  }
-
-                  let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-                  if !closure_only_items.is_empty() {
-                      writeln!(f, "    Closure Items:")?;
-                      for item in &closure_only_items {
-                          write!(f, "      - {} ->", item.production.lhs.0)?;
-                          for (i, symbol) in item.production.rhs.iter().enumerate() {
-                              if i == item.dot_position {
-                                  write!(f, " •")?;
-                              }
-                              match symbol {
-                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-                              }?;
-                          }
-                          if item.dot_position == item.production.rhs.len() {
-                              write!(f, " •")?;
-                          }
-                          writeln!(f)?;
+                  if let Some(items) = item_set_map.get_by_right(&state_id) {
+                      writeln!(f, "    Items:")?;
+                      for item in items {
+                          writeln!(f, "      - {}", item)?;
                       }
                   }
 
@@ -10267,6 +10525,27 @@ messages:
               self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
           }
 
+          pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+              return None;
+              self.log_gss("has_action_for-start", token_id);
+              let mut llm_tokens = LLMTokenBV::zeros();
+              for peek in self.active_state.stack.peek_iter() {
+                  let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                  let shifts_and_reduces = match self.phase {
+                      ParserPhase::ReadyForPhase1 => &row.phase1_shifts_and_reduces,
+                      ParserPhase::ReadyForPhase3 => &row.phase2_shifts_and_reduces,
+                  };
+                  if let Some(action) = shifts_and_reduces.get(&token_id) {
+                      crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
+                                    self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                                    peek.edge_value().state_id.0, action);
+                      // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                      llm_tokens = &llm_tokens | &peek.resolved_acc().union_llm_tokens();
+                  }
+              }
+              Some(llm_tokens)
+          }
+
           #[time_it("GLRParserState::step")]
           pub fn step(&mut self, token_id: TerminalID) {
               self.do_phase1_and_2(token_id);
@@ -10312,7 +10591,7 @@ messages:
           // #[time_it("GLRParserState::log_gss")]
           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-              return;
+              // return;
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 10000;
 
@@ -10545,13 +10824,13 @@ messages:
   - user: |-
       ```rust 'src/glr/table.rs'
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, ActionFn};
       use bimap::BiBTreeMap;
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap;
@@ -10840,6 +11119,7 @@ messages:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
+              lookahead: Terminal::EOF,
           };
           let initial_closure = BTreeSet::from([initial_item]);
           let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -10917,27 +11197,16 @@ messages:
       }
 
       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let follow_sets = compute_follow_sets(productions);
-          crate::debug!(3, "Follow sets:");
-          for (nt, follow_set) in &follow_sets {
-              crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-          }
-
           let mut stage_3_table = BTreeMap::new();
 
           for (item_set, row) in stage_2_table {
               let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
               for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-
-                  for terminal in lookaheads {
-                      reduces
-                          .entry(terminal.clone())
-                          .or_default()
-                          .insert(item.clone());
-                  }
+                  reduces
+                      .entry(item.lookahead.clone())
+                      .or_default()
+                      .insert(item.clone());
               }
 
               stage_3_table.insert(
@@ -11045,6 +11314,9 @@ messages:
               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
+                  if *terminal == Terminal::EOF {
+                      continue; // Skip EOF terminal
+                  }
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
                   let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
@@ -11174,6 +11446,7 @@ messages:
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
+              lookahead: Terminal::EOF,
           };
           let initial_item_set = BTreeSet::from([initial_item]);
           let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
@@ -11208,8 +11481,10 @@ messages:
               }
           }
 
-          // crate::debug!(2, "Validating");
-          // validate(&productions).expect("Validation error");
+          crate::debug!(2, "Validating");
+          validate(&productions).expect("Validation error");
+          validate_start_production_ends_with_terminal(&productions, start_production_id)
+              .expect("Start production does not end with a terminal");
 
           crate::debug!(2, "Stage 1");
           let stage_1_table = stage_1(&productions, start_production_id);
@@ -12274,19 +12549,14 @@ messages:
 
           // Assertions for State 0 (start state)
           assert!(explanation.contains(&format!("State {}:", start_state.0)));
-          assert!(explanation.contains("Core Items:"));
-          assert!(explanation.contains("S -> • A '$'"));
-          assert!(explanation.contains("Closure-only Items:"));
-          assert!(explanation.contains("A -> • A 'a'"));
-          assert!(explanation.contains("A -> • 'b'"));
+          assert!(explanation.contains("Items:"));
+          assert!(explanation.contains("[S -> • A '$', $]"));
           assert!(explanation.contains("On 'b': Shift to State"));
 
           // Assertions for State after shifting 'b'
           assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-          assert!(explanation.contains("Core Items:"));
-          assert!(explanation.contains("A -> 'b' •"));
-          assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-          assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+          assert!(explanation.contains("[A -> 'b' •, $]"));
+          assert!(explanation.contains("On '$': Reduce by rule"));
       }
 
       #[test]
@@ -12327,6 +12597,51 @@ messages:
           assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
       }
       // --- Notes on Limitations Not Easily Tested Here ---
+
+      #[test]
+      fn test_lr1_not_lalr1_grammar() {
+          // This grammar is a classic example of a grammar that is LR(1) but not LALR(1).
+          // An LALR(1) parser would merge states and create a reduce/reduce conflict.
+          // A canonical LR(1) parser should handle it without conflicts.
+          // S' -> S $
+          // S  -> a E c | a F d | b F c | b E d
+          // E  -> e
+          // F  -> e
+          let productions = vec![
+              prod("S'", vec![nt("S"), t("$")]), // Start rule
+              prod("S", vec![t("a"), nt("E"), t("c")]),
+              prod("S", vec![t("a"), nt("F"), t("d")]),
+              prod("S", vec![t("b"), nt("F"), t("c")]),
+              prod("S", vec![t("b"), nt("E"), t("d")]),
+              prod("E", vec![t("e")]),
+              prod("F", vec![t("e")]),
+          ];
+
+          // Validation should pass
+          assert!(analyze::validate(&productions).is_ok());
+
+          // Parser generation should succeed without conflicts for an LR(1) generator
+          let parser = generate_glr_parser(&productions, 0, None);
+          println!("Parser: {}", parser); // Useful for debugging the generated table
+
+          // Check stats to be sure there are no conflicts
+          let stats = stats::get_stats(&parser);
+          assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+          assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+
+          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+
+          let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+
+          for (input, expected_match) in test_cases {
+              let tokens = tokenize(&parser, input);
+              let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+              state.parse(&tokens);
+              state.step(eof);
+              assert_eq!(state.is_ok(), expected_match, "Parse check failed for LR(1)-specific input: '{}'", input);
+          }
+      }
+
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
       //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
@@ -12343,1670 +12658,139 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Make this generate a LR(1) table rather than LALR(1).
-      Add to `Item` an optional field that stores a single lookahead, `Option<Terminal>`.
-      For the start item, the lookahead will be `None`.
-
-      When we encounter an item with lookahead `None` and dot at the end of the rule, don't bother making a reduce action for it. Basically this item is just here to characterise the initial item set.
+      Unit graph building and 1-cycle detection isn't quite right right now.
+      ```rust
+          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
+      ```
+      This is wrong. It should be
+      ```rust
+          // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
+      ```
+      And the code should be update accordingly. ie we're interested in 1-cycles. If something non-nullable comes after the B, that's not a 1-cycle anymore. (But if something non-nullable comes before (or after) the B, then it's not a 1-cycle. What matters is whether or not it *can* be null - or, equivalently, whether or not it is *always* non-null - not whether or not is *always* null.)
     metadata:
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your request. Switching from an LALR(1) to a canonical LR(1) parser generator involves some significant changes to the state generation and lookahead handling logic. Here are the patches to implement this transformation.
+      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with grammar analysis intricacies like cycle detection can be tricky. You've correctly identified that the logic for detecting length-1 cycles needed refinement to handle nullable symbols on both sides of a non-terminal.
 
-      I've updated the `Item` struct to include a lookahead terminal and adjusted the table generation algorithms, particularly `stage_1` (for building the canonical collection of LR(1) item sets) and `stage_3` (for handling reductions based on the item's lookahead instead of FOLLOW sets). The `Display` and `explain_stack` functions have also been updated to reflect that parser states are now full LR(1) item sets.
+      Here is the patch that implements the corrected logic for building the unit graph. This change makes the cycle detection more accurate by correctly identifying unit-like productions of the form `A ::= Nullable* B Nullable*`.
 
-      Here are the required changes:
+      ### `src/glr/analyze.rs`
 
-      ### `src/glr/items.rs`
-
-      I'll start by modifying the `Item` struct to include the `lookahead` field. The `compute_closure` function is updated to calculate lookaheads for new items according to LR(1) rules, and `compute_goto` is adjusted to carry the lookahead over. The `Display` implementation is also updated for the new item format.
+      I've updated the logic for building the unit graph to correctly identify productions that effectively reduce to a single non-terminal, which is the source of length-1 recursion cycles.
 
       ```diff
-      --- a/src/glr/items.rs
-      +++ b/src/glr/items.rs
-      @@ -1,5 +1,5 @@
-      -use crate::glr::grammar::{Production, Symbol};
-      +use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use std::collections::{BTreeMap, BTreeSet, VecDeque};
-       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-       use std::collections::BTreeMap as StdMap;
-      @@ -11,6 +11,7 @@
-       pub struct Item {
-           pub production: Production,
-           pub dot_position: usize,
-      +    pub lookahead: Option<Terminal>,
-       }
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -140,61 +140,52 @@
+           let nullable_nonterminals = compute_nullable_nonterminals(productions);
+           crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
        
-       // Manual impl for Item (could be derived)
-      @@ -19,6 +20,7 @@
-               let mut obj = StdMap::new();
-               obj.insert("production".to_string(), self.production.to_json());
-               obj.insert("dot_position".to_string(), self.dot_position.to_json());
-      +        obj.insert("lookahead".to_string(), self.lookahead.to_json());
-               JSONNode::Object(obj)
+      -    // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
+      +    // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
+           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+           for nt in &all_nonterminals { // Initialize graph with all nodes
+               unit_graph.entry(nt.clone()).or_default();
            }
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-      @@ -28,7 +30,9 @@
-                                           .and_then(Production::from_json)?;
-                       let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
-                                             .and_then(usize::from_json)?;
-      -                Ok(Item { production, dot_position })
-      +                let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
-      +                                     .and_then(Option::<Terminal>::from_json)?;
-      +                Ok(Item { production, dot_position, lookahead })
-                   }
-                   _ => Err("Expected JSONNode::Object for Item".to_string()),
-               }
-      @@ -38,7 +42,7 @@
-       impl Display for Item {
-           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-               // Display the production and dot position
-      -        write!(f, "{} ->", self.production.lhs.0)?;
-      +        write!(f, "[{} ->", self.production.lhs.0)?;
-               for (i, symbol) in self.production.rhs.iter().enumerate() {
-                   if i == self.dot_position {
-                       write!(f, " •")?;
-      @@ -51,25 +55,66 @@
-               if self.dot_position == self.production.rhs.len() {
-                   write!(f, " •")?;
-               }
-      +        write!(f, ", ")?;
-      +        match &self.lookahead {
-      +            Some(t) => write!(f, "{}", t)?,
-      +            None => write!(f, "$")?,
-      +        }
-      +        write!(f, "]")?;
-               Ok(())
-           }
-       }
        
-      -pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
-      -    // crate::debug!(3, "Computing closure");
-      +pub fn compute_closure(
-      +    items: &BTreeSet<Item>,
-      +    productions: &[Production],
-      +    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    nullable_nonterminals: &BTreeSet<NonTerminal>,
-      +) -> BTreeSet<Item> {
-           let mut closure = items.clone();
-           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+      -    // --- Corrected Logic for Building Unit Graph ---
+      +    // --- Logic for Building Unit Graph ---
+           for prod in productions {
+               let lhs = &prod.lhs;
+               let rhs = &prod.rhs;
        
-           while let Some(item) = worklist.pop_front() {
-      -        if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-      -            for prod in productions.iter().filter(|p| p.lhs == *nt) {
-      -                let new_item = Item {
-      -                    production: prod.clone(),
-      -                    dot_position: 0,
-      -                };
-      -                if closure.insert(new_item.clone()) {
-      -                    worklist.push_back(new_item);
-      +        if let Some(Symbol::NonTerminal(b)) = item.production.rhs.get(item.dot_position) {
-      +            let beta = &item.production.rhs[item.dot_position + 1..];
-      +            let mut lookaheads = BTreeSet::new();
-      +
-      +            // Compute FIRST(beta)
-      +            let mut beta_is_nullable = true;
-      +            for symbol in beta {
-      +                match symbol {
-      +                    Symbol::Terminal(t) => {
-      +                        lookaheads.insert(t.clone());
-      +                        beta_is_nullable = false;
-      +                        break;
-      +                    }
-      +                    Symbol::NonTerminal(nt) => {
-      +                        if let Some(first_set) = first_sets.get(nt) {
-      +                            lookaheads.extend(first_set.iter().cloned());
-      +                        }
-      +                        if !nullable_nonterminals.contains(nt) {
-      +                            beta_is_nullable = false;
-      +                            break;
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            // If beta is nullable, add the original item's lookahead
-      +            if beta_is_nullable {
-      +                if let Some(lookahead) = &item.lookahead {
-      +                    lookaheads.insert(lookahead.clone());
-      +                }
-      +            }
-      +
-      +            for prod in productions.iter().filter(|p| p.lhs == *b) {
-      +                for lookahead in &lookaheads {
-      +                    let new_item = Item {
-      +                        production: prod.clone(),
-      +                        dot_position: 0,
-      +                        lookahead: Some(lookahead.clone()),
-      +                    };
-      +                    if closure.insert(new_item.clone()) {
-      +                        worklist.push_back(new_item);
-      +                    }
-                       }
-                   }
-               }
-      @@ -84,6 +129,7 @@
-                   result.insert(Item {
-                       production: item.production.clone(),
-                       dot_position: item.dot_position + 1,
-      +                lookahead: item.lookahead.clone(),
-                   });
-               }
-           }
-
-      ```
-
-      ### `src/glr/table.rs`
-
-      This file contains the bulk of the changes. I've rewritten the state generation (`stage_1`) and lookahead handling (`stage_3`) logic. The other stages are adjusted to work with full LR(1) item sets as states. The special `Accept` action is now identified by checking the content of the destination state.
-
-      ```diff
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -1,5 +1,5 @@
-       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      -use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      +use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::{GLRParser, ActionFn};
-       use bimap::BiBTreeMap;
-       use std::collections::{HashMap, VecDeque};
-      @@ -29,7 +29,7 @@
-       struct Stage3Row {
-           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-      -    reduces: BTreeMap<Terminal, BTreeSet<Item>>,
-      +    reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-       }
-       #[derive(Debug)]
-       struct Stage4Row {
-      @@ -280,51 +280,56 @@
-       );
-       
-       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-      +    let first_sets = compute_first_sets(productions);
-      +    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-      +
-           let initial_item = Item {
-               production: productions[start_production_id].clone(),
-               dot_position: 0,
-      +        lookahead: None, // Represents the end-of-input marker '$'
-           };
-      -    let initial_closure = BTreeSet::from([initial_item]);
-      -    let mut worklist = VecDeque::from([initial_closure.clone()]);
+      -        let mut first_non_nullable_symbol: Option<&Symbol> = None;
+      -        let mut first_non_nullable_idx: Option<usize> = None;
       -
-      +    let initial_state = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
-      +
-      +    let mut states = BTreeSet::from([initial_state.clone()]);
-      +    let mut worklist = VecDeque::from([initial_state.clone()]);
-           let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-       
-      -    while let Some(items) = worklist.pop_front() {
-      -        if transitions.contains_key(&items) {
-      +    while let Some(current_state) = worklist.pop_front() {
-      +        if transitions.contains_key(&current_state) {
-                   continue;
-               }
-       
-      -        let closure = compute_closure(&items, productions);
-      -        let splits = split_on_dot(&closure);
-      +        let splits = split_on_dot(&current_state);
-               let mut row = BTreeMap::new();
-       
-      -        for (symbol, items) in splits {
-      -            if symbol.is_none() {
-      -                continue;
-      -            }
-      -            let goto_set = compute_goto(&items);
-      -            row.insert(symbol.clone(), goto_set.clone());
-      -            worklist.push_back(goto_set);
-      -        }
-      -
-      -        transitions.insert(items.clone(), row);
-      +        let all_symbols: BTreeSet<_> = splits.keys().filter_map(|k| k.clone()).collect();
-      +
-      +        for symbol in all_symbols {
-      +            let items_on_symbol = splits.get(&Some(symbol.clone())).unwrap();
-      +            let goto_kernel = compute_goto(items_on_symbol);
-      +            if goto_kernel.is_empty() { continue; }
-      +
-      +            let next_state = compute_closure(&goto_kernel, productions, &first_sets, &nullable_nonterminals);
-      +            if next_state.is_empty() { continue; }
-      +
-      +            row.insert(Some(symbol.clone()), next_state.clone());
-      +
-      +            if states.insert(next_state.clone()) {
-      +                worklist.push_back(next_state);
-      +            }
-      +        }
-      +        transitions.insert(current_state, row);
-           }
-       
-           transitions
-       }
-       
-       fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-      +    // In LR(1), the item sets from stage_1 are the full states, not kernels.
-           let mut stage_2_table = BTreeMap::new();
-           for (item_set, transitions) in stage_1_table {
-               let mut shifts = BTreeMap::new();
-               let mut gotos = BTreeMap::new();
-               let mut reduces = BTreeSet::new();
-       
-      -        let closure = compute_closure(&item_set, productions);
-      -        for item in &closure { // Check the full closure for reductions
-      +        for item in &item_set { // Check the full state for reductions
-                   if item.dot_position == item.production.rhs.len() {
-                       reduces.insert(item.clone());
-                   }
-      @@ -342,12 +347,6 @@
-                   }
-               }
-       
-      -        for item in &closure {
-      -            // e.g. start rules
-      -            if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
-      -                gotos.insert(item.production.lhs.clone(), BTreeSet::new());
+      -        // Find the first non-nullable symbol and its index
+      -        for (idx, symbol) in rhs.iter().enumerate().rev() { // Changed to rev for 'last' non-nullable if we need it here
+      -            match symbol {
+      -                Symbol::Terminal(_) => {
+      -                    first_non_nullable_symbol = Some(symbol);
+      -                    first_non_nullable_idx = Some(idx);
+      -                    break; // Found first non-nullable, stop scanning
+      -                }
+      -                Symbol::NonTerminal(nt) => {
+      -                    if !nullable_nonterminals.contains(nt) {
+      -                        first_non_nullable_symbol = Some(symbol);
+      -                        first_non_nullable_idx = Some(idx);
+      -                        break; // Found first non-nullable, stop scanning
+      -                    }
+      -                    // It's a nullable non-terminal, continue scanning
+      -                }
       -            }
       -        }
       -
-               stage_2_table.insert(
-                   item_set,
-                   Stage2Row {
-      @@ -361,23 +360,18 @@
-       }
-       
-       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-      -    let follow_sets = compute_follow_sets(productions);
-      -    crate::debug!(3, "Follow sets:");
-      -    for (nt, follow_set) in &follow_sets {
-      -        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-      -    }
-      +    // For LR(1), lookaheads are already in the items. We just group reductions by lookahead.
-      +    let production_ids: BTreeMap<Production, ProductionID> = productions
-      +        .iter()
-      +        .enumerate()
-      +        .map(|(i, p)| (p.clone(), ProductionID(i)))
-      +        .collect();
-       
-           let mut stage_3_table = BTreeMap::new();
-       
-           for (item_set, row) in stage_2_table {
-      -        let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+      -        match first_non_nullable_symbol {
+      -            Some(Symbol::NonTerminal(target_nt)) => {
+      -                // Found a non-terminal B as the first non-nullable symbol at index k
+      -                let k = first_non_nullable_idx.unwrap();
       -
-      +        let mut reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
-               for item in &row.reduces {
-      -            let lhs = &item.production.lhs;
-      -            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-      -
-      -            for terminal in lookaheads {
-      -                reduces
-      -                    .entry(terminal.clone())
-      -                    .or_default()
-      -                    .insert(item.clone());
-      +            if let Some(lookahead) = &item.lookahead {
-      +                let prod_id = *production_ids.get(&item.production).unwrap();
-      +                reduces.entry(lookahead.clone()).or_default().insert(prod_id);
-                   }
-               }
-       
-      @@ -393,34 +387,8 @@
-       }
-       
-       fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-      -    let production_ids: BTreeMap<Production, ProductionID> = productions
-      -        .iter()
-      -        .enumerate()
-      -        .map(|(i, p)| (p.clone(), ProductionID(i)))
-      -        .collect();
-      -
-      -    let mut stage_4_table = BTreeMap::new();
-      -
-      -    for (item_set, row) in stage_3_table {
-      -        let mut reduces = BTreeMap::new();
-      -
-      -        for (terminal, items) in row.reduces {
-      -            let mut prod_ids = BTreeSet::new();
-      -            for item in items {
-      -                let prod_id = production_ids.get(&item.production).unwrap();
-      -                prod_ids.insert(*prod_id);
+      -                // Check if B is the *last* symbol in the RHS
+      -                if k == rhs.len() - 1 {
+      -                    // Rule is of the form A ::= Nullable* B. Add edge A -> B.
+      -                    unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
+      -                    crate::debug!(4, "Unit graph edge added ({} -> {} from rule: {} ::= {:?})", lhs.0, target_nt.0, lhs.0, prod.rhs);
+      -                } else {
+      -                    // Rule is A ::= Nullable* B NonEmptySuffix... Does not contribute.
+      -                    crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Non-terminal {} followed by other symbols.", lhs.0, prod.rhs, target_nt.0);
+      -                }
       -            }
-      -            reduces.insert(terminal.clone(), prod_ids);
-      -        }
-      -
-      -        stage_4_table.insert(
-      -            item_set,
-      -            Stage4Row {
-      -                shifts: row.shifts,
-      -                gotos: row.gotos,
-      -                reduces,
-      -            },
-      -        );
-      -    }
-      -
-      -    stage_4_table
-      +    // This stage used to convert reduce items to production IDs.
-      +    // This is now done in stage_3 for LR(1). So this is a pass-through.
-      +    stage_3_table
-       }
-       
-       fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-      @@ -574,8 +542,18 @@
-               let mut gotos = BTreeMap::new();
-               for (nonterminal, next_item_set) in row.gotos {
-                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-      -            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
-      -            if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
+      -            Some(Symbol::Terminal(_)) => {
+      -                // First non-nullable symbol is a terminal. Rule is A ::= Nullable* Terminal ... Does not contribute.
+      -                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): First non-nullable symbol is a terminal.", lhs.0, prod.rhs);
+      -            }
+      -            None => {
+      -                // All symbols in RHS are nullable, or RHS is empty. Rule is A ::= Nullable*. Does not contribute.
+      -                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): RHS is fully nullable or empty.", lhs.0, prod.rhs);
+      -            }
+      +        let non_nullable_symbols: Vec<&Symbol> = rhs
+      +            .iter()
+      +            .filter(|symbol| match symbol {
+      +                Symbol::Terminal(_) => true,
+      +                Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
+      +            })
+      +            .collect();
       +
-      +            let is_accept_state = next_item_set.iter().any(|item| {
-      +                item.production.lhs == productions[start_production_id].lhs &&
-      +                item.dot_position == item.production.rhs.len() &&
-      +                item.lookahead.is_none()
-      +            });
-      +
-      +            let goto = if is_accept_state {
-      +                Goto::Accept
+      +        if non_nullable_symbols.len() == 1 {
+      +            if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
+      +                // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
+      +                unit_graph
+      +                    .entry(lhs.clone())
+      +                    .or_default()
+      +                    .insert(target_nt.clone());
+      +                crate::debug!(
+      +                    4,
+      +                    "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
+      +                    lhs.0,
+      +                    target_nt.0,
+      +                    lhs.0,
+      +                    prod.rhs
+      +                );
       +            } else {
-      +                Goto::State(*item_set_map.get_by_left(&next_item_set).expect("GOTO to an unknown state"))
-      +            };
-                   gotos.insert(non_terminal_id, goto);
-               }
-       
-      @@ -587,11 +565,13 @@
-               });
-           }
-       
-      +    let first_sets = compute_first_sets(productions);
-      +    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-           let initial_item = Item {
-               production: productions[start_production_id].clone(),
-               dot_position: 0,
-      +        lookahead: None,
-           };
-      -    let initial_item_set = BTreeSet::from([initial_item]);
-      +    let initial_item_set = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
-           let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-       
-           (stage_7_table, item_set_map, start_state_id)
-
-      ```
-
-      ### `src/glr/parser.rs`
-
-      Here, I'll update `explain_stack` and the `Display` implementation for `GLRParser` to correctly handle the new LR(1) states, which are full item sets rather than kernels. This removes the now-incorrect distinction between "core" and "closure" items.
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -348,24 +348,16 @@
-                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-       
-                   // Get and print items
-      -            if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-      -                let full_closure = compute_closure(core_items, &self.productions);
-      -                let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-      -
-      -                writeln!(&mut result, "  Core Items:").unwrap();
-      -                if core_items.is_empty() {
-      +            if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-      +                // For LR(1), the item set in the map is the full state (closure).
-      +                writeln!(&mut result, "  Items:").unwrap();
-      +                if items.is_empty() {
-                           writeln!(&mut result, "    (None)").unwrap();
-                       } else {
-      -                    for item in core_items {
-      +                    for item in items {
-                               writeln!(&mut result, "    - {}", item).unwrap();
-                           }
-                       }
-      -
-      -                if !closure_only_items.is_empty() {
-      -                    writeln!(&mut result, "  Closure-only Items:").unwrap();
-      -                    for item in &closure_only_items {
-      -                        writeln!(&mut result, "    - {}", item).unwrap();
-      -                    }
-      -                }
-                   } else {
-                       writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
-                   }
-      @@ -478,43 +470,13 @@
-               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
-                   writeln!(f, "  State {}:", state_id.0)?;
-       
-      -            let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-      -            let full_closure = compute_closure(core_item_set, &self.productions);
-      -
-      -            writeln!(f, "    Core Items:")?;
-      -            for item in core_item_set {
-      -                write!(f, "      - {} ->", item.production.lhs.0)?;
-      -                for (i, symbol) in item.production.rhs.iter().enumerate() {
-      -                    if i == item.dot_position {
-      -                        write!(f, " •")?;
-      -                    }
-      -                    match symbol {
-      -                        Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-      -                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-      -                    }?;
-      -                }
-      -                if item.dot_position == item.production.rhs.len() {
-      -                    write!(f, " •")?;
-      -                }
-      -                writeln!(f)?;
-      -            }
-      -
-      -            let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-      -            if !closure_only_items.is_empty() {
-      -                writeln!(f, "    Closure Items:")?;
-      -                for item in &closure_only_items {
-      -                    write!(f, "      - {} ->", item.production.lhs.0)?;
-      -                    for (i, symbol) in item.production.rhs.iter().enumerate() {
-      -                        if i == item.dot_position {
-      -                            write!(f, " •")?;
-      -                        }
-      -                        match symbol {
-      -                            Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-      -                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-      -                        }?;
-      -                    }
-      -                    if item.dot_position == item.production.rhs.len() {
-      -                        write!(f, " •")?;
-      -                    }
-      -                    writeln!(f)?;
-      +            if let Some(items) = item_set_map.get_by_right(&state_id) {
-      +                writeln!(f, "    Items:")?;
-      +                for item in items {
-      +                    writeln!(f, "      - {}", item)?;
-                       }
-                   }
-       
-                   writeln!(f, "    Actions (Phase 1):")?;
-                   let actions = &row.phase1_shifts_and_reduces;
-
-      ```
-
-      ### `src/glr/tests.rs`
-
-      Finally, I'll update `test_explain_stack` to align with the new output format of the `explain_stack` method.
-
-      ```diff
-      --- a/src/glr/tests.rs
-      +++ b/src/glr/tests.rs
-      @@ -1011,16 +1011,13 @@
-       
-           // Assertions for State 0 (start state)
-           assert!(explanation.contains(&format!("State {}:", start_state.0)));
-      -    assert!(explanation.contains("Core Items:"));
-      -    assert!(explanation.contains("S -> • A '$'"));
-      -    assert!(explanation.contains("Closure-only Items:"));
-      -    assert!(explanation.contains("A -> • A 'a'"));
-      -    assert!(explanation.contains("A -> • 'b'"));
-      +    assert!(explanation.contains("Items:"));
-      +    assert!(explanation.contains("[S -> • A '$', $]"));
-           assert!(explanation.contains("On 'b': Shift to State"));
-       
-           // Assertions for State after shifting 'b'
-           assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-      -    assert!(explanation.contains("Core Items:"));
-      -    assert!(explanation.contains("A -> 'b' •"));
-      -    assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-      -    assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
-      +    assert!(explanation.contains("[A -> 'b' •, $]"));
-      +    assert!(explanation.contains("On '$': Reduce by rule"));
-       }
-       
-       #[test]
-
-      ```
-
-      These changes should successfully convert your parser generator to produce a canonical LR(1) table. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/items.rs
-      Applying patch to 'src/glr/items.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/items.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/glr/tests.rs
-      Applying patch to 'src/glr/tests.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/tests.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-      --- original version of src/glr/items.rs+++ current version of src/glr/items.rs@@ -1,4 +1,4 @@-use crate::glr::grammar::{Production, Symbol};
-      +use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use std::collections::{BTreeMap, BTreeSet, VecDeque};
-       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-       use std::collections::BTreeMap as StdMap;
-      @@ -10,6 +10,7 @@ pub struct Item {
-           pub production: Production,
-           pub dot_position: usize,
-      +    pub lookahead: Option<Terminal>,
-       }
-       
-       // Manual impl for Item (could be derived)
-      @@ -18,6 +19,7 @@         let mut obj = StdMap::new();
-               obj.insert("production".to_string(), self.production.to_json());
-               obj.insert("dot_position".to_string(), self.dot_position.to_json());
-      +        obj.insert("lookahead".to_string(), self.lookahead.to_json());
-               JSONNode::Object(obj)
-           }
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-      @@ -27,7 +29,9 @@                                     .and_then(Production::from_json)?;
-                       let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
-                                             .and_then(usize::from_json)?;
-      -                Ok(Item { production, dot_position })
-      +                let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
-      +                                     .and_then(Option::<Terminal>::from_json)?;
-      +                Ok(Item { production, dot_position, lookahead })
-                   }
-                   _ => Err("Expected JSONNode::Object for Item".to_string()),
-               }
-      @@ -37,7 +41,7 @@ impl Display for Item {
-           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-               // Display the production and dot position
-      -        write!(f, "{} ->", self.production.lhs.0)?;
-      +        write!(f, "[{} ->", self.production.lhs.0)?;
-               for (i, symbol) in self.production.rhs.iter().enumerate() {
-                   if i == self.dot_position {
-                       write!(f, " •")?;
-      @@ -50,24 +54,68 @@         if self.dot_position == self.production.rhs.len() {
-                   write!(f, " •")?;
-               }
-      +        write!(f, ", ")?;
-      +        match &self.lookahead {
-      +            Some(t) => write!(f, "{}", t)?,
-      +            None => write!(f, "$")?,
-      +        }
-      +        write!(f, "]")?;
-               Ok(())
-           }
-       }
-       
-      -pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
-      -    // crate::debug!(3, "Computing closure");
-      +pub fn compute_closure(
-      +    items: &BTreeSet<Item>,
-      +    productions: &[Production],
-      +    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    nullable_nonterminals: &BTreeSet<NonTerminal>,
-      +) -> BTreeSet<Item> {
-           let mut closure = items.clone();
-           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-       
-           while let Some(item) = worklist.pop_front() {
-      -        if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-      -            for prod in productions.iter().filter(|p| p.lhs == *nt) {
-      -                let new_item = Item {
-      -                    production: prod.clone(),
-      -                    dot_position: 0,
-      -                };
-      -                if closure.insert(new_item.clone()) {
-      -                    worklist.push_back(new_item);
-      +        if let Some(Symbol::NonTerminal(b)) = item.production.rhs.get(item.dot_position) {
-      +            let beta = &item.production.rhs[item.dot_position + 1..];
-      +            let mut lookaheads = BTreeSet::new();
-      +
-      +            // Compute FIRST(beta)
-      +            let mut beta_is_nullable = true;
-      +            for symbol in beta {
-      +                match symbol {
-      +                    Symbol::Terminal(t) => {
-      +                        lookaheads.insert(t.clone());
-      +                        beta_is_nullable = false;
-      +                        break;
-      +                    }
-      +                    Symbol::NonTerminal(nt) => {
-      +                        if let Some(first_set) = first_sets.get(nt) {
-      +                            lookaheads.extend(first_set.iter().cloned());
-      +                        }
-      +                        if !nullable_nonterminals.contains(nt) {
-      +                            beta_is_nullable = false;
-      +                            break;
-      +                        }
-      +                    }
-      +                }
+      +                // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
+      +                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
       +            }
-      +
-      +            // If beta is nullable, add the original item's lookahead
-      +            if beta_is_nullable {
-      +                if let Some(lookahead) = &item.lookahead {
-      +                    lookaheads.insert(lookahead.clone());
-      +                }
-      +            }
-      +
-      +            for prod in productions.iter().filter(|p| p.lhs == *b) {
-      +                for lookahead in &lookaheads {
-      +                    let new_item = Item {
-      +                        production: prod.clone(),
-      +                        dot_position: 0,
-      +                        lookahead: Some(lookahead.clone()),
-      +                    };
-      +                    if closure.insert(new_item.clone()) {
-      +                        worklist.push_back(new_item);
-      +                    }
-                       }
-                   }
-               }
-      @@ -84,6 +132,7 @@             result.insert(Item {
-                       production: item.production.clone(),
-                       dot_position: item.dot_position + 1,
-      +                lookahead: item.lookahead.clone(),
-                   });
+      +        } else {
+      +            // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
+      +            crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
                }
            }
+      -    // --- End Corrected Logic ---
+      +    // --- End Logic ---
+       
+       
+           // Detect cycles in the unit graph using DFS
 
       ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
 
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -318,22 +318,13 @@             writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-       
-                   // Get and print items
-      -            if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-      -                let full_closure = compute_closure(core_items, &self.productions);
-      -                let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-      -
-      -                writeln!(&mut result, "  Core Items:").unwrap();
-      -                if core_items.is_empty() {
-      +            if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-      +                // For LR(1), the item set in the map is the full state (closure).
-      +                writeln!(&mut result, "  Items:").unwrap();
-      +                if items.is_empty() {
-                           writeln!(&mut result, "    (None)").unwrap();
-                       } else {
-      -                    for item in core_items {
-      -                        writeln!(&mut result, "    - {}", item).unwrap();
-      -                    }
-      -                }
-      -
-      -                if !closure_only_items.is_empty() {
-      -                    writeln!(&mut result, "  Closure-only Items:").unwrap();
-      -                    for item in &closure_only_items {
-      +                    for item in items {
-                               writeln!(&mut result, "    - {}", item).unwrap();
-                           }
-                       }
-      @@ -488,45 +479,10 @@         for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
-                   writeln!(f, "  State {}:", state_id.0)?;
-       
-      -            let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-      -            let full_closure = compute_closure(core_item_set, &self.productions);
-      -
-      -            writeln!(f, "    Core Items:")?;
-      -            for item in core_item_set {
-      -                write!(f, "      - {} ->", item.production.lhs.0)?;
-      -                for (i, symbol) in item.production.rhs.iter().enumerate() {
-      -                    if i == item.dot_position {
-      -                        write!(f, " •")?;
-      -                    }
-      -                    match symbol {
-      -                        Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-      -                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-      -                    }?;
-      -                }
-      -                if item.dot_position == item.production.rhs.len() {
-      -                    write!(f, " •")?;
-      -                }
-      -                writeln!(f)?;
-      -            }
-      -
-      -            let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-      -            if !closure_only_items.is_empty() {
-      -                writeln!(f, "    Closure Items:")?;
-      -                for item in &closure_only_items {
-      -                    write!(f, "      - {} ->", item.production.lhs.0)?;
-      -                    for (i, symbol) in item.production.rhs.iter().enumerate() {
-      -                        if i == item.dot_position {
-      -                            write!(f, " •")?;
-      -                        }
-      -                        match symbol {
-      -                            Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-      -                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-      -                        }?;
-      -                    }
-      -                    if item.dot_position == item.production.rhs.len() {
-      -                        write!(f, " •")?;
-      -                    }
-      -                    writeln!(f)?;
-      +            if let Some(items) = item_set_map.get_by_right(&state_id) {
-      +                writeln!(f, "    Items:")?;
-      +                for item in items {
-      +                    writeln!(f, "      - {}", item)?;
-                       }
-                   }
-       
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-      --- original version of src/glr/table.rs+++ current version of src/glr/table.rs@@ -1,5 +1,5 @@ use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      -use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      +use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::{GLRParser, ActionFn};
-       use bimap::BiBTreeMap;
-       use std::collections::{HashMap, VecDeque};
-      @@ -33,14 +33,9 @@ struct Stage3Row {
-           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-      -    reduces: BTreeMap<Terminal, BTreeSet<Item>>,
-      -}
-      -#[derive(Debug)]
-      -struct Stage4Row {
-      -    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-      -    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-           reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-       }
-      +type Stage4Row = Stage3Row;
-       type Stage5Row = Stage4Row;
-       #[derive(Debug)]
-       struct Stage6Row {
-      @@ -291,48 +286,59 @@ );
-       
-       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-      +    let first_sets = compute_first_sets(productions);
-      +    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-      +
-           let initial_item = Item {
-               production: productions[start_production_id].clone(),
-               dot_position: 0,
-      +        lookahead: None, // Represents the end-of-input marker '$'
-           };
-      -    let initial_closure = BTreeSet::from([initial_item]);
-      -    let mut worklist = VecDeque::from([initial_closure.clone()]);
-      -
-      +    let initial_state = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
-      +
-      +    let mut states = BTreeSet::from([initial_state.clone()]);
-      +    let mut worklist = VecDeque::from([initial_state.clone()]);
-           let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-       
-      -    while let Some(items) = worklist.pop_front() {
-      -        if transitions.contains_key(&items) {
-      +    while let Some(current_state) = worklist.pop_front() {
-      +        if transitions.contains_key(&current_state) {
-                   continue;
-               }
-       
-      -        let closure = compute_closure(&items, productions);
-      -        let splits = split_on_dot(&closure);
-      +        let splits = split_on_dot(&current_state);
-               let mut row = BTreeMap::new();
-       
-      -        for (symbol, items) in splits {
-      -            if symbol.is_none() {
-      -                continue;
-      -            }
-      -            let goto_set = compute_goto(&items);
-      -            row.insert(symbol.clone(), goto_set.clone());
-      -            worklist.push_back(goto_set);
-      -        }
-      -
-      -        transitions.insert(items.clone(), row);
-      +        let all_symbols: BTreeSet<_> = splits.keys().filter_map(|k| k.clone()).collect();
-      +
-      +        for symbol in all_symbols {
-      +            let items_on_symbol = splits.get(&Some(symbol.clone())).unwrap();
-      +            let goto_kernel = compute_goto(items_on_symbol);
-      +            if goto_kernel.is_empty() { continue; }
-      +
-      +            let next_state = compute_closure(&goto_kernel, productions, &first_sets, &nullable_nonterminals);
-      +            if next_state.is_empty() { continue; }
-      +
-      +            row.insert(Some(symbol.clone()), next_state.clone());
-      +
-      +            if states.insert(next_state.clone()) {
-      +                worklist.push_back(next_state);
-      +            }
-      +        }
-      +        transitions.insert(current_state, row);
-           }
-       
-           transitions
-       }
-       
-       fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-      +    // In LR(1), the item sets from stage_1 are the full states, not kernels.
-           let mut stage_2_table = BTreeMap::new();
-           for (item_set, transitions) in stage_1_table {
-               let mut shifts = BTreeMap::new();
-               let mut gotos = BTreeMap::new();
-               let mut reduces = BTreeSet::new();
-       
-      -        let closure = compute_closure(&item_set, productions);
-      -        for item in &closure { // Check the full closure for reductions
-      +        for item in &item_set { // Check the full state for reductions
-                   if item.dot_position == item.production.rhs.len() {
-                       reduces.insert(item.clone());
-                   }
-      @@ -351,13 +357,6 @@             }
-               }
-       
-      -        for item in &closure {
-      -            // e.g. start rules
-      -            if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
-      -                gotos.insert(item.production.lhs.clone(), BTreeSet::new());
-      -            }
-      -        }
-      -
-               stage_2_table.insert(
-                   item_set,
-                   Stage2Row {
-      @@ -371,26 +370,21 @@ }
-       
-       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-      -    let follow_sets = compute_follow_sets(productions);
-      -    crate::debug!(3, "Follow sets:");
-      -    for (nt, follow_set) in &follow_sets {
-      -        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-      -    }
-      +    // For LR(1), lookaheads are already in the items. We just group reductions by lookahead.
-      +    let production_ids: BTreeMap<Production, ProductionID> = productions
-      +        .iter()
-      +        .enumerate()
-      +        .map(|(i, p)| (p.clone(), ProductionID(i)))
-      +        .collect();
-       
-           let mut stage_3_table = BTreeMap::new();
-       
-           for (item_set, row) in stage_2_table {
-      -        let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
-      -
-      +        let mut reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
-               for item in &row.reduces {
-      -            let lhs = &item.production.lhs;
-      -            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-      -
-      -            for terminal in lookaheads {
-      -                reduces
-      -                    .entry(terminal.clone())
-      -                    .or_default()
-      -                    .insert(item.clone());
-      +            if let Some(lookahead) = &item.lookahead {
-      +                let prod_id = *production_ids.get(&item.production).unwrap();
-      +                reduces.entry(lookahead.clone()).or_default().insert(prod_id);
-                   }
-               }
-       
-      @@ -408,37 +402,9 @@ }
-       
-       fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-      -    let production_ids: BTreeMap<Production, ProductionID> = productions
-      -        .iter()
-      -        .enumerate()
-      -        .map(|(i, p)| (p.clone(), ProductionID(i)))
-      -        .collect();
-      -
-      -    let mut stage_4_table = BTreeMap::new();
-      -
-      -    for (item_set, row) in stage_3_table {
-      -        let mut reduces = BTreeMap::new();
-      -
-      -        for (terminal, items) in row.reduces {
-      -            let mut prod_ids = BTreeSet::new();
-      -            for item in items {
-      -                let prod_id = production_ids.get(&item.production).unwrap();
-      -                prod_ids.insert(*prod_id);
-      -            }
-      -            reduces.insert(terminal.clone(), prod_ids);
-      -        }
-      -
-      -        stage_4_table.insert(
-      -            item_set,
-      -            Stage4Row {
-      -                shifts: row.shifts,
-      -                gotos: row.gotos,
-      -                reduces,
-      -            },
-      -        );
-      -    }
-      -
-      -    stage_4_table
-      +    // This stage used to convert reduce items to production IDs.
-      +    // This is now done in stage_3 for LR(1). So this is a pass-through.
-      +    stage_3_table
-       }
-       
-       fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-      @@ -612,8 +578,18 @@         let mut gotos = BTreeMap::new();
-               for (nonterminal, next_item_set) in row.gotos {
-                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-      -            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
-      -            if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
-      +
-      +            let is_accept_state = next_item_set.iter().any(|item| {
-      +                item.production.lhs == productions[start_production_id].lhs &&
-      +                item.dot_position == item.production.rhs.len() &&
-      +                item.lookahead.is_none()
-      +            });
-      +
-      +            let goto = if is_accept_state {
-      +                Goto::Accept
-      +            } else {
-      +                Goto::State(*item_set_map.get_by_left(&next_item_set).expect("GOTO to an unknown state"))
-      +            };
-                   gotos.insert(non_terminal_id, goto);
-               }
-       
-      @@ -625,11 +601,14 @@         });
-           }
-       
-      +    let first_sets = compute_first_sets(productions);
-      +    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-           let initial_item = Item {
-               production: productions[start_production_id].clone(),
-               dot_position: 0,
-      +        lookahead: None,
-           };
-      -    let initial_item_set = BTreeSet::from([initial_item]);
-      +    let initial_item_set = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
-           let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-       
-           (stage_7_table, item_set_map, start_state_id)
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-      --- original version of src/glr/tests.rs+++ current version of src/glr/tests.rs@@ -987,19 +987,14 @@ 
-           // Assertions for State 0 (start state)
-           assert!(explanation.contains(&format!("State {}:", start_state.0)));
-      -    assert!(explanation.contains("Core Items:"));
-      -    assert!(explanation.contains("S -> • A '$'"));
-      -    assert!(explanation.contains("Closure-only Items:"));
-      -    assert!(explanation.contains("A -> • A 'a'"));
-      -    assert!(explanation.contains("A -> • 'b'"));
-      +    assert!(explanation.contains("Items:"));
-      +    assert!(explanation.contains("[S -> • A '$', $]"));
-           assert!(explanation.contains("On 'b': Shift to State"));
-       
-           // Assertions for State after shifting 'b'
-           assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-      -    assert!(explanation.contains("Core Items:"));
-      -    assert!(explanation.contains("A -> 'b' •"));
-      -    assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-      -    assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
-      +    assert!(explanation.contains("[A -> 'b' •, $]"));
-      +    assert!(explanation.contains("On '$': Reduce by rule"));
-       }
-       
-       #[test]
-
-      ```
-    metadata:
-  - user: What's a good grammar to reveal the difference between a LR(1) and LALR(1)
-      parser? Include that in the tests.
-    metadata:
-  - assistant: |-
-      Of course! A great grammar to highlight the difference between LR(1) and LALR(1) is one that is LR(1) but *not* LALR(1). An LALR(1) parser generator would produce a reduce/reduce conflict for such a grammar, while a canonical LR(1) parser generator (which you now have) should handle it without any issues.
-
-      The classic example grammar for this is:
-      ```
-      S' -> S $
-      S  -> a E c
-      S  -> a F d
-      S  -> b F c
-      S  -> b E d
-      E  -> e
-      F  -> e
-      ```
-      An LALR(1) parser merges states with identical cores. In this grammar, the state reached after parsing `ae` and the state reached after parsing `be` have the same core (`{E -> e., F -> e.}`). Merging them combines their lookaheads, leading to a reduce/reduce conflict on lookaheads `c` and `d`. A canonical LR(1) parser keeps these states separate because their full item sets (including lookaheads) are different, thus avoiding the conflict.
-
-      I'll add a test case to `src/glr/tests.rs` that uses this grammar. The test will confirm that your LR(1) parser generator builds a conflict-free table and correctly parses strings.
-
-      Here is the patch for `src/glr/tests.rs`:
-
-      ### `src/glr/tests.rs`
-
-      ```diff
-      --- a/src/glr/tests.rs
-      +++ b/src/glr/tests.rs
-      @@ -1020,6 +1020,52 @@
-           assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
-       }
-       // --- Notes on Limitations Not Easily Tested Here ---
-      +
-      +#[test]
-      +fn test_lr1_not_lalr1_grammar() {
-      +    // This grammar is a classic example of a grammar that is LR(1) but not LALR(1).
-      +    // An LALR(1) parser would merge states and create a reduce/reduce conflict.
-      +    // A canonical LR(1) parser should handle it without conflicts.
-      +    // S' -> S $
-      +    // S  -> a E c | a F d | b F c | b E d
-      +    // E  -> e
-      +    // F  -> e
-      +    let productions = vec![
-      +        prod("S'", vec![nt("S"), t("$")]), // Start rule
-      +        prod("S", vec![t("a"), nt("E"), t("c")]),
-      +        prod("S", vec![t("a"), nt("F"), t("d")]),
-      +        prod("S", vec![t("b"), nt("F"), t("c")]),
-      +        prod("S", vec![t("b"), nt("E"), t("d")]),
-      +        prod("E", vec![t("e")]),
-      +        prod("F", vec![t("e")]),
-      +    ];
-      +
-      +    // Validation should pass
-      +    assert!(analyze::validate(&productions).is_ok());
-      +
-      +    // Parser generation should succeed without conflicts for an LR(1) generator
-      +    let parser = generate_glr_parser(&productions, 0, None);
-      +
-      +    // Check stats to be sure there are no conflicts
-      +    let stats = stats::get_stats(&parser);
-      +    assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
-      +    assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
-      +
-      +    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-      +
-      +    let test_cases = [("aec", true), ("afd", true), ("bfc", true), ("bed", true), ("aed", false), ("afc", false), ("bec", false), ("bfd", false), ("e", false), ("ac", false)];
-      +
-      +    for (input, expected_match) in test_cases {
-      +        let tokens = tokenize(&parser, input);
-      +        let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
-      +        state.parse(&tokens);
-      +        state.step(eof);
-      +        assert_eq!(state.is_ok(), expected_match, "Parse check failed for LR(1)-specific input: '{}'", input);
-      +    }
-      +}
-      +
-       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
-       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
-       //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
-
-      ```
+      This updated logic is not only more correct but also simpler and easier to understand. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/tests.rs
-      Applying patch to 'src/glr/tests.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/tests.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-      --- original version of src/glr/items.rs+++ current version of src/glr/items.rs@@ -1,4 +1,4 @@-use crate::glr::grammar::{Production, Symbol};
-      +use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use std::collections::{BTreeMap, BTreeSet, VecDeque};
-       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-       use std::collections::BTreeMap as StdMap;
-      @@ -10,6 +10,7 @@ pub struct Item {
-           pub production: Production,
-           pub dot_position: usize,
-      +    pub lookahead: Option<Terminal>,
-       }
-       
-       // Manual impl for Item (could be derived)
-      @@ -18,6 +19,7 @@         let mut obj = StdMap::new();
-               obj.insert("production".to_string(), self.production.to_json());
-               obj.insert("dot_position".to_string(), self.dot_position.to_json());
-      +        obj.insert("lookahead".to_string(), self.lookahead.to_json());
-               JSONNode::Object(obj)
-           }
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-      @@ -27,7 +29,9 @@                                     .and_then(Production::from_json)?;
-                       let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
-                                             .and_then(usize::from_json)?;
-      -                Ok(Item { production, dot_position })
-      +                let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
-      +                                     .and_then(Option::<Terminal>::from_json)?;
-      +                Ok(Item { production, dot_position, lookahead })
-                   }
-                   _ => Err("Expected JSONNode::Object for Item".to_string()),
-               }
-      @@ -37,7 +41,7 @@ impl Display for Item {
-           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-               // Display the production and dot position
-      -        write!(f, "{} ->", self.production.lhs.0)?;
-      +        write!(f, "[{} ->", self.production.lhs.0)?;
-               for (i, symbol) in self.production.rhs.iter().enumerate() {
-                   if i == self.dot_position {
-                       write!(f, " •")?;
-      @@ -50,24 +54,68 @@         if self.dot_position == self.production.rhs.len() {
-                   write!(f, " •")?;
-               }
-      +        write!(f, ", ")?;
-      +        match &self.lookahead {
-      +            Some(t) => write!(f, "{}", t)?,
-      +            None => write!(f, "$")?,
-      +        }
-      +        write!(f, "]")?;
-               Ok(())
-           }
-       }
-       
-      -pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
-      -    // crate::debug!(3, "Computing closure");
-      +pub fn compute_closure(
-      +    items: &BTreeSet<Item>,
-      +    productions: &[Production],
-      +    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    nullable_nonterminals: &BTreeSet<NonTerminal>,
-      +) -> BTreeSet<Item> {
-           let mut closure = items.clone();
-           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-       
-           while let Some(item) = worklist.pop_front() {
-      -        if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
-      -            for prod in productions.iter().filter(|p| p.lhs == *nt) {
-      -                let new_item = Item {
-      -                    production: prod.clone(),
-      -                    dot_position: 0,
-      -                };
-      -                if closure.insert(new_item.clone()) {
-      -                    worklist.push_back(new_item);
-      +        if let Some(Symbol::NonTerminal(b)) = item.production.rhs.get(item.dot_position) {
-      +            let beta = &item.production.rhs[item.dot_position + 1..];
-      +            let mut lookaheads = BTreeSet::new();
-      +
-      +            // Compute FIRST(beta)
-      +            let mut beta_is_nullable = true;
-      +            for symbol in beta {
-      +                match symbol {
-      +                    Symbol::Terminal(t) => {
-      +                        lookaheads.insert(t.clone());
-      +                        beta_is_nullable = false;
-      +                        break;
-      +                    }
-      +                    Symbol::NonTerminal(nt) => {
-      +                        if let Some(first_set) = first_sets.get(nt) {
-      +                            lookaheads.extend(first_set.iter().cloned());
-      +                        }
-      +                        if !nullable_nonterminals.contains(nt) {
-      +                            beta_is_nullable = false;
-      +                            break;
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            // If beta is nullable, add the original item's lookahead
-      +            if beta_is_nullable {
-      +                if let Some(lookahead) = &item.lookahead {
-      +                    lookaheads.insert(lookahead.clone());
-      +                }
-      +            }
-      +
-      +            for prod in productions.iter().filter(|p| p.lhs == *b) {
-      +                for lookahead in &lookaheads {
-      +                    let new_item = Item {
-      +                        production: prod.clone(),
-      +                        dot_position: 0,
-      +                        lookahead: Some(lookahead.clone()),
-      +                    };
-      +                    if closure.insert(new_item.clone()) {
-      +                        worklist.push_back(new_item);
-      +                    }
-                       }
-                   }
-               }
-      @@ -84,6 +132,7 @@             result.insert(Item {
-                       production: item.production.clone(),
-                       dot_position: item.dot_position + 1,
-      +                lookahead: item.lookahead.clone(),
-                   });
-               }
-           }
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -318,22 +318,13 @@             writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-       
-                   // Get and print items
-      -            if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-      -                let full_closure = compute_closure(core_items, &self.productions);
-      -                let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-      -
-      -                writeln!(&mut result, "  Core Items:").unwrap();
-      -                if core_items.is_empty() {
-      +            if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-      +                // For LR(1), the item set in the map is the full state (closure).
-      +                writeln!(&mut result, "  Items:").unwrap();
-      +                if items.is_empty() {
-                           writeln!(&mut result, "    (None)").unwrap();
-                       } else {
-      -                    for item in core_items {
-      -                        writeln!(&mut result, "    - {}", item).unwrap();
-      -                    }
-      -                }
-      -
-      -                if !closure_only_items.is_empty() {
-      -                    writeln!(&mut result, "  Closure-only Items:").unwrap();
-      -                    for item in &closure_only_items {
-      +                    for item in items {
-                               writeln!(&mut result, "    - {}", item).unwrap();
-                           }
-                       }
-      @@ -488,45 +479,10 @@         for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
-                   writeln!(f, "  State {}:", state_id.0)?;
-       
-      -            let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-      -            let full_closure = compute_closure(core_item_set, &self.productions);
-      -
-      -            writeln!(f, "    Core Items:")?;
-      -            for item in core_item_set {
-      -                write!(f, "      - {} ->", item.production.lhs.0)?;
-      -                for (i, symbol) in item.production.rhs.iter().enumerate() {
-      -                    if i == item.dot_position {
-      -                        write!(f, " •")?;
-      -                    }
-      -                    match symbol {
-      -                        Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-      -                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-      -                    }?;
-      -                }
-      -                if item.dot_position == item.production.rhs.len() {
-      -                    write!(f, " •")?;
-      -                }
-      -                writeln!(f)?;
-      -            }
-      -
-      -            let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
-      -            if !closure_only_items.is_empty() {
-      -                writeln!(f, "    Closure Items:")?;
-      -                for item in &closure_only_items {
-      -                    write!(f, "      - {} ->", item.production.lhs.0)?;
-      -                    for (i, symbol) in item.production.rhs.iter().enumerate() {
-      -                        if i == item.dot_position {
-      -                            write!(f, " •")?;
-      -                        }
-      -                        match symbol {
-      -                            Symbol::Terminal(terminal) => write!(f, " {}", terminal),
-      -                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
-      -                        }?;
-      -                    }
-      -                    if item.dot_position == item.production.rhs.len() {
-      -                        write!(f, " •")?;
-      -                    }
-      -                    writeln!(f)?;
-      +            if let Some(items) = item_set_map.get_by_right(&state_id) {
-      +                writeln!(f, "    Items:")?;
-      +                for item in items {
-      +                    writeln!(f, "      - {}", item)?;
-                       }
-                   }
-       
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-      --- original version of src/glr/table.rs+++ current version of src/glr/table.rs@@ -1,5 +1,5 @@ use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      -use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      +use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::{GLRParser, ActionFn};
-       use bimap::BiBTreeMap;
-       use std::collections::{HashMap, VecDeque};
-      @@ -33,14 +33,9 @@ struct Stage3Row {
-           shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-           gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-      -    reduces: BTreeMap<Terminal, BTreeSet<Item>>,
-      -}
-      -#[derive(Debug)]
-      -struct Stage4Row {
-      -    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-      -    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-           reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-       }
-      +type Stage4Row = Stage3Row;
-       type Stage5Row = Stage4Row;
-       #[derive(Debug)]
-       struct Stage6Row {
-      @@ -291,48 +286,59 @@ );
-       
-       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-      +    let first_sets = compute_first_sets(productions);
-      +    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-      +
-           let initial_item = Item {
-               production: productions[start_production_id].clone(),
-               dot_position: 0,
-      +        lookahead: None, // Represents the end-of-input marker '$'
-           };
-      -    let initial_closure = BTreeSet::from([initial_item]);
-      -    let mut worklist = VecDeque::from([initial_closure.clone()]);
-      -
-      +    let initial_state = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
-      +
-      +    let mut states = BTreeSet::from([initial_state.clone()]);
-      +    let mut worklist = VecDeque::from([initial_state.clone()]);
-           let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-       
-      -    while let Some(items) = worklist.pop_front() {
-      -        if transitions.contains_key(&items) {
-      +    while let Some(current_state) = worklist.pop_front() {
-      +        if transitions.contains_key(&current_state) {
-                   continue;
-               }
-       
-      -        let closure = compute_closure(&items, productions);
-      -        let splits = split_on_dot(&closure);
-      +        let splits = split_on_dot(&current_state);
-               let mut row = BTreeMap::new();
-       
-      -        for (symbol, items) in splits {
-      -            if symbol.is_none() {
-      -                continue;
-      -            }
-      -            let goto_set = compute_goto(&items);
-      -            row.insert(symbol.clone(), goto_set.clone());
-      -            worklist.push_back(goto_set);
-      -        }
-      -
-      -        transitions.insert(items.clone(), row);
-      +        let all_symbols: BTreeSet<_> = splits.keys().filter_map(|k| k.clone()).collect();
-      +
-      +        for symbol in all_symbols {
-      +            let items_on_symbol = splits.get(&Some(symbol.clone())).unwrap();
-      +            let goto_kernel = compute_goto(items_on_symbol);
-      +            if goto_kernel.is_empty() { continue; }
-      +
-      +            let next_state = compute_closure(&goto_kernel, productions, &first_sets, &nullable_nonterminals);
-      +            if next_state.is_empty() { continue; }
-      +
-      +            row.insert(Some(symbol.clone()), next_state.clone());
-      +
-      +            if states.insert(next_state.clone()) {
-      +                worklist.push_back(next_state);
-      +            }
-      +        }
-      +        transitions.insert(current_state, row);
-           }
-       
-           transitions
-       }
-       
-       fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-      +    // In LR(1), the item sets from stage_1 are the full states, not kernels.
-           let mut stage_2_table = BTreeMap::new();
-           for (item_set, transitions) in stage_1_table {
-               let mut shifts = BTreeMap::new();
-               let mut gotos = BTreeMap::new();
-               let mut reduces = BTreeSet::new();
-       
-      -        let closure = compute_closure(&item_set, productions);
-      -        for item in &closure { // Check the full closure for reductions
-      +        for item in &item_set { // Check the full state for reductions
-                   if item.dot_position == item.production.rhs.len() {
-                       reduces.insert(item.clone());
-                   }
-      @@ -351,13 +357,6 @@             }
-               }
-       
-      -        for item in &closure {
-      -            // e.g. start rules
-      -            if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
-      -                gotos.insert(item.production.lhs.clone(), BTreeSet::new());
-      -            }
-      -        }
-      -
-               stage_2_table.insert(
-                   item_set,
-                   Stage2Row {
-      @@ -371,26 +370,21 @@ }
-       
-       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-      -    let follow_sets = compute_follow_sets(productions);
-      -    crate::debug!(3, "Follow sets:");
-      -    for (nt, follow_set) in &follow_sets {
-      -        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-      -    }
-      +    // For LR(1), lookaheads are already in the items. We just group reductions by lookahead.
-      +    let production_ids: BTreeMap<Production, ProductionID> = productions
-      +        .iter()
-      +        .enumerate()
-      +        .map(|(i, p)| (p.clone(), ProductionID(i)))
-      +        .collect();
-       
-           let mut stage_3_table = BTreeMap::new();
-       
-           for (item_set, row) in stage_2_table {
-      -        let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
-      -
-      +        let mut reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
-               for item in &row.reduces {
-      -            let lhs = &item.production.lhs;
-      -            let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
-      -
-      -            for terminal in lookaheads {
-      -                reduces
-      -                    .entry(terminal.clone())
-      -                    .or_default()
-      -                    .insert(item.clone());
-      +            if let Some(lookahead) = &item.lookahead {
-      +                let prod_id = *production_ids.get(&item.production).unwrap();
-      +                reduces.entry(lookahead.clone()).or_default().insert(prod_id);
-                   }
-               }
-       
-      @@ -408,37 +402,9 @@ }
-       
-       fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-      -    let production_ids: BTreeMap<Production, ProductionID> = productions
-      -        .iter()
-      -        .enumerate()
-      -        .map(|(i, p)| (p.clone(), ProductionID(i)))
-      -        .collect();
-      -
-      -    let mut stage_4_table = BTreeMap::new();
-      -
-      -    for (item_set, row) in stage_3_table {
-      -        let mut reduces = BTreeMap::new();
-      -
-      -        for (terminal, items) in row.reduces {
-      -            let mut prod_ids = BTreeSet::new();
-      -            for item in items {
-      -                let prod_id = production_ids.get(&item.production).unwrap();
-      -                prod_ids.insert(*prod_id);
-      -            }
-      -            reduces.insert(terminal.clone(), prod_ids);
-      -        }
-      -
-      -        stage_4_table.insert(
-      -            item_set,
-      -            Stage4Row {
-      -                shifts: row.shifts,
-      -                gotos: row.gotos,
-      -                reduces,
-      -            },
-      -        );
-      -    }
-      -
-      -    stage_4_table
-      +    // This stage used to convert reduce items to production IDs.
-      +    // This is now done in stage_3 for LR(1). So this is a pass-through.
-      +    stage_3_table
-       }
-       
-       fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-      @@ -612,8 +578,18 @@         let mut gotos = BTreeMap::new();
-               for (nonterminal, next_item_set) in row.gotos {
-                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-      -            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
-      -            if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
-      +
-      +            let is_accept_state = next_item_set.iter().any(|item| {
-      +                item.production.lhs == productions[start_production_id].lhs &&
-      +                item.dot_position == item.production.rhs.len() &&
-      +                item.lookahead.is_none()
-      +            });
-      +
-      +            let goto = if is_accept_state {
-      +                Goto::Accept
-      +            } else {
-      +                Goto::State(*item_set_map.get_by_left(&next_item_set).expect("GOTO to an unknown state"))
-      +            };
-                   gotos.insert(non_terminal_id, goto);
-               }
-       
-      @@ -625,11 +601,14 @@         });
-           }
-       
-      +    let first_sets = compute_first_sets(productions);
-      +    let nullable_nonterminals = compute_epsilon_nonterminals(productions);
-           let initial_item = Item {
-               production: productions[start_production_id].clone(),
-               dot_position: 0,
-      +        lookahead: None,
-           };
-      -    let initial_item_set = BTreeSet::from([initial_item]);
-      +    let initial_item_set = compute_closure(&BTreeSet::from([initial_item]), productions, &first_sets, &nullable_nonterminals);
-           let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-       
-           (stage_7_table, item_set_map, start_state_id)
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-      --- original version of src/glr/tests.rs+++ current version of src/glr/tests.rs@@ -987,19 +987,14 @@ 
-           // Assertions for State 0 (start state)
-           assert!(explanation.contains(&format!("State {}:", start_state.0)));
-      -    assert!(explanation.contains("Core Items:"));
-      -    assert!(explanation.contains("S -> • A '$'"));
-      -    assert!(explanation.contains("Closure-only Items:"));
-      -    assert!(explanation.contains("A -> • A 'a'"));
-      -    assert!(explanation.contains("A -> • 'b'"));
-      +    assert!(explanation.contains("Items:"));
-      +    assert!(explanation.contains("[S -> • A '$', $]"));
-           assert!(explanation.contains("On 'b': Shift to State"));
-       
-           // Assertions for State after shifting 'b'
-           assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
-      -    assert!(explanation.contains("Core Items:"));
-      -    assert!(explanation.contains("A -> 'b' •"));
-      -    assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-      -    assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
-      +    assert!(explanation.contains("[A -> 'b' •, $]"));
-      +    assert!(explanation.contains("On '$': Reduce by rule"));
-       }
-       
-       #[test]
-      @@ -1040,6 +1035,51 @@     assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
-       }
-       // --- Notes on Limitations Not Easily Tested Here ---
-      +
-      +#[test]
-      +fn test_lr1_not_lalr1_grammar() {
-      +    // This grammar is a classic example of a grammar that is LR(1) but not LALR(1).
-      +    // An LALR(1) parser would merge states and create a reduce/reduce conflict.
-      +    // A canonical LR(1) parser should handle it without conflicts.
-      +    // S' -> S $
-      +    // S  -> a E c | a F d | b F c | b E d
-      +    // E  -> e
-      +    // F  -> e
-      +    let productions = vec![
-      +        prod("S'", vec![nt("S"), t("$")]), // Start rule
-      +        prod("S", vec![t("a"), nt("E"), t("c")]),
-      +        prod("S", vec![t("a"), nt("F"), t("d")]),
-      +        prod("S", vec![t("b"), nt("F"), t("c")]),
-      +        prod("S", vec![t("b"), nt("E"), t("d")]),
-      +        prod("E", vec![t("e")]),
-      +        prod("F", vec![t("e")]),
-      +    ];
-      +
-      +    // Validation should pass
-      +    assert!(analyze::validate(&productions).is_ok());
-      +
-      +    // Parser generation should succeed without conflicts for an LR(1) generator
-      +    let parser = generate_glr_parser(&productions, 0, None);
-      +    println!("Parser: {}", parser); // Useful for debugging the generated table
-      +
-      +    // Check stats to be sure there are no conflicts
-      +    let stats = stats::get_stats(&parser);
-      +    assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
-      +    assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
-      +
-      +    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-      +
-      +    let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
-      +
-      +    for (input, expected_match) in test_cases {
-      +        let tokens = tokenize(&parser, input);
-      +        let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
-      +        state.parse(&tokens);
-      +        state.step(eof);
-      +        assert_eq!(state.is_ok(), expected_match, "Parse check failed for LR(1)-specific input: '{}'", input);
-      +    }
-      +}
-      +
-       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
-       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
-       //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
-
-      ```
-    metadata:
-  - user: Is this a LR(1) parser now?
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
     metadata:
 ...
