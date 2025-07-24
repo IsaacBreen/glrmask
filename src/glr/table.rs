@@ -217,51 +217,31 @@ impl JSONConvertible for Stage7Row {
 }
 
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Goto {
-    State(StateID),
-    Accept,
-    Split(StateID)
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Goto {
+    pub state_id: Option<StateID>,
+    pub accept: bool,
 }
 
 impl JSONConvertible for Goto {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        match self {
-            Goto::State(state_id) => {
-                obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
-                obj.insert("value".to_string(), state_id.to_json());
-            }
-            Goto::Accept => {
-                obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
-                // No value needed for Accept
-            }
-            Goto::Split(state_id) => {
-                obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                obj.insert("value".to_string(), state_id.to_json());
-            }
-        }
+        obj.insert("state_id".to_string(), self.state_id.to_json());
+        obj.insert("accept".to_string(), self.accept.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj.remove("variant")
-                    .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
-                    .and_then(String::from_json)?;
-                match variant.as_str() {
-                    "State" => {
-                        let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
-                        StateID::from_json(value_node).map(Goto::State)
-                    }
-                    "Accept" => Ok(Goto::Accept),
-                    "Split" => {
-                        let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::Split".to_string())?;
-                        StateID::from_json(value_node).map(Goto::Split)
-                    }
-                    _ => Err(format!("Unknown variant '{}' for Goto", variant)),
-                }
-            }
+            JSONNode::Object(mut obj) => Ok(Goto {
+                state_id: obj
+                    .remove("state_id")
+                    .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
+                    .and_then(Option::<StateID>::from_json)?,
+                accept: obj
+                    .remove("accept")
+                    .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
+                    .and_then(bool::from_json)?,
+            }),
             _ => Err("Expected JSONNode::Object for Goto".to_string()),
         }
     }
@@ -652,7 +632,10 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-            let goto = Goto::State(*item_set_map.get_by_left(&next_item_set).unwrap());
+            let goto = Goto {
+                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                accept: false,
+            };
             gotos.insert(non_terminal_id, goto);
         }
 
@@ -676,19 +659,18 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
     match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
         std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(Goto::Accept);
+            entry.insert(Goto {
+                state_id: None,
+                accept: true,
+            });
         }
         std::collections::btree_map::Entry::Occupied(mut entry) => {
             let goto = entry.get_mut();
-            match goto {
-                Goto::State(state_id) => {
-                    *goto = Goto::Split(*state_id);
-                }
-                Goto::Accept | Goto::Split(_) => {
-                    // We can use the `goto` reference here for the panic message.
-                    panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                }
+            if goto.accept {
+                // We can use the `goto` reference here for the panic message.
+                panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
             }
+            goto.accept = true;
         }
     }
 

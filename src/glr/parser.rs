@@ -456,10 +456,16 @@ impl GLRParser {
                     for (non_terminal_id, goto) in sorted_gotos {
                         let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
                         write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
-                        match goto {
-                            Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
-                            Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
-                            Goto::Split(next_state_id) => writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap(),
+                        if let Some(next_state_id) = goto.state_id {
+                            if goto.accept {
+                                writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                            } else {
+                                writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                            }
+                        } else if goto.accept {
+                            writeln!(&mut result, "Accept").unwrap();
+                        } else {
+                            writeln!(&mut result, "No-op (should not happen)").unwrap();
                         }
                     }
                 }
@@ -575,12 +581,18 @@ impl Display for GLRParser {
             }
 
             writeln!(f, "    Gotos:")?;
-            for (&non_terminal_id, &next_state_id) in &row.gotos {
+            for (&non_terminal_id, goto) in &row.gotos {
                 let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
-                let goto_str = match &next_state_id {
-                    Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
-                    Goto::Accept => "accept".to_string(),
-                    Goto::Split(state_id_val) => format!("{} or accept", state_id_val.0),
+                let goto_str = if let Some(state_id_val) = goto.state_id {
+                    if goto.accept {
+                        format!("{} or accept", state_id_val.0)
+                    } else {
+                        format!("{}", state_id_val.0)
+                    }
+                } else if goto.accept {
+                    "accept".to_string()
+                } else {
+                    "no-op".to_string()
                 };
                 writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
             }
@@ -732,23 +744,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
                     format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
                 );
-                match goto {
-                    Goto::State(goto_state_id) => {
-                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                        out.push(new_gss_node);
-                    }
-                    Goto::Accept => {
-                        // Mark successful acceptance
-                        self.accepted = true;
-                    }
-                    Goto::Split(goto_state_id) => {
+
+                if goto.accept {
+                    self.accepted = true;
+                }
+
+                if let Some(goto_state_id) = goto.state_id {
+                    if goto.accept {
                         crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                        out.push(new_gss_node);
-                        // Also mark acceptance
-                        self.accepted = true;
+                    } else {
+                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                     }
+                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                        out.push(new_gss_node);
                 }
             }
         }
