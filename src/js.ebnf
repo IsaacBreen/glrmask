@@ -1,8 +1,7 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 !ignore IGNORE;
 
-program ::= statement_list? EOF ;
-EOF ::= '' ;
+program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
 IGNORE ::= WS | COMMENT ;
