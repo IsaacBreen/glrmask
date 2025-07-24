@@ -446,8 +446,6 @@ fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map:
     // ie it removes the None entries, which represent EOF.
     // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
     // merging with any existing production ID sets in the reduces map.
-    let _ = productions; // Currently unused – kept for potential future needs / signature consistency
-
     let mut stage_5_table = BTreeMap::new();
 
     for (item_set, row) in stage_4_table {
