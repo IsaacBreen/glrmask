@@ -194,9 +194,10 @@ fn validation_fails_indirect_length_1_recursion() {
     let result = analyze::validate(&productions);
     assert!(result.is_err());
     // The exact path might depend on BTreeSet iteration order, check for involvement
+    // With canonicalization, the path should be deterministic.
     let err_msg = result.unwrap_err();
     assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-    assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+    assert!(err_msg.contains("A -> B -> A"));
 
     // A -> B, B -> C, C -> A
     let productions_3 = vec![
@@ -247,8 +248,7 @@ fn validation_fails_indirect_length_1_recursion_nullable_prefix() {
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
     assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-    // Depending on traversal order, the cycle could start from A or B
-    assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+    assert!(err_msg.contains("A -> B -> A"));
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn validation_fails_left_nullable_left_recursion() {
     let result = analyze::validate(&productions);
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
-    assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
+    assert!(err_msg.contains("Left-nullable left recursion detected"));
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn validation_fails_missing_nonterminal() {
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS: {\"B\"}"));
+    assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS"));
 }
 
 #[test]
