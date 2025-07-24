@@ -489,9 +489,6 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
         for (terminal, action) in &row.shifts_and_reduces {
-            if *terminal == Terminal::EOF {
-                continue; // Skip EOF terminal
-            }
             let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
             let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 

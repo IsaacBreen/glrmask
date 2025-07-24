@@ -9,9 +9,75 @@ use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
 fn create_simple_parser() -> GLRParser {
-    // S -> A $
-    // A -> A a
-    // A -> b
+// 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+//    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+//    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+#[test]
+fn test_repetition_no_eof() {
+    // Grammar: S -> S 'a' | 'a'
+    // This grammar defines a sequence of one or more 'a's.
+    // We will parse inputs without a final EOF token and check the state.
+    let productions = vec![
+        prod("S", vec![nt("S"), t("a")]), // Start rule is recursive
+        prod("S", vec![t("a")]),
+    ];
+
+    // The start production is the first one, index 0.
+    // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
+    // but the grammar itself and the inputs we test will not use an EOF/dollar token.
+    let parser = generate_glr_parser(&productions, 0, None);
+    println!("Parser: {}", parser);
+
+    let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+    // Test case 1: "a"
+    let tokens1 = vec![a_token];
+    let mut state1 = parser.init_glr_parser(None);
+    state1.parse(&tokens1);
+    // After parsing "a", the parser should be in a valid state, having recognized an 'S'.
+    // The active state should contain stacks that have successfully parsed 'S'.
+    assert!(state1.is_ok(), "Parse should be ok after 'a'");
+
+    // Test case 2: "aaa"
+    let tokens2 = vec![a_token, a_token, a_token];
+    let mut state2 = parser.init_glr_parser(None);
+    state2.parse(&tokens2);
+    assert!(state2.is_ok(), "Parse should be ok after 'aaa'");
+
+    // Test case 3: "" (empty)
+    let tokens3 = vec![];
+    let mut state3 = parser.init_glr_parser(None);
+    state3.parse(&tokens3);
+    // The initial state is ok because it's ready to parse.
+    // After parsing nothing, it's still in that same ready state.
+    assert!(state3.is_ok(), "State should still be ok after parsing empty input");
+    // However, if we were to check for *acceptance*, it would fail because S is not nullable.
+    // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+
+    // Test case 4: "b" (invalid token)
+    // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
+    let productions_with_b = vec![
+        prod("S", vec![nt("S"), t("a")]),
+        prod("S", vec![t("a")]),
+        prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+    ];
+    let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+    let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
+    let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+
+    let tokens4 = vec![b_token];
+    let mut state4 = parser_with_b.init_glr_parser(None);
+    state4.parse(&tokens4);
+    // After parsing 'b', there should be no valid active states.
+    assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
+
+    // Test case 5: "ab"
+    let tokens5 = vec![a_token_b, b_token];
+    let mut state5 = parser_with_b.init_glr_parser(None);
+    state5.parse(&tokens5);
+    assert!(!state5.is_ok(), "Parse should fail for 'ab'");
+}
     // This grammar is left-recursive but does NOT have length-1 cycles.
     let productions = vec![
         prod("S", vec![nt("A"), t("$")]), // Start rule

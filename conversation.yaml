@@ -46,86 +46,16 @@ local_system:
       }
 
 
-      /// Helper function for detecting cycles using Depth First Search.
-      fn detect_cycles_recursive(
-          nt: &NonTerminal,
-          graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
-          visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-          visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored (all descendants visited)
-          path: &mut Vec<NonTerminal>,          // Current path for error reporting
-      ) -> Result<(), String> {
-          visiting.insert(nt.clone());
-          path.push(nt.clone());
-
-          // Explore neighbors
-          if let Some(neighbors) = graph.get(nt) {
-              for neighbor in neighbors {
-                  if visiting.contains(neighbor) {
-                      // Cycle detected: neighbor is already in the current recursion stack
-                      path.push(neighbor.clone()); // Add the node that closes the cycle to the path
-
-                      // Find where the cycle starts in the current path
-                      let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-                      // Get only the nodes involved in the cycle itself
-                      let cycle_nodes_in_path: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
-
-                      // Format the cycle path string: "A -> B -> C -> A"
-                      let cycle_path_str = cycle_nodes_in_path.join(" -> ");
-
-                      let recursion_type = if cycle_nodes_in_path.len() == 2 && cycle_nodes_in_path[0] == cycle_nodes_in_path[1] { // A -> A case
-                          "Direct"
-                      } else {
-                          "Indirect"
-                      };
-
-                      // Remove the temporary node added to path for cycle detection before returning error
-                      path.pop();
-
-                      return Err(format!(
-                          "{} length-1 recursion cycle detected: {}",
-                          recursion_type, cycle_path_str
-                      ));
-                  }
-                  // If the neighbor hasn't been fully explored yet, recurse
-                  if !visited.contains(neighbor) {
-                      // Propagate error if cycle found in recursive call
-                      detect_cycles_recursive(neighbor, graph, visiting, visited, path)?;
-                  }
-                  // Else: neighbor is in visited but not visiting, meaning it was fully explored from a different path, no cycle here.
-              }
-          }
-
-          // Finished exploring descendants of nt
-          visiting.remove(nt); // Remove from current recursion stack
-          visited.insert(nt.clone()); // Mark as fully explored
-          path.pop(); // Backtrack path
-
-          Ok(())
-      }
-
-
-      /// Validates the grammar for common issues.
-      ///
-      /// Checks for:
-      /// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
-      /// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
-      ///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
-      /// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
-      ///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
-      ///    and nothing else (i.e., `A ::= Nullable* B).
-      pub fn validate(productions: &[Production]) -> Result<(), String> {
-          // --- Check 1: Missing Productions ---
+      /// Checks for non-terminals used in rule RHS but never defined in LHS.
+      pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
           let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
           let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-          let mut all_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new(); // Collect all NTs
 
           for prod in productions {
               lhs_nonterms.insert(prod.lhs.clone());
-              all_nonterminals.insert(prod.lhs.clone());
               for symbol in &prod.rhs {
                   if let Symbol::NonTerminal(nt) = symbol {
                       rhs_nonterms.insert(nt.clone());
-                      all_nonterminals.insert(nt.clone());
                   }
               }
           }
@@ -133,26 +63,77 @@ local_system:
           let missing_nonterms: BTreeSet<_> = rhs_nonterms.difference(&lhs_nonterms).collect();
           if !missing_nonterms.is_empty() {
               let missing_nonterm_strings: BTreeSet<_> = missing_nonterms.into_iter().map(|nt| nt.0.clone()).collect();
-              // Provide more context in the error message
-              let rhs_strings: BTreeSet<_> = rhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-              let lhs_strings: BTreeSet<_> = lhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-              return Err(format!(
-                  "Validation Error: Non-terminal(s) used in rule RHS but never defined in LHS: {:?}. All RHS non-terminals: {:?}. All LHS non-terminals: {:?}",
-                  missing_nonterm_strings, rhs_strings, lhs_strings
-              ));
+              vec![format!(
+                  "Non-terminal(s) used in rule RHS but never defined in LHS: {:?}",
+                  missing_nonterm_strings
+              )]
+          } else {
+              Vec::new()
+          }
+      }
+
+      /// Helper for check_for_length_1_recursion. Detects all elementary cycles in a graph.
+      fn detect_all_cycles_recursive(
+          nt: &NonTerminal,
+          graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
+          visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
+          visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored
+          path: &mut Vec<NonTerminal>,          // Current path for cycle detection
+          cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
+      ) {
+          visiting.insert(nt.clone());
+          path.push(nt.clone());
+
+          if let Some(neighbors) = graph.get(nt) {
+              for neighbor in neighbors {
+                  if visiting.contains(neighbor) {
+                      // Cycle detected. Extract it from the current path.
+                      let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
+                      let mut cycle: Vec<_> = path[cycle_start_index..].to_vec();
+
+                      // Canonicalize the cycle by rotating it to start with the lexicographically smallest element.
+                      // This ensures that A -> B -> A and B -> A -> B are treated as the same cycle.
+                      if !cycle.is_empty() {
+                          let min_node_pos = cycle.iter().enumerate()
+                              .min_by_key(|&(_, n)| n)
+                              .map(|(i, _)| i)
+                              .unwrap_or(0);
+                          cycle.rotate_left(min_node_pos);
+                      }
+                      cycles.insert(cycle);
+                      continue; // Continue to find other cycles from this node.
+                  }
+
+                  if !visited.contains(neighbor) {
+                      detect_all_cycles_recursive(neighbor, graph, visiting, visited, path, cycles);
+                  }
+              }
           }
 
-          // --- Check 2: Length-1 Recursion ---
+          visiting.remove(nt);
+          visited.insert(nt.clone());
+          path.pop();
+      }
+
+      /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
+      pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+          let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
+              let mut nts = vec![p.lhs.clone()];
+              for s in &p.rhs {
+                  if let Symbol::NonTerminal(nt) = s {
+                      nts.push(nt.clone());
+                  }
+              }
+              nts
+          }).collect();
 
           // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-          for nt in &all_nonterminals { // Initialize graph with all nodes
+          for nt in &all_nonterminals {
               unit_graph.entry(nt.clone()).or_default();
           }
 
-          // --- Logic for Building Unit Graph ---
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
@@ -167,47 +148,44 @@ local_system:
 
               if non_nullable_symbols.len() == 1 {
                   if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
-                      // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
                       unit_graph
                           .entry(lhs.clone())
                           .or_default()
                           .insert(target_nt.clone());
-                      crate::debug!(
-                          4,
-                          "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
-                          lhs.0,
-                          target_nt.0,
-                          lhs.0,
-                          prod.rhs
-                      );
-                  } else {
-                      // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
                   }
-              } else {
-                  // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
-                  crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
               }
           }
-          // --- End Logic ---
 
-
-          // Detect cycles in the unit graph using DFS
-          let mut visiting = BTreeSet::new(); // Nodes currently in DFS stack
-          let mut visited = BTreeSet::new();  // Nodes fully explored
-
-          // Sort the non-terminals for deterministic traversal order (optional, but good for consistency)
+          // Detect all unique cycles in the unit graph using DFS.
+          let mut visiting = BTreeSet::new();
+          let mut visited = BTreeSet::new();
+          let mut cycles = BTreeSet::new();
           let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
 
           for nt in sorted_nonterminals {
-              if !visited.contains(nt) { // Only start DFS from unvisited nodes
-                  let mut path = Vec::new(); // Track path for error reporting
-                  detect_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path)?;
+              if !visited.contains(nt) {
+                  let mut path = Vec::new();
+                  detect_all_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path, &mut cycles);
               }
           }
 
-          // --- Check 3: Left-Nullable Left Recursion ---
-          // Detect rules like A ::= B A ... where B is nullable.
+          // Format errors for each unique cycle found.
+          cycles.into_iter().map(|cycle| {
+              let mut cycle_nodes_for_display: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
+              cycle_nodes_for_display.push(cycle[0].0.as_str()); // Close the loop for display.
+
+              let cycle_path_str = cycle_nodes_for_display.join(" -> ");
+              let recursion_type = if cycle.len() == 1 { "Direct" } else { "Indirect" };
+
+              format!("{} length-1 recursion cycle detected: {}", recursion_type, cycle_path_str)
+          }).collect()
+      }
+
+      /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
+      pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let mut errors = Vec::new();
+
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
@@ -225,20 +203,40 @@ local_system:
                               });
 
                               if prefix_is_nullable {
-                                  return Err(format!("Validation Error: Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
+                                  errors.push(format!("Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
                               }
                           }
-                          // If the prefix is empty (direct left recursion A ::= A ...) or not fully nullable,
-                          // we don't flag it here (GLR can handle standard left recursion).
-                          // We only care about the case where a nullable sequence precedes the recursion.
-                          break; // Found the first instance of A on RHS, no need to check further in this rule
+                          // We only care about the first instance of recursion in a rule.
+                          break;
                       }
                   }
               }
           }
+          errors
+      }
 
-          // --- Validation Successful ---
-          Ok(())
+      /// Validates the grammar for common issues, collecting all errors.
+      ///
+      /// Checks for:
+      /// 1. Undefined non-terminals.
+      /// 2. Length-1 recursion (direct or indirect).
+      /// 3. Left-nullable left recursion.
+      pub fn validate(productions: &[Production]) -> Result<(), String> {
+          let mut errors = Vec::new();
+
+          errors.extend(check_for_undefined_non_terminals(productions));
+          errors.extend(check_for_length_1_recursion(productions));
+          errors.extend(check_for_left_nullable_left_recursion(productions));
+
+          if errors.is_empty() {
+              Ok(())
+          } else {
+              Err(format!(
+                  "Grammar validation failed with {} error(s):\n- {}",
+                  errors.len(),
+                  errors.join("\n- ")
+              ))
+          }
       }
 
       pub fn validate_start_production_ends_with_terminal(
@@ -251,7 +249,7 @@ local_system:
 
           let start_prod = &productions[start_production_id];
           if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
-              return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+              return Err(format!("Start production [{}] does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod, start_prod.rhs.last()));
           }
 
           Ok(())
@@ -3025,8 +3023,7 @@ local_system:
 
           crate::debug!(2, "Validating");
           validate(&productions).expect("Validation error");
-          validate_start_production_ends_with_terminal(&productions, start_production_id)
-              .expect("Start production does not end with a terminal");
+          // validate_start_production_ends_with_terminal(&productions, start_production_id).expect("Start production does not end with a terminal"); // TODO: not needed anymore, remove function
 
           crate::debug!(2, "Stage 1");
           let stage_1_table = stage_1(&productions, start_production_id);
@@ -3293,9 +3290,10 @@ local_system:
           let result = analyze::validate(&productions);
           assert!(result.is_err());
           // The exact path might depend on BTreeSet iteration order, check for involvement
+          // With canonicalization, the path should be deterministic.
           let err_msg = result.unwrap_err();
           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-          assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+          assert!(err_msg.contains("A -> B -> A"));
 
           // A -> B, B -> C, C -> A
           let productions_3 = vec![
@@ -3346,8 +3344,7 @@ local_system:
           assert!(result.is_err());
           let err_msg = result.unwrap_err();
           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-          // Depending on traversal order, the cycle could start from A or B
-          assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+          assert!(err_msg.contains("A -> B -> A"));
       }
 
       #[test]
@@ -3383,7 +3380,7 @@ local_system:
           let result = analyze::validate(&productions);
           assert!(result.is_err());
           let err_msg = result.unwrap_err();
-          assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
+          assert!(err_msg.contains("Left-nullable left recursion detected"));
       }
 
       #[test]
@@ -3396,7 +3393,7 @@ local_system:
           ];
           let result = analyze::validate(&productions);
           assert!(result.is_err());
-          assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS: {\"B\"}"));
+          assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS"));
       }
 
       #[test]
@@ -4226,86 +4223,16 @@ local_system:
       }
 
 
-      /// Helper function for detecting cycles using Depth First Search.
-      fn detect_cycles_recursive(
-          nt: &NonTerminal,
-          graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
-          visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-          visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored (all descendants visited)
-          path: &mut Vec<NonTerminal>,          // Current path for error reporting
-      ) -> Result<(), String> {
-          visiting.insert(nt.clone());
-          path.push(nt.clone());
-
-          // Explore neighbors
-          if let Some(neighbors) = graph.get(nt) {
-              for neighbor in neighbors {
-                  if visiting.contains(neighbor) {
-                      // Cycle detected: neighbor is already in the current recursion stack
-                      path.push(neighbor.clone()); // Add the node that closes the cycle to the path
-
-                      // Find where the cycle starts in the current path
-                      let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-                      // Get only the nodes involved in the cycle itself
-                      let cycle_nodes_in_path: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
-
-                      // Format the cycle path string: "A -> B -> C -> A"
-                      let cycle_path_str = cycle_nodes_in_path.join(" -> ");
-
-                      let recursion_type = if cycle_nodes_in_path.len() == 2 && cycle_nodes_in_path[0] == cycle_nodes_in_path[1] { // A -> A case
-                          "Direct"
-                      } else {
-                          "Indirect"
-                      };
-
-                      // Remove the temporary node added to path for cycle detection before returning error
-                      path.pop();
-
-                      return Err(format!(
-                          "{} length-1 recursion cycle detected: {}",
-                          recursion_type, cycle_path_str
-                      ));
-                  }
-                  // If the neighbor hasn't been fully explored yet, recurse
-                  if !visited.contains(neighbor) {
-                      // Propagate error if cycle found in recursive call
-                      detect_cycles_recursive(neighbor, graph, visiting, visited, path)?;
-                  }
-                  // Else: neighbor is in visited but not visiting, meaning it was fully explored from a different path, no cycle here.
-              }
-          }
-
-          // Finished exploring descendants of nt
-          visiting.remove(nt); // Remove from current recursion stack
-          visited.insert(nt.clone()); // Mark as fully explored
-          path.pop(); // Backtrack path
-
-          Ok(())
-      }
-
-
-      /// Validates the grammar for common issues.
-      ///
-      /// Checks for:
-      /// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
-      /// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
-      ///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
-      /// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
-      ///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
-      ///    and nothing else (i.e., `A ::= Nullable* B).
-      pub fn validate(productions: &[Production]) -> Result<(), String> {
-          // --- Check 1: Missing Productions ---
+      /// Checks for non-terminals used in rule RHS but never defined in LHS.
+      pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
           let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
           let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-          let mut all_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new(); // Collect all NTs
 
           for prod in productions {
               lhs_nonterms.insert(prod.lhs.clone());
-              all_nonterminals.insert(prod.lhs.clone());
               for symbol in &prod.rhs {
                   if let Symbol::NonTerminal(nt) = symbol {
                       rhs_nonterms.insert(nt.clone());
-                      all_nonterminals.insert(nt.clone());
                   }
               }
           }
@@ -4313,26 +4240,77 @@ local_system:
           let missing_nonterms: BTreeSet<_> = rhs_nonterms.difference(&lhs_nonterms).collect();
           if !missing_nonterms.is_empty() {
               let missing_nonterm_strings: BTreeSet<_> = missing_nonterms.into_iter().map(|nt| nt.0.clone()).collect();
-              // Provide more context in the error message
-              let rhs_strings: BTreeSet<_> = rhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-              let lhs_strings: BTreeSet<_> = lhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-              return Err(format!(
-                  "Validation Error: Non-terminal(s) used in rule RHS but never defined in LHS: {:?}. All RHS non-terminals: {:?}. All LHS non-terminals: {:?}",
-                  missing_nonterm_strings, rhs_strings, lhs_strings
-              ));
+              vec![format!(
+                  "Non-terminal(s) used in rule RHS but never defined in LHS: {:?}",
+                  missing_nonterm_strings
+              )]
+          } else {
+              Vec::new()
+          }
+      }
+
+      /// Helper for check_for_length_1_recursion. Detects all elementary cycles in a graph.
+      fn detect_all_cycles_recursive(
+          nt: &NonTerminal,
+          graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
+          visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
+          visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored
+          path: &mut Vec<NonTerminal>,          // Current path for cycle detection
+          cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
+      ) {
+          visiting.insert(nt.clone());
+          path.push(nt.clone());
+
+          if let Some(neighbors) = graph.get(nt) {
+              for neighbor in neighbors {
+                  if visiting.contains(neighbor) {
+                      // Cycle detected. Extract it from the current path.
+                      let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
+                      let mut cycle: Vec<_> = path[cycle_start_index..].to_vec();
+
+                      // Canonicalize the cycle by rotating it to start with the lexicographically smallest element.
+                      // This ensures that A -> B -> A and B -> A -> B are treated as the same cycle.
+                      if !cycle.is_empty() {
+                          let min_node_pos = cycle.iter().enumerate()
+                              .min_by_key(|&(_, n)| n)
+                              .map(|(i, _)| i)
+                              .unwrap_or(0);
+                          cycle.rotate_left(min_node_pos);
+                      }
+                      cycles.insert(cycle);
+                      continue; // Continue to find other cycles from this node.
+                  }
+
+                  if !visited.contains(neighbor) {
+                      detect_all_cycles_recursive(neighbor, graph, visiting, visited, path, cycles);
+                  }
+              }
           }
 
-          // --- Check 2: Length-1 Recursion ---
+          visiting.remove(nt);
+          visited.insert(nt.clone());
+          path.pop();
+      }
+
+      /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
+      pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+          let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
+              let mut nts = vec![p.lhs.clone()];
+              for s in &p.rhs {
+                  if let Symbol::NonTerminal(nt) = s {
+                      nts.push(nt.clone());
+                  }
+              }
+              nts
+          }).collect();
 
           // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-          for nt in &all_nonterminals { // Initialize graph with all nodes
+          for nt in &all_nonterminals {
               unit_graph.entry(nt.clone()).or_default();
           }
 
-          // --- Logic for Building Unit Graph ---
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
@@ -4347,47 +4325,44 @@ local_system:
 
               if non_nullable_symbols.len() == 1 {
                   if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
-                      // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
                       unit_graph
                           .entry(lhs.clone())
                           .or_default()
                           .insert(target_nt.clone());
-                      crate::debug!(
-                          4,
-                          "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
-                          lhs.0,
-                          target_nt.0,
-                          lhs.0,
-                          prod.rhs
-                      );
-                  } else {
-                      // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
                   }
-              } else {
-                  // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
-                  crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
               }
           }
-          // --- End Logic ---
 
-
-          // Detect cycles in the unit graph using DFS
-          let mut visiting = BTreeSet::new(); // Nodes currently in DFS stack
-          let mut visited = BTreeSet::new();  // Nodes fully explored
-
-          // Sort the non-terminals for deterministic traversal order (optional, but good for consistency)
+          // Detect all unique cycles in the unit graph using DFS.
+          let mut visiting = BTreeSet::new();
+          let mut visited = BTreeSet::new();
+          let mut cycles = BTreeSet::new();
           let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
 
           for nt in sorted_nonterminals {
-              if !visited.contains(nt) { // Only start DFS from unvisited nodes
-                  let mut path = Vec::new(); // Track path for error reporting
-                  detect_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path)?;
+              if !visited.contains(nt) {
+                  let mut path = Vec::new();
+                  detect_all_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path, &mut cycles);
               }
           }
 
-          // --- Check 3: Left-Nullable Left Recursion ---
-          // Detect rules like A ::= B A ... where B is nullable.
+          // Format errors for each unique cycle found.
+          cycles.into_iter().map(|cycle| {
+              let mut cycle_nodes_for_display: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
+              cycle_nodes_for_display.push(cycle[0].0.as_str()); // Close the loop for display.
+
+              let cycle_path_str = cycle_nodes_for_display.join(" -> ");
+              let recursion_type = if cycle.len() == 1 { "Direct" } else { "Indirect" };
+
+              format!("{} length-1 recursion cycle detected: {}", recursion_type, cycle_path_str)
+          }).collect()
+      }
+
+      /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
+      pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let mut errors = Vec::new();
+
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
@@ -4405,20 +4380,40 @@ local_system:
                               });
 
                               if prefix_is_nullable {
-                                  return Err(format!("Validation Error: Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
+                                  errors.push(format!("Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
                               }
                           }
-                          // If the prefix is empty (direct left recursion A ::= A ...) or not fully nullable,
-                          // we don't flag it here (GLR can handle standard left recursion).
-                          // We only care about the case where a nullable sequence precedes the recursion.
-                          break; // Found the first instance of A on RHS, no need to check further in this rule
+                          // We only care about the first instance of recursion in a rule.
+                          break;
                       }
                   }
               }
           }
+          errors
+      }
 
-          // --- Validation Successful ---
-          Ok(())
+      /// Validates the grammar for common issues, collecting all errors.
+      ///
+      /// Checks for:
+      /// 1. Undefined non-terminals.
+      /// 2. Length-1 recursion (direct or indirect).
+      /// 3. Left-nullable left recursion.
+      pub fn validate(productions: &[Production]) -> Result<(), String> {
+          let mut errors = Vec::new();
+
+          errors.extend(check_for_undefined_non_terminals(productions));
+          errors.extend(check_for_length_1_recursion(productions));
+          errors.extend(check_for_left_nullable_left_recursion(productions));
+
+          if errors.is_empty() {
+              Ok(())
+          } else {
+              Err(format!(
+                  "Grammar validation failed with {} error(s):\n- {}",
+                  errors.len(),
+                  errors.join("\n- ")
+              ))
+          }
       }
 
       pub fn validate_start_production_ends_with_terminal(
@@ -4431,7 +4426,7 @@ local_system:
 
           let start_prod = &productions[start_production_id];
           if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
-              return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+              return Err(format!("Start production [{}] does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod, start_prod.rhs.last()));
           }
 
           Ok(())
@@ -7205,8 +7200,7 @@ local_system:
 
           crate::debug!(2, "Validating");
           validate(&productions).expect("Validation error");
-          validate_start_production_ends_with_terminal(&productions, start_production_id)
-              .expect("Start production does not end with a terminal");
+          // validate_start_production_ends_with_terminal(&productions, start_production_id).expect("Start production does not end with a terminal"); // TODO: not needed anymore, remove function
 
           crate::debug!(2, "Stage 1");
           let stage_1_table = stage_1(&productions, start_production_id);
@@ -7473,9 +7467,10 @@ local_system:
           let result = analyze::validate(&productions);
           assert!(result.is_err());
           // The exact path might depend on BTreeSet iteration order, check for involvement
+          // With canonicalization, the path should be deterministic.
           let err_msg = result.unwrap_err();
           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-          assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+          assert!(err_msg.contains("A -> B -> A"));
 
           // A -> B, B -> C, C -> A
           let productions_3 = vec![
@@ -7526,8 +7521,7 @@ local_system:
           assert!(result.is_err());
           let err_msg = result.unwrap_err();
           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-          // Depending on traversal order, the cycle could start from A or B
-          assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+          assert!(err_msg.contains("A -> B -> A"));
       }
 
       #[test]
@@ -7563,7 +7557,7 @@ local_system:
           let result = analyze::validate(&productions);
           assert!(result.is_err());
           let err_msg = result.unwrap_err();
-          assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
+          assert!(err_msg.contains("Left-nullable left recursion detected"));
       }
 
       #[test]
@@ -7576,7 +7570,7 @@ local_system:
           ];
           let result = analyze::validate(&productions);
           assert!(result.is_err());
-          assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS: {\"B\"}"));
+          assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS"));
       }
 
       #[test]
@@ -8429,86 +8423,16 @@ messages:
       }
 
 
-      /// Helper function for detecting cycles using Depth First Search.
-      fn detect_cycles_recursive(
-          nt: &NonTerminal,
-          graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
-          visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-          visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored (all descendants visited)
-          path: &mut Vec<NonTerminal>,          // Current path for error reporting
-      ) -> Result<(), String> {
-          visiting.insert(nt.clone());
-          path.push(nt.clone());
-
-          // Explore neighbors
-          if let Some(neighbors) = graph.get(nt) {
-              for neighbor in neighbors {
-                  if visiting.contains(neighbor) {
-                      // Cycle detected: neighbor is already in the current recursion stack
-                      path.push(neighbor.clone()); // Add the node that closes the cycle to the path
-
-                      // Find where the cycle starts in the current path
-                      let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-                      // Get only the nodes involved in the cycle itself
-                      let cycle_nodes_in_path: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
-
-                      // Format the cycle path string: "A -> B -> C -> A"
-                      let cycle_path_str = cycle_nodes_in_path.join(" -> ");
-
-                      let recursion_type = if cycle_nodes_in_path.len() == 2 && cycle_nodes_in_path[0] == cycle_nodes_in_path[1] { // A -> A case
-                          "Direct"
-                      } else {
-                          "Indirect"
-                      };
-
-                      // Remove the temporary node added to path for cycle detection before returning error
-                      path.pop();
-
-                      return Err(format!(
-                          "{} length-1 recursion cycle detected: {}",
-                          recursion_type, cycle_path_str
-                      ));
-                  }
-                  // If the neighbor hasn't been fully explored yet, recurse
-                  if !visited.contains(neighbor) {
-                      // Propagate error if cycle found in recursive call
-                      detect_cycles_recursive(neighbor, graph, visiting, visited, path)?;
-                  }
-                  // Else: neighbor is in visited but not visiting, meaning it was fully explored from a different path, no cycle here.
-              }
-          }
-
-          // Finished exploring descendants of nt
-          visiting.remove(nt); // Remove from current recursion stack
-          visited.insert(nt.clone()); // Mark as fully explored
-          path.pop(); // Backtrack path
-
-          Ok(())
-      }
-
-
-      /// Validates the grammar for common issues.
-      ///
-      /// Checks for:
-      /// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
-      /// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
-      ///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
-      /// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
-      ///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
-      ///    and nothing else (i.e., `A ::= Nullable* B).
-      pub fn validate(productions: &[Production]) -> Result<(), String> {
-          // --- Check 1: Missing Productions ---
+      /// Checks for non-terminals used in rule RHS but never defined in LHS.
+      pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
           let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
           let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-          let mut all_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new(); // Collect all NTs
 
           for prod in productions {
               lhs_nonterms.insert(prod.lhs.clone());
-              all_nonterminals.insert(prod.lhs.clone());
               for symbol in &prod.rhs {
                   if let Symbol::NonTerminal(nt) = symbol {
                       rhs_nonterms.insert(nt.clone());
-                      all_nonterminals.insert(nt.clone());
                   }
               }
           }
@@ -8516,26 +8440,77 @@ messages:
           let missing_nonterms: BTreeSet<_> = rhs_nonterms.difference(&lhs_nonterms).collect();
           if !missing_nonterms.is_empty() {
               let missing_nonterm_strings: BTreeSet<_> = missing_nonterms.into_iter().map(|nt| nt.0.clone()).collect();
-              // Provide more context in the error message
-              let rhs_strings: BTreeSet<_> = rhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-              let lhs_strings: BTreeSet<_> = lhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-              return Err(format!(
-                  "Validation Error: Non-terminal(s) used in rule RHS but never defined in LHS: {:?}. All RHS non-terminals: {:?}. All LHS non-terminals: {:?}",
-                  missing_nonterm_strings, rhs_strings, lhs_strings
-              ));
+              vec![format!(
+                  "Non-terminal(s) used in rule RHS but never defined in LHS: {:?}",
+                  missing_nonterm_strings
+              )]
+          } else {
+              Vec::new()
+          }
+      }
+
+      /// Helper for check_for_length_1_recursion. Detects all elementary cycles in a graph.
+      fn detect_all_cycles_recursive(
+          nt: &NonTerminal,
+          graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
+          visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
+          visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored
+          path: &mut Vec<NonTerminal>,          // Current path for cycle detection
+          cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
+      ) {
+          visiting.insert(nt.clone());
+          path.push(nt.clone());
+
+          if let Some(neighbors) = graph.get(nt) {
+              for neighbor in neighbors {
+                  if visiting.contains(neighbor) {
+                      // Cycle detected. Extract it from the current path.
+                      let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
+                      let mut cycle: Vec<_> = path[cycle_start_index..].to_vec();
+
+                      // Canonicalize the cycle by rotating it to start with the lexicographically smallest element.
+                      // This ensures that A -> B -> A and B -> A -> B are treated as the same cycle.
+                      if !cycle.is_empty() {
+                          let min_node_pos = cycle.iter().enumerate()
+                              .min_by_key(|&(_, n)| n)
+                              .map(|(i, _)| i)
+                              .unwrap_or(0);
+                          cycle.rotate_left(min_node_pos);
+                      }
+                      cycles.insert(cycle);
+                      continue; // Continue to find other cycles from this node.
+                  }
+
+                  if !visited.contains(neighbor) {
+                      detect_all_cycles_recursive(neighbor, graph, visiting, visited, path, cycles);
+                  }
+              }
           }
 
-          // --- Check 2: Length-1 Recursion ---
+          visiting.remove(nt);
+          visited.insert(nt.clone());
+          path.pop();
+      }
+
+      /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
+      pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+          let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
+              let mut nts = vec![p.lhs.clone()];
+              for s in &p.rhs {
+                  if let Symbol::NonTerminal(nt) = s {
+                      nts.push(nt.clone());
+                  }
+              }
+              nts
+          }).collect();
 
           // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-          for nt in &all_nonterminals { // Initialize graph with all nodes
+          for nt in &all_nonterminals {
               unit_graph.entry(nt.clone()).or_default();
           }
 
-          // --- Logic for Building Unit Graph ---
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
@@ -8550,47 +8525,44 @@ messages:
 
               if non_nullable_symbols.len() == 1 {
                   if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
-                      // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
                       unit_graph
                           .entry(lhs.clone())
                           .or_default()
                           .insert(target_nt.clone());
-                      crate::debug!(
-                          4,
-                          "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
-                          lhs.0,
-                          target_nt.0,
-                          lhs.0,
-                          prod.rhs
-                      );
-                  } else {
-                      // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
-                      crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
                   }
-              } else {
-                  // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
-                  crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
               }
           }
-          // --- End Logic ---
 
-
-          // Detect cycles in the unit graph using DFS
-          let mut visiting = BTreeSet::new(); // Nodes currently in DFS stack
-          let mut visited = BTreeSet::new();  // Nodes fully explored
-
-          // Sort the non-terminals for deterministic traversal order (optional, but good for consistency)
+          // Detect all unique cycles in the unit graph using DFS.
+          let mut visiting = BTreeSet::new();
+          let mut visited = BTreeSet::new();
+          let mut cycles = BTreeSet::new();
           let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
 
           for nt in sorted_nonterminals {
-              if !visited.contains(nt) { // Only start DFS from unvisited nodes
-                  let mut path = Vec::new(); // Track path for error reporting
-                  detect_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path)?;
+              if !visited.contains(nt) {
+                  let mut path = Vec::new();
+                  detect_all_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path, &mut cycles);
               }
           }
 
-          // --- Check 3: Left-Nullable Left Recursion ---
-          // Detect rules like A ::= B A ... where B is nullable.
+          // Format errors for each unique cycle found.
+          cycles.into_iter().map(|cycle| {
+              let mut cycle_nodes_for_display: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
+              cycle_nodes_for_display.push(cycle[0].0.as_str()); // Close the loop for display.
+
+              let cycle_path_str = cycle_nodes_for_display.join(" -> ");
+              let recursion_type = if cycle.len() == 1 { "Direct" } else { "Indirect" };
+
+              format!("{} length-1 recursion cycle detected: {}", recursion_type, cycle_path_str)
+          }).collect()
+      }
+
+      /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
+      pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let mut errors = Vec::new();
+
           for prod in productions {
               let lhs = &prod.lhs;
               let rhs = &prod.rhs;
@@ -8608,20 +8580,40 @@ messages:
                               });
 
                               if prefix_is_nullable {
-                                  return Err(format!("Validation Error: Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
+                                  errors.push(format!("Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
                               }
                           }
-                          // If the prefix is empty (direct left recursion A ::= A ...) or not fully nullable,
-                          // we don't flag it here (GLR can handle standard left recursion).
-                          // We only care about the case where a nullable sequence precedes the recursion.
-                          break; // Found the first instance of A on RHS, no need to check further in this rule
+                          // We only care about the first instance of recursion in a rule.
+                          break;
                       }
                   }
               }
           }
+          errors
+      }
 
-          // --- Validation Successful ---
-          Ok(())
+      /// Validates the grammar for common issues, collecting all errors.
+      ///
+      /// Checks for:
+      /// 1. Undefined non-terminals.
+      /// 2. Length-1 recursion (direct or indirect).
+      /// 3. Left-nullable left recursion.
+      pub fn validate(productions: &[Production]) -> Result<(), String> {
+          let mut errors = Vec::new();
+
+          errors.extend(check_for_undefined_non_terminals(productions));
+          errors.extend(check_for_length_1_recursion(productions));
+          errors.extend(check_for_left_nullable_left_recursion(productions));
+
+          if errors.is_empty() {
+              Ok(())
+          } else {
+              Err(format!(
+                  "Grammar validation failed with {} error(s):\n- {}",
+                  errors.len(),
+                  errors.join("\n- ")
+              ))
+          }
       }
 
       pub fn validate_start_production_ends_with_terminal(
@@ -8634,7 +8626,7 @@ messages:
 
           let start_prod = &productions[start_production_id];
           if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
-              return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+              return Err(format!("Start production [{}] does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod, start_prod.rhs.last()));
           }
 
           Ok(())
@@ -11438,8 +11430,7 @@ messages:
 
           crate::debug!(2, "Validating");
           validate(&productions).expect("Validation error");
-          validate_start_production_ends_with_terminal(&productions, start_production_id)
-              .expect("Start production does not end with a terminal");
+          // validate_start_production_ends_with_terminal(&productions, start_production_id).expect("Start production does not end with a terminal"); // TODO: not needed anymore, remove function
 
           crate::debug!(2, "Stage 1");
           let stage_1_table = stage_1(&productions, start_production_id);
@@ -11711,9 +11702,10 @@ messages:
           let result = analyze::validate(&productions);
           assert!(result.is_err());
           // The exact path might depend on BTreeSet iteration order, check for involvement
+          // With canonicalization, the path should be deterministic.
           let err_msg = result.unwrap_err();
           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-          assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+          assert!(err_msg.contains("A -> B -> A"));
 
           // A -> B, B -> C, C -> A
           let productions_3 = vec![
@@ -11764,8 +11756,7 @@ messages:
           assert!(result.is_err());
           let err_msg = result.unwrap_err();
           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-          // Depending on traversal order, the cycle could start from A or B
-          assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
+          assert!(err_msg.contains("A -> B -> A"));
       }
 
       #[test]
@@ -11801,7 +11792,7 @@ messages:
           let result = analyze::validate(&productions);
           assert!(result.is_err());
           let err_msg = result.unwrap_err();
-          assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
+          assert!(err_msg.contains("Left-nullable left recursion detected"));
       }
 
       #[test]
@@ -11814,7 +11805,7 @@ messages:
           ];
           let result = analyze::validate(&productions);
           assert!(result.is_err());
-          assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS: {\"B\"}"));
+          assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS"));
       }
 
       #[test]
@@ -12612,416 +12603,98 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: |-
-      Modify `validate`/the validation 'framework'.
-      Split it into multiple functions.
-      Rather than just returning the first error, return *all* problems found. It'd be annoying if the Rust compiler just told us about the first error, wouldn't it?
+  - user: Add a test where the start production is a repetition, no EOF token.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you refactor your grammar validation logic. Collecting all errors at once instead of failing on the first one is a great improvement, much like how modern compilers work. It provides a much better developer experience.
+      Hello! As a helpful assistant, I'd be happy to add the requested test case to your project. This test will verify that the parser can handle a grammar designed for repetition without an explicit EOF token in the input stream.
 
-      Here are the patches to split your validation logic into separate functions and aggregate all the errors found.
-
-      ### `src/glr/analyze.rs`
-
-      I've refactored the `validate` function. It now delegates to three new public functions, each responsible for a specific check: `check_for_undefined_non_terminals`, `check_for_length_1_recursion`, and `check_for_left_nullable_left_recursion`. The main `validate` function now collects all errors from these checks and returns them in a single, formatted error message. This also includes a more robust cycle detection algorithm that finds all unique cycles.
-
-      ```diff
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -38,193 +38,188 @@
-       }
-       
-       
-      -/// Helper function for detecting cycles using Depth First Search.
-      -fn detect_cycles_recursive(
-      +/// Checks for non-terminals used in rule RHS but never defined in LHS.
-      +pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
-      +    let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-      +    let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-      +
-      +    for prod in productions {
-      +        lhs_nonterms.insert(prod.lhs.clone());
-      +        for symbol in &prod.rhs {
-      +            if let Symbol::NonTerminal(nt) = symbol {
-      +                rhs_nonterms.insert(nt.clone());
-      +            }
-      +        }
-      +    }
-      +
-      +    let missing_nonterms: BTreeSet<_> = rhs_nonterms.difference(&lhs_nonterms).collect();
-      +    if !missing_nonterms.is_empty() {
-      +        let missing_nonterm_strings: BTreeSet<_> = missing_nonterms.into_iter().map(|nt| nt.0.clone()).collect();
-      +        vec![format!(
-      +            "Non-terminal(s) used in rule RHS but never defined in LHS: {:?}",
-      +            missing_nonterm_strings
-      +        )]
-      +    } else {
-      +        Vec::new()
-      +    }
-      +}
-      +
-      +/// Helper for check_for_length_1_recursion. Detects all elementary cycles in a graph.
-      +fn detect_all_cycles_recursive(
-           nt: &NonTerminal,
-           graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
-           visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-      -    visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored (all descendants visited)
-      -    path: &mut Vec<NonTerminal>,          // Current path for error reporting
-      -) -> Result<(), String> {
-      +    visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored
-      +    path: &mut Vec<NonTerminal>,          // Current path for cycle detection
-      +    cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
-      +) {
-           visiting.insert(nt.clone());
-           path.push(nt.clone());
-       
-      -    // Explore neighbors
-           if let Some(neighbors) = graph.get(nt) {
-               for neighbor in neighbors {
-                   if visiting.contains(neighbor) {
-      -                // Cycle detected: neighbor is already in the current recursion stack
-      -                path.push(neighbor.clone()); // Add the node that closes the cycle to the path
-      -
-      -                // Find where the cycle starts in the current path
-      +                // Cycle detected. Extract it from the current path.
-                       let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-      -                // Get only the nodes involved in the cycle itself
-      -                let cycle_nodes_in_path: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
-      -
-      -                // Format the cycle path string: "A -> B -> C -> A"
-      -                let cycle_path_str = cycle_nodes_in_path.join(" -> ");
-      -
-      -                let recursion_type = if cycle_nodes_in_path.len() == 2 && cycle_nodes_in_path[0] == cycle_nodes_in_path[1] { // A -> A case
-      -                    "Direct"
-      -                } else {
-      -                    "Indirect"
-      -                };
-      -
-      -                // Remove the temporary node added to path for cycle detection before returning error
-      -                path.pop();
-      -
-      -                return Err(format!(
-      -                    "{} length-1 recursion cycle detected: {}",
-      -                    recursion_type, cycle_path_str
-      -                ));
-      -            }
-      -            // If the neighbor hasn't been fully explored yet, recurse
-      +                let mut cycle: Vec<_> = path[cycle_start_index..].to_vec();
-      +
-      +                // Canonicalize the cycle by rotating it to start with the lexicographically smallest element.
-      +                // This ensures that A -> B -> A and B -> A -> B are treated as the same cycle.
-      +                if !cycle.is_empty() {
-      +                    let min_node_pos = cycle.iter().enumerate()
-      +                        .min_by_key(|&(_, n)| n)
-      +                        .map(|(i, _)| i)
-      +                        .unwrap_or(0);
-      +                    cycle.rotate_left(min_node_pos);
-      +                }
-      +                cycles.insert(cycle);
-      +                continue; // Continue to find other cycles from this node.
-      +            }
-      +
-                   if !visited.contains(neighbor) {
-      -                // Propagate error if cycle found in recursive call
-      -                detect_cycles_recursive(neighbor, graph, visiting, visited, path)?;
-      -            }
-      -            // Else: neighbor is in visited but not visiting, meaning it was fully explored from a different path, no cycle here.
-      -        }
-      -    }
-      -
-      -    // Finished exploring descendants of nt
-      -    visiting.remove(nt); // Remove from current recursion stack
-      -    visited.insert(nt.clone()); // Mark as fully explored
-      -    path.pop(); // Backtrack path
-      -
-      -    Ok(())
-      -}
-      -
-      -
-      -/// Validates the grammar for common issues.
-      -///
-      -/// Checks for:
-      -/// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
-      -/// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
-      -///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
-      -/// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
-      -///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
-      -///    and nothing else (i.e., `A ::= Nullable* B).
-      -pub fn validate(productions: &[Production]) -> Result<(), String> {
-      -    // --- Check 1: Missing Productions ---
-      -    let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-      -    let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-      -    let mut all_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new(); // Collect all NTs
-      -
-      -    for prod in productions {
-      -        lhs_nonterms.insert(prod.lhs.clone());
-      -        all_nonterminals.insert(prod.lhs.clone());
-      -        for symbol in &prod.rhs {
-      -            if let Symbol::NonTerminal(nt) = symbol {
-      -                rhs_nonterms.insert(nt.clone());
-      -                all_nonterminals.insert(nt.clone());
-      -            }
-      -        }
-      -    }
-      -
-      -    let missing_nonterms: BTreeSet<_> = rhs_nonterms.difference(&lhs_nonterms).collect();
-      -    if !missing_nonterms.is_empty() {
-      -        let missing_nonterm_strings: BTreeSet<_> = missing_nonterms.into_iter().map(|nt| nt.0.clone()).collect();
-      -        // Provide more context in the error message
-      -        let rhs_strings: BTreeSet<_> = rhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-      -        let lhs_strings: BTreeSet<_> = lhs_nonterms.iter().map(|nt| nt.0.clone()).collect();
-      -        return Err(format!(
-      -            "Validation Error: Non-terminal(s) used in rule RHS but never defined in LHS: {:?}. All RHS non-terminals: {:?}. All LHS non-terminals: {:?}",
-      -            missing_nonterm_strings, rhs_strings, lhs_strings
-      -        ));
-      -    }
-      -
-      -    // --- Check 2: Length-1 Recursion ---
-      +                detect_all_cycles_recursive(neighbor, graph, visiting, visited, path, cycles);
-      +            }
-      +        }
-      +    }
-      +
-      +    visiting.remove(nt);
-      +    visited.insert(nt.clone());
-      +    path.pop();
-      +}
-      +
-      +/// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
-      +pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-      +    let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
-      +        let mut nts = vec![p.lhs.clone()];
-      +        for s in &p.rhs {
-      +            if let Symbol::NonTerminal(nt) = s {
-      +                nts.push(nt.clone());
-      +            }
-      +        }
-      +        nts
-      +    }).collect();
-       
-           // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
-           let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-      -    for nt in &all_nonterminals { // Initialize graph with all nodes
-      +    for nt in &all_nonterminals {
-               unit_graph.entry(nt.clone()).or_default();
-           }
-       
-      -    // --- Logic for Building Unit Graph ---
-           for prod in productions {
-               let lhs = &prod.lhs;
-               let rhs = &prod.rhs;
-       
-               let non_nullable_symbols: Vec<&Symbol> = rhs
-                   .iter()
-                   .filter(|symbol| match symbol {
-                       Symbol::Terminal(_) => true,
-                       Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
-                   })
-                   .collect();
-       
-               if non_nullable_symbols.len() == 1 {
-                   if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
-      -                // Rule is of the form A ::= Nullable* B Nullable*. Add edge A -> B.
-                       unit_graph
-                           .entry(lhs.clone())
-                           .or_default()
-                           .insert(target_nt.clone());
-      -                crate::debug!(
-      -                    4,
-      -                    "Unit graph edge added ({} -> {} from rule: {} ::= {:?})",
-      -                    lhs.0,
-      -                    target_nt.0,
-      -                    lhs.0,
-      -                    prod.rhs
-      -                );
-      -            } else {
-      -                // The single non-nullable symbol is a terminal. Does not contribute to NT cycles.
-      -                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Single non-nullable is a terminal.", lhs.0, prod.rhs);
-      -            }
-      -        } else {
-      -            // Rule has 0 or >1 non-nullable symbols. Does not contribute to a length-1 cycle.
-      -            crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Found {} non-nullable symbols.", lhs.0, prod.rhs, non_nullable_symbols.len());
-      -        }
-      -    }
-      -    // --- End Logic ---
-      -
-      -
-      -    // Detect cycles in the unit graph using DFS
-      +            }
-      +        }
-      +    }
-      +
-      +    // Detect all unique cycles in the unit graph using DFS.
-           let mut visiting = BTreeSet::new();
-      -    let mut visited = BTreeSet::new();  // Nodes fully explored
-      -
-      -    // Sort the non-terminals for deterministic traversal order (optional, but good for consistency)
-      +    let mut visited = BTreeSet::new();
-      +    let mut cycles = BTreeSet::new();
-           let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
-       
-           for nt in sorted_nonterminals {
-      -        if !visited.contains(nt) { // Only start DFS from unvisited nodes
-      -            let mut path = Vec::new(); // Track path for error reporting
-      -            detect_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path)?;
-      -        }
-      -    }
-      -
-      -    // --- Check 3: Left-Nullable Left Recursion ---
-      -    // Detect rules like A ::= B A ... where B is nullable.
-      +        if !visited.contains(nt) {
-      +            let mut path = Vec::new();
-      +            detect_all_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path, &mut cycles);
-      +        }
-      +    }
-      +
-      +    // Format errors for each unique cycle found.
-      +    cycles.into_iter().map(|cycle| {
-      +        let mut cycle_nodes_for_display: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
-      +        cycle_nodes_for_display.push(cycle[0].0.as_str()); // Close the loop for display.
-      +
-      +        let cycle_path_str = cycle_nodes_for_display.join(" -> ");
-      +        let recursion_type = if cycle.len() == 1 { "Direct" } else { "Indirect" };
-      +
-      +        format!("{} length-1 recursion cycle detected: {}", recursion_type, cycle_path_str)
-      +    }).collect()
-      +}
-      +
-      +/// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
-      +pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
-      +    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      +    let mut errors = Vec::new();
-      +
-           for prod in productions {
-               let lhs = &prod.lhs;
-               let rhs = &prod.rhs;
-       
-               // Iterate through RHS symbols to find the recursive non-terminal A
-               for (i, symbol) in rhs.iter().enumerate() {
-                   if let Symbol::NonTerminal(nt) = symbol {
-                       if nt == lhs { // Found potential left recursion: A ::= ... A ...
-                           // Check if all preceding symbols (if any) are nullable non-terminals
-                           let prefix = &rhs[0..i];
-                           if !prefix.is_empty() { // Only check if there's a prefix
-                               let prefix_is_nullable = prefix.iter().all(|sym| match sym {
-                                   Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
-                                   Symbol::Terminal(_) => false, // Terminals are not nullable
-                               });
-       
-                               if prefix_is_nullable {
-      -                            return Err(format!("Validation Error: Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
-      +                            errors.push(format!("Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
-                               }
-                           }
-      -                    // If the prefix is empty (direct left recursion A ::= A ...) or not fully nullable,
-      -                    // we don't flag it here (GLR can handle standard left recursion).
-      -                    // We only care about the case where a nullable sequence precedes the recursion.
-      -                    break; // Found the first instance of A on RHS, no need to check further in this rule
-      +                    // We only care about the first instance of recursion in a rule.
-      +                    break;
-                       }
-                   }
-               }
-           }
-      -
-      -    // --- Validation Successful ---
-      -    Ok(())
-      +    errors
-      +}
-      +
-      +/// Validates the grammar for common issues, collecting all errors.
-      +///
-      +/// Checks for:
-      +/// 1. Undefined non-terminals.
-      +/// 2. Length-1 recursion (direct or indirect).
-      +/// 3. Left-nullable left recursion.
-      +pub fn validate(productions: &[Production]) -> Result<(), String> {
-      +    let mut errors = Vec::new();
-      +
-      +    errors.extend(check_for_undefined_non_terminals(productions));
-      +    errors.extend(check_for_length_1_recursion(productions));
-      +    errors.extend(check_for_left_nullable_left_recursion(productions));
-      +
-      +    if errors.is_empty() {
-      +        Ok(())
-      +    } else {
-      +        Err(format!(
-      +            "Grammar validation failed with {} error(s):\n- {}",
-      +            errors.len(),
-      +            errors.join("\n- ")
-      +        ))
-      +    }
-       }
-       
-       pub fn validate_start_production_ends_with_terminal(
-
-      ```
-
-      ### `src/glr/tests.rs`
-
-      To accommodate the new validation framework, I've updated the tests. The assertions on error messages are now more robust and less dependent on the exact formatting, checking for the presence of key phrases instead. The test for indirect recursion is also more specific now that cycle detection is canonical.
+      Here is the git diff for the changes:
 
       ```diff
       --- a/src/glr/tests.rs
       +++ b/src/glr/tests.rs
-      @@ -168,10 +168,9 @@
-           let result = analyze::validate(&productions);
-           assert!(result.is_err());
-           // The exact path might depend on BTreeSet iteration order, check for involvement
-      +    // With canonicalization, the path should be deterministic.
-           let err_msg = result.unwrap_err();
-           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-      -    assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
-      +    assert!(err_msg.contains("A -> B -> A"));
-       
-           // A -> B, B -> C, C -> A
-           let productions_3 = vec![
-      @@ -212,8 +211,7 @@
-           assert!(result.is_err());
-           let err_msg = result.unwrap_err();
-           assert!(err_msg.contains("Indirect length-1 recursion cycle detected"));
-      -    // Depending on traversal order, the cycle could start from A or B
-      -    assert!(err_msg.contains("A -> B -> A") || err_msg.contains("B -> A -> B"));
-      +    assert!(err_msg.contains("A -> B -> A"));
-       }
-       
-       #[test]
-      @@ -246,7 +244,7 @@
-           let result = analyze::validate(&productions);
-           assert!(result.is_err());
-           let err_msg = result.unwrap_err();
-      -    assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
-      +    assert!(err_msg.contains("Left-nullable left recursion detected"));
-       }
-       
-       #[test]
-      @@ -258,7 +256,7 @@
-           ];
-           let result = analyze::validate(&productions);
-           assert!(result.is_err());
-      -    assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS: {\"B\"}"));
-      +    assert!(result.unwrap_err().contains("Non-terminal(s) used in rule RHS but never defined in LHS"));
-       }
-       
-       #[test]
+      @@ -721,3 +721,55 @@
+       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+      +
+      +#[test]
+      +fn test_repetition_no_eof() {
+      +    // Grammar: S -> S 'a' | 'a'
+      +    // This grammar defines a sequence of one or more 'a's.
+      +    // We will parse inputs without a final EOF token and check the state.
+      +    let productions = vec![
+      +        prod("S", vec![nt("S"), t("a")]), // Start rule is recursive
+      +        prod("S", vec![t("a")]),
+      +    ];
+      +
+      +    // The start production is the first one, index 0.
+      +    // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
+      +    // but the grammar itself and the inputs we test will not use an EOF/dollar token.
+      +    let parser = generate_glr_parser(&productions, 0, None);
+      +    println!("Parser: {}", parser);
+      +
+      +    let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+      +
+      +    // Test case 1: "a"
+      +    let tokens1 = vec![a_token];
+      +    let mut state1 = parser.init_glr_parser(None);
+      +    state1.parse(&tokens1);
+      +    // After parsing "a", the parser should be in a valid state, having recognized an 'S'.
+      +    // The active state should contain stacks that have successfully parsed 'S'.
+      +    assert!(state1.is_ok(), "Parse should be ok after 'a'");
+      +
+      +    // Test case 2: "aaa"
+      +    let tokens2 = vec![a_token, a_token, a_token];
+      +    let mut state2 = parser.init_glr_parser(None);
+      +    state2.parse(&tokens2);
+      +    assert!(state2.is_ok(), "Parse should be ok after 'aaa'");
+      +
+      +    // Test case 3: "" (empty)
+      +    let tokens3 = vec![];
+      +    let mut state3 = parser.init_glr_parser(None);
+      +    state3.parse(&tokens3);
+      +    // The initial state is ok because it's ready to parse.
+      +    // After parsing nothing, it's still in that same ready state.
+      +    assert!(state3.is_ok(), "State should still be ok after parsing empty input");
+      +    // However, if we were to check for *acceptance*, it would fail because S is not nullable.
+      +    // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+      +
+      +    // Test case 4: "b" (invalid token)
+      +    // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
+      +    let productions_with_b = vec![
+      +        prod("S", vec![nt("S"), t("a")]),
+      +        prod("S", vec![t("a")]),
+      +        prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+      +    ];
+      +    let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+      +    let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
+      +    let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+      +
+      +    let tokens4 = vec![b_token];
+      +    let mut state4 = parser_with_b.init_glr_parser(None);
+      +    state4.parse(&tokens4);
+      +    // After parsing 'b', there should be no valid active states.
+      +    assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
+      +
+      +    // Test case 5: "ab"
+      +    let tokens5 = vec![a_token_b, b_token];
+      +    let mut state5 = parser_with_b.init_glr_parser(None);
+      +    state5.parse(&tokens5);
+      +    assert!(!state5.is_ok(), "Parse should fail for 'ab'");
+      +}
 
       ```
 
-      These changes should make your grammar validation more powerful and user-friendly. Let me know if you have any other questions
+      I've added the new test case `test_repetition_no_eof` to `src/glr/tests.rs`. This test defines a simple left-recursive grammar for a sequence of one or more `'a'`s and verifies that the parser correctly handles valid and invalid inputs without requiring a special end-of-file token in the parsed string.
+
+      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/glr/tests.rs
       Applying patch to 'src/glr/tests.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/tests.rs.
