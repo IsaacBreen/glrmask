@@ -621,7 +621,6 @@ impl GrammarDefinition {
             return Err("Grammar expressions list cannot be empty.".to_string());
         }
 
-        let mut productions = Vec::new();
         let mut literal_to_group_id: BiBTreeMap<Vec<u8>, usize> = BiBTreeMap::new();
         let mut regex_name_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
         let mut regex_expr_to_group_id = BiBTreeMap::new();
@@ -654,10 +653,12 @@ impl GrammarDefinition {
         all_names.insert(start_production_name.clone());
         debug!(2, "Augmented start_production_name: {:?}", start_production_name);
 
-        productions.push(Production {
-            lhs: NonTerminal(start_production_name.clone()),
-            rhs: vec![Symbol::NonTerminal(NonTerminal(grammar_exprs[0].0.clone()))],
-        });
+        let mut productions = vec![
+            Production {
+                lhs: NonTerminal(start_production_name.clone()),
+                rhs: vec![Symbol::NonTerminal(NonTerminal(grammar_exprs[0].0.clone()))],
+            }
+        ];
         let start_production_id = 0; // The augmented start production is always the first one.
 
         for (name, expr) in tqdm!(grammar_exprs.iter()) {
