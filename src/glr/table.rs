@@ -318,10 +318,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
 
-    let mut i = 0;
     while let Some(item_set) = worklist.pop_front() {
-        i += 1;
-        println!("Processing item set {}", i);
         if transitions.contains_key(&item_set) {
             continue;
         }
