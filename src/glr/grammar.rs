@@ -183,31 +183,35 @@ pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
     }
 }
 
-pub fn compute_epsilon_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    let mut epsilon_nonterminals = BTreeSet::new();
+pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+    let mut nullable_nonterminals = BTreeSet::new();
     let mut changed = true;
 
     while changed {
         changed = false;
         for production in productions {
-            if production.rhs.is_empty() && !epsilon_nonterminals.contains(&production.lhs) {
-                epsilon_nonterminals.insert(production.lhs.clone());
+            // Rule 1: A -> ε makes A nullable
+            if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
+                nullable_nonterminals.insert(production.lhs.clone());
                 changed = true;
-            } else if production.rhs.iter().all(|symbol| {
-                matches!(symbol, Symbol::NonTerminal(nt) if epsilon_nonterminals.contains(nt))
-            }) && !epsilon_nonterminals.contains(&production.lhs)
+            // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
+            } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
+                      && production.rhs.iter().all(|symbol| {
+                          matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
+                      })
+                      && !nullable_nonterminals.contains(&production.lhs)
             {
-                epsilon_nonterminals.insert(production.lhs.clone());
+                nullable_nonterminals.insert(production.lhs.clone());
                 changed = true;
             }
         }
     }
 
-    epsilon_nonterminals
+    nullable_nonterminals
 }
 
 pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-    let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
     // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
@@ -235,7 +239,7 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
                     let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
                     first_sets.get_mut(lhs).unwrap().extend(first_nt);
 
-                    if !epsilon_nonterminals.contains(nt) {
+                    if !nullable_nonterminals.contains(nt) {
                         break;
                     }
                 } else if let Symbol::Terminal(t) = symbol { // Added this case
@@ -255,7 +259,7 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
 
 pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     let first_sets = compute_first_sets_for_nonterminals(productions);
-    let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
     for production in productions {
@@ -292,7 +296,7 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
                                 let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
                                 follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
                                 
-                                if !epsilon_nonterminals.contains(nt_next) {
+                                if !nullable_nonterminals.contains(nt_next) {
                                     nullable = false;
                                     break;
                                 }

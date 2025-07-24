@@ -1,35 +1,7 @@
 use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
-use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-
-/// Computes the set of non-terminals that can derive the empty string (epsilon).
-pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    let mut nullable_nonterminals = BTreeSet::new();
-    let mut changed = true;
-
-    while changed {
-        changed = false;
-        for production in productions {
-            // Rule 1: A -> ε makes A nullable
-            if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
-                nullable_nonterminals.insert(production.lhs.clone());
-                changed = true;
-            // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
-            } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
-                      && production.rhs.iter().all(|symbol| {
-                          matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
-                      })
-                      && !nullable_nonterminals.contains(&production.lhs)
-            {
-                nullable_nonterminals.insert(production.lhs.clone());
-                changed = true;
-            }
-        }
-    }
-
-    nullable_nonterminals
-}
+use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.

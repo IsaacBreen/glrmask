@@ -1,5 +1,5 @@
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
