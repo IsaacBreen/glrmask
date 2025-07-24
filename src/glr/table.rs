@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
@@ -662,8 +662,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
         }
     }
 
-    // crate::debug!(2, "Validating");
-    // validate(&productions).expect("Validation error");
+    crate::debug!(2, "Validating");
+    validate(&productions).expect("Validation error");
+    validate_start_production_ends_with_terminal(&productions, start_production_id)
+        .expect("Start production does not end with a terminal");
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions, start_production_id);

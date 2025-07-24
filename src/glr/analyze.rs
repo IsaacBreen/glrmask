@@ -242,6 +242,22 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_start_production_ends_with_terminal(
+    productions: &[Production],
+    start_production_id: usize,
+) -> Result<(), String> {
+    if start_production_id >= productions.len() {
+        return Err(format!("Invalid start production ID: {}. Must be less than the number of productions: {}", start_production_id, productions.len()));
+    }
+
+    let start_prod = &productions[start_production_id];
+    if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
+        return Err(format!("Start production '{}' does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod.lhs.0, start_prod.rhs.last()));
+    }
+
+    Ok(())
+}
+
 /// Removes productions that use non-terminals on their RHS which are never defined on the LHS
 /// of any *remaining* production. This process is repeated until no more productions can be removed.
 ///
