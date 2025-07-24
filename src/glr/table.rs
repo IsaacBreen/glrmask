@@ -659,9 +659,6 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
     stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
-    let compatible_states = find_compatible_states(&mut stage_7_table);
-    assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
-
     (stage_7_table, item_set_map, start_state_id)
 }
 
@@ -715,8 +712,11 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
+
+    let compatible_states = find_compatible_states(&mut stage_7_table);
+    assert!(compatible_states.is_empty(), "Found incompatible states: {:?}", compatible_states);
 
     crate::debug!(2, "Done generating GLR parser");
 
