@@ -378,7 +378,6 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
         let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
         for item in &row.reduces {
-            let lhs = &item.production.lhs;
             if let Some(terminal) = &item.lookahead {
                 reduces
                     .entry(terminal.clone())
