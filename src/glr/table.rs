@@ -319,12 +319,11 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
         let mut row = BTreeMap::new();
 
         for (symbol, items) in splits {
-            if symbol.is_none() {
-                continue;
-            }
             let goto_set = compute_goto(&items);
             row.insert(symbol.clone(), goto_set.clone());
-            worklist.push_back(goto_set);
+            if symbol.is_some() {
+                worklist.push_back(goto_set);
+            }
         }
 
         transitions.insert(items.clone(), row);
@@ -340,13 +339,6 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
         let mut gotos = BTreeMap::new();
         let mut reduces = BTreeSet::new();
 
-        let closure = compute_closure(&item_set, productions);
-        for item in &closure { // Check the full closure for reductions
-            if item.dot_position == item.production.rhs.len() {
-                reduces.insert(item.clone());
-            }
-        }
-
         for (symbol_opt, next_item_set) in &transitions {
             if let Some(symbol) = symbol_opt {
                 match symbol {
@@ -356,6 +348,11 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
                     Symbol::NonTerminal(nt) => {
                         gotos.insert(nt.clone(), next_item_set.clone());
                     }
+                }
+            } else {
+                for item in next_item_set {
+                    assert_eq!(item.dot_position, item.production.rhs.len());
+                    reduces.insert(item.clone());
                 }
             }
         }
