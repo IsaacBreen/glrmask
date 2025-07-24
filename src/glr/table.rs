@@ -1,5 +1,5 @@
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -628,7 +628,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
     // Ensure at least one row has more than one item
     if !stage_7_table.values().any(|row| row.phase2_shifts_and_reduces.len() > 1) {
-        panic!("No valid state found in the GLR parser. This usually indicates an error in the grammar or the parsing stages.");
+        panic!("Generated GLR parser has no state with multiple items. This is likely an error in the grammar or the parser generation logic.");
     }
 
     (stage_7_table, item_set_map, start_state_id)

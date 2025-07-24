@@ -1,7 +1,7 @@
 use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
-use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 
 /// Computes the set of non-terminals that can derive the empty string (epsilon).
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -541,7 +541,7 @@ fn find_last_non_nullable_symbol<'a>(
 }
 
 pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-    let first_sets = compute_first_sets(productions);
+    let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let nonterminal_follow_sets = compute_follow_sets(productions);
 

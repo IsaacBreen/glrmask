@@ -206,7 +206,7 @@ pub fn compute_epsilon_nonterminals(productions: &[Production]) -> BTreeSet<NonT
     epsilon_nonterminals
 }
 
-pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -254,7 +254,7 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
 }
 
 pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-    let first_sets = compute_first_sets(productions);
+    let first_sets = compute_first_sets_for_nonterminals(productions);
     let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
     let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 

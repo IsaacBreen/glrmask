@@ -1,4 +1,4 @@
-use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_epsilon_nonterminals, compute_first_sets_for_nonterminals, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
@@ -84,7 +84,7 @@ impl Item {
     }
 }
 
-pub fn compute_firsts(
+pub fn compute_first_set_for_item(
     item: &Item,
     productions: &[Production],
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
@@ -99,7 +99,7 @@ pub fn compute_firsts(
             let first_set = first_sets.get(nt).cloned().unwrap_or_default();
             if nullable_nonterminals.contains(nt) {
                 // If the non-terminal is nullable, we also need to include the firsts for the next item
-                let next_firsts = compute_firsts(
+                let next_firsts = compute_first_set_for_item(
                     &item.next(),
                     productions,
                     first_sets,
@@ -123,7 +123,7 @@ pub fn compute_firsts(
 
 pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
-    let first_sets = compute_first_sets(productions);
+    let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_epsilon_nonterminals(productions);
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
@@ -131,7 +131,7 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
     while let Some(item) = worklist.pop_front() {
         if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
             for prod in productions.iter().filter(|p| p.lhs == *nt) {
-                let lookaheads = compute_firsts(&item.next(), productions, &first_sets, &nullable_nonterminals);
+                let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
                 for lookahead in lookaheads {
                     let new_item = Item {
                         production: prod.clone(),
