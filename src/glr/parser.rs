@@ -461,6 +461,7 @@ impl GLRParser {
                         match goto {
                             Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
                             Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
+                            Goto::Split(next_state_id) => writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap(),
                         }
                     }
                 }
@@ -581,6 +582,7 @@ impl Display for GLRParser {
                 let goto_str = match &next_state_id {
                     Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
                     Goto::Accept => "accept".to_string(),
+                    Goto::Split(state_id_val) => format!("{} or accept", state_id_val.0),
                 };
                 writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
             }
@@ -740,6 +742,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     Goto::Accept => {
                         // Mark successful acceptance
+                        self.accepted = true;
+                    }
+                    Goto::Split(goto_state_id) => {
+                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
+                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
+                        out.push(new_gss_node);
+                        // Also mark acceptance
                         self.accepted = true;
                     }
                 }

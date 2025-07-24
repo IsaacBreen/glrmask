@@ -221,6 +221,7 @@ impl JSONConvertible for Stage7Row {
 pub enum Goto {
     State(StateID),
     Accept,
+    Split(StateID)
 }
 
 impl JSONConvertible for Goto {
@@ -234,6 +235,10 @@ impl JSONConvertible for Goto {
             Goto::Accept => {
                 obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
                 // No value needed for Accept
+            }
+            Goto::Split(state_id) => {
+                obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
+                obj.insert("value".to_string(), state_id.to_json());
             }
         }
         JSONNode::Object(obj)
@@ -250,6 +255,10 @@ impl JSONConvertible for Goto {
                         StateID::from_json(value_node).map(Goto::State)
                     }
                     "Accept" => Ok(Goto::Accept),
+                    "Split" => {
+                        let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::Split".to_string())?;
+                        StateID::from_json(value_node).map(Goto::Split)
+                    }
                     _ => Err(format!("Unknown variant '{}' for Goto", variant)),
                 }
             }
@@ -354,13 +363,6 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
                     assert_eq!(item.dot_position, item.production.rhs.len());
                     reduces.insert(item.clone());
                 }
-            }
-        }
-
-        for item in &closure {
-            // e.g. start rules
-            if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
-                gotos.insert(item.production.lhs.clone(), BTreeSet::new());
             }
         }
 
@@ -656,8 +658,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
-            if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
+            let goto = Goto::State(*item_set_map.get_by_left(&next_item_set).unwrap());
             gotos.insert(non_terminal_id, goto);
         }
 
@@ -676,6 +677,26 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     };
     let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+
+    // Goto for initial production
+    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+    match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(Goto::Accept);
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let goto = entry.get_mut();
+            match goto {
+                Goto::State(state_id) => {
+                    *goto = Goto::Split(*state_id);
+                }
+                Goto::Accept | Goto::Split(_) => {
+                    // We can use the `goto` reference here for the panic message.
+                    panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
+                }
+            }
+        }
+    }
 
     (stage_7_table, item_set_map, start_state_id)
 }
