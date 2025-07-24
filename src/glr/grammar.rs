@@ -25,6 +25,7 @@ impl Display for NonTerminal {
 pub enum Terminal {
     Regex(String),
     Literal(Vec<u8>),
+    EOF,
 }
 
 impl JSONConvertible for Terminal {
@@ -40,6 +41,12 @@ impl JSONConvertible for Terminal {
                 let mut obj = StdMap::new();
                 obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
                 obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                obj
+            }),
+            Terminal::EOF => JSONNode::Object({
+                let mut obj = StdMap::new();
+                obj.insert("type".to_string(), JSONNode::String("EOF".to_string()));
+                obj.insert("value".to_string(), JSONNode::String("EOF".to_string()));
                 obj
             }),
         }
@@ -66,6 +73,7 @@ impl Display for Terminal {
         match self {
             Terminal::Regex(name) => write!(f, "{}", name),
             Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+            Terminal::EOF => write!(f, "EOF"),
         }
     }
 }

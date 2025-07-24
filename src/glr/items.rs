@@ -10,7 +10,7 @@ use std::fmt::{Display, Formatter};
 pub struct Item {
     pub production: Production,
     pub dot_position: usize,
-    pub lookahead: Option<Terminal>,
+    pub lookahead: Terminal,
 }
 
 // Manual impl for Item (could be derived)
@@ -30,7 +30,7 @@ impl JSONConvertible for Item {
                 let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
                                       .and_then(usize::from_json)?;
                 let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
-                                     .and_then(Option::<Terminal>::from_json)?;
+                                      .and_then(Terminal::from_json)?;
                 Ok(Item { production, dot_position, lookahead })
             }
             _ => Err("Expected JSONNode::Object for Item".to_string()),
@@ -55,10 +55,8 @@ impl Display for Item {
             write!(f, " •")?;
         }
         write!(f, ", ")?;
-        match &self.lookahead {
-            Some(t) => write!(f, "{}", t)?,
-            None => write!(f, "$")?,
-        }
+        // Display the lookahead
+        write!(f, "lookahead: {}", self.lookahead)?;
         write!(f, "]")?;
         Ok(())
     }
@@ -111,12 +109,8 @@ pub fn compute_first_set_for_item(
             }
         }
         None => {
-            // The child production is of length 0. The first is the lookahead if it exists.
-            if let Some(lookahead) = &item.lookahead {
-                BTreeSet::from([lookahead.clone()])
-            } else {
-                BTreeSet::new() // No lookahead if none is provided
-            }
+            // The child production is of length 0. The first is the lookahead.
+            BTreeSet::from([item.lookahead.clone()])
         }
     }
 }
@@ -133,11 +127,10 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
             for prod in productions.iter().filter(|p| p.lhs == *nt) {
                 let lookaheads = compute_first_set_for_item(&item.next(), productions, &first_sets, &nullable_nonterminals);
                 dbg!(&item, &prod, &lookaheads); // Debugging line to inspect item and production
-                for lookahead in lookaheads {
                     let new_item = Item {
                         production: prod.clone(),
                         dot_position: 0,
-                        lookahead: Some(lookahead),
+                        lookahead,
                     };
                     if closure.insert(new_item.clone()) {
                         worklist.push_back(new_item);

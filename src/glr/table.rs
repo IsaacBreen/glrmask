@@ -294,7 +294,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
-        lookahead: None,
+        lookahead: Terminal::EOF,
     };
     let initial_closure = BTreeSet::from([initial_item]);
     let mut worklist = VecDeque::from([initial_closure.clone()]);
@@ -378,12 +378,10 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
         let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
 
         for item in &row.reduces {
-            if let Some(terminal) = &item.lookahead {
-                reduces
-                    .entry(terminal.clone())
-                    .or_default()
-                    .insert(item.clone());
-            }
+            reduces
+                .entry(item.lookahead.clone())
+                .or_default()
+                .insert(item.clone());
         }
 
         stage_3_table.insert(
@@ -620,7 +618,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
-        lookahead: None,
+        lookahead: Terminal::EOF,
     };
     let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
