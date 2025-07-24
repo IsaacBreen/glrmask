@@ -869,6 +869,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let peek_llm_tokens = timeit!(peek.resolved_llm_tokens_union());
                     timeit!(llm_tokens |= peek_llm_tokens);
                 });
+            } else {
+                timeit!("GLRParserState::has_action_for::no_action_found", {
+                    crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
+                });
             }
         }
         Some(llm_tokens)
