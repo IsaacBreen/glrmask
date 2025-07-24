@@ -1691,10 +1691,16 @@ local_system:
                           for (non_terminal_id, goto) in sorted_gotos {
                               let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
                               write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
-                              match goto {
-                                  Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
-                                  Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
-                                  Goto::Split(next_state_id) => writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap(),
+                              if let Some(next_state_id) = goto.state_id {
+                                  if goto.accept {
+                                      writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                                  } else {
+                                      writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                                  }
+                              } else if goto.accept {
+                                  writeln!(&mut result, "Accept").unwrap();
+                              } else {
+                                  writeln!(&mut result, "No-op (should not happen)").unwrap();
                               }
                           }
                       }
@@ -1810,12 +1816,18 @@ local_system:
                   }
 
                   writeln!(f, "    Gotos:")?;
-                  for (&non_terminal_id, &next_state_id) in &row.gotos {
+                  for (&non_terminal_id, goto) in &row.gotos {
                       let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
-                      let goto_str = match &next_state_id {
-                          Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
-                          Goto::Accept => "accept".to_string(),
-                          Goto::Split(state_id_val) => format!("{} or accept", state_id_val.0),
+                      let goto_str = if let Some(state_id_val) = goto.state_id {
+                          if goto.accept {
+                              format!("{} or accept", state_id_val.0)
+                          } else {
+                              format!("{}", state_id_val.0)
+                          }
+                      } else if goto.accept {
+                          "accept".to_string()
+                      } else {
+                          "no-op".to_string()
                       };
                       writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
                   }
@@ -1967,23 +1979,19 @@ local_system:
                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
                       );
-                      match goto {
-                          Goto::State(goto_state_id) => {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                              let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                              out.push(new_gss_node);
-                          }
-                          Goto::Accept => {
-                              // Mark successful acceptance
-                              self.accepted = true;
-                          }
-                          Goto::Split(goto_state_id) => {
+
+                      if goto.accept {
+                          self.accepted = true;
+                      }
+
+                      if let Some(goto_state_id) = goto.state_id {
+                          if goto.accept {
                               crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                              let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                              out.push(new_gss_node);
-                              // Also mark acceptance
-                              self.accepted = true;
+                          } else {
+                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                           }
+                          let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                              out.push(new_gss_node);
                       }
                   }
               }
@@ -2610,51 +2618,31 @@ local_system:
       }
 
 
-      #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-      pub enum Goto {
-          State(StateID),
-          Accept,
-          Split(StateID)
+      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct Goto {
+          pub state_id: Option<StateID>,
+          pub accept: bool,
       }
 
       impl JSONConvertible for Goto {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
-              match self {
-                  Goto::State(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
-                      obj.insert("value".to_string(), state_id.to_json());
-                  }
-                  Goto::Accept => {
-                      obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
-                      // No value needed for Accept
-                  }
-                  Goto::Split(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                      obj.insert("value".to_string(), state_id.to_json());
-                  }
-              }
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              obj.insert("accept".to_string(), self.accept.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
               match node {
-                  JSONNode::Object(mut obj) => {
-                      let variant = obj.remove("variant")
-                          .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
-                          .and_then(String::from_json)?;
-                      match variant.as_str() {
-                          "State" => {
-                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
-                              StateID::from_json(value_node).map(Goto::State)
-                          }
-                          "Accept" => Ok(Goto::Accept),
-                          "Split" => {
-                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::Split".to_string())?;
-                              StateID::from_json(value_node).map(Goto::Split)
-                          }
-                          _ => Err(format!("Unknown variant '{}' for Goto", variant)),
-                      }
-                  }
+                  JSONNode::Object(mut obj) => Ok(Goto {
+                      state_id: obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
+                          .and_then(Option::<StateID>::from_json)?,
+                      accept: obj
+                          .remove("accept")
+                          .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
+                          .and_then(bool::from_json)?,
+                  }),
                   _ => Err("Expected JSONNode::Object for Goto".to_string()),
               }
           }
@@ -3045,7 +3033,10 @@ local_system:
               let mut gotos = BTreeMap::new();
               for (nonterminal, next_item_set) in row.gotos {
                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-                  let goto = Goto::State(*item_set_map.get_by_left(&next_item_set).unwrap());
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
                   gotos.insert(non_terminal_id, goto);
               }
 
@@ -3069,19 +3060,18 @@ local_system:
           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
           match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
               std::collections::btree_map::Entry::Vacant(entry) => {
-                  entry.insert(Goto::Accept);
+                  entry.insert(Goto {
+                      state_id: None,
+                      accept: true,
+                  });
               }
               std::collections::btree_map::Entry::Occupied(mut entry) => {
                   let goto = entry.get_mut();
-                  match goto {
-                      Goto::State(state_id) => {
-                          *goto = Goto::Split(*state_id);
-                      }
-                      Goto::Accept | Goto::Split(_) => {
-                          // We can use the `goto` reference here for the panic message.
-                          panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                      }
+                  if goto.accept {
+                      // We can use the `goto` reference here for the panic message.
+                      panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
                   }
+                  goto.accept = true;
               }
           }
 
@@ -6029,10 +6019,16 @@ local_system:
                           for (non_terminal_id, goto) in sorted_gotos {
                               let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
                               write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
-                              match goto {
-                                  Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
-                                  Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
-                                  Goto::Split(next_state_id) => writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap(),
+                              if let Some(next_state_id) = goto.state_id {
+                                  if goto.accept {
+                                      writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                                  } else {
+                                      writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                                  }
+                              } else if goto.accept {
+                                  writeln!(&mut result, "Accept").unwrap();
+                              } else {
+                                  writeln!(&mut result, "No-op (should not happen)").unwrap();
                               }
                           }
                       }
@@ -6148,12 +6144,18 @@ local_system:
                   }
 
                   writeln!(f, "    Gotos:")?;
-                  for (&non_terminal_id, &next_state_id) in &row.gotos {
+                  for (&non_terminal_id, goto) in &row.gotos {
                       let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
-                      let goto_str = match &next_state_id {
-                          Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
-                          Goto::Accept => "accept".to_string(),
-                          Goto::Split(state_id_val) => format!("{} or accept", state_id_val.0),
+                      let goto_str = if let Some(state_id_val) = goto.state_id {
+                          if goto.accept {
+                              format!("{} or accept", state_id_val.0)
+                          } else {
+                              format!("{}", state_id_val.0)
+                          }
+                      } else if goto.accept {
+                          "accept".to_string()
+                      } else {
+                          "no-op".to_string()
                       };
                       writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
                   }
@@ -6305,23 +6307,19 @@ local_system:
                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
                       );
-                      match goto {
-                          Goto::State(goto_state_id) => {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                              let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                              out.push(new_gss_node);
-                          }
-                          Goto::Accept => {
-                              // Mark successful acceptance
-                              self.accepted = true;
-                          }
-                          Goto::Split(goto_state_id) => {
+
+                      if goto.accept {
+                          self.accepted = true;
+                      }
+
+                      if let Some(goto_state_id) = goto.state_id {
+                          if goto.accept {
                               crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                              let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                              out.push(new_gss_node);
-                              // Also mark acceptance
-                              self.accepted = true;
+                          } else {
+                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                           }
+                          let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                              out.push(new_gss_node);
                       }
                   }
               }
@@ -6948,51 +6946,31 @@ local_system:
       }
 
 
-      #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-      pub enum Goto {
-          State(StateID),
-          Accept,
-          Split(StateID)
+      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct Goto {
+          pub state_id: Option<StateID>,
+          pub accept: bool,
       }
 
       impl JSONConvertible for Goto {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
-              match self {
-                  Goto::State(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
-                      obj.insert("value".to_string(), state_id.to_json());
-                  }
-                  Goto::Accept => {
-                      obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
-                      // No value needed for Accept
-                  }
-                  Goto::Split(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                      obj.insert("value".to_string(), state_id.to_json());
-                  }
-              }
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              obj.insert("accept".to_string(), self.accept.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
               match node {
-                  JSONNode::Object(mut obj) => {
-                      let variant = obj.remove("variant")
-                          .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
-                          .and_then(String::from_json)?;
-                      match variant.as_str() {
-                          "State" => {
-                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
-                              StateID::from_json(value_node).map(Goto::State)
-                          }
-                          "Accept" => Ok(Goto::Accept),
-                          "Split" => {
-                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::Split".to_string())?;
-                              StateID::from_json(value_node).map(Goto::Split)
-                          }
-                          _ => Err(format!("Unknown variant '{}' for Goto", variant)),
-                      }
-                  }
+                  JSONNode::Object(mut obj) => Ok(Goto {
+                      state_id: obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
+                          .and_then(Option::<StateID>::from_json)?,
+                      accept: obj
+                          .remove("accept")
+                          .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
+                          .and_then(bool::from_json)?,
+                  }),
                   _ => Err("Expected JSONNode::Object for Goto".to_string()),
               }
           }
@@ -7383,7 +7361,10 @@ local_system:
               let mut gotos = BTreeMap::new();
               for (nonterminal, next_item_set) in row.gotos {
                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-                  let goto = Goto::State(*item_set_map.get_by_left(&next_item_set).unwrap());
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
                   gotos.insert(non_terminal_id, goto);
               }
 
@@ -7407,19 +7388,18 @@ local_system:
           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
           match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
               std::collections::btree_map::Entry::Vacant(entry) => {
-                  entry.insert(Goto::Accept);
+                  entry.insert(Goto {
+                      state_id: None,
+                      accept: true,
+                  });
               }
               std::collections::btree_map::Entry::Occupied(mut entry) => {
                   let goto = entry.get_mut();
-                  match goto {
-                      Goto::State(state_id) => {
-                          *goto = Goto::Split(*state_id);
-                      }
-                      Goto::Accept | Goto::Split(_) => {
-                          // We can use the `goto` reference here for the panic message.
-                          panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                      }
+                  if goto.accept {
+                      // We can use the `goto` reference here for the panic message.
+                      panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
                   }
+                  goto.accept = true;
               }
           }
 
@@ -10410,10 +10390,16 @@ messages:
                           for (non_terminal_id, goto) in sorted_gotos {
                               let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
                               write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
-                              match goto {
-                                  Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
-                                  Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
-                                  Goto::Split(next_state_id) => writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap(),
+                              if let Some(next_state_id) = goto.state_id {
+                                  if goto.accept {
+                                      writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                                  } else {
+                                      writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                                  }
+                              } else if goto.accept {
+                                  writeln!(&mut result, "Accept").unwrap();
+                              } else {
+                                  writeln!(&mut result, "No-op (should not happen)").unwrap();
                               }
                           }
                       }
@@ -10529,12 +10515,18 @@ messages:
                   }
 
                   writeln!(f, "    Gotos:")?;
-                  for (&non_terminal_id, &next_state_id) in &row.gotos {
+                  for (&non_terminal_id, goto) in &row.gotos {
                       let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
-                      let goto_str = match &next_state_id {
-                          Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
-                          Goto::Accept => "accept".to_string(),
-                          Goto::Split(state_id_val) => format!("{} or accept", state_id_val.0),
+                      let goto_str = if let Some(state_id_val) = goto.state_id {
+                          if goto.accept {
+                              format!("{} or accept", state_id_val.0)
+                          } else {
+                              format!("{}", state_id_val.0)
+                          }
+                      } else if goto.accept {
+                          "accept".to_string()
+                      } else {
+                          "no-op".to_string()
                       };
                       writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
                   }
@@ -10686,23 +10678,19 @@ messages:
                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
                       );
-                      match goto {
-                          Goto::State(goto_state_id) => {
-                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                              let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                              out.push(new_gss_node);
-                          }
-                          Goto::Accept => {
-                              // Mark successful acceptance
-                              self.accepted = true;
-                          }
-                          Goto::Split(goto_state_id) => {
+
+                      if goto.accept {
+                          self.accepted = true;
+                      }
+
+                      if let Some(goto_state_id) = goto.state_id {
+                          if goto.accept {
                               crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                              let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-                              out.push(new_gss_node);
-                              // Also mark acceptance
-                              self.accepted = true;
+                          } else {
+                              crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                           }
+                          let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                              out.push(new_gss_node);
                       }
                   }
               }
@@ -11339,51 +11327,31 @@ messages:
       }
 
 
-      #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-      pub enum Goto {
-          State(StateID),
-          Accept,
-          Split(StateID)
+      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct Goto {
+          pub state_id: Option<StateID>,
+          pub accept: bool,
       }
 
       impl JSONConvertible for Goto {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
-              match self {
-                  Goto::State(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
-                      obj.insert("value".to_string(), state_id.to_json());
-                  }
-                  Goto::Accept => {
-                      obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
-                      // No value needed for Accept
-                  }
-                  Goto::Split(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                      obj.insert("value".to_string(), state_id.to_json());
-                  }
-              }
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              obj.insert("accept".to_string(), self.accept.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
               match node {
-                  JSONNode::Object(mut obj) => {
-                      let variant = obj.remove("variant")
-                          .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
-                          .and_then(String::from_json)?;
-                      match variant.as_str() {
-                          "State" => {
-                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
-                              StateID::from_json(value_node).map(Goto::State)
-                          }
-                          "Accept" => Ok(Goto::Accept),
-                          "Split" => {
-                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::Split".to_string())?;
-                              StateID::from_json(value_node).map(Goto::Split)
-                          }
-                          _ => Err(format!("Unknown variant '{}' for Goto", variant)),
-                      }
-                  }
+                  JSONNode::Object(mut obj) => Ok(Goto {
+                      state_id: obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
+                          .and_then(Option::<StateID>::from_json)?,
+                      accept: obj
+                          .remove("accept")
+                          .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
+                          .and_then(bool::from_json)?,
+                  }),
                   _ => Err("Expected JSONNode::Object for Goto".to_string()),
               }
           }
@@ -11774,7 +11742,10 @@ messages:
               let mut gotos = BTreeMap::new();
               for (nonterminal, next_item_set) in row.gotos {
                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-                  let goto = Goto::State(*item_set_map.get_by_left(&next_item_set).unwrap());
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
                   gotos.insert(non_terminal_id, goto);
               }
 
@@ -11798,19 +11769,18 @@ messages:
           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
           match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
               std::collections::btree_map::Entry::Vacant(entry) => {
-                  entry.insert(Goto::Accept);
+                  entry.insert(Goto {
+                      state_id: None,
+                      accept: true,
+                  });
               }
               std::collections::btree_map::Entry::Occupied(mut entry) => {
                   let goto = entry.get_mut();
-                  match goto {
-                      Goto::State(state_id) => {
-                          *goto = Goto::Split(*state_id);
-                      }
-                      Goto::Accept | Goto::Split(_) => {
-                          // We can use the `goto` reference here for the panic message.
-                          panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-                      }
+                  if goto.accept {
+                      // We can use the `goto` reference here for the panic message.
+                      panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
                   }
+                  goto.accept = true;
               }
           }
 
@@ -13087,248 +13057,110 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Modify this so that instead of
-      ```rust
-      pub enum Goto {
-          State(StateID),
-          Accept,
-          Split(StateID)
-      }
-      ```
-      we have
-      ```rust
-      pub struct Goto {
-          state_id: StateID,
-          accept: bool,
-      }
-      ```
+      Add a function to analyze.rs that looks at a parse table and sees whether any two states have exactly the same shifts and reduces but 'compatible' gotos and reports them. Check all phases. Reduces include the default reduce.
+      Let's define 'compatible' gotos. Gotos are a map from nonterminal to Goto. Two goto maps are considered to be 'compatible' if for all keys they have in common, the values are exactly matching as well.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Here are the requested changes to refactor the `Goto` enum into a struct. I've interpreted that `state_id` should be an `Option<StateID>` to accommodate the `Accept` case, which doesn't have a state to transition to.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the diffs for the requested changes.
 
-      Here are the diffs for the modified files:
+      I've added a new function `find_compatible_states` to `src/glr/analyze.rs`. This function identifies pairs of states in the parse table that have identical actions across all phases but "compatible" goto maps, as you defined. This can be a useful tool for analyzing the structure of the generated parse table.
 
-      In `src/glr/table.rs`, I'll update the definition of `Goto` and the logic in `stage_7` that creates `Goto` instances.
+      Here are the changes:
 
       ```diff
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -221,48 +221,29 @@
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -1,7 +1,8 @@
+       use std::cmp::PartialEq;
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
+       use kdam::{tqdm, BarExt};
+       use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+      +use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
+       
+       
+       /// Checks for non-terminals used in rule RHS but never defined in LHS.
+      @@ -690,3 +691,63 @@
+           productions.clear();
+           productions.extend(new_productions);
        }
-       
-       
-      -#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-      -pub enum Goto {
-      -    State(StateID),
-      -    Accept,
-      -    Split(StateID)
-      +#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      +pub struct Goto {
-      +    pub state_id: Option<StateID>,
-      +    pub accept: bool,
-       }
-       
-       impl JSONConvertible for Goto {
-           fn to_json(&self) -> JSONNode {
-               let mut obj = StdMap::new();
-      -        match self {
-      -            Goto::State(state_id) => {
-      -                obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
-      -                obj.insert("value".to_string(), state_id.to_json());
-      -            }
-      -            Goto::Accept => {
-      -                obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
-      -                // No value needed for Accept
-      -            }
-      -            Goto::Split(state_id) => {
-      -                obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-      -                obj.insert("value".to_string(), state_id.to_json());
-      -            }
-      -        }
-      +        obj.insert("state_id".to_string(), self.state_id.to_json());
-      +        obj.insert("accept".to_string(), self.accept.to_json());
-               JSONNode::Object(obj)
-           }
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-               match node {
-      -            JSONNode::Object(mut obj) => {
-      -                let variant = obj.remove("variant")
-      -                    .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
-      -                    .and_then(String::from_json)?;
-      -                match variant.as_str() {
-      -                    "State" => {
-      -                        let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
-      -                        StateID::from_json(value_node).map(Goto::State)
-      -                    }
-      -                    "Accept" => Ok(Goto::Accept),
-      -                    "Split" => {
-      -                        let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::Split".to_string())?;
-      -                        StateID::from_json(value_node).map(Goto::Split)
-      -                    }
-      -                    _ => Err(format!("Unknown variant '{}' for Goto", variant)),
-      -                }
-      -            }
-      +            JSONNode::Object(mut obj) => Ok(Goto {
-      +                state_id: obj
-      +                    .remove("state_id")
-      +                    .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
-      +                    .and_then(Option::<StateID>::from_json)?,
-      +                accept: obj
-      +                    .remove("accept")
-      +                    .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
-      +                    .and_then(bool::from_json)?,
-      +            }),
-                   _ => Err("Expected JSONNode::Object for Goto".to_string()),
-               }
-           }
-       }
-      @@ -648,7 +629,10 @@
-               let mut gotos = BTreeMap::new();
-               for (nonterminal, next_item_set) in row.gotos {
-                   let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-      -            let goto = Goto::State(*item_set_map.get_by_left(&next_item_set).unwrap());
-      +            let goto = Goto {
-      +                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
-      +                accept: false,
-      +            };
-                   gotos.insert(non_terminal_id, goto);
-               }
-       
-      @@ -667,20 +651,18 @@
-           let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-           match stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id) {
-               std::collections::btree_map::Entry::Vacant(entry) => {
-      -            entry.insert(Goto::Accept);
-      +            entry.insert(Goto {
-      +                state_id: None,
-      +                accept: true,
-      +            });
-               }
-               std::collections::btree_map::Entry::Occupied(mut entry) => {
-                   let goto = entry.get_mut();
-      -            match goto {
-      -                Goto::State(state_id) => {
-      -                    *goto = Goto::Split(*state_id);
-      -                }
-      -                Goto::Accept | Goto::Split(_) => {
-      -                    // We can use the `goto` reference here for the panic message.
-      -                    panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
-      -                }
-      -            }
-      +            if goto.accept {
-      +                // We can use the `goto` reference here for the panic message.
-      +                panic!("Unexpected Goto for start state {}: {:?}", start_state_id.0, goto);
+      +
+      +/// Checks if two goto maps are compatible.
+      +///
+      +/// Two goto maps are compatible if, for all non-terminal IDs they have in common,
+      +/// the corresponding `Goto` actions are identical.
+      +fn are_gotos_compatible(
+      +    gotos1: &BTreeMap<NonTerminalID, Goto>,
+      +    gotos2: &BTreeMap<NonTerminalID, Goto>,
+      +) -> bool {
+      +    // Iterate over the keys of the first map.
+      +    for (nt_id, goto1) in gotos1 {
+      +        // If the second map also contains this key, check if the values are equal.
+      +        if let Some(goto2) = gotos2.get(nt_id) {
+      +            if goto1 != goto2 {
+      +                // Incompatibility found.
+      +                return false;
       +            }
-      +            goto.accept = true;
-               }
-           }
-       
-
-      ```
-
-      In `src/glr/parser.rs`, I'll update the functions that use `Goto` to work with the new struct.
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -470,9 +470,15 @@
-                           for (non_terminal_id, goto) in sorted_gotos {
-                               let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
-                               write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
-      -                        match goto {
-      -                            Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
-      -                            Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
-      -                            Goto::Split(next_state_id) => writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap(),
-      +                        if let Some(next_state_id) = goto.state_id {
-      +                            if goto.accept {
-      +                                writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
-      +                            } else {
-      +                                writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
-      +                            }
-      +                        } else if goto.accept {
-      +                            writeln!(&mut result, "Accept").unwrap();
-      +                        } else {
-      +                            writeln!(&mut result, "No-op (should not happen)").unwrap();
-                               }
-                           }
-                       }
-      @@ -568,13 +574,19 @@
-                   }
-       
-                   writeln!(f, "    Gotos:")?;
-      -            for (&non_terminal_id, &next_state_id) in &row.gotos {
-      +            for (&non_terminal_id, goto) in &row.gotos {
-                       let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
-      -                let goto_str = match &next_state_id {
-      -                    Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
-      -                    Goto::Accept => "accept".to_string(),
-      -                    Goto::Split(state_id_val) => format!("{} or accept", state_id_val.0),
-      +                let goto_str = if let Some(state_id_val) = goto.state_id {
-      +                    if goto.accept {
-      +                        format!("{} or accept", state_id_val.0)
-      +                    } else {
-      +                        format!("{}", state_id_val.0)
-      +                    }
-      +                } else if goto.accept {
-      +                    "accept".to_string()
-      +                } else {
-      +                    "no-op".to_string()
-                       };
-                       writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
-                   }
-      @@ -700,24 +712,19 @@
-                       let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                           format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                       );
-      -                match goto {
-      -                    Goto::State(goto_state_id) => {
-      -                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-      -                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
+      +        }
+      +    }
+      +    // No incompatibilities found.
+      +    true
+      +}
       +
-      +                if goto.accept {
-      +                    self.accepted = true;
+      +/// Finds pairs of states in a parse table that have identical actions but only
+      +/// "compatible" gotos.
+      +///
+      +/// This is useful for identifying states that might be candidates for merging in
+      +/// LALR(1) parsers, or for general table analysis.
+      +///
+      +/// A pair of states is reported if:
+      +/// 1. Their shift/reduce actions are identical across all phases (including default reduces).
+      +/// 2. Their `goto` maps are "compatible". Two goto maps are compatible if for every
+      +///    non-terminal key they have in common, the target `Goto` action is also identical.
+      +///
+      +/// # Arguments
+      +/// * `table` - The `Stage7Table` to analyze.
+      +///
+      +/// # Returns
+      +/// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
+      +/// compatible states.
+      +pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
+      +    let mut compatible_pairs = Vec::new();
+      +    let states_and_rows: Vec<_> = table.iter().collect();
+      +
+      +    // Iterate over all unique pairs of states.
+      +    for i in 0..states_and_rows.len() {
+      +        for j in (i + 1)..states_and_rows.len() {
+      +            let (state_id1, row1) = states_and_rows[i];
+      +            let (state_id2, row2) = states_and_rows[j];
+      +
+      +            // Condition 1: Check for identical actions across all phases.
+      +            let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
+      +                && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
+      +                && row1.phase3_default_reduce == row2.phase3_default_reduce;
+      +
+      +            if actions_are_identical {
+      +                // Condition 2: Check for compatible gotos.
+      +                if are_gotos_compatible(&row1.gotos, &row2.gotos) {
+      +                    compatible_pairs.push((*state_id1, *state_id2));
       +                }
+      +            }
+      +        }
+      +    }
       +
-      +                if let Some(goto_state_id) = goto.state_id {
-      +                    if goto.accept {
-      +                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-      +                    } else {
-      +                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-      +                    }
-      +                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                               out.push(new_gss_node);
-      -                    }
-      -                    Goto::Accept => {
-      -                        // Mark successful acceptance
-      -                        self.accepted = true;
-      -                    }
-      -                    Goto::Split(goto_state_id) => {
-      -                        crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {} or Accept", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-      -                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: *goto_state_id });
-      -                        out.push(new_gss_node);
-      -                        // Also mark acceptance
-      -                        self.accepted = true;
-      -                    }
-                       }
-                   }
-               }
+      +    compatible_pairs
+      +}
 
       ```
 
-      These changes should accomplish the refactoring you requested. Let me know if you have any other questions
+      Let me know if you have any other questions or need further assistance
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
     metadata:
 ...

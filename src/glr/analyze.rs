@@ -2,6 +2,7 @@ use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
 use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -712,5 +713,71 @@ pub fn resolve_direct_right_recursion(
     // 4. Replace the original productions with the new set.
     productions.clear();
     productions.extend(new_productions);
+}
+
+/// Checks if two goto maps are compatible.
+///
+/// Two goto maps are compatible if, for all non-terminal IDs they have in common,
+/// the corresponding `Goto` actions are identical.
+fn are_gotos_compatible(
+    gotos1: &BTreeMap<NonTerminalID, Goto>,
+    gotos2: &BTreeMap<NonTerminalID, Goto>,
+) -> bool {
+    // Iterate over the keys of the first map.
+    for (nt_id, goto1) in gotos1 {
+        // If the second map also contains this key, check if the values are equal.
+        if let Some(goto2) = gotos2.get(nt_id) {
+            if goto1 != goto2 {
+                // Incompatibility found.
+                return false;
+            }
+        }
+    }
+    // No incompatibilities found.
+    true
+}
+
+/// Finds pairs of states in a parse table that have identical actions but only
+/// "compatible" gotos.
+///
+/// This is useful for identifying states that might be candidates for merging in
+/// LALR(1) parsers, or for general table analysis.
+///
+/// A pair of states is reported if:
+/// 1. Their shift/reduce actions are identical across all phases (including default reduces).
+/// 2. Their `goto` maps are "compatible". Two goto maps are compatible if for every
+///    non-terminal key they have in common, the target `Goto` action is also identical.
+///
+/// # Arguments
+/// * `table` - The `Stage7Table` to analyze.
+///
+/// # Returns
+/// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
+/// compatible states.
+pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
+    let mut compatible_pairs = Vec::new();
+    let states_and_rows: Vec<_> = table.iter().collect();
+
+    // Iterate over all unique pairs of states.
+    for i in 0..states_and_rows.len() {
+        for j in (i + 1)..states_and_rows.len() {
+            let (state_id1, row1) = states_and_rows[i];
+            let (state_id2, row2) = states_and_rows[j];
+
+            // Condition 1: Check for identical actions across all phases.
+            let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
+                && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
+                && row1.phase3_default_reduce == row2.phase3_default_reduce;
+
+            if actions_are_identical {
+                // Condition 2: Check for compatible gotos.
+                if are_gotos_compatible(&row1.gotos, &row2.gotos) {
+                    compatible_pairs.push((*state_id1, *state_id2));
+                }
+            }
+        }
+    }
+
+    compatible_pairs
 }
 
