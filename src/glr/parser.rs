@@ -857,6 +857,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+        return None;
         if Some(token_id) == self.parser.ignore_terminal_id {
             timeit!("GLRParserState::has_action_for::ignore_token", {
                 crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
@@ -864,7 +865,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 return Some(LLMTokenBV::max_ones());
             });
         }
-        // return None;
         // let mut hasher = DeterministicHasher::new(DefaultHasher::new());
         // self.active_state.hash(&mut hasher);
         // let self_hash = hasher.finish();
