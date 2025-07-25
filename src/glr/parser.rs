@@ -156,6 +156,7 @@ pub enum ParserPhase {
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
+    pub start_production_id: usize,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -184,6 +185,8 @@ impl JSONConvertible for GLRParser {
                                        .and_then(Stage7Table::from_json)?;
                 let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                      .and_then(Vec::<Production>::from_json)?;
+                let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id".to_string())
+                                              .and_then(|n| usize::from_json(n))?;
                 let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
                                       .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                 let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
@@ -198,6 +201,7 @@ impl JSONConvertible for GLRParser {
                 Ok(GLRParser {
                     stage_7_table,
                     productions,
+                    start_production_id,
                     terminal_map,
                     non_terminal_map,
                     item_set_map,
@@ -242,6 +246,7 @@ impl GLRParser {
     pub fn new(
         stage_7_table: Stage7Table,
         productions: Vec<Production>,
+        start_production_id: usize,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -261,6 +266,7 @@ impl GLRParser {
         Self {
             stage_7_table,
             productions,
+            start_production_id,
             terminal_map,
             non_terminal_map,
             item_set_map,

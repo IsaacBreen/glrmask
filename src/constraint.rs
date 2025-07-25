@@ -280,7 +280,7 @@ impl GrammarConstraint {
         // These might be computed elsewhere or need to be computed here.
         // Assuming compute_first_sets is available from grammar module.
 
-        let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
+        let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions, parser.start_production_id);
         crate::debug!(3, "terminal_follow_sets_named:");
         for (terminal, following_terminals) in &terminal_follow_sets_named {
             crate::debug!(3, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
