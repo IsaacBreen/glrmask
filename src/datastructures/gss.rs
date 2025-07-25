@@ -802,11 +802,11 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut total_depth = 0u64;
     let mut total_preds = 0u64;
 
-    let mut root_predecessor_keys = HashSet::new();
+    let mut root_predecessor_dest_keys = HashSet::new();
     for root_node in roots {
         stats.num_root_predecessors += root_node.predecessors().len();
-        for key in root_node.predecessors().keys() {
-            root_predecessor_keys.insert(key.clone());
+        for ((edge_value, dest_key)) in root_node.predecessors().keys() {
+            root_predecessor_dest_keys.insert(edge_value.clone());
         }
 
         let node_ptr = *root_node as *const GSSNode;
@@ -814,7 +814,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
             queue.push_back((*root_node, 0));
         }
     }
-    stats.num_unique_root_predecessor_keys = root_predecessor_keys.len();
+    stats.num_unique_root_predecessor_keys = root_predecessor_dest_keys.len();
 
     // Reset visited for the main traversal to correctly process all nodes.
     visited.clear();
