@@ -796,7 +796,7 @@ pub struct GSSStats {
 }
 
 /// Gathers statistics about the structure and complexity of a GSS forest.
-// #[time_it]
+#[time_it]
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
