@@ -7,7 +7,7 @@ use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7Row, Stage7Shif
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -828,28 +828,46 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
         assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
-
-        let mut phase3_todo: VecDeque<ParseState> = VecDeque::new();
+    
+        // The work queue is now a BTreeMap to merge states and process shorter stacks first.
+        // Key: (stack_depth, state_id)
+        let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
+    
+        // 1. Initialize work_map by "peeling off" the top states from the active GSS.
         if !self.active_state.stack.is_empty() {
-            phase3_todo.push_back(self.active_state.clone());
+            for peek in self.active_state.stack.peek_iter() {
+                let key = (peek.depth(), peek.edge_value().state_id);
+                let state_for_map = ParseState { stack: Arc::new(peek.isolated_node()) };
+                match work_map.entry(key) {
+                    Entry::Vacant(e) => { e.insert(state_for_map); },
+                    Entry::Occupied(mut e) => { e.get_mut().merge(state_for_map); },
+                }
+            }
         }
-
+    
         let mut next = ParseState::new();
-
+    
         let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
         println!("GSS stats before phase 3: {:#?}", stats);
-
-        crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
+    
+        crate::debug!(4, "Phase 3: Processing {} unique (depth, state_id) pairs", work_map.len());
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
-            while let Some(state) = phase3_todo.pop_front() {
-                crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
+            while let Some((key, state)) = work_map.pop_first() {
+                crate::debug!(4, "Processing key {:?} with {} predecessors ({} keys in map)", key, state.stack.num_predecessors(), work_map.len());
                 for peek in state.stack.peek_iter() {
                     crate::debug!(4, "Processing peek with state ID {}", peek.edge_value().state_id.0);
                     let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                     if let Some(ref r) = row.phase3_default_reduce.reduce {
                         let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack.is_empty() {
-                            phase3_todo.push_back(ParseState { stack: new_stack });
+                            for new_peek in new_stack.peek_iter() {
+                                let new_key = (new_peek.depth(), new_peek.edge_value().state_id);
+                                let new_state_for_map = ParseState { stack: Arc::new(new_peek.isolated_node()) };
+                                match work_map.entry(new_key) {
+                                    Entry::Vacant(e) => { e.insert(new_state_for_map); },
+                                    Entry::Occupied(mut e) => { e.get_mut().merge(new_state_for_map); },
+                                }
+                            }
                         }
                     }
                     if row.phase3_default_reduce.clone_and_merge {
@@ -858,7 +876,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         });
-
+    
         crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next.stack.num_predecessors());
         self.active_state = next;
         self.phase = ParserPhase::ReadyForPhase1;

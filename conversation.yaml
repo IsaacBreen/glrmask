@@ -8,10 +8,10 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
-    src/glr/analyze.rs: |+
+    src/glr/analyze.rs: |
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
@@ -526,10 +526,10 @@ local_system:
           None
       }
 
-      pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
           let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -572,7 +572,11 @@ local_system:
                       // then FOLLOW(t) must also include FOLLOW(lhs).
                       if all_following_are_nullable {
                           if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-                              terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
+                              terminal_follows
+                                  .entry(t.clone())
+                                  .or_default()
+                                  // filter_map removes None (EOF) and unwraps Some(T) to T
+                                  .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
                           }
                       }
                   }
@@ -794,7 +798,6 @@ local_system:
 
           compatible_pairs
       }
-
     src/glr/grammar.rs: |
       use std::collections::{BTreeMap, BTreeSet};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -1055,9 +1058,15 @@ local_system:
           first_sets
       }
 
-      pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
+      pub fn compute_follow_sets_for_nonterminals(
+          productions: &[Production],
+          start_production_id: usize,
+          first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
+      ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+          let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
+          // Initialize for all non-terminals
           for production in productions {
               follow_sets.entry(production.lhs.clone()).or_default();
               for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
@@ -1067,6 +1076,11 @@ local_system:
               }
           }
 
+          // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
+          if !productions.is_empty() {
+              let start_nt = &productions[start_production_id].lhs;
+              follow_sets.entry(start_nt.clone()).or_default().insert(None);
+          }
 
           let mut changed = true;
           while changed {
@@ -1078,34 +1092,34 @@ local_system:
 
                   for (i, symbol) in rhs.iter().enumerate() {
                       if let Symbol::NonTerminal(nt) = symbol {
-                          let old_size = follow_sets.get_mut(nt).unwrap().len();
+                          let old_len = follow_sets.get(nt).unwrap().len();
 
-                          let mut nullable = true;
+                          let mut suffix_is_nullable = true;
                           for next_symbol in &rhs[i + 1..] {
                               match next_symbol {
                                   Symbol::Terminal(t_next) => {
-                                      follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-                                      nullable = false;
+                                      follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
+                                      suffix_is_nullable = false;
                                       break;
                                   }
                                   Symbol::NonTerminal(nt_next) => {
                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-                                      follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-                                      
+                                      follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
+
                                       if !nullable_nonterminals.contains(nt_next) {
-                                          nullable = false;
+                                          suffix_is_nullable = false;
                                           break;
                                       }
                                   }
                               }
                           }
 
-                          if nullable {
+                          if suffix_is_nullable {
                               let follow_lhs = follow_sets.get(lhs).unwrap().clone();
                               follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
                           }
 
-                          if follow_sets.get_mut(nt).unwrap().len() != old_size {
+                          if follow_sets.get(nt).unwrap().len() != old_len {
                               changed = true;
                           }
                       }
@@ -1115,7 +1129,7 @@ local_system:
 
           follow_sets
       }
-    src/glr/items.rs: |+
+    src/glr/items.rs: |
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -1246,13 +1260,14 @@ local_system:
           LR1,
       }
 
+      pub const LR_TYPE: LRType = LRType::LALR;
+
       pub fn compute_closure(
           items: &BTreeSet<Item>,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
-          follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          lr_type: LRType,
+          follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
 
       ) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
@@ -1277,7 +1292,29 @@ local_system:
               }
           }
 
-          // crate::debug!(3, "Done computing closure");
+          if matches!(LR_TYPE, LRType::LALR) {
+              let mut lalr_closure = BTreeSet::new();
+              let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+
+              // Separate reduce and non-reduce items, and group reduce items by core
+              for item in closure {
+                  if item.dot_at_end() {
+                      reduce_item_cores.entry((item.production, item.dot_position)).or_default();
+                  } else {
+                      lalr_closure.insert(item);
+                  }
+              }
+
+              // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+              for ((prod, dot_pos), _) in reduce_item_cores {
+                  if let Some(follows) = follow_sets.get(&prod.lhs) {
+                      for lookahead in follows {
+                          lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+                      }
+                  }
+              }
+              return lalr_closure;
+          }
           closure
       }
 
@@ -1298,7 +1335,6 @@ local_system:
           }
           result
       }
-
     src/glr/mod.rs: |
       pub mod table;
       pub mod grammar;
@@ -1466,6 +1502,7 @@ local_system:
       pub struct GLRParser {
           pub stage_7_table: Stage7Table,
           pub productions: Vec<Production>,
+          pub start_production_id: usize,
           pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
           pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
           pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -1494,6 +1531,8 @@ local_system:
                                              .and_then(Stage7Table::from_json)?;
                       let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                            .and_then(Vec::<Production>::from_json)?;
+                      let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id".to_string())
+                                                    .and_then(|n| usize::from_json(n))?;
                       let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
                                             .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                       let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
@@ -1508,6 +1547,7 @@ local_system:
                       Ok(GLRParser {
                           stage_7_table,
                           productions,
+                          start_production_id,
                           terminal_map,
                           non_terminal_map,
                           item_set_map,
@@ -1552,6 +1592,7 @@ local_system:
           pub fn new(
               stage_7_table: Stage7Table,
               productions: Vec<Production>,
+              start_production_id: usize,
               terminal_map: BiBTreeMap<Terminal, TerminalID>,
               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -1571,6 +1612,7 @@ local_system:
               Self {
                   stage_7_table,
                   productions,
+                  start_production_id,
                   terminal_map,
                   non_terminal_map,
                   item_set_map,
@@ -2140,8 +2182,11 @@ local_system:
 
               let mut next = ParseState::new();
 
+              let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
+              println!("GSS stats before phase 3: {:#?}", stats);
+
               crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
-              timeit!("GLRParserState::step::phase3", {
+              timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
                   while let Some(state) = phase3_todo.pop_front() {
                       crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
                       for peek in state.stack.peek_iter() {
@@ -2768,30 +2813,29 @@ local_system:
               dot_position: 0,
               lookahead: None,
           };
-          let initial_closure = BTreeSet::from([initial_item]);
-          let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+          let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
           let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
-          const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
+          let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
           while let Some(item_set) = worklist.pop_front() {
               if transitions.contains_key(&item_set) {
                   continue;
               }
 
-              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, lr_type);
+              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
               let splits = split_on_dot(&closure);
               let mut row = BTreeMap::new();
 
-              for (symbol, item_set) in splits {
+              for (symbol, item_set) in &splits {
                   row.insert(symbol.clone(), item_set.clone());
                   if symbol.is_some() {
-                      let goto_set = compute_goto(&item_set);
+                      let goto_set = compute_goto(item_set);
                       worklist.push_back(goto_set);
                   }
               }
@@ -3315,7 +3359,7 @@ local_system:
 
           crate::debug!(2, "Done generating GLR parser");
 
-          GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
+          GLRParser::new(stage_7_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
       }
 
       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
@@ -4521,7 +4565,7 @@ local_system:
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
   prev_file_contents:
-    src/glr/analyze.rs: |+
+    src/glr/analyze.rs: |
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
@@ -5036,10 +5080,10 @@ local_system:
           None
       }
 
-      pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
           let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -5082,7 +5126,11 @@ local_system:
                       // then FOLLOW(t) must also include FOLLOW(lhs).
                       if all_following_are_nullable {
                           if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-                              terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
+                              terminal_follows
+                                  .entry(t.clone())
+                                  .or_default()
+                                  // filter_map removes None (EOF) and unwraps Some(T) to T
+                                  .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
                           }
                       }
                   }
@@ -5304,7 +5352,6 @@ local_system:
 
           compatible_pairs
       }
-
     src/glr/grammar.rs: |
       use std::collections::{BTreeMap, BTreeSet};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -5565,9 +5612,15 @@ local_system:
           first_sets
       }
 
-      pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
+      pub fn compute_follow_sets_for_nonterminals(
+          productions: &[Production],
+          start_production_id: usize,
+          first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
+      ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+          let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
+          // Initialize for all non-terminals
           for production in productions {
               follow_sets.entry(production.lhs.clone()).or_default();
               for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
@@ -5577,6 +5630,11 @@ local_system:
               }
           }
 
+          // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
+          if !productions.is_empty() {
+              let start_nt = &productions[start_production_id].lhs;
+              follow_sets.entry(start_nt.clone()).or_default().insert(None);
+          }
 
           let mut changed = true;
           while changed {
@@ -5588,34 +5646,34 @@ local_system:
 
                   for (i, symbol) in rhs.iter().enumerate() {
                       if let Symbol::NonTerminal(nt) = symbol {
-                          let old_size = follow_sets.get_mut(nt).unwrap().len();
+                          let old_len = follow_sets.get(nt).unwrap().len();
 
-                          let mut nullable = true;
+                          let mut suffix_is_nullable = true;
                           for next_symbol in &rhs[i + 1..] {
                               match next_symbol {
                                   Symbol::Terminal(t_next) => {
-                                      follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-                                      nullable = false;
+                                      follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
+                                      suffix_is_nullable = false;
                                       break;
                                   }
                                   Symbol::NonTerminal(nt_next) => {
                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-                                      follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-                                      
+                                      follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
+
                                       if !nullable_nonterminals.contains(nt_next) {
-                                          nullable = false;
+                                          suffix_is_nullable = false;
                                           break;
                                       }
                                   }
                               }
                           }
 
-                          if nullable {
+                          if suffix_is_nullable {
                               let follow_lhs = follow_sets.get(lhs).unwrap().clone();
                               follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
                           }
 
-                          if follow_sets.get_mut(nt).unwrap().len() != old_size {
+                          if follow_sets.get(nt).unwrap().len() != old_len {
                               changed = true;
                           }
                       }
@@ -5625,7 +5683,7 @@ local_system:
 
           follow_sets
       }
-    src/glr/items.rs: |+
+    src/glr/items.rs: |
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -5756,13 +5814,14 @@ local_system:
           LR1,
       }
 
+      pub const LR_TYPE: LRType = LRType::LALR;
+
       pub fn compute_closure(
           items: &BTreeSet<Item>,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
-          follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          lr_type: LRType,
+          follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
 
       ) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
@@ -5787,7 +5846,29 @@ local_system:
               }
           }
 
-          // crate::debug!(3, "Done computing closure");
+          if matches!(LR_TYPE, LRType::LALR) {
+              let mut lalr_closure = BTreeSet::new();
+              let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+
+              // Separate reduce and non-reduce items, and group reduce items by core
+              for item in closure {
+                  if item.dot_at_end() {
+                      reduce_item_cores.entry((item.production, item.dot_position)).or_default();
+                  } else {
+                      lalr_closure.insert(item);
+                  }
+              }
+
+              // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+              for ((prod, dot_pos), _) in reduce_item_cores {
+                  if let Some(follows) = follow_sets.get(&prod.lhs) {
+                      for lookahead in follows {
+                          lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+                      }
+                  }
+              }
+              return lalr_closure;
+          }
           closure
       }
 
@@ -5808,7 +5889,6 @@ local_system:
           }
           result
       }
-
     src/glr/mod.rs: |
       pub mod table;
       pub mod grammar;
@@ -5976,6 +6056,7 @@ local_system:
       pub struct GLRParser {
           pub stage_7_table: Stage7Table,
           pub productions: Vec<Production>,
+          pub start_production_id: usize,
           pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
           pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
           pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -6004,6 +6085,8 @@ local_system:
                                              .and_then(Stage7Table::from_json)?;
                       let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                            .and_then(Vec::<Production>::from_json)?;
+                      let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id".to_string())
+                                                    .and_then(|n| usize::from_json(n))?;
                       let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
                                             .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                       let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
@@ -6018,6 +6101,7 @@ local_system:
                       Ok(GLRParser {
                           stage_7_table,
                           productions,
+                          start_production_id,
                           terminal_map,
                           non_terminal_map,
                           item_set_map,
@@ -6062,6 +6146,7 @@ local_system:
           pub fn new(
               stage_7_table: Stage7Table,
               productions: Vec<Production>,
+              start_production_id: usize,
               terminal_map: BiBTreeMap<Terminal, TerminalID>,
               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -6081,6 +6166,7 @@ local_system:
               Self {
                   stage_7_table,
                   productions,
+                  start_production_id,
                   terminal_map,
                   non_terminal_map,
                   item_set_map,
@@ -6650,8 +6736,11 @@ local_system:
 
               let mut next = ParseState::new();
 
+              let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
+              println!("GSS stats before phase 3: {:#?}", stats);
+
               crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
-              timeit!("GLRParserState::step::phase3", {
+              timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
                   while let Some(state) = phase3_todo.pop_front() {
                       crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
                       for peek in state.stack.peek_iter() {
@@ -7278,30 +7367,29 @@ local_system:
               dot_position: 0,
               lookahead: None,
           };
-          let initial_closure = BTreeSet::from([initial_item]);
-          let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+          let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
           let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
-          const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
+          let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
           while let Some(item_set) = worklist.pop_front() {
               if transitions.contains_key(&item_set) {
                   continue;
               }
 
-              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, lr_type);
+              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
               let splits = split_on_dot(&closure);
               let mut row = BTreeMap::new();
 
-              for (symbol, item_set) in splits {
+              for (symbol, item_set) in &splits {
                   row.insert(symbol.clone(), item_set.clone());
                   if symbol.is_some() {
-                      let goto_set = compute_goto(&item_set);
+                      let goto_set = compute_goto(item_set);
                       worklist.push_back(goto_set);
                   }
               }
@@ -7825,7 +7913,7 @@ local_system:
 
           crate::debug!(2, "Done generating GLR parser");
 
-          GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
+          GLRParser::new(stage_7_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
       }
 
       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
@@ -9569,10 +9657,10 @@ messages:
           None
       }
 
-      pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
           let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -9615,7 +9703,11 @@ messages:
                       // then FOLLOW(t) must also include FOLLOW(lhs).
                       if all_following_are_nullable {
                           if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-                              terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
+                              terminal_follows
+                                  .entry(t.clone())
+                                  .or_default()
+                                  // filter_map removes None (EOF) and unwraps Some(T) to T
+                                  .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
                           }
                       }
                   }
@@ -9837,7 +9929,6 @@ messages:
 
           compatible_pairs
       }
-
 
       ```
     metadata:
@@ -10103,9 +10194,15 @@ messages:
           first_sets
       }
 
-      pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
+      pub fn compute_follow_sets_for_nonterminals(
+          productions: &[Production],
+          start_production_id: usize,
+          first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
+      ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+          let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
+          // Initialize for all non-terminals
           for production in productions {
               follow_sets.entry(production.lhs.clone()).or_default();
               for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
@@ -10115,6 +10212,11 @@ messages:
               }
           }
 
+          // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
+          if !productions.is_empty() {
+              let start_nt = &productions[start_production_id].lhs;
+              follow_sets.entry(start_nt.clone()).or_default().insert(None);
+          }
 
           let mut changed = true;
           while changed {
@@ -10126,34 +10228,34 @@ messages:
 
                   for (i, symbol) in rhs.iter().enumerate() {
                       if let Symbol::NonTerminal(nt) = symbol {
-                          let old_size = follow_sets.get_mut(nt).unwrap().len();
+                          let old_len = follow_sets.get(nt).unwrap().len();
 
-                          let mut nullable = true;
+                          let mut suffix_is_nullable = true;
                           for next_symbol in &rhs[i + 1..] {
                               match next_symbol {
                                   Symbol::Terminal(t_next) => {
-                                      follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-                                      nullable = false;
+                                      follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
+                                      suffix_is_nullable = false;
                                       break;
                                   }
                                   Symbol::NonTerminal(nt_next) => {
                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-                                      follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-                                      
+                                      follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
+
                                       if !nullable_nonterminals.contains(nt_next) {
-                                          nullable = false;
+                                          suffix_is_nullable = false;
                                           break;
                                       }
                                   }
                               }
                           }
 
-                          if nullable {
+                          if suffix_is_nullable {
                               let follow_lhs = follow_sets.get(lhs).unwrap().clone();
                               follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
                           }
 
-                          if follow_sets.get_mut(nt).unwrap().len() != old_size {
+                          if follow_sets.get(nt).unwrap().len() != old_len {
                               changed = true;
                           }
                       }
@@ -10299,13 +10401,14 @@ messages:
           LR1,
       }
 
+      pub const LR_TYPE: LRType = LRType::LALR;
+
       pub fn compute_closure(
           items: &BTreeSet<Item>,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
-          follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          lr_type: LRType,
+          follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
 
       ) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
@@ -10330,7 +10433,29 @@ messages:
               }
           }
 
-          // crate::debug!(3, "Done computing closure");
+          if matches!(LR_TYPE, LRType::LALR) {
+              let mut lalr_closure = BTreeSet::new();
+              let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+
+              // Separate reduce and non-reduce items, and group reduce items by core
+              for item in closure {
+                  if item.dot_at_end() {
+                      reduce_item_cores.entry((item.production, item.dot_position)).or_default();
+                  } else {
+                      lalr_closure.insert(item);
+                  }
+              }
+
+              // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+              for ((prod, dot_pos), _) in reduce_item_cores {
+                  if let Some(follows) = follow_sets.get(&prod.lhs) {
+                      for lookahead in follows {
+                          lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+                      }
+                  }
+              }
+              return lalr_closure;
+          }
           closure
       }
 
@@ -10351,7 +10476,6 @@ messages:
           }
           result
       }
-
 
       ```
     metadata:
@@ -10529,6 +10653,7 @@ messages:
       pub struct GLRParser {
           pub stage_7_table: Stage7Table,
           pub productions: Vec<Production>,
+          pub start_production_id: usize,
           pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
           pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
           pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -10557,6 +10682,8 @@ messages:
                                              .and_then(Stage7Table::from_json)?;
                       let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                            .and_then(Vec::<Production>::from_json)?;
+                      let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id".to_string())
+                                                    .and_then(|n| usize::from_json(n))?;
                       let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
                                             .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                       let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
@@ -10571,6 +10698,7 @@ messages:
                       Ok(GLRParser {
                           stage_7_table,
                           productions,
+                          start_production_id,
                           terminal_map,
                           non_terminal_map,
                           item_set_map,
@@ -10615,6 +10743,7 @@ messages:
           pub fn new(
               stage_7_table: Stage7Table,
               productions: Vec<Production>,
+              start_production_id: usize,
               terminal_map: BiBTreeMap<Terminal, TerminalID>,
               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -10634,6 +10763,7 @@ messages:
               Self {
                   stage_7_table,
                   productions,
+                  start_production_id,
                   terminal_map,
                   non_terminal_map,
                   item_set_map,
@@ -11203,8 +11333,11 @@ messages:
 
               let mut next = ParseState::new();
 
+              let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
+              println!("GSS stats before phase 3: {:#?}", stats);
+
               crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
-              timeit!("GLRParserState::step::phase3", {
+              timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
                   while let Some(state) = phase3_todo.pop_front() {
                       crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
                       for peek in state.stack.peek_iter() {
@@ -11841,30 +11974,29 @@ messages:
               dot_position: 0,
               lookahead: None,
           };
-          let initial_closure = BTreeSet::from([initial_item]);
-          let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+          let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
           let first_sets = compute_first_sets_for_nonterminals(productions);
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
-          const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
+          let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
           while let Some(item_set) = worklist.pop_front() {
               if transitions.contains_key(&item_set) {
                   continue;
               }
 
-              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, lr_type);
+              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
               let splits = split_on_dot(&closure);
               let mut row = BTreeMap::new();
 
-              for (symbol, item_set) in splits {
+              for (symbol, item_set) in &splits {
                   row.insert(symbol.clone(), item_set.clone());
                   if symbol.is_some() {
-                      let goto_set = compute_goto(&item_set);
+                      let goto_set = compute_goto(item_set);
                       worklist.push_back(goto_set);
                   }
               }
@@ -12388,7 +12520,7 @@ messages:
 
           crate::debug!(2, "Done generating GLR parser");
 
-          GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
+          GLRParser::new(stage_7_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
       }
 
       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
@@ -13603,1258 +13735,127 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      I want to make it easy to switch between LALR (not implemented) and LR (currently implemented) here by changing a LRType passed to the closure fn. This should work since the difference between LR1 and LALR is that LALR includes all follow terminals for a given nonterminal as the follow for an item.
-      We can add a bit of code to the end of compute_closure that augments the closure as such.
-      e.g.
-      - get unique 'base' items in the closure so far, setting lookahead to None, as a set. Set aside any items that *already* have None as their lookahead
-      - create a new empty closure
-      - loop through the set of unique 'base' items. Get the follow terminals for this nonterminal nonterminal. For each follow terminal, add an item with that terminal as lookahead to the new closure.
-      - add back those items that *already* had None as their lookahead.
+      I want to merge GSSs as we go.
+      I suspect we often get back to the same GSS state from multiple places.
+      But not merging leads to a huge number of iterations in do_phase3. Like thousands.
+
+      We could try sorting by max depth. That might work.
+
+      Or we could try making the queue a map from state ID to stack. ie don't push the top state just yet, defer it.
+      Then when we can, merge into the existing stack in the map.
+
+      Yes. Let's do that.
+      AND always process the shortest stack first.
+
+      So, instead of pushing a new edge to a new node on a goto, we push to the queue.
+      This means the setup for each phase will need to be slightly different. We'll need to peel off the top edges to construct the queue.
+      And it means we'll need to be careful to push that state to the stack when needed, e.g. on a shift (where we'll actually have *two* pushes - one for the queue key state ID, one for the shifted state ID), or on reduce (or not if we're careful - you decide).
+      This just applies to gotos. Shifts still just get merged straight in.
+
+      So, we'll have
+      `let mut work_map: BTreeMap<(StateID, MaxDepth), ParseState> = BTreeMap::new();`
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the git diff patches for the modifications you've described.
+      Hello! As a helpful assistant, I've analyzed your request to optimize the GSS merging process during parsing. Dealing with a large number of states in `do_phase3` can indeed be a performance bottleneck, and your suggestion to use a merging work queue is an excellent approach.
 
-      It seems you're looking to adjust the `compute_closure` function to handle both LR(1) and LALR(1) item set generation by using an `LRType` enum. The core idea is that for LALR(1), the lookaheads for reduction items should be determined by the FOLLOW set of the non-terminal, rather than the more specific lookaheads computed in the LR(1) fashion.
+      I've implemented the changes in `do_phase3` to use a `BTreeMap` as a work queue, keyed by `(depth, StateID)`. This ensures that states are merged as they are produced and that shorter stacks are processed first, which should significantly reduce the number of iterations.
 
-      Here is the patch that implements this logic as a post-processing step within `compute_closure`:
+      Here are the required changes:
 
-      ```diff a/src/glr/items.rs
-      --- a/src/glr/items.rs
-      +++ b/src/glr/items.rs
-      @@ -134,8 +134,39 @@
-               }
-           }
+      ### `src/glr/parser.rs`
+
+      I'll modify `do_phase3` to use the new `BTreeMap`-based work queue. This involves initializing the map by "peeling off" the initial active states, and then, within the loop, merging new states from reductions back into the map. I'll also add the necessary `use` statement for `btree_map::Entry`.
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -6,7 +6,7 @@
+       use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
        
-      -    // crate::debug!(3, "Done computing closure");
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position))
-      +                    .or_default()
-      +                    .insert(item.lookahead);
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items
-      +        for ((prod, dot_pos), original_lookaheads) in reduce_item_cores {
-      +            let lhs = &prod.lhs;
-      +            if let Some(follows) = follow_sets.get(lhs) {
-      +                for f in follows {
-      +                    lalr_closure.insert(Item {
-      +                        production: prod.clone(),
-      +                        dot_position: dot_pos,
-      +                        lookahead: Some(f.clone()),
-      +                    });
+       use bimap::BiBTreeMap;
+      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
+       use std::fmt::{Debug, Display, Formatter, Write};
+       use std::hash::{DefaultHasher, Hash, Hasher};
+       use std::sync::Arc;
+      @@ -611,36 +611,47 @@
+                   return;
+               }
+               assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
+      -
+      -        let mut phase3_todo: VecDeque<ParseState> = VecDeque::new();
+      +    
+      +        // The work queue is now a BTreeMap to merge states and process shorter stacks first.
+      +        // Key: (stack_depth, state_id)
+      +        let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
+      +    
+      +        // 1. Initialize work_map by "peeling off" the top states from the active GSS.
+               if !self.active_state.stack.is_empty() {
+      -            phase3_todo.push_back(self.active_state.clone());
+      +            for peek in self.active_state.stack.peek_iter() {
+      +                let key = (peek.depth(), peek.edge_value().state_id);
+      +                let state_for_map = ParseState { stack: Arc::new(peek.isolated_node()) };
+      +                match work_map.entry(key) {
+      +                    Entry::Vacant(e) => { e.insert(state_for_map); },
+      +                    Entry::Occupied(mut e) => { e.get_mut().merge(state_for_map); },
       +                }
       +            }
-      +            if original_lookaheads.contains(&None) {
-      +                lalr_closure.insert(Item { production: prod, dot_position: dot_pos, lookahead: None });
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-           closure
-       }
-       
+               }
+      -
+      +    
+               let mut next = ParseState::new();
+      -
+      +    
+               let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
+               println!("GSS stats before phase 3: {:#?}", stats);
+      -
+      -        crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
+      +    
+      +        crate::debug!(4, "Phase 3: Processing {} unique (depth, state_id) pairs", work_map.len());
+               timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
+      -            while let Some(state) = phase3_todo.pop_front() {
+      -                crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
+      +            while let Some((key, state)) = work_map.pop_first() {
+      +                crate::debug!(4, "Processing key {:?} with {} predecessors ({} keys in map)", key, state.stack.num_predecessors(), work_map.len());
+                       for peek in state.stack.peek_iter() {
+                           crate::debug!(4, "Processing peek with state ID {}", peek.edge_value().state_id.0);
+                           let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                           if let Some(ref r) = row.phase3_default_reduce.reduce {
+                               let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                               if !new_stack.is_empty() {
+      -                            phase3_todo.push_back(ParseState { stack: new_stack });
+      +                            for new_peek in new_stack.peek_iter() {
+      +                                let new_key = (new_peek.depth(), new_peek.edge_value().state_id);
+      +                                let new_state_for_map = ParseState { stack: Arc::new(new_peek.isolated_node()) };
+      +                                match work_map.entry(new_key) {
+      +                                    Entry::Vacant(e) => { e.insert(new_state_for_map); },
+      +                                    Entry::Occupied(mut e) => { e.get_mut().merge(new_state_for_map); },
+      +                                }
+      +                            }
+                               }
+                           }
+                           if row.phase3_default_reduce.clone_and_merge {
+      @@ -649,7 +660,7 @@
+                       }
+                   }
+               });
+      -
+      +    
+               crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next.stack.num_predecessors());
+               self.active_state = next;
+               self.phase = ParserPhase::ReadyForPhase1;
+
       ```
 
-      This change modifies `compute_closure` to first calculate the LR(1) closure and then, if the `lr_type` is `LALR`, it transforms the set of items. It preserves non-reduce items as they are, but for reduce items, it replaces their specific lookaheads with the entire FOLLOW set of the corresponding non-terminal's left-hand side. This correctly models the behavior of LALR parsers, where reduce actions are determined by the broader FOLLOW set, which can sometimes lead to the conflicts seen in grammars that are LR(1) but not LALR(1).
-
-      Let me know if you have any other questions
+      These changes should improve the performance of the `do_phase3` method by avoiding redundant computations on equivalent GSS paths. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/items.rs
-      Applying patch to 'src/glr/items.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/items.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-      --- original version of src/glr/items.rs+++ current version of src/glr/items.rs@@ -159,7 +159,39 @@         }
-           }
-       
-      -    // crate::debug!(3, "Done computing closure");
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position))
-      +                    .or_default()
-      +                    .insert(item.lookahead);
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items
-      +        for ((prod, dot_pos), original_lookaheads) in reduce_item_cores {
-      +            let lhs = &prod.lhs;
-      +            if let Some(follows) = follow_sets.get(lhs) {
-      +                for f in follows {
-      +                    lalr_closure.insert(Item {
-      +                        production: prod.clone(),
-      +                        dot_position: dot_pos,
-      +                        lookahead: Some(f.clone()),
-      +                    });
-      +                }
-      +            }
-      +            if original_lookaheads.contains(&None) {
-      +                lalr_closure.insert(Item { production: prod, dot_position: dot_pos, lookahead: None });
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-           closure
-       }
-       
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: And actually we can make it even better by making `compute_follow_sets_for_nonterminals`
-      return map from nt to a set of `Option<Terminal>`. We'll have to take `start_production_id`
-      as a parameter for it to work. Now we don't even have to set aside the None
-      lookahead items in compute_closure.
-    metadata:
-  - assistant: |-
-      Of course! You've got a great idea for refining the LALR(1) implementation. By making `compute_follow_sets_for_nonterminals` aware of the start symbol and allowing it to return `Option<Terminal>`, you can handle the end-of-file marker (EOF) more cleanly and simplify the LALR logic in `compute_closure`.
-
-      Here are the patches to implement this improvement across the relevant files.
-
-      ### `src/glr/grammar.rs`
-
-      I'll update `compute_follow_sets_for_nonterminals` to accept the `start_production_id`, return a set of `Option<Terminal>`, and correctly handle the EOF marker (`None`) for the start symbol.
-
-      ```diff
-      --- a/src/glr/grammar.rs
-      +++ b/src/glr/grammar.rs
-      @@ -278,53 +278,62 @@
-           first_sets
-       }
-       
-      -pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-      -    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
-      -
-      +pub fn compute_follow_sets_for_nonterminals(
-      +    productions: &[Production],
-      +    start_production_id: usize,
-      +    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    nullable_nonterminals: &BTreeSet<NonTerminal>,
-      +) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
-      +    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +    // Initialize for all non-terminals
-           for production in productions {
-               follow_sets.entry(production.lhs.clone()).or_default();
-               for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
-                   if let Symbol::NonTerminal(nt) = symbol {
-                       follow_sets.entry(nt.clone()).or_default();
-                   }
-               }
-           }
-       
-      +    // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
-      +    if !productions.is_empty() {
-      +        let start_nt = &productions[start_production_id].lhs;
-      +        follow_sets.entry(start_nt.clone()).or_default().insert(None);
-      +    }
-       
-           let mut changed = true;
-           while changed {
-               changed = false;
-       
-               for production in productions {
-                   let lhs = &production.lhs;
-                   let rhs = &production.rhs;
-       
-                   for (i, symbol) in rhs.iter().enumerate() {
-                       if let Symbol::NonTerminal(nt) = symbol {
-      -                    let old_size = follow_sets.get_mut(nt).unwrap().len();
-      -
-      -                    let mut nullable = true;
-      +                    let old_len = follow_sets.get(nt).unwrap().len();
-      +
-      +                    let mut suffix_is_nullable = true;
-                           for next_symbol in &rhs[i + 1..] {
-                               match next_symbol {
-                                   Symbol::Terminal(t_next) => {
-      -                                follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-      -                                nullable = false;
-      +                                follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
-      +                                suffix_is_nullable = false;
-                                       break;
-                                   }
-                                   Symbol::NonTerminal(nt_next) => {
-                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-      -                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-      -                                
-      +                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
-      +
-                                       if !nullable_nonterminals.contains(nt_next) {
-      -                                    nullable = false;
-      +                                    suffix_is_nullable = false;
-                                           break;
-                                       }
-                                   }
-                               }
-                           }
-       
-      -                    if nullable {
-      +                    if suffix_is_nullable {
-                               let follow_lhs = follow_sets.get(lhs).unwrap().clone();
-                               follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
-                           }
-       
-      -                    if follow_sets.get_mut(nt).unwrap().len() != old_size {
-      +                    if follow_sets.get(nt).unwrap().len() != old_len {
-                               changed = true;
-                           }
-                       }
-      @@ -334,3 +343,4 @@
-       
-           follow_sets
-       }
-
-      ```
-
-      ### `src/glr/items.rs`
-
-      Now, I'll update `compute_closure` to use the new `follow_sets` type, which simplifies the LALR logic significantly.
-
-      ```diff
-      --- a/src/glr/items.rs
-      +++ b/src/glr/items.rs
-      @@ -124,7 +124,7 @@
-           productions: &[Production],
-           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-           nullable_nonterminals: &BTreeSet<NonTerminal>,
-      -    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-           lr_type: LRType,
-       
-       ) -> BTreeSet<Item> {
-      @@ -147,38 +147,28 @@
-               }
-           }
-       
-      -    // crate::debug!(3, "Done computing closure");
-      -    closure
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-      +        for ((prod, dot_pos), _) in reduce_item_cores {
-      +            if let Some(follows) = follow_sets.get(&prod.lhs) {
-      +                for lookahead in follows {
-      +                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-      +                }
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-      +    closure
-       }
-       
-       pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-
-      ```
-
-      ### `src/glr/table.rs`
-
-      Here, I'll update the call to `compute_follow_sets_for_nonterminals` in `stage_1` to pass the `start_production_id`.
-
-      ```diff
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -348,7 +348,7 @@
-       
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-      +    let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
-       
-           const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
-       
-
-      ```
-
-      ### `src/glr/analyze.rs`
-
-      Finally, I'll adjust `compute_terminal_follow_sets` to work with the new signature and return type, assuming a default start production index of `0` for this standalone analysis function.
-
-      ```diff
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -588,8 +588,9 @@
-       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-      +    // Assume start production is at index 0 for this analysis function.
-      +    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, 0, &first_sets, &nullable_nonterminals);
-       
-           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
-       
-      @@ -628,7 +629,11 @@
-                       // then FOLLOW(t) must also include FOLLOW(lhs).
-                       if all_following_are_nullable {
-                           if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-      -                        terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
-      +                        terminal_follows
-      +                            .entry(t.clone())
-      +                            .or_default()
-      +                            // filter_map removes None (EOF) and unwraps Some(T) to T
-      +                            .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
-                           }
-                       }
-                   }
-
-      ```
-
-      These changes should correctly implement your proposed enhancement, making the code cleaner and more robust. Let me know if there is anything else I can help with
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/grammar.rs
-      Applying patch to 'src/glr/grammar.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/grammar.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/items.rs
-      Applying patch to 'src/glr/items.rs' using custom patcher...
-      Error applying patch to src/glr/items.rs:
-      Hunk #2 (header: @@ -147,38 +147,28 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-              }
-          }
-
-          // crate::debug!(3, "Done computing closure");
-          closure
-      }
-
-      pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-      --- Expected Context (from patch, after normalization): ---
-      }
-      }
-
-
-      closure
-      }
-
-      pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 191 with ratio 0.75 (6/8 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        }
-        }
-      - 
-      - 
-      + return lalr_closure;
-      + }
-        closure
-        }
-        
-        pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-      Problematic diff content:
-      ---
-      --- a/src/glr/items.rs
-      +++ b/src/glr/items.rs
-      @@ -124,7 +124,7 @@
-           productions: &[Production],
-           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-           nullable_nonterminals: &BTreeSet<NonTerminal>,
-      -    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-           lr_type: LRType,
-       
-       ) -> BTreeSet<Item> {
-      @@ -147,38 +147,28 @@
-               }
-           }
-       
-      -    // crate::debug!(3, "Done computing closure");
-      -    closure
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-      +        for ((prod, dot_pos), _) in reduce_item_cores {
-      +            if let Some(follows) = follow_sets.get(&prod.lhs) {
-      +                for lookahead in follows {
-      +                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-      +                }
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-      +    closure
-       }
-       
-       pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-
-      ---
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
-      Found 4 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/grammar.rs
-      Applying patch to 'src/glr/grammar.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/grammar.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/items.rs
-      Applying patch to 'src/glr/items.rs' using custom patcher...
-      Error applying patch to src/glr/items.rs:
-      Hunk #2 (header: @@ -147,38 +147,28 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-              }
-          }
-
-          // crate::debug!(3, "Done computing closure");
-          closure
-      }
-
-      pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-      --- Expected Context (from patch, after normalization): ---
-      }
-      }
-
-
-      closure
-      }
-
-      pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 191 with ratio 0.75 (6/8 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        }
-        }
-      - 
-      - 
-      + return lalr_closure;
-      + }
-        closure
-        }
-        
-        pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-      Problematic diff content:
-      ---
-      --- a/src/glr/items.rs
-      +++ b/src/glr/items.rs
-      @@ -124,7 +124,7 @@
-           productions: &[Production],
-           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-           nullable_nonterminals: &BTreeSet<NonTerminal>,
-      -    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-           lr_type: LRType,
-       
-       ) -> BTreeSet<Item> {
-      @@ -147,38 +147,28 @@
-               }
-           }
-       
-      -    // crate::debug!(3, "Done computing closure");
-      -    closure
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-      +        for ((prod, dot_pos), _) in reduce_item_cores {
-      +            if let Some(follows) = follow_sets.get(&prod.lhs) {
-      +                for lookahead in follows {
-      +                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-      +                }
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-      +    closure
-       }
-       
-       pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-
-      ---
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
-
-
-      LLM apply output:
-      Using model 'gemini/gemini-2.5-flash' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/glr/grammar.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/items.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/table.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/analyze.rs"
-        }
-      ]
-      Found 4 code blocks with filepaths in attempt 1.
-      Received code for required file: src/glr/grammar.rs
-      Received code for required file: src/glr/items.rs
-      Received code for required file: src/glr/table.rs
-      Received code for required file: src/glr/analyze.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/glr/items.rs
-      Successfully replaced file: src/glr/analyze.rs
-      Successfully replaced file: src/glr/table.rs
-      Successfully replaced file: src/glr/grammar.rs
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-      --- original version of src/glr/analyze.rs+++ current version of src/glr/analyze.rs@@ -515,7 +515,8 @@ pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-      +    // Assume start production is at index 0 for this analysis function.
-      +    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, 0, &first_sets, &nullable_nonterminals);
-       
-           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
-       
-      @@ -558,7 +559,11 @@                 // then FOLLOW(t) must also include FOLLOW(lhs).
-                       if all_following_are_nullable {
-                           if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-      -                        terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
-      +                        terminal_follows
-      +                            .entry(t.clone())
-      +                            .or_default()
-      +                            // filter_map removes None (EOF) and unwraps Some(T) to T
-      +                            .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
-                           }
-                       }
-                   }
-      @@ -780,4 +785,3 @@ 
-           compatible_pairs
-       }
-      -
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-      --- original version of src/glr/grammar.rs+++ current version of src/glr/grammar.rs@@ -257,9 +257,15 @@     first_sets
-       }
-       
-      -pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-      -    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
-      -
-      +pub fn compute_follow_sets_for_nonterminals(
-      +    productions: &[Production],
-      +    start_production_id: usize,
-      +    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    nullable_nonterminals: &BTreeSet<NonTerminal>,
-      +) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
-      +    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +    // Initialize for all non-terminals
-           for production in productions {
-               follow_sets.entry(production.lhs.clone()).or_default();
-               for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
-      @@ -269,6 +275,11 @@         }
-           }
-       
-      +    // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
-      +    if !productions.is_empty() {
-      +        let start_nt = &productions[start_production_id].lhs;
-      +        follow_sets.entry(start_nt.clone()).or_default().insert(None);
-      +    }
-       
-           let mut changed = true;
-           while changed {
-      @@ -280,34 +291,34 @@ 
-                   for (i, symbol) in rhs.iter().enumerate() {
-                       if let Symbol::NonTerminal(nt) = symbol {
-      -                    let old_size = follow_sets.get_mut(nt).unwrap().len();
-      -
-      -                    let mut nullable = true;
-      +                    let old_len = follow_sets.get(nt).unwrap().len();
-      +
-      +                    let mut suffix_is_nullable = true;
-                           for next_symbol in &rhs[i + 1..] {
-                               match next_symbol {
-                                   Symbol::Terminal(t_next) => {
-      -                                follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-      -                                nullable = false;
-      +                                follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
-      +                                suffix_is_nullable = false;
-                                       break;
-                                   }
-                                   Symbol::NonTerminal(nt_next) => {
-                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-      -                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-      -                                
-      +                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
-      +
-                                       if !nullable_nonterminals.contains(nt_next) {
-      -                                    nullable = false;
-      +                                    suffix_is_nullable = false;
-                                           break;
-                                       }
-                                   }
-                               }
-                           }
-       
-      -                    if nullable {
-      +                    if suffix_is_nullable {
-                               let follow_lhs = follow_sets.get(lhs).unwrap().clone();
-                               follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
-                           }
-       
-      -                    if follow_sets.get_mut(nt).unwrap().len() != old_size {
-      +                    if follow_sets.get(nt).unwrap().len() != old_len {
-                               changed = true;
-                           }
-                       }
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-      --- original version of src/glr/items.rs+++ current version of src/glr/items.rs@@ -133,7 +133,7 @@     productions: &[Production],
-           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-           nullable_nonterminals: &BTreeSet<NonTerminal>,
-      -    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-           lr_type: LRType,
-       
-       ) -> BTreeSet<Item> {
-      @@ -159,7 +159,29 @@         }
-           }
-       
-      -    // crate::debug!(3, "Done computing closure");
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-      +        for ((prod, dot_pos), _) in reduce_item_cores {
-      +            if let Some(follows) = follow_sets.get(&prod.lhs) {
-      +                for lookahead in follows {
-      +                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-      +                }
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-           closure
-       }
-       
-      @@ -180,4 +202,3 @@     }
-           result
-       }
-      -
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-      --- original version of src/glr/table.rs+++ current version of src/glr/table.rs@@ -290,16 +290,17 @@         dot_position: 0,
-               lookahead: None,
-           };
-      -    let initial_closure = BTreeSet::from([initial_item]);
-      -    let mut worklist = VecDeque::from([initial_closure.clone()]);
-      -
-      -    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-      +    let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
-       
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-      +    let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
-       
-           const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
-      +
-      +    let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
-      +
-      +    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-       
-           while let Some(item_set) = worklist.pop_front() {
-               if transitions.contains_key(&item_set) {
-      @@ -310,10 +311,10 @@         let splits = split_on_dot(&closure);
-               let mut row = BTreeMap::new();
-       
-      -        for (symbol, item_set) in splits {
-      +        for (symbol, item_set) in &splits {
-                   row.insert(symbol.clone(), item_set.clone());
-                   if symbol.is_some() {
-      -                let goto_set = compute_goto(&item_set);
-      +                let goto_set = compute_goto(item_set);
-                       worklist.push_back(goto_set);
-                   }
-               }
-      @@ -570,8 +571,9 @@                 }
-                   };
-                   match action {
-      -                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-      -                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
-      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-      +                        if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
-      +                    let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
-                           entry.0 += 1;
-                           entry.1.extend(production_ids.iter().cloned());
-                       },
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Don't 'Assume start production is at index 0 for this analysis function'
-      in `compute_follow_sets_for_nonterminals`. Make sure it's passed down properly.
-    metadata:
-  - assistant: |-
-      You are absolutely right to point that out! Hardcoding the start production ID was an oversight. An analysis function like that should not make assumptions about the grammar's structure.
-
-      I've corrected this by updating the signature of `compute_terminal_follow_sets` to accept the `start_production_id`, ensuring it's passed down correctly to `compute_follow_sets_for_nonterminals`.
-
-      Here is the patch for `src/glr/analyze.rs`:
-
-      ```diff a/src/glr/analyze.rs
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -588,11 +588,9 @@
-           None
-       }
-       
-      -pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-      +pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    // Assume start production is at index 0 for this analysis function.
-      -    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, 0, &first_sets, &nullable_nonterminals);
-      +    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
-       
-           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
-       
-
-      ```
-
-      This change makes the function more robust and its behavior more explicit. Thank you for catching that! Let me know if you have any more adjustments in mind.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-      --- original version of src/glr/analyze.rs+++ current version of src/glr/analyze.rs@@ -512,10 +512,10 @@     None
-       }
-       
-      -pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-      +pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-      +    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
-       
-           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
-       
-      @@ -558,7 +558,11 @@                 // then FOLLOW(t) must also include FOLLOW(lhs).
-                       if all_following_are_nullable {
-                           if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-      -                        terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
-      +                        terminal_follows
-      +                            .entry(t.clone())
-      +                            .or_default()
-      +                            // filter_map removes None (EOF) and unwraps Some(T) to T
-      +                            .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
-                           }
-                       }
-                   }
-      @@ -780,4 +784,3 @@ 
-           compatible_pairs
-       }
-      -
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-      --- original version of src/glr/grammar.rs+++ current version of src/glr/grammar.rs@@ -257,9 +257,15 @@     first_sets
-       }
-       
-      -pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-      -    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
-      -
-      +pub fn compute_follow_sets_for_nonterminals(
-      +    productions: &[Production],
-      +    start_production_id: usize,
-      +    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    nullable_nonterminals: &BTreeSet<NonTerminal>,
-      +) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
-      +    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +    // Initialize for all non-terminals
-           for production in productions {
-               follow_sets.entry(production.lhs.clone()).or_default();
-               for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
-      @@ -269,6 +275,11 @@         }
-           }
-       
-      +    // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
-      +    if !productions.is_empty() {
-      +        let start_nt = &productions[start_production_id].lhs;
-      +        follow_sets.entry(start_nt.clone()).or_default().insert(None);
-      +    }
-       
-           let mut changed = true;
-           while changed {
-      @@ -280,34 +291,34 @@ 
-                   for (i, symbol) in rhs.iter().enumerate() {
-                       if let Symbol::NonTerminal(nt) = symbol {
-      -                    let old_size = follow_sets.get_mut(nt).unwrap().len();
-      -
-      -                    let mut nullable = true;
-      +                    let old_len = follow_sets.get(nt).unwrap().len();
-      +
-      +                    let mut suffix_is_nullable = true;
-                           for next_symbol in &rhs[i + 1..] {
-                               match next_symbol {
-                                   Symbol::Terminal(t_next) => {
-      -                                follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-      -                                nullable = false;
-      +                                follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
-      +                                suffix_is_nullable = false;
-                                       break;
-                                   }
-                                   Symbol::NonTerminal(nt_next) => {
-                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-      -                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-      -                                
-      +                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
-      +
-                                       if !nullable_nonterminals.contains(nt_next) {
-      -                                    nullable = false;
-      +                                    suffix_is_nullable = false;
-                                           break;
-                                       }
-                                   }
-                               }
-                           }
-       
-      -                    if nullable {
-      +                    if suffix_is_nullable {
-                               let follow_lhs = follow_sets.get(lhs).unwrap().clone();
-                               follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
-                           }
-       
-      -                    if follow_sets.get_mut(nt).unwrap().len() != old_size {
-      +                    if follow_sets.get(nt).unwrap().len() != old_len {
-                               changed = true;
-                           }
-                       }
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-      --- original version of src/glr/items.rs+++ current version of src/glr/items.rs@@ -133,7 +133,7 @@     productions: &[Production],
-           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-           nullable_nonterminals: &BTreeSet<NonTerminal>,
-      -    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-      +    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-           lr_type: LRType,
-       
-       ) -> BTreeSet<Item> {
-      @@ -159,7 +159,29 @@         }
-           }
-       
-      -    // crate::debug!(3, "Done computing closure");
-      +    if matches!(lr_type, LRType::LALR) {
-      +        let mut lalr_closure = BTreeSet::new();
-      +        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +
-      +        // Separate reduce and non-reduce items, and group reduce items by core
-      +        for item in closure {
-      +            if item.dot_at_end() {
-      +                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-      +            } else {
-      +                lalr_closure.insert(item);
-      +            }
-      +        }
-      +
-      +        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-      +        for ((prod, dot_pos), _) in reduce_item_cores {
-      +            if let Some(follows) = follow_sets.get(&prod.lhs) {
-      +                for lookahead in follows {
-      +                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-      +                }
-      +            }
-      +        }
-      +        return lalr_closure;
-      +    }
-           closure
-       }
-       
-      @@ -180,4 +202,3 @@     }
-           result
-       }
-      -
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-      --- original version of src/glr/table.rs+++ current version of src/glr/table.rs@@ -290,16 +290,17 @@         dot_position: 0,
-               lookahead: None,
-           };
-      -    let initial_closure = BTreeSet::from([initial_item]);
-      -    let mut worklist = VecDeque::from([initial_closure.clone()]);
-      -
-      -    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-      +    let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
-       
-           let first_sets = compute_first_sets_for_nonterminals(productions);
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-      +    let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
-       
-           const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
-      +
-      +    let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
-      +
-      +    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-       
-           while let Some(item_set) = worklist.pop_front() {
-               if transitions.contains_key(&item_set) {
-      @@ -310,10 +311,10 @@         let splits = split_on_dot(&closure);
-               let mut row = BTreeMap::new();
-       
-      -        for (symbol, item_set) in splits {
-      +        for (symbol, item_set) in &splits {
-                   row.insert(symbol.clone(), item_set.clone());
-                   if symbol.is_some() {
-      -                let goto_set = compute_goto(&item_set);
-      +                let goto_set = compute_goto(item_set);
-                       worklist.push_back(goto_set);
-                   }
-               }
-      @@ -570,8 +571,9 @@                 }
-                   };
-                   match action {
-      -                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-      -                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
-      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-      +                        if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
-      +                    let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
-                           entry.0 += 1;
-                           entry.1.extend(production_ids.iter().cloned());
-                       },
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_with_gpt2_vocab --profile test -- --nocapture | tee .temp2; python analyze_timings.py src/example_code.js .temp2
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0425]: cannot find value `nonterminal_id` in this scope
-         --> src/glr/table.rs:575:45
-          |
-      574 |                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-          |                 -------------------------------------------------------------------------------------------------- this pattern doesn't include `nonterminal_id`, which is available in `Reduce`
-      575 |                         if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
-          |                                             ^^^^^^^^^^^^^^ help: a local variable with a similar name exists: `non_terminal_map`
-
-      error[E0425]: cannot find value `len` in this scope
-         --> src/glr/table.rs:575:78
-          |
-      574 |                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-          |                 -------------------------------------------------------------------------------------------------- this pattern doesn't include `len`, which is available in `Reduce`
-      575 |                         if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
-          |                                                                              ^^^ not found in this scope
-
-      error[E0425]: cannot find value `production_ids` in this scope
-         --> src/glr/table.rs:578:36
-          |
-      574 |                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-          |                 -------------------------------------------------------------------------------------------------- this pattern doesn't include `production_ids`, which is available in `Reduce`
-      ...
-      578 |                     entry.1.extend(production_ids.iter().cloned());
-          |                                    ^^^^^^^^^^^^^^ help: a local variable with a similar name exists: `productions`
-
-      error[E0061]: this function takes 2 arguments but 1 argument was supplied
-         --> src/constraint.rs:283:42
-          |
-      283 |         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
-          |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------------- argument #2 of type `usize` is missing
-          |
-      note: function defined here
-         --> src/glr/analyze.rs:515:8
-          |
-      515 | pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
-          |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^                             --------------------------
-      help: provide the argument
-          |
-      283 |         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions, /* usize */);
-          |                                                                                          +++++++++++++
-
-      Some errors have detailed explanations: E0061, E0425.
-      For more information about an error, try `rustc --explain E0061`.
-      error: could not compile `sep1` (lib test) due to 4 previous errors
-      /Users/isaacbreen/Projects2/grammars2024/analyze_timings.py:247: SyntaxWarning: invalid escape sequence '\/'
-        """
-      Generated /Users/isaacbreen/Projects2/grammars2024/timings_visualization.html
-    metadata:
-  - assistant: |-
-      My apologies! It looks like the last set of changes introduced some compilation errors. The patch for `src/glr/table.rs` was faulty and caused the issues with undefined variables. I've corrected this by reverting that specific part of the logic to its correct state.
-
-      Additionally, changing the signature of `compute_terminal_follow_sets` in `src/glr/analyze.rs` requires updating any code that calls it. The error log indicates a call in `src/constraint.rs` needs to be updated.
-
-      Here is the patch to fix the compilation errors in `src/glr/table.rs`:
-
-      ```diff a/src/glr/table.rs
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -569,13 +569,12 @@
-                       }
-                   };
-                   match action {
-      -                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-      -                        if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
-      -                    let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
-      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-      +                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
-                           entry.0 += 1;
-                           entry.1.extend(production_ids.iter().cloned());
-                       },
-      -                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
-      +                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
-                       _ => {}
-                   }
-               }
-
-      ```
-
-      Regarding the error in `src/constraint.rs`:
-      ```
-      error[E0061]: this function takes 2 arguments but 1 argument was supplied
-         --> src/constraint.rs:283:42
-          |
-      283 |         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
-      ```
-      This error occurs because the function `compute_terminal_follow_sets` now requires the `start_production_id` as its second argument. You will need to find where `compute_terminal_follow_sets` is called in `src/constraint.rs` and pass the appropriate start production ID, like this:
-
-      ```rust
-      // In src/constraint.rs
-      let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions, your_start_production_id);
-      ```
-
-      After applying the patch for `table.rs` and updating the call in `constraint.rs`, the code should compile successfully. Let me know if you run into any other issues
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...
