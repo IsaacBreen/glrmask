@@ -23,8 +23,8 @@ use profiler_macro::{time_it, timeit};
 
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
-/// Maps a node's depth to its predecessors at that depth.
-type NodeMap = BTreeMap<(ParseStateEdgeContent, DestKey), Arc<GSSNode>>;
+/// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
+type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
@@ -162,11 +162,15 @@ impl GSSPopper {
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
                 let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
-                for child in parent.predecessors.values() {
-                    if let Some(existing_acc) = new_paths.get_mut(child) {
-                        *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
-                    } else {
-                        new_paths.insert(child.clone(), new_path_acc.clone());
+                for preds_by_depth in parent.predecessors.values() {
+                    for pred_vec in preds_by_depth.values() {
+                        for child in pred_vec {
+                            if let Some(existing_acc) = new_paths.get_mut(child) {
+                                *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
+                            } else {
+                                new_paths.insert(child.clone(), new_path_acc.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -193,13 +197,17 @@ impl<'a> GSSPopperItem<'a> {
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
-        self.node.predecessors.iter().map(|((edge_val, _dest_key), pred_arc)| {
-            GSSPopperItemPeek {
-                path_acc: &self.path_acc,
-                parent_acc: &self.node.acc,
-                edge_value: edge_val,
-                predecessor_node: pred_arc,
-            }
+        self.node.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
+            preds_by_depth.values().flat_map(move |pred_vec| {
+                pred_vec.iter().map(move |pred_arc| {
+                    GSSPopperItemPeek {
+                        path_acc: &self.path_acc,
+                        parent_acc: &self.node.acc,
+                        edge_value: edge_val,
+                        predecessor_node: pred_arc,
+                    }
+                })
+            })
         })
     }
 }
@@ -246,7 +254,10 @@ impl<'a> GSSPopperItemPeek<'a> {
 
 // Helper functions for GSSNode construction
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    predecessors.values()
+    predecessors
+        .values()
+        .flat_map(|preds_by_depth| preds_by_depth.values())
+        .flat_map(|pred_vec| pred_vec.iter())
         .map(|pred_arc| pred_arc.max_depth() + 1)
         .max()
         .unwrap_or(0)
@@ -258,10 +269,14 @@ fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
     acc.llm_tokens_intersection.hash(&mut hasher);
     acc.terminals_union.hash(&mut hasher);
     acc.terminals_intersection.hash(&mut hasher);
-    for ((edge_val, dest_key), pred_arc) in predecessors {
+    for (edge_val, preds_by_depth) in predecessors {
         edge_val.hash(&mut hasher);
-        dest_key.hash(&mut hasher);
-        pred_arc.hash_key_cache.hash(&mut hasher);
+        for (dest_key, pred_vec) in preds_by_depth {
+            dest_key.hash(&mut hasher);
+            for pred_arc in pred_vec {
+                pred_arc.hash_key_cache.hash(&mut hasher);
+            }
+        }
     }
     hasher.finish()
 }
@@ -270,7 +285,8 @@ fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
 // #[time_it]
 fn process_predecessors(incoming: &NodeSet) -> NodeMap {
-    let mut grouped: BTreeMap<(ParseStateEdgeContent, DestKey), Vec<Arc<GSSNode>>> = BTreeMap::new();
+    let mut grouped: BTreeMap<(ParseStateEdgeContent, DestKey), Vec<Arc<GSSNode>>> =
+        BTreeMap::new();
 
     for (pred_arc, edge_val) in incoming {
         grouped
@@ -280,35 +296,58 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     }
 
     let mut result: NodeMap = BTreeMap::new();
-    for (key, pred_arcs) in grouped {
-        if pred_arcs.is_empty() { continue; }
+    for ((edge_val, dest_key), pred_arcs) in grouped {
+        if pred_arcs.is_empty() {
+            continue;
+        }
 
         let mut iter = pred_arcs.into_iter();
         let first = iter.next().unwrap();
 
-        if iter.len() == 0 {
-            result.insert(key, first);
+        let final_node = if iter.len() == 0 {
+            first
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge(&other_arc);
+                merged_node.merge(&other_arc, usize::MAX);
             }
-            result.insert(key, Arc::new(merged_node));
-        }
+            Arc::new(merged_node)
+        };
+        result
+            .entry(edge_val)
+            .or_default()
+            .insert(dest_key, vec![final_node]);
     }
     result
 }
 
 /// Merges the `source` NodeMap into the `target` NodeMap.
 // #[time_it]
-fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
-    for (key, source_pred_arc) in source {
-        match target.entry(key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(source_pred_arc);
+fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
+    for (edge_val, source_preds_by_depth) in source {
+        let target_preds_by_depth = target.entry(edge_val.clone()).or_default();
+        for (dest_key, source_preds_vec) in source_preds_by_depth {
+            let target_preds_vec = target_preds_by_depth.entry(dest_key).or_default();
+
+            if merge_depth == 0 {
+                target_preds_vec.extend(source_preds_vec);
+                continue;
             }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                Arc::make_mut(entry.get_mut())._merge(&source_pred_arc);
+
+            let mut nodes_to_merge = source_preds_vec;
+            if !target_preds_vec.is_empty() {
+                nodes_to_merge.extend(target_preds_vec.drain(..));
+            }
+
+            if nodes_to_merge.len() <= 1 {
+                *target_preds_vec = nodes_to_merge;
+            } else {
+                let mut iter = nodes_to_merge.into_iter();
+                let mut merged = (*iter.next().unwrap()).clone();
+                for other in iter {
+                    merged._merge(&other, merge_depth - 1);
+                }
+                *target_preds_vec = vec![Arc::new(merged)];
             }
         }
     }
@@ -326,7 +365,7 @@ impl GSSNode {
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
     fn new_with_map(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
-        let pred_accs = predecessors.values().map(|p| &p.acc);
+        // let pred_accs = predecessors.values().map(|p| &p.acc);
         let hash_key_cache = compute_hash_key(&predecessors, &acc);
         let max_depth = compute_max_depth(&predecessors);
         Self { acc, predecessors, hash_key_cache, max_depth }
@@ -335,7 +374,10 @@ impl GSSNode {
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
         let mut predecessors_map = NodeMap::new();
-        predecessors_map.insert((edge_value, predecessor_arc.dest_key()), predecessor_arc.clone());
+        predecessors_map
+            .entry(edge_value)
+            .or_default()
+            .insert(predecessor_arc.dest_key(), vec![predecessor_arc.clone()]);
         Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
@@ -345,7 +387,12 @@ impl GSSNode {
 
     pub fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
-    pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
+    pub fn num_predecessors(&self) -> usize {
+        self.predecessors
+            .values()
+            .map(|preds_by_depth| preds_by_depth.values().map(|v| v.len()).sum::<usize>())
+            .sum()
+    }
     pub fn max_depth(&self) -> MaxDepth { self.max_depth }
     // fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
     fn dest_key(&self) -> DestKey { self.max_depth() }
@@ -382,11 +429,11 @@ impl GSSNode {
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
     #[time_it]
-    pub fn merge(&mut self, other: &Self) {
-        self._merge(other);
+    pub fn merge(&mut self, other: &Self, merge_depth: usize) {
+        self._merge(other, merge_depth);
     }
 
-    fn _merge(&mut self, other: &Self) {
+    fn _merge(&mut self, other: &Self, merge_depth: usize) {
         if self == other { return; }
 
         if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
@@ -398,13 +445,13 @@ impl GSSNode {
         let merged_acc = Arc::new(Acc::merge(&self.acc, &other.acc));
         
         let mut new_predecessors = self.predecessors.clone();
-        merge_node_maps(&mut new_predecessors, other.predecessors.clone());
+        merge_node_maps(&mut new_predecessors, other.predecessors.clone(), merge_depth);
         
         *self = GSSNode::new_with_map(merged_acc, new_predecessors);
     }
 
-    pub fn merged(mut self, other: Self) -> Self {
-        self.merge(&other);
+    pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
+        self.merge(&other, merge_depth);
         self
     }
 
@@ -415,15 +462,18 @@ impl GSSNode {
     
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
-        self.predecessors.iter().map(|((edge_val, _dest_key), pred_arc)| {
-            GSSPeek {
-                parent_acc: &self.acc,
-                edge_value: edge_val,
-                predecessor_node: pred_arc,
-            }
+        self.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
+            preds_by_depth.values().flat_map(move |pred_vec| {
+                pred_vec.iter().map(move |pred_arc| GSSPeek {
+                    parent_acc: &self.acc,
+                    edge_value: edge_val,
+                    predecessor_node: pred_arc,
+                })
+            })
         })
     }
 }
+
 
 impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
@@ -529,11 +579,14 @@ fn prune_and_transform_recursive(
         }
         Some((new_local_acc, continue_recursion)) => {
             let new_node_predecessors_map = if continue_recursion {
-                let new_predecessors_set = node_arc.predecessors.iter()
-                    .filter_map(|((edge_val, _), pred_arc)| {
-                        prune_and_transform_recursive(pred_arc, closure, memo)
-                            .map(|new_pred_arc| (new_pred_arc, edge_val.clone()))
+                let new_predecessors_set = node_arc.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
+                    preds_by_depth.values().flat_map(move |pred_vec| {
+                        pred_vec.iter().filter_map(move |pred_arc| {
+                            prune_and_transform_recursive(pred_arc, closure, memo)
+                                .map(|new_pred_arc| (new_pred_arc, edge_val.clone()))
+                        })
                     })
+                })
                     .collect::<NodeSet>();
                 if new_predecessors_set.is_empty() && !node_arc.predecessors.is_empty() {
                     memo.insert(node_ptr, None);
@@ -729,9 +782,13 @@ pub fn fuse_predecessors_recursive(
 
     // 1. Recursively fuse the predecessors first (post-order traversal).
     let mut recursively_fused_predecessors = Vec::new();
-    for ((edge_val, _), pred_arc) in &node_arc.predecessors {
-        let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
-        recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+    for (edge_val, preds_by_depth) in &node_arc.predecessors {
+        for pred_vec in preds_by_depth.values() {
+            for pred_arc in pred_vec {
+                let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
+                recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+            }
+        }
     }
 
     // 2. Group the now-fused predecessors by their edge value.
@@ -753,7 +810,7 @@ pub fn fuse_predecessors_recursive(
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge(&other_arc);
+                merged_node.merge(&other_arc, usize::MAX);
             }
             Arc::new(merged_node)
         };
@@ -808,8 +865,8 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
 
     let mut root_predecessor_dest_keys = HashSet::new();
     for root_node in roots {
-        stats.num_root_predecessors += root_node.predecessors().len();
-        for ((edge_value, dest_key)) in root_node.predecessors().keys() {
+        stats.num_root_predecessors += root_node.num_predecessors();
+        for edge_value in root_node.predecessors().keys() {
             root_predecessor_dest_keys.insert(edge_value.clone());
         }
 
@@ -837,14 +894,22 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
         stats.max_predecessors_with_values = stats.max_predecessors_with_values.max(num_preds);
         total_preds += num_preds as u64;
 
-        let unique_pred_arcs: HashSet<_> = node.predecessors.values()
+        let unique_pred_arcs: HashSet<_> = node
+            .predecessors
+            .values()
+            .flat_map(|v| v.values())
+            .flat_map(|v| v.iter())
             .map(Arc::as_ptr)
             .collect();
         if unique_pred_arcs.len() > 1 {
             stats.merge_points += 1;
         }
 
-        for pred_arc in node.predecessors.values() {
+        for pred_arc in node
+            .predecessors
+            .values()
+            .flat_map(|v| v.values())
+            .flat_map(|v| v.iter()) {
             queue.push_back((pred_arc.as_ref(), depth + 1));
         }
     }
@@ -856,7 +921,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
 
     // Calculate structural uniqueness
     let mut structural_memo = HashMap::new();
-    let mut structural_cache: BTreeMap<BTreeMap<(ParseStateEdgeContent, DestKey), usize>, usize> = BTreeMap::new();
+    let mut structural_cache: BTreeMap<BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<usize>>>, usize> = BTreeMap::new();
     for root_node in roots {
         get_structural_id(root_node, &mut structural_memo, &mut structural_cache);
     }
@@ -871,7 +936,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
 fn get_structural_id(
     node: &GSSNode,
     memo: &mut HashMap<*const GSSNode, usize>,
-    structural_cache: &mut BTreeMap<BTreeMap<(ParseStateEdgeContent, DestKey), usize>, usize>,
+    structural_cache: &mut BTreeMap<BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<usize>>>, usize>,
 ) -> usize {
     let node_ptr = node as *const GSSNode;
     if let Some(id) = memo.get(&node_ptr) {
@@ -879,9 +944,18 @@ fn get_structural_id(
     }
 
     let mut pred_structural_ids = BTreeMap::new();
-    for ((edge_val, dest_key), pred_arc) in &node.predecessors {
-        let pred_id = get_structural_id(pred_arc.as_ref(), memo, structural_cache);
-        pred_structural_ids.insert((edge_val.clone(), *dest_key), pred_id);
+    for (edge_val, preds_by_depth) in &node.predecessors {
+        let mut ids_by_depth = BTreeMap::new();
+        for (dest_key, pred_vec) in preds_by_depth {
+            let mut ids_vec = Vec::new();
+            for pred_arc in pred_vec {
+                let pred_id = get_structural_id(pred_arc.as_ref(), memo, structural_cache);
+                ids_vec.push(pred_id);
+            }
+            ids_vec.sort(); // For canonical representation
+            ids_by_depth.insert(*dest_key, ids_vec);
+        }
+        pred_structural_ids.insert(edge_val.clone(), ids_by_depth);
     }
 
     let next_id = structural_cache.len();
@@ -911,12 +985,16 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
         }
 
         let mut longest_path = Vec::new();
-        for ((edge_val, _), pred_arc) in node_arc.predecessors.iter() {
-            let mut path_from_pred = find_longest_recursive(pred_arc, memo);
-            // The path ends with the edge leading to `node_arc` and `node_arc` itself.
-            path_from_pred.push((edge_val.clone(), node_arc.clone()));
-            if path_from_pred.len() > longest_path.len() {
-                longest_path = path_from_pred;
+        for (edge_val, preds_by_depth) in node_arc.predecessors.iter() {
+            for pred_vec in preds_by_depth.values() {
+                for pred_arc in pred_vec {
+                    let mut path_from_pred = find_longest_recursive(pred_arc, memo);
+                    // The path ends with the edge leading to `node_arc` and `node_arc` itself.
+                    path_from_pred.push((edge_val.clone(), node_arc.clone()));
+                    if path_from_pred.len() > longest_path.len() {
+                        longest_path = path_from_pred;
+                    }
+                }
             }
         }
 
@@ -995,7 +1073,11 @@ pub fn print_gss_forest(
 
         let predecessors: Vec<_> = node_arc.predecessors()
             .iter()
-            .map(|((edge_val, _), pred_arc)| (edge_val, pred_arc))
+            .flat_map(|(edge_val, preds_by_depth)| {
+                preds_by_depth.values().flat_map(move |pred_vec| {
+                    pred_vec.iter().map(move |pred_arc| (edge_val, pred_arc))
+                })
+            })
             .collect();
 
         for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
@@ -1227,7 +1309,7 @@ mod tests {
         let n2 = Arc::new(n0.push(mock_edge(0)));
 
         let mut merged = (*n1).clone();
-        merged.merge(&n2);
+        merged.merge(&n2, 1);
 
         assert_eq!(merged.acc.llm_tokens_union, HybridBitset::max_ones());
 
@@ -1247,8 +1329,8 @@ mod tests {
         assert_eq!(c.max_depth, 3);
 
         let mut preds_map = NodeMap::new();
-        preds_map.insert((mock_edge(100), b.dest_key()), b.clone());
-        preds_map.insert((mock_edge(100), c.dest_key()), c.clone());
+        preds_map.entry(mock_edge(100)).or_default().insert(b.dest_key(), vec![b.clone()]);
+        preds_map.entry(mock_edge(100)).or_default().insert(c.dest_key(), vec![c.clone()]);
 
         let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
         assert_eq!(root.num_predecessors(), 2);
@@ -1256,7 +1338,15 @@ mod tests {
         root.fuse_predecessors(1);
 
         assert_eq!(root.num_predecessors(), 1);
-        let fused_pred_arc = root.predecessors().values().next().unwrap();
+        let fused_pred_arc = root
+            .predecessors()
+            .values()
+            .next()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()[0]
+            .clone();
 
         assert_eq!(fused_pred_arc.acc.llm_tokens_union, HybridBitset::max_ones());
         assert_eq!(fused_pred_arc.num_predecessors(), 2);
