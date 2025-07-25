@@ -515,7 +515,8 @@ fn find_last_non_nullable_symbol<'a>(
 pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+    // Assume start production is at index 0 for this analysis function.
+    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, 0, &first_sets, &nullable_nonterminals);
 
     let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -558,7 +559,11 @@ pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Term
                 // then FOLLOW(t) must also include FOLLOW(lhs).
                 if all_following_are_nullable {
                     if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
-                        terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
+                        terminal_follows
+                            .entry(t.clone())
+                            .or_default()
+                            // filter_map removes None (EOF) and unwraps Some(T) to T
+                            .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
                     }
                 }
             }
@@ -780,4 +785,3 @@ pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
 
     compatible_pairs
 }
-

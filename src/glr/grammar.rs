@@ -257,9 +257,15 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
     first_sets
 }
 
-pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>, nullable_nonterminals: &BTreeSet<NonTerminal>) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
+pub fn compute_follow_sets_for_nonterminals(
+    productions: &[Production],
+    start_production_id: usize,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    nullable_nonterminals: &BTreeSet<NonTerminal>,
+) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
+    // Initialize for all non-terminals
     for production in productions {
         follow_sets.entry(production.lhs.clone()).or_default();
         for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
@@ -269,6 +275,11 @@ pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_se
         }
     }
 
+    // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
+    if !productions.is_empty() {
+        let start_nt = &productions[start_production_id].lhs;
+        follow_sets.entry(start_nt.clone()).or_default().insert(None);
+    }
 
     let mut changed = true;
     while changed {
@@ -280,34 +291,34 @@ pub fn compute_follow_sets_for_nonterminals(productions: &[Production], first_se
 
             for (i, symbol) in rhs.iter().enumerate() {
                 if let Symbol::NonTerminal(nt) = symbol {
-                    let old_size = follow_sets.get_mut(nt).unwrap().len();
+                    let old_len = follow_sets.get(nt).unwrap().len();
 
-                    let mut nullable = true;
+                    let mut suffix_is_nullable = true;
                     for next_symbol in &rhs[i + 1..] {
                         match next_symbol {
                             Symbol::Terminal(t_next) => {
-                                follow_sets.get_mut(nt).unwrap().insert(t_next.clone());
-                                nullable = false;
+                                follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
+                                suffix_is_nullable = false;
                                 break;
                             }
                             Symbol::NonTerminal(nt_next) => {
                                 let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-                                
+                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
+
                                 if !nullable_nonterminals.contains(nt_next) {
-                                    nullable = false;
+                                    suffix_is_nullable = false;
                                     break;
                                 }
                             }
                         }
                     }
 
-                    if nullable {
+                    if suffix_is_nullable {
                         let follow_lhs = follow_sets.get(lhs).unwrap().clone();
                         follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
                     }
 
-                    if follow_sets.get_mut(nt).unwrap().len() != old_size {
+                    if follow_sets.get(nt).unwrap().len() != old_len {
                         changed = true;
                     }
                 }

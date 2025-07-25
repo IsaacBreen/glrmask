@@ -133,7 +133,7 @@ pub fn compute_closure(
     productions: &[Production],
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
-    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
     lr_type: LRType,
 
 ) -> BTreeSet<Item> {
@@ -166,28 +166,18 @@ pub fn compute_closure(
         // Separate reduce and non-reduce items, and group reduce items by core
         for item in closure {
             if item.dot_at_end() {
-                reduce_item_cores.entry((item.production, item.dot_position))
-                    .or_default()
-                    .insert(item.lookahead);
+                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
             } else {
                 lalr_closure.insert(item);
             }
         }
 
-        // Process reduce items
-        for ((prod, dot_pos), original_lookaheads) in reduce_item_cores {
-            let lhs = &prod.lhs;
-            if let Some(follows) = follow_sets.get(lhs) {
-                for f in follows {
-                    lalr_closure.insert(Item {
-                        production: prod.clone(),
-                        dot_position: dot_pos,
-                        lookahead: Some(f.clone()),
-                    });
+        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+        for ((prod, dot_pos), _) in reduce_item_cores {
+            if let Some(follows) = follow_sets.get(&prod.lhs) {
+                for lookahead in follows {
+                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
                 }
-            }
-            if original_lookaheads.contains(&None) {
-                lalr_closure.insert(Item { production: prod, dot_position: dot_pos, lookahead: None });
             }
         }
         return lalr_closure;
@@ -212,4 +202,3 @@ pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet
     }
     result
 }
-

@@ -290,16 +290,17 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
         dot_position: 0,
         lookahead: None,
     };
-    let initial_closure = BTreeSet::from([initial_item]);
-    let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+    let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
     const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
+
+    let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
+
+    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
     while let Some(item_set) = worklist.pop_front() {
         if transitions.contains_key(&item_set) {
@@ -310,10 +311,10 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
-        for (symbol, item_set) in splits {
+        for (symbol, item_set) in &splits {
             row.insert(symbol.clone(), item_set.clone());
             if symbol.is_some() {
-                let goto_set = compute_goto(&item_set);
+                let goto_set = compute_goto(item_set);
                 worklist.push_back(goto_set);
             }
         }
@@ -570,8 +571,9 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                 }
             };
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
+                        if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
+                    let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
                     entry.0 += 1;
                     entry.1.extend(production_ids.iter().cloned());
                 },
