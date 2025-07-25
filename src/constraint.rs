@@ -1127,7 +1127,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if num_non_end == 0 {
                         if let Some(gtid) = grammar_token_opt {
                             let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
-                            crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
+                            crate::debug!(3, "Step for grammar token {:?} with only end nodes, GSS stats: {:#?}", gtid, stats);
                             // Perhaps we can avoid stepping by calling `has_action_for`
                             match glr_s.has_action_for(*gtid) {
                                 Some(glr_s_llm_tokens) => {
