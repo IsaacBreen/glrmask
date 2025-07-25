@@ -36,6 +36,7 @@ use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
+use crate::glr::items::{LRType, LR_TYPE};
 use crate::interface::CompiledGrammar;
 
 pub type LLMTokenBV = HybridBitset;
@@ -1254,9 +1255,10 @@ impl<'a> GrammarConstraintState<'a> {
                         // Print GSS stats
                         // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
-                        let mut do_phase3 = num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
-                        do_phase3 |= true;
-                        do_phase3 |= true;
+                        let mut do_phase3 = false;
+                        do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
+                        do_phase3 |= !matches!(LR_TYPE, LRType::LR1);
+                        // do_phase3 |= true;
                         if do_phase3 {
                             // There will be a split.
                             // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
