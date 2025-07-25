@@ -840,7 +840,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         println!("GSS stats before phase 3: {:#?}", stats);
 
         crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
-        timeit!("GLRParserState::step::phase3", {
+        timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
             while let Some(state) = phase3_todo.pop_front() {
                 crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
                 for peek in state.stack.peek_iter() {
