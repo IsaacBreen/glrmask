@@ -1098,7 +1098,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |glr_s, grammar_token_opt, dest_map| {
-                if false {
+                if true {
                     timeit!("get_mask try to avoid step for no additional llm tokens", {
                     let mut all_edge_llm_tokens = HybridBitset::zeros();
                     for edge_llm_tokens_bv in dest_map.values() {
