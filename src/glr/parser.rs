@@ -829,58 +829,38 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
 
-        // Key is (depth, state_id) to process shortest stacks first.
-        let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
-
-        // Peel off the top edges to populate the initial work map.
-        for peek in self.active_state.stack.peek_iter() {
-            let isolated_state = ParseState { stack: Arc::new(peek.isolated_parent()) };
-            let depth = isolated_state.stack.max_depth();
-            let state_id = peek.edge_value().state_id;
-            work_map.entry((depth, state_id))
-                .and_modify(|s| s.merge(isolated_state.clone()))
-                .or_insert(isolated_state);
+        let mut phase3_todo: VecDeque<ParseState> = VecDeque::new();
+        if !self.active_state.stack.is_empty() {
+            phase3_todo.push_back(self.active_state.clone());
         }
 
-        let mut next_active_state = ParseState::new();
+        let mut next = ParseState::new();
 
         let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
+        println!("GSS stats before phase 3: {:#?}", stats);
 
-        crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
+        crate::debug!(4, "Phase 3: Processing {} states", phase3_todo.len());
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
-            while let Some(((_depth, state_id), state)) = work_map.pop_last() {
-                let row = &self.parser.stage_7_table[&state_id];
-
-                if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    let mut reduced_stack = GSSNode::new_fresh();
-                    for peek in state.stack.peek_iter() {
-                        let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                        if !new_stack_part.is_empty() {
-                            reduced_stack.merge(&new_stack_part);
+            while let Some(state) = phase3_todo.pop_front() {
+                crate::debug!(4, "Processing state with {} predecessors ({} in queue)", state.stack.num_predecessors(), phase3_todo.len());
+                for peek in state.stack.peek_iter() {
+                    crate::debug!(4, "Processing peek with state ID {}", peek.edge_value().state_id.0);
+                    let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                    if let Some(ref r) = row.phase3_default_reduce.reduce {
+                        let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                        if !new_stack.is_empty() {
+                            phase3_todo.push_back(ParseState { stack: new_stack });
                         }
                     }
-
-                    if !reduced_stack.is_empty() {
-                        // Deconstruct the result and put it back into the work map.
-                        for new_peek in Arc::new(reduced_stack).peek_iter() {
-                            let isolated = ParseState { stack: Arc::new(new_peek.isolated_parent()) };
-                            let new_depth = isolated.stack.max_depth();
-                            let new_state_id = new_peek.edge_value().state_id;
-                            work_map.entry((new_depth, new_state_id))
-                                .and_modify(|s| s.merge(isolated.clone()))
-                                .or_insert(isolated);
-                        }
+                    if row.phase3_default_reduce.clone_and_merge {
+                        next.merge(ParseState { stack: Arc::new(peek.isolated_parent()) });
                     }
-                }
-
-                if row.phase3_default_reduce.clone_and_merge {
-                    next_active_state.merge(state);
                 }
             }
         });
 
-        crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
-        self.active_state = next_active_state;
+        crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next.stack.num_predecessors());
+        self.active_state = next;
         self.phase = ParserPhase::ReadyForPhase1;
         self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
     }
