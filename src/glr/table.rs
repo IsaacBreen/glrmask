@@ -1,5 +1,5 @@
-use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+use super::items::{compute_closure, compute_goto, split_on_dot, Item, LRType};
+use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -297,13 +297,16 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
 
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
 
     while let Some(item_set) = worklist.pop_front() {
         if transitions.contains_key(&item_set) {
             continue;
         }
 
-        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals);
+        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, lr_type);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 

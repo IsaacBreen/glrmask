@@ -123,11 +123,19 @@ pub fn compute_first_set_for_item(
     }
 }
 
+pub enum LRType {
+    LALR,
+    LR1,
+}
+
 pub fn compute_closure(
     items: &BTreeSet<Item>,
     productions: &[Production],
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-    nullable_nonterminals: &BTreeSet<NonTerminal>
+    nullable_nonterminals: &BTreeSet<NonTerminal>,
+    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    lr_type: LRType,
+
 ) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();
