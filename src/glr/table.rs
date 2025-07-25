@@ -571,9 +571,8 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                 }
             };
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-                        if *action_nt_id == nonterminal_id && *action_len == len => { // This is fine, it's a comment
-                    let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
                     entry.0 += 1;
                     entry.1.extend(production_ids.iter().cloned());
                 },
