@@ -16,7 +16,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
-use crate::glr::items::{compute_closure, Item};
+use crate::glr::items::{compute_closure, Item, LRType, LR_TYPE};
 use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
@@ -886,7 +886,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
-        return None;
+        if LR_TYPE != LRType::LR1 {
+            return None;
+        }
         if Some(token_id) == self.parser.ignore_terminal_id {
             timeit!("GLRParserState::has_action_for::ignore_token", {
                 crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
@@ -1019,7 +1021,7 @@ impl ParseState { // No longer generic
         // if self.stack.max_depth() > other.stack.max_depth() {
         //     std::mem::swap(self, &mut other);
         // }
-        Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
     }
 }
 

@@ -123,6 +123,7 @@ pub fn compute_first_set_for_item(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LRType {
     LALR,
     LR1,
