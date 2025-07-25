@@ -149,8 +149,7 @@ local_system:
       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
-          postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
         ;
 
       postfix_expression ::=
@@ -158,13 +157,12 @@ local_system:
         ;
 
       left_hand_side_expression ::=
-          new_expression
-        | call_expression
+          new_expression | call_expression
         ;
 
       new_expression ::=
           member_expression
-        | 'new' new_expression
+        | 'new' member_expression
         ;
 
       call_expression ::=
@@ -420,8 +418,7 @@ local_system:
       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
-          postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
         ;
 
       postfix_expression ::=
@@ -429,13 +426,12 @@ local_system:
         ;
 
       left_hand_side_expression ::=
-          new_expression
-        | call_expression
+          new_expression | call_expression
         ;
 
       new_expression ::=
           member_expression
-        | 'new' new_expression
+        | 'new' member_expression
         ;
 
       call_expression ::=
@@ -551,22 +547,24 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
-    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
-    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
+    If asked for full code, provide it.
+    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
+    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
+    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gp
+    - o3
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
 messages:
   - user: |-
       ```text 'src/js.ebnf'
@@ -714,8 +712,7 @@ messages:
       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
-          postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
         ;
 
       postfix_expression ::=
@@ -723,13 +720,12 @@ messages:
         ;
 
       left_hand_side_expression ::=
-          new_expression
-        | call_expression
+          new_expression | call_expression
         ;
 
       new_expression ::=
           member_expression
-        | 'new' new_expression
+        | 'new' member_expression
         ;
 
       call_expression ::=
@@ -847,60 +843,72 @@ messages:
       bad. Fix it.
     metadata:
   - assistant: |-
-      Of course. I can help you with that.
+      Below is a concise, rule-by-rule recipe you can follow to remove every instance of right-recursion (both direct and indirect) from src/js.ebnf.  
+      Follow the steps in the order shown; do not add “+ / –” prefixes—just edit the file exactly as described.  
 
-      Your grammar contains a few instances of right-recursion. While right-recursion is the correct way to define right-associative operators (like assignment and exponentiation), some forms of it can be problematic for certain types of parsers, and in some cases, it can make the grammar less precise.
+      ---
 
-      I've identified two rules, `unary_expression` and `new_expression`, where the right-recursion can be removed to improve the grammar.
+      1.  Locate the “Expressions (Precedence from lowest to highest)” block and find the rule that currently starts with  
 
-      1.  **`unary_expression`**: This rule was written in a way that is equivalent to `OP* postfix_expression`. I've rewritten it to use the `*` operator (zero or more repetitions) to make this explicit and remove the direct right-recursion.
+             assignment_expression ::=  
 
-      2.  **`new_expression`**: The original rule `new_expression ::= ... | 'new' new_expression` incorrectly allows for expressions like `new new MyClass()`, which is a `SyntaxError` in JavaScript. By removing the recursion, we not only fix the right-recursion issue but also make the grammar more accurate.
+          It has four alternatives; the fourth one is the self-referential, right-recursive clause that begins with  
 
-      I have left the right-recursion in `assignment_expression` and `exponentiation_expression` untouched. This is because these operators are right-associative in JavaScript, and right-recursion is the standard and correct way to express this in a grammar. Altering them would change the associativity and break the grammar's correctness for those expressions.
+             left_hand_side_expression ( '=' | …  
 
-      Here are the patches for the `src/js.ebnf` file.
+          Replace the entire assignment_expression rule **by the three-alternative version shown below** (keep the exact indentation you already use):  
 
-      ```diff
-      diff --git a/src/js.ebnf b/src/js.ebnf
-      --- a/src/js.ebnf
-      +++ b/src/js.ebnf
-      @@ -161,18 +161,16 @@
-       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-       
-       unary_expression ::=
-      -    postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-      +    ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
-         ;
-       
-       postfix_expression ::=
-           left_hand_side_expression ( '++' | '--' )?
-         ;
-       
-       left_hand_side_expression ::=
-      -    new_expression
-      -  | call_expression
-      +    new_expression | call_expression
-         ;
-       
-       new_expression ::=
-           member_expression
-      -  | 'new' new_expression
-      +  | 'new' member_expression
-         ;
-       
-       call_expression ::=
+             assignment_expression ::=
+                 yield_expression
+               | arrow_function
+               | assignment_chain
+               ;
 
-      ```
+          •  yield_expression and arrow_function are left untouched.  
+          •  assignment_chain is a new helper rule you will add in the next step.
+
+      2.  Immediately after the assignment_expression rule you just rewrote, insert the three new rules that implement a non-recursive, Kleene-star loop:
+
+             assignment_chain ::= conditional_expression ( assignment_operator conditional_expression )* ;
+             assignment_operator ::= '=' | '+=' | '-=' | '*=' | '/=' | '%='
+                                   | '<<=' | '>>=' | '>>>='
+                                   | '&='  | '^='  | '|='  | '**=' ;
+
+          Notes  
+          •  The ( … )* construct is EBNF, so no recursion is involved.  
+          •  Because only conditional_expression appears inside the loop, there is no longer any path that can put assignment_expression on the far right of itself.
+
+      3.  Still in the same “Expressions” section, find the rule that begins
+
+             exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+
+          Remove that entire line and **replace it with**:
+
+             exponentiation_expression ::= unary_expression ( '**' unary_expression )* ;
+
+          The rule is now iterative instead of right-recursive.  
+          Yes, the operator is right-associative in JavaScript; you can recover that during AST construction if necessary.  The grammar itself is now free of right recursion.
+
+      4.  No other rule in this grammar ends with itself (directly or indirectly), so after completing the two edits above the file is fully free of right-recursion.  
+          Left-recursion that was already present (e.g. the various call_expression and member_expression chains) is unchanged—only right-recursion is removed, exactly as requested.
+
+      Save the file and regenerate your parser; it will no longer contain any right-recursive rules.
     metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Using model 'gemini/gemini-2.5-flash' for code completion.
 
-      --- Processing Diff Block 1 ---
-      Identified target file: src/js.ebnf
-      Applying patch to 'src/js.ebnf' using custom patcher...
-      Successfully applied patch and wrote to src/js.ebnf.
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/js.ebnf"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/js.ebnf
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/js.ebnf
     metadata:
 ...

@@ -106,9 +106,13 @@ expression ::= assignment_expression ;
 assignment_expression ::=
     yield_expression
   | arrow_function
-  | conditional_expression
-  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+  | assignment_chain
   ;
+
+assignment_chain ::= conditional_expression ( assignment_operator conditional_expression )* ;
+assignment_operator ::= '=' | '+=' | '-=' | '*=' | '/=' | '%='
+                      | '<<=' | '>>=' | '>>>='
+                      | '&='  | '^='  | '|='  | '**=' ;
 
 arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
 arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
@@ -121,9 +125,7 @@ coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
 
 logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
-logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
-
-bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+logical_and_expression ::= bitwise_or_expression ( '|' bitwise_xor_expression )* ;
 
 bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
 
@@ -139,7 +141,7 @@ additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative
 
 multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
 
-exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+exponentiation_expression ::= unary_expression ( '**' unary_expression )* ;
 
 unary_expression ::=
     ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
