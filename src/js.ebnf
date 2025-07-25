@@ -142,8 +142,7 @@ multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) ex
 exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
 unary_expression ::=
-    postfix_expression
-  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+    ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
   ;
 
 postfix_expression ::=
@@ -151,13 +150,12 @@ postfix_expression ::=
   ;
 
 left_hand_side_expression ::=
-    new_expression
-  | call_expression
+    new_expression | call_expression
   ;
 
 new_expression ::=
     member_expression
-  | 'new' new_expression
+  | 'new' member_expression
   ;
 
 call_expression ::=
