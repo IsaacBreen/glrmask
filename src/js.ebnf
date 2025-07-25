@@ -1,267 +1,111 @@
-// Instruct the parser to ignore Whitespace and Comments between tokens.
-!ignore IGNORE;
-
-program ::= statement_list? ;
-
-// Lexical Grammar: Whitespace and Comments
-IGNORE ::= WS | COMMENT ;
-WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
-SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ; // Non-greedy match
-MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ; // Non-greedy match
-
-// Statements
-statement_list ::= statement+ ;
-
-statement ::=
-    block
-  | declaration_statement
-  | if_statement
-  | iteration_statement
-  | switch_statement
-  | with_statement
-  | try_statement
-  | function_declaration
-  | return_statement
-  | break_statement
-  | continue_statement
-  | throw_statement
-  | debugger_statement
-  | labeled_statement
-  | class_declaration
-  | import_statement
-  | export_statement
-  | expression_statement
-  ;
-
-// Note: Semicolon is optional to simulate Automatic Semicolon Insertion (ASI).
-// A real parser has complex rules for this.
-expression_statement ::= expression ';'? ;
-
-block ::= '{' statement_list? '}' ;
-
-labeled_statement ::= IDENTIFIER ':' statement ;
-
-declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
-
-variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-
-variable_declaration ::= binding_pattern ( '=' expression )? ;
-
-if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-
-iteration_statement ::=
-    'while' '(' expression ')' statement
-  | 'do' statement 'while' '(' expression ')' ';'
-  | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
-  | 'for' '(' expression? ';' expression? ';' expression? ')' statement
-  ;
-
-switch_statement ::= 'switch' '(' expression ')' '{' case_clauses? ( default_clause case_clauses? )? '}' ;
-case_clauses ::= case_clause+ ;
-case_clause ::= 'case' expression ':' statement_list? ;
-default_clause ::= 'default' ':' statement_list? ;
-
-with_statement ::= 'with' '(' expression ')' statement ;
-
-try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
-catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
-finally_clause ::= 'finally' block ;
-
-function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-
-parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
-
-formal_parameter ::= binding_pattern ( '=' expression )? ;
-
-return_statement ::= 'return' expression? ';'? ;
-break_statement ::= 'break' IDENTIFIER? ';'? ;
-continue_statement ::= 'continue' IDENTIFIER? ';'? ;
-throw_statement ::= 'throw' expression ';'? ;
-debugger_statement ::= 'debugger' ';'? ;
-
-// Binding Patterns (for destructuring)
-binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
-property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
-array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
-binding_element ::= binding_pattern ('=' expression)? ;
-
-// ES6 Modules
-import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
-import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
-default_import ::= IDENTIFIER ;
-named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
-namespace_import ::= '*' 'as' IDENTIFIER ;
-import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-
-export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
-named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
-export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
-
-// Expressions (Precedence from lowest to highest)
-expression ::= assignment_expression ;
-
-assignment_expression ::=
-    yield_expression
-  | arrow_function
-  | conditional_expression
-  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
-  ;
-
-arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
-arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-
-conditional_expression ::=
-    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
-  ;
-
-coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
-
-logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-
-logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
-
-bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
-
-bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
-
-bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
-
-equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
-
-relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
-
-shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
-
-additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
-
-exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
-
-unary_expression ::=
-    ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
-  ;
-
-postfix_expression ::=
-    left_hand_side_expression ( '++' | '--' )?
-  ;
-
-left_hand_side_expression ::=
-    new_expression | call_expression
-  ;
-
-new_expression ::=
-    member_expression
-  | 'new' member_expression
-  ;
-
-call_expression ::=
-    member_expression arguments
-  | 'super' arguments
-  | call_expression arguments
-  | call_expression '?.' arguments
-  | call_expression '[' expression ']'
-  | call_expression '?.' '[' expression ']'
-  | call_expression '.' IDENTIFIER
-  | call_expression '?.' IDENTIFIER
-  | call_expression '.' private_identifier
-  | call_expression '?.' private_identifier
-  | call_expression template_literal
-  ;
-
-arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-
-member_expression ::=
-    primary_expression
-  | member_expression '[' expression ']'
-  | member_expression '?.' '[' expression ']'
-  | member_expression '.' IDENTIFIER
-  | member_expression '?.' IDENTIFIER
-  | member_expression '.' private_identifier
-  | member_expression '?.' private_identifier
-  | 'new' member_expression arguments
-  | member_expression template_literal
-  ;
-
-primary_expression ::=
-    'this'
-  | 'super'
-  | IDENTIFIER
-  | literal
-  | array_literal
-  | object_literal
-  | function_expression
-  | '(' expression ')'
-  ;
-
-function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
-
-yield_expression ::= 'yield' '*'? expression? ;
-
-array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
-ELISION ::= ','+ ;
-
-object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-property_assignment ::=
-    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
-  | 'get' property_name '(' ')' block
-  | 'set' property_name '(' IDENTIFIER ')' block
-  | property_name ':' assignment_expression
-  | '...' assignment_expression
-  | IDENTIFIER // Shorthand property
-  ;
-property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
-
-class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
-class_body ::= '{' class_member* '}' ;
-class_member ::= (method_definition | field_definition) ';'? | ';' ;
-field_definition ::= ('static')? class_property_name ('=' expression)? ;
-method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
-class_property_name ::= property_name | private_identifier ;
-private_identifier ::= '#' IDENTIFIER ;
-
-// Literals
-literal ::=
-    NULL_LITERAL
-  | BOOLEAN_LITERAL
-  | NUMERIC_LITERAL
-  | BIGINT_LITERAL
-  | STRING_LITERAL
-  | REGULAR_EXPRESSION_LITERAL
-  | template_literal
-  ;
-
-NULL_LITERAL ::= 'null' ;
-BOOLEAN_LITERAL ::= 'true' | 'false' ;
-
-NUMERIC_LITERAL ::= HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL | DECIMAL_LITERAL ;
-DECIMAL_LITERAL ::= DECIMAL_INTEGER_LITERAL '.' DECIMAL_DIGITS? EXPONENT_PART? | '.' DECIMAL_DIGITS EXPONENT_PART? | DECIMAL_INTEGER_LITERAL EXPONENT_PART? ;
-DECIMAL_INTEGER_LITERAL ::= '0' | NON_ZERO_DIGIT DECIMAL_DIGITS? ;
-DECIMAL_DIGITS ::= DECIMAL_DIGIT+ ;
-DECIMAL_DIGIT ::= [0-9] ;
-NON_ZERO_DIGIT ::= [1-9] ;
-EXPONENT_PART ::= ('e'|'E') ('+'|'-')? DECIMAL_DIGITS ;
-HEX_LITERAL ::= '0' ('x'|'X') HEX_DIGIT+ ;
-BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1')+ ;
-OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7')+ ;
-BIGINT_LITERAL ::= (DECIMAL_INTEGER_LITERAL | HEX_LITERAL | BINARY_LITERAL | OCTAL_LITERAL) 'n' ;
-
-STRING_LITERAL ::= '"' ( [^"\\] | ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\] | ESCAPE_SEQUENCE )* '\'' ;
-ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' HEX_DIGIT HEX_DIGIT | 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ) ;
-
-REGULAR_EXPRESSION_LITERAL ::= '/' REGEX_BODY '/' REGEX_FLAGS? ;
-REGEX_BODY ::= ( [^/\n\r\\] | '\\' . )+ ; // Any char except /, newline, or backslash, or any escaped char.
-REGEX_FLAGS ::= IDENTIFIER_PART+ ;
-
-template_literal ::= '`' ( TEMPLATE_CHAR | template_substitution )* '`' ;
-TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
-template_substitution ::= '${' expression '}' ;
-
-// Identifiers
-IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
-IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
-IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
-HEX_DIGIT ::= [0-9a-fA-F] ;
+--- a/src/js.ebnf
++++ b/src/js.ebnf
+@@ -106,37 +106,71 @@
+ assignment_expression ::=
+     yield_expression
+   | arrow_function
+-  | conditional_expression
+-  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
++  | assignment_expression assignment_operator conditional_expression
++  | conditional_expression
+   ;
++assignment_operator ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ;
+ 
+ arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+ arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+ 
+ conditional_expression ::=
+-    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
++    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+   ;
+ 
+-coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+-
+-logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+-
+-logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+-
+-bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+-
+-bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+-
+-bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+-
+-equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+-
+-relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+-
+-shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+-
+-additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+-
+-multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+-
+-exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
++coalesce_expression ::=
++    coalesce_expression '??' logical_or_expression
++  | logical_or_expression
++  ;
++
++logical_or_expression ::=
++    logical_or_expression '||' logical_and_expression
++  | logical_and_expression
++  ;
++
++logical_and_expression ::=
++    logical_and_expression '&&' bitwise_or_expression
++  | bitwise_or_expression
++  ;
++
++bitwise_or_expression ::=
++    bitwise_or_expression '|' bitwise_xor_expression
++  | bitwise_xor_expression
++  ;
++
++bitwise_xor_expression ::=
++    bitwise_xor_expression '^' bitwise_and_expression
++  | bitwise_and_expression
++  ;
++
++bitwise_and_expression ::=
++    bitwise_and_expression '&' equality_expression
++  | equality_expression
++  ;
++
++equality_expression ::=
++    equality_expression equality_operator relational_expression
++  | relational_expression
++  ;
++equality_operator ::= '==' | '!=' | '===' | '!==' ;
++
++relational_expression ::=
++    relational_expression relational_operator shift_expression
++  | shift_expression
++  ;
++relational_operator ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
++
++shift_expression ::=
++    shift_expression shift_operator additive_expression
++  | additive_expression
++  ;
++shift_operator ::= '<<' | '>>' | '>>>' ;
++
++additive_expression ::=
++    additive_expression additive_operator multiplicative_expression
++  | multiplicative_expression
++  ;
++additive_operator ::= '+' | '-' ;
++
++multiplicative_expression ::=
++    multiplicative_expression multiplicative_operator exponentiation_expression
++  | exponentiation_expression
++  ;
++multiplicative_operator ::= '*' | '/' | '%' ;
++
++exponentiation_expression ::=
++    exponentiation_expression '**' unary_expression
++  | unary_expression
++  ;
+ 
+ unary_expression ::=
+     ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression

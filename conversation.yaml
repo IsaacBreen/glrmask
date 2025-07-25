@@ -149,8 +149,7 @@ local_system:
       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
-          postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
         ;
 
       postfix_expression ::=
@@ -158,13 +157,12 @@ local_system:
         ;
 
       left_hand_side_expression ::=
-          new_expression
-        | call_expression
+          new_expression | call_expression
         ;
 
       new_expression ::=
           member_expression
-        | 'new' new_expression
+        | 'new' member_expression
         ;
 
       call_expression ::=
@@ -420,8 +418,7 @@ local_system:
       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
-          postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
         ;
 
       postfix_expression ::=
@@ -429,13 +426,12 @@ local_system:
         ;
 
       left_hand_side_expression ::=
-          new_expression
-        | call_expression
+          new_expression | call_expression
         ;
 
       new_expression ::=
           member_expression
-        | 'new' new_expression
+        | 'new' member_expression
         ;
 
       call_expression ::=
@@ -559,7 +555,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gp
+    - o3
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -714,8 +710,7 @@ messages:
       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
       unary_expression ::=
-          postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
         ;
 
       postfix_expression ::=
@@ -723,13 +718,12 @@ messages:
         ;
 
       left_hand_side_expression ::=
-          new_expression
-        | call_expression
+          new_expression | call_expression
         ;
 
       new_expression ::=
           member_expression
-        | 'new' new_expression
+        | 'new' member_expression
         ;
 
       call_expression ::=
@@ -847,60 +841,587 @@ messages:
       bad. Fix it.
     metadata:
   - assistant: |-
-      Of course. I can help you with that.
-
-      Your grammar contains a few instances of right-recursion. While right-recursion is the correct way to define right-associative operators (like assignment and exponentiation), some forms of it can be problematic for certain types of parsers, and in some cases, it can make the grammar less precise.
-
-      I've identified two rules, `unary_expression` and `new_expression`, where the right-recursion can be removed to improve the grammar.
-
-      1.  **`unary_expression`**: This rule was written in a way that is equivalent to `OP* postfix_expression`. I've rewritten it to use the `*` operator (zero or more repetitions) to make this explicit and remove the direct right-recursion.
-
-      2.  **`new_expression`**: The original rule `new_expression ::= ... | 'new' new_expression` incorrectly allows for expressions like `new new MyClass()`, which is a `SyntaxError` in JavaScript. By removing the recursion, we not only fix the right-recursion issue but also make the grammar more accurate.
-
-      I have left the right-recursion in `assignment_expression` and `exponentiation_expression` untouched. This is because these operators are right-associative in JavaScript, and right-recursion is the standard and correct way to express this in a grammar. Altering them would change the associativity and break the grammar's correctness for those expressions.
-
-      Here are the patches for the `src/js.ebnf` file.
+      The grammar contained several instances of right-recursion (both direct and via EBNF “*” / “+” repetitions).  
+      The patch below rewrites all of them into equivalent left-recursive forms and factors the various operator tokens into their own non-terminals.
 
       ```diff
       diff --git a/src/js.ebnf b/src/js.ebnf
+      index 4e6e7a1..3b9c9f2 100644
       --- a/src/js.ebnf
       +++ b/src/js.ebnf
-      @@ -161,18 +161,16 @@
-       exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+      @@
+       assignment_expression ::=
+           yield_expression
+         | arrow_function
+      -  | conditional_expression
+      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+      +  | assignment_expression assignment_operator conditional_expression
+      +  | conditional_expression
+         ;
+      +assignment_operator ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ;
+       
+       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+       
+       conditional_expression ::=
+      -    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+         ;
+       
+      -coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      -logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      -logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      -bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      -bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      -bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      -equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      -relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      -shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      -additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      -multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      -exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+      +coalesce_expression ::=
+      +    coalesce_expression '??' logical_or_expression
+      +  | logical_or_expression
+      +  ;
+      +
+      +logical_or_expression ::=
+      +    logical_or_expression '||' logical_and_expression
+      +  | logical_and_expression
+      +  ;
+      +
+      +logical_and_expression ::=
+      +    logical_and_expression '&&' bitwise_or_expression
+      +  | bitwise_or_expression
+      +  ;
+      +
+      +bitwise_or_expression ::=
+      +    bitwise_or_expression '|' bitwise_xor_expression
+      +  | bitwise_xor_expression
+      +  ;
+      +
+      +bitwise_xor_expression ::=
+      +    bitwise_xor_expression '^' bitwise_and_expression
+      +  | bitwise_and_expression
+      +  ;
+      +
+      +bitwise_and_expression ::=
+      +    bitwise_and_expression '&' equality_expression
+      +  | equality_expression
+      +  ;
+      +
+      +equality_expression ::=
+      +    equality_expression equality_operator relational_expression
+      +  | relational_expression
+      +  ;
+      +equality_operator ::= '==' | '!=' | '===' | '!==' ;
+      +
+      +relational_expression ::=
+      +    relational_expression relational_operator shift_expression
+      +  | shift_expression
+      +  ;
+      +relational_operator ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
+      +
+      +shift_expression ::=
+      +    shift_expression shift_operator additive_expression
+      +  | additive_expression
+      +  ;
+      +shift_operator ::= '<<' | '>>' | '>>>' ;
+      +
+      +additive_expression ::=
+      +    additive_expression additive_operator multiplicative_expression
+      +  | multiplicative_expression
+      +  ;
+      +additive_operator ::= '+' | '-' ;
+      +
+      +multiplicative_expression ::=
+      +    multiplicative_expression multiplicative_operator exponentiation_expression
+      +  | exponentiation_expression
+      +  ;
+      +multiplicative_operator ::= '*' | '/' | '%' ;
+      +
+      +exponentiation_expression ::=
+      +    exponentiation_expression '**' unary_expression
+      +  | unary_expression
+      +  ;
        
        unary_expression ::=
-      -    postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
-      +    ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+           ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
          ;
-       
-       postfix_expression ::=
-           left_hand_side_expression ( '++' | '--' )?
-         ;
-       
-       left_hand_side_expression ::=
-      -    new_expression
-      -  | call_expression
-      +    new_expression | call_expression
-         ;
-       
-       new_expression ::=
-           member_expression
-      -  | 'new' new_expression
-      +  | 'new' member_expression
-         ;
-       
-       call_expression ::=
-
       ```
     metadata:
-  - user: |
-      Apply result (git-llm mode):
+  - user: |-
+      Git apply attempt failed (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/js.ebnf
       Applying patch to 'src/js.ebnf' using custom patcher...
-      Successfully applied patch and wrote to src/js.ebnf.
+      Error applying patch to src/js.ebnf:
+      Hunk #1 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      assignment_expression ::=
+          yield_expression
+        | arrow_function
+        | conditional_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+        ;
+
+      arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+      arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+
+      conditional_expression ::=
+          coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+        ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+
+      unary_expression ::=
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+        
+      --- Expected Context (from patch, after normalization): ---
+      assignment_expression ::=
+      yield_expression
+      | arrow_function
+      | conditional_expression
+      | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+      ;
+
+      arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+      arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+
+      conditional_expression ::=
+      coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+      ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+
+      unary_expression ::=
+      ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+      ;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 106 with ratio 0.77 (23/30 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        assignment_expression ::=
+        yield_expression
+        | arrow_function
+        | conditional_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+        ;
+        
+        arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+        arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+        
+        conditional_expression ::=
+        coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+        ;
+        
+        coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      + 
+        logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      + 
+        logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      + 
+        bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      + 
+        bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      + 
+        bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      + 
+        equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      + 
+        relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      - shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      - additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      - multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      - exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+        
+      - unary_expression ::=
+      - ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+      - ;
+      Problematic diff content:
+      ---
+      diff --git a/src/js.ebnf b/src/js.ebnf
+      index 4e6e7a1..3b9c9f2 100644
+      --- a/src/js.ebnf
+      +++ b/src/js.ebnf
+      @@
+       assignment_expression ::=
+           yield_expression
+         | arrow_function
+      -  | conditional_expression
+      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+      +  | assignment_expression assignment_operator conditional_expression
+      +  | conditional_expression
+         ;
+      +assignment_operator ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ;
+       
+       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+       
+       conditional_expression ::=
+      -    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+         ;
+       
+      -coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      -logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      -logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      -bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      -bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      -bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      -equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      -relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      -shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      -additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      -multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      -exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+      +coalesce_expression ::=
+      +    coalesce_expression '??' logical_or_expression
+      +  | logical_or_expression
+      +  ;
+      +
+      +logical_or_expression ::=
+      +    logical_or_expression '||' logical_and_expression
+      +  | logical_and_expression
+      +  ;
+      +
+      +logical_and_expression ::=
+      +    logical_and_expression '&&' bitwise_or_expression
+      +  | bitwise_or_expression
+      +  ;
+      +
+      +bitwise_or_expression ::=
+      +    bitwise_or_expression '|' bitwise_xor_expression
+      +  | bitwise_xor_expression
+      +  ;
+      +
+      +bitwise_xor_expression ::=
+      +    bitwise_xor_expression '^' bitwise_and_expression
+      +  | bitwise_and_expression
+      +  ;
+      +
+      +bitwise_and_expression ::=
+      +    bitwise_and_expression '&' equality_expression
+      +  | equality_expression
+      +  ;
+      +
+      +equality_expression ::=
+      +    equality_expression equality_operator relational_expression
+      +  | relational_expression
+      +  ;
+      +equality_operator ::= '==' | '!=' | '===' | '!==' ;
+      +
+      +relational_expression ::=
+      +    relational_expression relational_operator shift_expression
+      +  | shift_expression
+      +  ;
+      +relational_operator ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
+      +
+      +shift_expression ::=
+      +    shift_expression shift_operator additive_expression
+      +  | additive_expression
+      +  ;
+      +shift_operator ::= '<<' | '>>' | '>>>' ;
+      +
+      +additive_expression ::=
+      +    additive_expression additive_operator multiplicative_expression
+      +  | multiplicative_expression
+      +  ;
+      +additive_operator ::= '+' | '-' ;
+      +
+      +multiplicative_expression ::=
+      +    multiplicative_expression multiplicative_operator exponentiation_expression
+      +  | exponentiation_expression
+      +  ;
+      +multiplicative_operator ::= '*' | '/' | '%' ;
+      +
+      +exponentiation_expression ::=
+      +    exponentiation_expression '**' unary_expression
+      +  | unary_expression
+      +  ;
+       
+       unary_expression ::=
+           ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+         ;
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/js.ebnf
+      Applying patch to 'src/js.ebnf' using custom patcher...
+      Error applying patch to src/js.ebnf:
+      Hunk #1 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      assignment_expression ::=
+          yield_expression
+        | arrow_function
+        | conditional_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+        ;
+
+      arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+      arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+
+      conditional_expression ::=
+          coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+        ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+
+      unary_expression ::=
+          ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+        
+      --- Expected Context (from patch, after normalization): ---
+      assignment_expression ::=
+      yield_expression
+      | arrow_function
+      | conditional_expression
+      | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+      ;
+
+      arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+      arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+
+      conditional_expression ::=
+      coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+      ;
+
+      coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+
+      unary_expression ::=
+      ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+      ;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 106 with ratio 0.77 (23/30 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        assignment_expression ::=
+        yield_expression
+        | arrow_function
+        | conditional_expression
+        | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+        ;
+        
+        arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+        arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+        
+        conditional_expression ::=
+        coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+        ;
+        
+        coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      + 
+        logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      + 
+        logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      + 
+        bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      + 
+        bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      + 
+        bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      + 
+        equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      + 
+        relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      - shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      - additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      - multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      - exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+        
+      - unary_expression ::=
+      - ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+      - ;
+      Problematic diff content:
+      ---
+      diff --git a/src/js.ebnf b/src/js.ebnf
+      index 4e6e7a1..3b9c9f2 100644
+      --- a/src/js.ebnf
+      +++ b/src/js.ebnf
+      @@
+       assignment_expression ::=
+           yield_expression
+         | arrow_function
+      -  | conditional_expression
+      -  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+      +  | assignment_expression assignment_operator conditional_expression
+      +  | conditional_expression
+         ;
+      +assignment_operator ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ;
+       
+       arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+       arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+       
+       conditional_expression ::=
+      -    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+      +    coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
+         ;
+       
+      -coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+      -logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+      -logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+      -bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+      -bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+      -bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+      -equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+      -relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+      -shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+      -additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+      -multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+      -exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
+      +coalesce_expression ::=
+      +    coalesce_expression '??' logical_or_expression
+      +  | logical_or_expression
+      +  ;
+      +
+      +logical_or_expression ::=
+      +    logical_or_expression '||' logical_and_expression
+      +  | logical_and_expression
+      +  ;
+      +
+      +logical_and_expression ::=
+      +    logical_and_expression '&&' bitwise_or_expression
+      +  | bitwise_or_expression
+      +  ;
+      +
+      +bitwise_or_expression ::=
+      +    bitwise_or_expression '|' bitwise_xor_expression
+      +  | bitwise_xor_expression
+      +  ;
+      +
+      +bitwise_xor_expression ::=
+      +    bitwise_xor_expression '^' bitwise_and_expression
+      +  | bitwise_and_expression
+      +  ;
+      +
+      +bitwise_and_expression ::=
+      +    bitwise_and_expression '&' equality_expression
+      +  | equality_expression
+      +  ;
+      +
+      +equality_expression ::=
+      +    equality_expression equality_operator relational_expression
+      +  | relational_expression
+      +  ;
+      +equality_operator ::= '==' | '!=' | '===' | '!==' ;
+      +
+      +relational_expression ::=
+      +    relational_expression relational_operator shift_expression
+      +  | shift_expression
+      +  ;
+      +relational_operator ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
+      +
+      +shift_expression ::=
+      +    shift_expression shift_operator additive_expression
+      +  | additive_expression
+      +  ;
+      +shift_operator ::= '<<' | '>>' | '>>>' ;
+      +
+      +additive_expression ::=
+      +    additive_expression additive_operator multiplicative_expression
+      +  | multiplicative_expression
+      +  ;
+      +additive_operator ::= '+' | '-' ;
+      +
+      +multiplicative_expression ::=
+      +    multiplicative_expression multiplicative_operator exponentiation_expression
+      +  | exponentiation_expression
+      +  ;
+      +multiplicative_operator ::= '*' | '/' | '%' ;
+      +
+      +exponentiation_expression ::=
+      +    exponentiation_expression '**' unary_expression
+      +  | unary_expression
+      +  ;
+       
+       unary_expression ::=
+           ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' )* postfix_expression
+         ;
+      ---
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/js.ebnf"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/js.ebnf
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/js.ebnf
     metadata:
 ...
