@@ -197,7 +197,7 @@ impl<'a> GSSPopperItem<'a> {
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
-        self.node.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
+        self.node.predecessors.iter().flat_map(move |(edge_val, preds_by_depth)| {
             preds_by_depth.values().flat_map(move |pred_vec| {
                 pred_vec.iter().map(move |pred_arc| {
                     GSSPopperItemPeek {
@@ -309,7 +309,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge(&other_arc, usize::MAX);
+                merged_node.merge_with_depth(&other_arc, usize::MAX);
             }
             Arc::new(merged_node)
         };
@@ -428,8 +428,12 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
+    pub fn merge(&mut self, other: &Self) {
+        self._merge(other, usize::MAX);
+    }
+
     #[time_it]
-    pub fn merge(&mut self, other: &Self, merge_depth: usize) {
+    pub fn merge_with_depth(&mut self, other: &Self, merge_depth: usize) {
         self._merge(other, merge_depth);
     }
 
@@ -451,7 +455,7 @@ impl GSSNode {
     }
 
     pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
-        self.merge(&other, merge_depth);
+        self.merge_with_depth(&other, merge_depth);
         self
     }
 
@@ -462,7 +466,7 @@ impl GSSNode {
     
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
-        self.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
+        self.predecessors.iter().flat_map(move |(edge_val, preds_by_depth)| {
             preds_by_depth.values().flat_map(move |pred_vec| {
                 pred_vec.iter().map(move |pred_arc| GSSPeek {
                     parent_acc: &self.acc,
@@ -810,7 +814,7 @@ pub fn fuse_predecessors_recursive(
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge(&other_arc, usize::MAX);
+                merged_node.merge_with_depth(&other_arc, usize::MAX);
             }
             Arc::new(merged_node)
         };
@@ -1309,7 +1313,7 @@ mod tests {
         let n2 = Arc::new(n0.push(mock_edge(0)));
 
         let mut merged = (*n1).clone();
-        merged.merge(&n2, 1);
+        merged.merge_with_depth(&n2, 1);
 
         assert_eq!(merged.acc.llm_tokens_union, HybridBitset::max_ones());
 
