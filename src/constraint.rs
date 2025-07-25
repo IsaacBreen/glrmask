@@ -1253,9 +1253,9 @@ impl<'a> GrammarConstraintState<'a> {
                             }
                         }
                         // Print GSS stats
-                        let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         let mut do_phase3 = false;
                         do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
