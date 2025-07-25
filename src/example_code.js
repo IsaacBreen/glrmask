@@ -1,5 +1,5 @@
-[x]
-[Symbol('description')]
+[x]: 1
+[Symbol('description')]: 2
 
 let aaaaaaaa = 11111111111111111111111111111111;
 const myObject = {
