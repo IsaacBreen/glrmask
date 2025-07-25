@@ -136,7 +136,6 @@ pub fn compute_closure(
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-    lr_type: LRType,
 
 ) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
@@ -161,7 +160,7 @@ pub fn compute_closure(
         }
     }
 
-    if matches!(lr_type, LRType::LALR) {
+    if matches!(LR_TYPE, LRType::LALR) {
         let mut lalr_closure = BTreeSet::new();
         let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 

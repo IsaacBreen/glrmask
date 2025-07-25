@@ -305,7 +305,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
             continue;
         }
 
-        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, LR_TYPE);
+        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
