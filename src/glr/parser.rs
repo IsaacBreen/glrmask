@@ -9,11 +9,12 @@ use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{Debug, Display, Formatter, Write};
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::items::{compute_closure, Item};
 use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
@@ -864,6 +865,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             });
         }
         // return None;
+        let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+        let self_hash = self.active_state.hash(&mut hasher);
+        println!("GLRParserState::has_action_for: {:?}", self_hash);
         self.log_gss("has_action_for-start", token_id);
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
