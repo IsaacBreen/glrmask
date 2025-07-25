@@ -347,8 +347,8 @@ impl GSSNode {
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
     pub fn max_depth(&self) -> MaxDepth { self.max_depth }
-    // fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
-    fn dest_key(&self) -> DestKey { self.max_depth() }
+    fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
+    // fn dest_key(&self) -> DestKey { self.max_depth() }
 
     /// Returns the set of LLM tokens allowed by *any* path ending at this node.
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.acc.llm_tokens_union.clone() }
