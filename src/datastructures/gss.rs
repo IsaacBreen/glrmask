@@ -819,7 +819,7 @@ pub fn fuse_predecessors_recursive(
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge_with_depth(usize::MAX, &other_arc);
+                merged_node.merge_with_depth(1, &other_arc);
             }
             Arc::new(merged_node)
         };
