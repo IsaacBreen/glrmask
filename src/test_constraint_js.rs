@@ -476,15 +476,15 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     // let vocab_url = "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B/raw/main/vocab.json";
     // let vocab_file_name = "qwen_vocab.json";
     let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-
-    let vocab = vec![
-        " &",
-        "x", "[", "]:",
-    ];
-    let mut gpt2_raw_vocab = vocab.into_iter()
-        .enumerate()
-        .map(|(id, token)| (token.to_string(), id as u32))
-        .collect::<BTreeMap<String, u32>>();
+    //
+    // let vocab = vec![
+    //     " &",
+    //     "x", "[", "]:",
+    // ];
+    // let mut gpt2_raw_vocab = vocab.into_iter()
+    //     .enumerate()
+    //     .map(|(id, token)| (token.to_string(), id as u32))
+    //     .collect::<BTreeMap<String, u32>>();
 
     // let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
     // // Just fill with all bytes
@@ -602,10 +602,10 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     // llm_token_map.retain(|v, _| [b"'".as_ref()].contains(&v.as_ref()));
     // llm_token_map.retain(|v, _| v.len() == 1);
 
-    // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b":"].contains(&v.as_ref()));
+    llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
     // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b":"].contains(&v.as_ref()));
 
-    llm_token_map.retain(|v, _| v.iter().all(|c| !c.is_ascii_alphanumeric() || c == &b'x'));
+    // llm_token_map.retain(|v, _| v.iter().all(|c| !c.is_ascii_alphanumeric() || c == &b'x'));
 
     llm_token_map.retain(|v, _| v.len() <= 2);
     // llm_token_map.retain(|v, _| v.len() <= 5);
