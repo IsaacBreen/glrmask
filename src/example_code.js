@@ -1,5 +1,13 @@
-let aaaaaaaa = 11111111111111111111111111111111;
-let aaaaaaaa = 11111111111111111111111111111111;
+const myObject = {
+    stringKey: "value",
+    "key-with-hyphen": 123,
+    unquotedKey: true,
+    123: "numeric key", // Numeric keys
+    // Computed property name
+    [mySymbol]: "symbol key value",
+    // Trailing comma
+};
+
 let aaaaaaaa = 11111111111111111111111111111111;
 let aaaaaaaa = 11111111111111111111111111111111;
 let aaaaaaaa = 11111111111111111111111111111111;
