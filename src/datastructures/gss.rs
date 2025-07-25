@@ -346,7 +346,7 @@ impl GSSNode {
     pub fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
     pub fn num_predecessors(&self) -> usize { self.predecessors.len() }
-    fn max_depth(&self) -> MaxDepth { self.max_depth }
+    pub fn max_depth(&self) -> MaxDepth { self.max_depth }
     fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
     // fn dest_key(&self) -> DestKey { self.max_depth() }
 
