@@ -309,7 +309,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge_with_depth(usize::MAX, &other_arc);
+                merged_node.merge_with_depth(1, &other_arc);
             }
             Arc::new(merged_node)
         };
@@ -430,7 +430,7 @@ impl GSSNode {
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
     #[time_it]
     pub fn merge(&mut self, other: &Self) {
-        self._merge(other, usize::MAX);
+        self._merge(other, 1);
     }
 
     #[time_it]
