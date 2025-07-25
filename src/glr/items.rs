@@ -161,7 +161,7 @@ pub fn compute_closure(
         }
     }
 
-    if matches!(LR_TYPE, LRType::LALR) {
+    if LR_TYPE == LRType::LALR {
         let mut lalr_closure = BTreeSet::new();
         let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
