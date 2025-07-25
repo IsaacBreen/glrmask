@@ -129,8 +129,8 @@ pub enum LRType {
     LR1,
 }
 
-// pub const LR_TYPE: LRType = LRType::LALR;
-pub const LR_TYPE: LRType = LRType::LR1;
+pub const LR_TYPE: LRType = LRType::LALR;
+// pub const LR_TYPE: LRType = LRType::LR1;
 
 pub fn compute_closure(
     items: &BTreeSet<Item>,
