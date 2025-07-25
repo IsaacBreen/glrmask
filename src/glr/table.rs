@@ -296,8 +296,6 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
 
-    const lr_type: LRType = LRType::LALR; // Change this to the desired LR type
-
     let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
@@ -307,7 +305,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
             continue;
         }
 
-        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, lr_type);
+        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, LR_TYPE);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 

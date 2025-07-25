@@ -1254,7 +1254,10 @@ impl<'a> GrammarConstraintState<'a> {
                         // Print GSS stats
                         // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
-                        if num_outgoing_edges_that_lead_to_non_end_nodes >= 2 {
+                        let mut do_phase3 = num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
+                        do_phase3 |= true;
+                        do_phase3 |= true;
+                        if do_phase3 {
                             // There will be a split.
                             // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
                             crate::debug!(4, "Processing non-end precomputed node data");
@@ -1264,11 +1267,11 @@ impl<'a> GrammarConstraintState<'a> {
                             // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                             crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
-                            disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                            crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                            crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         }
+                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
+                        crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         !glr_s.active_state.stack.is_empty()
                     }
                 })
