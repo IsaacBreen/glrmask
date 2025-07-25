@@ -1110,6 +1110,9 @@ impl<'a> GrammarConstraintState<'a> {
                     return Vec::new();
                 }
 
+                let mut glr_s = glr_s.clone();
+                disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+
                 // Count num end nodes vs non end nodes
                 let mut num_end = 0;
                 let mut num_non_end = 0;
