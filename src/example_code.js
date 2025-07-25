@@ -1,11 +1,7 @@
 const myObject = {
-    stringKey: "value",
-    "key-with-hyphen": 123,
-    unquotedKey: true,
+    // Numeric keys
     123: "numeric key", // Numeric keys
     // Computed property name
-    [mySymbol]: "symbol key value",
-    // Trailing comma
 };
 
 let aaaaaaaa = 11111111111111111111111111111111;
