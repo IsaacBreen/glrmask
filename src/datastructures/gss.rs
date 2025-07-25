@@ -779,6 +779,8 @@ impl GSSNode {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GSSStats {
     pub num_roots: usize,
+    pub num_root_predecessors: usize,
+    pub num_unique_root_predecessor_keys: usize,
     pub unique_nodes: usize,
     pub structurally_unique_nodes: usize,
     pub structural_redundancy: f64,
@@ -800,12 +802,19 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut total_depth = 0u64;
     let mut total_preds = 0u64;
 
+    let mut root_predecessor_keys = HashSet::new();
     for root_node in roots {
+        stats.num_root_predecessors += root_node.predecessors().len();
+        for key in root_node.predecessors().keys() {
+            root_predecessor_keys.insert(key.clone());
+        }
+
         let node_ptr = *root_node as *const GSSNode;
         if visited.insert(node_ptr) {
             queue.push_back((*root_node, 0));
         }
     }
+    stats.num_unique_root_predecessor_keys = root_predecessor_keys.len();
 
     // Reset visited for the main traversal to correctly process all nodes.
     visited.clear();
