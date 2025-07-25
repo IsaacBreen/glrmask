@@ -1,8 +1,6 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 !ignore IGNORE;
 
-start ::= property_name+ ;
-property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
