@@ -773,7 +773,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut out_iter = out.into_iter();
             let mut out_node = out_iter.next().unwrap();
             for next_node in out_iter {
-                out_node.merge(&next_node);
+                out_node.merge_with_depth(2, &next_node);
             }
             Arc::new(out_node)
         }
@@ -1019,7 +1019,7 @@ impl ParseState { // No longer generic
         // if self.stack.max_depth() > other.stack.max_depth() {
         //     std::mem::swap(self, &mut other);
         // }
-        Arc::make_mut(&mut self.stack).merge(&other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
     }
 }
 
