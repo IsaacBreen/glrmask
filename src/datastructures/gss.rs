@@ -428,6 +428,7 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
+    #[time_it]
     pub fn merge(&mut self, other: &Self) {
         self._merge(other, usize::MAX);
     }
@@ -437,6 +438,7 @@ impl GSSNode {
         self._merge(other, merge_depth);
     }
 
+    #[time_it]
     fn _merge(&mut self, other: &Self, merge_depth: usize) {
         if self == other { return; }
 
