@@ -308,7 +308,7 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
                 entry.insert(source_pred_arc);
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
-                Arc::make_mut(entry.get_mut()).merge(&source_pred_arc);
+                Arc::make_mut(entry.get_mut())._merge(&source_pred_arc);
             }
         }
     }
