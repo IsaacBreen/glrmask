@@ -855,6 +855,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
                     let mut reduced_stack = GSSNode::new_fresh();
                     for peek in state.stack.peek_iter() {
+                        println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
+                                 state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
                         let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack_part.is_empty() {
                             reduced_stack.merge(&new_stack_part);
