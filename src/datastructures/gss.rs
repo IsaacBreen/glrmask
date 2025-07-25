@@ -309,7 +309,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge_with_depth(&other_arc, usize::MAX);
+                merged_node.merge_with_depth(usize::MAX, &other_arc);
             }
             Arc::new(merged_node)
         };
@@ -433,7 +433,7 @@ impl GSSNode {
     }
 
     #[time_it]
-    pub fn merge_with_depth(&mut self, other: &Self, merge_depth: usize) {
+    pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
         self._merge(other, merge_depth);
     }
 
@@ -455,7 +455,7 @@ impl GSSNode {
     }
 
     pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
-        self.merge_with_depth(&other, merge_depth);
+        self.merge_with_depth(merge_depth, &other);
         self
     }
 
@@ -817,7 +817,7 @@ pub fn fuse_predecessors_recursive(
         } else {
             let mut merged_node = (*first).clone();
             for other_arc in iter {
-                merged_node.merge_with_depth(&other_arc, usize::MAX);
+                merged_node.merge_with_depth(usize::MAX, &other_arc);
             }
             Arc::new(merged_node)
         };
@@ -1316,7 +1316,7 @@ mod tests {
         let n2 = Arc::new(n0.push(mock_edge(0)));
 
         let mut merged = (*n1).clone();
-        merged.merge_with_depth(&n2, 1);
+        merged.merge_with_depth(1, &n2);
 
         assert_eq!(merged.acc.llm_tokens_union, HybridBitset::max_ones());
 
