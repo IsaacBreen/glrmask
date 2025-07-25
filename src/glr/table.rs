@@ -835,8 +835,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     }
 
     crate::debug!(2, "Done generating GLR parser");
-    crate::debug!(6, "Number of states: {}", stage_7_table.len());
-    panic!("GLR parser generation complete. Number of states: {}", stage_7_table.len());
+    // crate::debug!(6, "Number of states: {}", stage_7_table.len());
+    // panic!("GLR parser generation complete. Number of states: {}", stage_7_table.len());
 
     GLRParser::new(stage_7_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
 }

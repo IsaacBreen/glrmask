@@ -168,11 +168,7 @@ pub fn compute_closure(
 
         // Separate reduce and non-reduce items, and group reduce items by core
         for item in closure {
-            if item.dot_at_end() {
-                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-            } else {
-                lalr_closure.insert(item);
-            }
+        reduce_item_cores.entry((item.production, item.dot_position)).or_default();
         }
 
         // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
