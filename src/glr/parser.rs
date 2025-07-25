@@ -865,10 +865,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             });
         }
         // return None;
-        let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-        self.active_state.hash(&mut hasher);
-        let self_hash = hasher.finish();
-        println!("GLRParserState::has_action_for: {:?}", self_hash);
+        // let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+        // self.active_state.hash(&mut hasher);
+        // let self_hash = hasher.finish();
+        // println!("GLRParserState::has_action_for: {:?}", self_hash);
         self.log_gss("has_action_for-start", token_id);
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
