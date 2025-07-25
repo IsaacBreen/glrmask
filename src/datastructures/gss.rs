@@ -383,6 +383,10 @@ impl GSSNode {
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
     #[time_it]
     pub fn merge(&mut self, other: &Self) {
+        self._merge(other);
+    }
+
+    fn _merge(&mut self, other: &Self) {
         if self == other { return; }
 
         if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
