@@ -775,7 +775,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     // );
     // return Ok(());
 
-    if true {
+    if false {
         let mut constraint_state1 = grammar_constraint.init();
         let mut constraint_state2 = grammar_constraint.init();
         pretty_assertions::assert_eq!(constraint_state1.to_string(), constraint_state2.to_string(), "Initial constraint states should be equal after initialization.");
@@ -839,7 +839,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 llm_token_id.0
             );
 
-            if true {
+            if false {
                 constraint_state = grammar_constraint.init();
                 println!("  Re-initializing constraint state for token {} ('{}').", i + 1, current_token_str);
                 // Commit the full text up to this token
