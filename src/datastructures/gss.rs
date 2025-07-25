@@ -583,15 +583,18 @@ fn prune_and_transform_recursive(
         }
         Some((new_local_acc, continue_recursion)) => {
             let new_node_predecessors_map = if continue_recursion {
-                let new_predecessors_set = node_arc.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
-                    preds_by_depth.values().flat_map(|pred_vec| {
-                        pred_vec.iter().filter_map(|pred_arc| {
-                            prune_and_transform_recursive(pred_arc, closure, memo)
-                                .map(|new_pred_arc| (new_pred_arc, edge_val.clone()))
-                        })
-                    })
-                })
-                    .collect::<NodeSet>();
+                let mut new_predecessors_set = NodeSet::new();
+                for (edge_val, preds_by_depth) in &node_arc.predecessors {
+                    for pred_vec in preds_by_depth.values() {
+                        for pred_arc in pred_vec {
+                            if let Some(new_pred_arc) =
+                                prune_and_transform_recursive(pred_arc, closure, memo)
+                            {
+                                new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
+                            }
+                        }
+                    }
+                }
                 if new_predecessors_set.is_empty() && !node_arc.predecessors.is_empty() {
                     memo.insert(node_ptr, None);
                     return None;
