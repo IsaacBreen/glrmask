@@ -159,7 +159,39 @@ pub fn compute_closure(
         }
     }
 
-    // crate::debug!(3, "Done computing closure");
+    if matches!(lr_type, LRType::LALR) {
+        let mut lalr_closure = BTreeSet::new();
+        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+
+        // Separate reduce and non-reduce items, and group reduce items by core
+        for item in closure {
+            if item.dot_at_end() {
+                reduce_item_cores.entry((item.production, item.dot_position))
+                    .or_default()
+                    .insert(item.lookahead);
+            } else {
+                lalr_closure.insert(item);
+            }
+        }
+
+        // Process reduce items
+        for ((prod, dot_pos), original_lookaheads) in reduce_item_cores {
+            let lhs = &prod.lhs;
+            if let Some(follows) = follow_sets.get(lhs) {
+                for f in follows {
+                    lalr_closure.insert(Item {
+                        production: prod.clone(),
+                        dot_position: dot_pos,
+                        lookahead: Some(f.clone()),
+                    });
+                }
+            }
+            if original_lookaheads.contains(&None) {
+                lalr_closure.insert(Item { production: prod, dot_position: dot_pos, lookahead: None });
+            }
+        }
+        return lalr_closure;
+    }
     closure
 }
 
