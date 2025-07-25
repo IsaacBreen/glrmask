@@ -584,8 +584,8 @@ fn prune_and_transform_recursive(
         Some((new_local_acc, continue_recursion)) => {
             let new_node_predecessors_map = if continue_recursion {
                 let new_predecessors_set = node_arc.predecessors.iter().flat_map(|(edge_val, preds_by_depth)| {
-                    preds_by_depth.values().flat_map(move |pred_vec| {
-                        pred_vec.iter().filter_map(move |pred_arc| {
+                    preds_by_depth.values().flat_map(|pred_vec| {
+                        pred_vec.iter().filter_map(|pred_arc| {
                             prune_and_transform_recursive(pred_arc, closure, memo)
                                 .map(|new_pred_arc| (new_pred_arc, edge_val.clone()))
                         })
