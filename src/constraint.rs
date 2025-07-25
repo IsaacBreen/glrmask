@@ -1098,6 +1098,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |glr_s, grammar_token_opt, dest_map| {
+                timeit!("get_mask try to avoid step for no additional llm tokens", {
                 let mut all_edge_llm_tokens = HybridBitset::zeros();
                 for edge_llm_tokens_bv in dest_map.values() {
                     all_edge_llm_tokens |= edge_llm_tokens_bv;
@@ -1109,6 +1110,7 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(4, "Skipping step for grammar token {:?} as all edge LLM tokens are already in final mask.", grammar_token_opt);
                     return Vec::new();
                 }
+                });
 
                 // let mut glr_s = glr_s.clone();
                 // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
