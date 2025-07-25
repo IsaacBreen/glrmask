@@ -636,8 +636,8 @@ impl<'r> Precomputer<'r> {
                 // Prune children of the current node.
                 node.children_mut().retain(|edge_terminal_opt, _dest_map| {
                     match edge_terminal_opt {
-                        // Keep edges with terminals that are in the allowed follow set.
-                        Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal),
+                        // Keep edges with terminals that are in the allowed follow set (or ignore edges).
+                        Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
                         // Always keep `None` edges, as they don't represent grammar terminals.
                         None => true,
                     }
