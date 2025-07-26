@@ -1,8 +1,6 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 !ignore IGNORE;
 
-start ::= temp+ ;
-temp ::= property_name ':' assignment_expression ;
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
