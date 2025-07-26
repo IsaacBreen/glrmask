@@ -33,6 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use rand::prelude::IndexedRandom;
+use crate::profiler::{print_summary, print_summary_flat, reset};
 // --- Helper Functions ---
 
 /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.
@@ -483,11 +484,18 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
     println!("Terminal sequence to parse: {:?}", terminal_names);
     println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
+    // Reset the profiler
+    reset();
+
     // 4. Initialize the parser state and step through the terminals.
     let mut glr_state = parser.init_glr_parser(None);
     for (i, &terminal_id) in terminal_ids.iter().enumerate() {
         println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
         glr_state.step(terminal_id);
+        // Print profiler stats after each step
+        print_summary_flat();
+        print_summary();
+        reset();
         assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
     }
 
