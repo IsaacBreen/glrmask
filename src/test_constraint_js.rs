@@ -199,15 +199,15 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
 
         // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-        llm_token_map.retain(|bytes, _| {
-            bytes.iter().all(|&b| {
-                if b.is_ascii_alphabetic() {
-                    b.to_ascii_lowercase() == b'a'
-                } else {
-                    true
-                }
-            })
-        });
+        // llm_token_map.retain(|bytes, _| {
+        //     bytes.iter().all(|&b| {
+        //         if b.is_ascii_alphabetic() {
+        //             b.to_ascii_lowercase() == b'a'
+        //         } else {
+        //             true
+        //         }
+        //     })
+        // });
         println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
         // Option 3: Set to a few specific tokens (currently inactive)
