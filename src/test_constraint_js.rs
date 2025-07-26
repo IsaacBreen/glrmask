@@ -191,11 +191,11 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
-    if false { // Manual vocabulary modifications for debugging
+    if true { // Manual vocabulary modifications for debugging
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 2;
+        let x = 5;
         llm_token_map.retain(|bytes, _| bytes.len() <= x);
         println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
 
@@ -282,7 +282,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
-        if false {
+        if true {
             // Reinitialize the constraint state fresh
             constraint_state = grammar_constraint.init();
             let prefix_token_ids = test_token_sequence_ids[..=i].to_vec();
