@@ -14,6 +14,7 @@ local_system:
     - src/js2.ebnf
     - src/example_code2.js
     - src/test_constraint_js.rs
+    - analyze_timings.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -7394,7 +7395,7 @@ local_system:
                           let mut cloned_glr_s = glr_s_at_offset.clone();
 
                           cloned_glr_s.step(TerminalID(match_info.id));
-                          cloned_glr_s.do_phase3();
+                          // cloned_glr_s.do_phase3();
 
                           if cloned_glr_s.is_ok() {
                               let new_offset = offset + match_info.width;
@@ -9106,7 +9107,7 @@ local_system:
               }
           }
       }
-    src/test_constraint_js.rs: |
+    src/test_constraint_js.rs: |-
       // This file contains integration tests for the GrammarConstraint using a full JavaScript grammar.
       // It is structured as follows:
       // - Helper functions for loading vocabularies and debugging.
@@ -9142,6 +9143,7 @@ local_system:
       use std::sync::Arc;
       use std::time::Instant;
       use rand::prelude::IndexedRandom;
+      use crate::profiler::{print_summary, print_summary_flat, reset};
       // --- Helper Functions ---
 
       /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.
@@ -9269,7 +9271,6 @@ local_system:
       // --- Main Integration Tests ---
 
       #[test]
-      #[ignore] // This is a long-running, full integration test.
       fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
           // --- Setup Phase ---
           println!("--- Setting up for JS Constraint Integration Test ---");
@@ -9299,6 +9300,43 @@ local_system:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+
+          if false { // Manual vocabulary modifications for debugging
+              println!("\n--- Applying manual vocabulary modifications ---");
+
+              // Filter 1: Keep only tokens with length < 5
+              llm_token_map.retain(|bytes, _| bytes.len() < 5);
+              println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+
+              // Filter 2: Keep only tokens where all alphabetic chars are 'a'
+              // llm_token_map.retain(|bytes, _| {
+              //     bytes.iter().all(|&b| {
+              //         if b.is_ascii_alphabetic() {
+              //             b.to_ascii_lowercase() == b'a'
+              //         } else {
+              //             true
+              //         }
+              //     })
+              // });
+              println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+
+              // Option 3: Set to a few specific tokens (currently inactive)
+              /*
+              let mut specific_tokens = LLMTokenMap::new();
+              specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
+              specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
+              specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+              specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+              specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+              llm_token_map = specific_tokens;
+              println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+              */
+
+              // After filtering, we must recalculate max_original_llm_token_id_val
+              max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
+              println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+              println!("--- Finished manual vocabulary modifications ---\n");
+          }
 
           // 3. Construct the GrammarConstraint.
           let dummy_eof_placeholder = 0;
@@ -9548,18 +9586,31 @@ local_system:
           for name in &terminal_names {
               let terminal_obj = terminal(name);
               let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
-                  .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", name));
+                  .unwrap_or_else(|| {
+                      eprintln!("Terminals in parser's terminal map:");
+                      for (name, id) in &parser.terminal_map {
+                          eprintln!("  - '{}' ({})", name, id.0);
+                      }
+                      panic!("Terminal '{}' not found in parser's terminal map.", name);
+                  });
               terminal_ids.push(*terminal_id);
           }
 
           println!("Terminal sequence to parse: {:?}", terminal_names);
           println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
+          // Reset the profiler
+          reset();
+
           // 4. Initialize the parser state and step through the terminals.
           let mut glr_state = parser.init_glr_parser(None);
           for (i, &terminal_id) in terminal_ids.iter().enumerate() {
               println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
               glr_state.step(terminal_id);
+              // Print profiler stats after each step
+              print_summary_flat();
+              print_summary();
+              reset();
               assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
           }
 
@@ -9568,6 +9619,260 @@ local_system:
 
           Ok(())
       }
+    analyze_timings.py: |-
+      import re
+      import sys
+      import html
+      import json
+      from pathlib import Path
+      import math
+
+      def parse_duration(s):
+          """Parses a duration string like '1.234ms' or '567.8µs' or '1.2s' into milliseconds."""
+          s = s.strip().replace(',', '') # handle thousands separators
+          
+          # Use regex to find the numeric part and the unit
+          match = re.match(r'([\d.]+)\s*([a-zA-Zµ]+)', s)
+          if not match:
+              return 0.0
+
+          val_str, unit = match.groups()
+          val = float(val_str)
+          
+          if unit == 'ns':
+              return val / 1_000_000.0
+          if unit == 'µs' or unit == 'us':
+              return val / 1_000.0
+          if unit == 'ms':
+              return val
+          if unit == 's':
+              return val * 1000.0
+          return 0.0
+
+      def generate_color(time_ms):
+          """Generates a color from green to red based on time in ms."""
+          if time_ms is None:
+              return 'rgba(128, 128, 128, 0.2)' # Grey for no data
+          
+          # Use a log scale for better color distribution.
+          # Let's say 1ms is green, 100ms is red.
+          log_min = 0 # log10(1)
+          log_max = 2 # log10(100)
+          
+          if time_ms <= 1:
+              log_time = log_min
+          else:
+              log_time = math.log10(time_ms)
+          
+          # Normalize to 0-1 range
+          ratio = max(0, min(1, (log_time - log_min) / (log_max - log_min)))
+          
+          # HSL color: Hue goes from 120 (green) down to 0 (red)
+          h = 120 * (1 - ratio)
+          s = 80
+          l = 60
+          return f'hsla({h}, {s}%, {l}%, 0.6)'
+
+      def main():
+          if len(sys.argv) < 3:
+              print(f"Usage: python {sys.argv[0]} <path_to_source_code> <path_to_log_file>")
+              sys.exit(1)
+
+          source_path = Path(sys.argv[1])
+          log_path = Path(sys.argv[2])
+          output_path = Path("timings_visualization.html")
+
+          # Pane width configuration: flex-grow ratio for code vs details panes.
+          # For 1/3 code vs 2/3 details split, use 1 and 2. For 50/50, use 1 and 1.
+          code_pane_flex_ratio = 1
+          details_pane_flex_ratio = 5
+
+          full_text = source_path.read_text(encoding='utf-8')
+          log_content = log_path.read_text(encoding='utf-8')
+
+          # Find all "Processing token..." markers to split the log
+          processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
+          
+          initial_log_block = ""
+          if processing_markers:
+              initial_log_block = log_content[:processing_markers[0].start()]
+
+          tokens_data = []
+          for i, marker in enumerate(processing_markers):
+              start_pos = marker.start()
+              end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
+              
+              token_log = log_content[start_pos:end_pos]
+              
+              # The get_mask for the first token is in the initial block before the loop
+              log_for_get_mask = initial_log_block if i == 0 else token_log
+
+              token_info = {}
+              
+              m = re.search(r"Processing token \d+/\d+: (.*?)\(LLMTokenID\((\d+)\)\)", token_log)
+              if m:
+                  token_str_raw = m.group(1).strip()
+                  if token_str_raw.startswith("'") and token_str_raw.endswith("'"):
+                      token_str_raw = token_str_raw[1:-1]
+                  elif token_str_raw.startswith('"') and token_str_raw.endswith('"'):
+                       token_str_raw = token_str_raw[1:-1]
+                  token_info['str'] = bytes(token_str_raw, "utf-8").decode("unicode_escape", "replace")
+                  token_info['id'] = int(m.group(2))
+
+              m = re.search(r"Context Highlight \(Token bytes \[(\d+), (\d+)\)\):", token_log)
+              if m:
+                  token_info['start_byte'] = int(m.group(1))
+                  token_info['end_byte'] = int(m.group(2))
+
+              get_mask_time = None
+              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+              if m_get_mask:
+                  get_mask_time = parse_duration(m_get_mask.group(1))
+
+              commit_time = None
+              m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+              if m_commit:
+                  commit_time = parse_duration(m_commit.group(1))
+                  
+              special_map_time = None
+              m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+              if m_special_map:
+                  special_map_time = parse_duration(m_special_map.group(1))
+
+              token_info['timings'] = {
+                  'get_mask (total)': get_mask_time,
+                  'commit': commit_time,
+                  'get_mask (special_map)': special_map_time
+              }
+              token_info['log'] = token_log
+              
+              if 'start_byte' in token_info:
+                  tokens_data.append(token_info)
+
+          # Generate HTML
+          html_parts = []
+          last_pos = 0
+          for token in sorted(tokens_data, key=lambda t: t['start_byte']):
+              html_parts.append(html.escape(full_text[last_pos:token['start_byte']]))
+              
+              color = generate_color(token['timings']['get_mask (special_map)'])
+              token_text = html.escape(full_text[token['start_byte']:token['end_byte']])
+              data_log = html.escape(json.dumps(token))
+              
+              html_parts.append(f'<span class="token" style="background-color: {color};" data-tokeninfo=\'{data_log}\'>{token_text}</span>')
+              last_pos = token['end_byte']
+          
+          html_parts.append(html.escape(full_text[last_pos:]))
+          code_html = "".join(html_parts)
+
+          output_html = f"""
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <title>Performance Visualization</title>
+          <style>
+              body {{ font-family: sans-serif; display: flex; height: 100vh; margin: 0; }}
+              #code-container {{ flex: {code_pane_flex_ratio}; overflow: auto; padding: 1em; border-right: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; line-height: 1.4; }}
+              #details-container {{ flex: {details_pane_flex_ratio}; overflow: auto; padding: 1em; }}
+              .token {{ cursor: pointer; border-radius: 3px; }}
+              .token:hover {{ outline: 1px solid blue; }}
+              .token.locked {{ outline: 2px solid blue; }}
+              #details-container h3 {{ margin-top: 0; }}
+              #details-content pre {{ background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre; overflow-x: auto; }}
+          </style>
+      </head>
+      <body>
+          <div id="code-container"><pre>{code_html}</pre></div>
+          <div id="details-container">
+              <h3>Token Details</h3>
+              <p>Hover over or click a token on the left to see its details.</p>
+              <div id="details-content"></div>
+          </div>
+
+          <script>
+              let lockedToken = null;
+
+              document.getElementById('code-container').addEventListener('mouseover', (e) => {{
+                  if (e.target.classList.contains('token') && lockedToken === null) {{
+                      updateDetails(e.target);
+                  }}
+              }});
+
+              document.getElementById('code-container').addEventListener('click', (e) => {{
+                  if (e.target.classList.contains('token')) {{
+                      if (lockedToken) {{
+                          lockedToken.classList.remove('locked');
+                      }}
+                      if (lockedToken === e.target) {{
+                          lockedToken = null;
+                          clearDetails();
+                      }} else {{
+                          lockedToken = e.target;
+                          lockedToken.classList.add('locked');
+                          updateDetails(lockedToken);
+                      }}
+                  }}
+              }});
+
+              function updateDetails(tokenElement) {{
+                  const info = JSON.parse(tokenElement.dataset.tokeninfo);
+                  const detailsDiv = document.getElementById('details-content');
+                  
+                  let timingsHtml = '<ul>';
+                  for (const [key, value] of Object.entries(info.timings)) {{
+                      timingsHtml += `<li><strong>${{key}}:</strong> ${{value !== null ? value.toFixed(3) + ' ms' : 'N/A'}}</li>`;
+                  }}
+                  timingsHtml += '</ul>';
+
+                  detailsDiv.innerHTML = `
+                      <h4>Token Info</h4>
+                      <p><strong>Text:</strong> <code>${{html.escape(info.str)}}</code></p>
+                      <p><strong>ID:</strong> ${{info.id}}</p>
+                      <p><strong>Bytes:</strong> [${{info.start_byte}}, ${{info.end_byte}})</p>
+                      <h4>Timings</h4>
+                      ${{timingsHtml}}
+                      <h4>Full Log</h4>
+                      <pre>${{html.escape(info.log)}}</pre>
+                  `;
+              }}
+              
+              function clearDetails() {{
+                  document.getElementById('details-content').innerHTML = '<p>Hover over or click a token on the left to see its details.</p>';
+              }}
+
+              /* -------------------------------------------------------------------
+                 Simple HTML-escaper for the small snippets we put into the details
+                 pane. We can’t rely on the browser’s implicit escaping because we’re
+                 building the markup with template-literals.
+              ------------------------------------------------------------------- */
+              const entityMap = {{
+                  '&':  '&amp;',
+                  '<':  '&lt;',
+                  '>':  '&gt;',
+                  '"':  '&quot;',
+                  "'":  '&#39;',
+                  '/':  '&#x2F;',
+                  '`':  '&#x60;',
+                  '=':  '&#x3D;'
+              }};
+
+              function escapeHtml(string) {{
+                  return String(string).replace(/[&<>"'`=\/]/g, s => entityMap[s]);
+              }}
+
+              /* expose as window.html.escape so that updateDetails() can use it */
+              window.html = {{ escape: escapeHtml }};
+          </script>
+      </body>
+      </html>
+          """
+          
+          output_path.write_text(output_html, encoding='utf-8')
+          print(f"Generated {output_path.resolve()}")
+
+      if __name__ == "__main__":
+          main()
   prev_file_contents:
     src/glr/analyze.rs: |
       use std::cmp::PartialEq;
@@ -16946,7 +17251,7 @@ local_system:
                           let mut cloned_glr_s = glr_s_at_offset.clone();
 
                           cloned_glr_s.step(TerminalID(match_info.id));
-                          cloned_glr_s.do_phase3();
+                          // cloned_glr_s.do_phase3();
 
                           if cloned_glr_s.is_ok() {
                               let new_offset = offset + match_info.width;
@@ -18658,7 +18963,7 @@ local_system:
               }
           }
       }
-    src/test_constraint_js.rs: |
+    src/test_constraint_js.rs: |-
       // This file contains integration tests for the GrammarConstraint using a full JavaScript grammar.
       // It is structured as follows:
       // - Helper functions for loading vocabularies and debugging.
@@ -18694,6 +18999,7 @@ local_system:
       use std::sync::Arc;
       use std::time::Instant;
       use rand::prelude::IndexedRandom;
+      use crate::profiler::{print_summary, print_summary_flat, reset};
       // --- Helper Functions ---
 
       /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.
@@ -18821,7 +19127,6 @@ local_system:
       // --- Main Integration Tests ---
 
       #[test]
-      #[ignore] // This is a long-running, full integration test.
       fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
           // --- Setup Phase ---
           println!("--- Setting up for JS Constraint Integration Test ---");
@@ -18851,6 +19156,43 @@ local_system:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+
+          if false { // Manual vocabulary modifications for debugging
+              println!("\n--- Applying manual vocabulary modifications ---");
+
+              // Filter 1: Keep only tokens with length < 5
+              llm_token_map.retain(|bytes, _| bytes.len() < 5);
+              println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+
+              // Filter 2: Keep only tokens where all alphabetic chars are 'a'
+              // llm_token_map.retain(|bytes, _| {
+              //     bytes.iter().all(|&b| {
+              //         if b.is_ascii_alphabetic() {
+              //             b.to_ascii_lowercase() == b'a'
+              //         } else {
+              //             true
+              //         }
+              //     })
+              // });
+              println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+
+              // Option 3: Set to a few specific tokens (currently inactive)
+              /*
+              let mut specific_tokens = LLMTokenMap::new();
+              specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
+              specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
+              specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+              specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+              specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+              llm_token_map = specific_tokens;
+              println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+              */
+
+              // After filtering, we must recalculate max_original_llm_token_id_val
+              max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
+              println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+              println!("--- Finished manual vocabulary modifications ---\n");
+          }
 
           // 3. Construct the GrammarConstraint.
           let dummy_eof_placeholder = 0;
@@ -19100,18 +19442,31 @@ local_system:
           for name in &terminal_names {
               let terminal_obj = terminal(name);
               let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
-                  .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", name));
+                  .unwrap_or_else(|| {
+                      eprintln!("Terminals in parser's terminal map:");
+                      for (name, id) in &parser.terminal_map {
+                          eprintln!("  - '{}' ({})", name, id.0);
+                      }
+                      panic!("Terminal '{}' not found in parser's terminal map.", name);
+                  });
               terminal_ids.push(*terminal_id);
           }
 
           println!("Terminal sequence to parse: {:?}", terminal_names);
           println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
+          // Reset the profiler
+          reset();
+
           // 4. Initialize the parser state and step through the terminals.
           let mut glr_state = parser.init_glr_parser(None);
           for (i, &terminal_id) in terminal_ids.iter().enumerate() {
               println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
               glr_state.step(terminal_id);
+              // Print profiler stats after each step
+              print_summary_flat();
+              print_summary();
+              reset();
               assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
           }
 
@@ -19120,6 +19475,260 @@ local_system:
 
           Ok(())
       }
+    analyze_timings.py: |-
+      import re
+      import sys
+      import html
+      import json
+      from pathlib import Path
+      import math
+
+      def parse_duration(s):
+          """Parses a duration string like '1.234ms' or '567.8µs' or '1.2s' into milliseconds."""
+          s = s.strip().replace(',', '') # handle thousands separators
+          
+          # Use regex to find the numeric part and the unit
+          match = re.match(r'([\d.]+)\s*([a-zA-Zµ]+)', s)
+          if not match:
+              return 0.0
+
+          val_str, unit = match.groups()
+          val = float(val_str)
+          
+          if unit == 'ns':
+              return val / 1_000_000.0
+          if unit == 'µs' or unit == 'us':
+              return val / 1_000.0
+          if unit == 'ms':
+              return val
+          if unit == 's':
+              return val * 1000.0
+          return 0.0
+
+      def generate_color(time_ms):
+          """Generates a color from green to red based on time in ms."""
+          if time_ms is None:
+              return 'rgba(128, 128, 128, 0.2)' # Grey for no data
+          
+          # Use a log scale for better color distribution.
+          # Let's say 1ms is green, 100ms is red.
+          log_min = 0 # log10(1)
+          log_max = 2 # log10(100)
+          
+          if time_ms <= 1:
+              log_time = log_min
+          else:
+              log_time = math.log10(time_ms)
+          
+          # Normalize to 0-1 range
+          ratio = max(0, min(1, (log_time - log_min) / (log_max - log_min)))
+          
+          # HSL color: Hue goes from 120 (green) down to 0 (red)
+          h = 120 * (1 - ratio)
+          s = 80
+          l = 60
+          return f'hsla({h}, {s}%, {l}%, 0.6)'
+
+      def main():
+          if len(sys.argv) < 3:
+              print(f"Usage: python {sys.argv[0]} <path_to_source_code> <path_to_log_file>")
+              sys.exit(1)
+
+          source_path = Path(sys.argv[1])
+          log_path = Path(sys.argv[2])
+          output_path = Path("timings_visualization.html")
+
+          # Pane width configuration: flex-grow ratio for code vs details panes.
+          # For 1/3 code vs 2/3 details split, use 1 and 2. For 50/50, use 1 and 1.
+          code_pane_flex_ratio = 1
+          details_pane_flex_ratio = 5
+
+          full_text = source_path.read_text(encoding='utf-8')
+          log_content = log_path.read_text(encoding='utf-8')
+
+          # Find all "Processing token..." markers to split the log
+          processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
+          
+          initial_log_block = ""
+          if processing_markers:
+              initial_log_block = log_content[:processing_markers[0].start()]
+
+          tokens_data = []
+          for i, marker in enumerate(processing_markers):
+              start_pos = marker.start()
+              end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
+              
+              token_log = log_content[start_pos:end_pos]
+              
+              # The get_mask for the first token is in the initial block before the loop
+              log_for_get_mask = initial_log_block if i == 0 else token_log
+
+              token_info = {}
+              
+              m = re.search(r"Processing token \d+/\d+: (.*?)\(LLMTokenID\((\d+)\)\)", token_log)
+              if m:
+                  token_str_raw = m.group(1).strip()
+                  if token_str_raw.startswith("'") and token_str_raw.endswith("'"):
+                      token_str_raw = token_str_raw[1:-1]
+                  elif token_str_raw.startswith('"') and token_str_raw.endswith('"'):
+                       token_str_raw = token_str_raw[1:-1]
+                  token_info['str'] = bytes(token_str_raw, "utf-8").decode("unicode_escape", "replace")
+                  token_info['id'] = int(m.group(2))
+
+              m = re.search(r"Context Highlight \(Token bytes \[(\d+), (\d+)\)\):", token_log)
+              if m:
+                  token_info['start_byte'] = int(m.group(1))
+                  token_info['end_byte'] = int(m.group(2))
+
+              get_mask_time = None
+              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+              if m_get_mask:
+                  get_mask_time = parse_duration(m_get_mask.group(1))
+
+              commit_time = None
+              m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+              if m_commit:
+                  commit_time = parse_duration(m_commit.group(1))
+                  
+              special_map_time = None
+              m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+              if m_special_map:
+                  special_map_time = parse_duration(m_special_map.group(1))
+
+              token_info['timings'] = {
+                  'get_mask (total)': get_mask_time,
+                  'commit': commit_time,
+                  'get_mask (special_map)': special_map_time
+              }
+              token_info['log'] = token_log
+              
+              if 'start_byte' in token_info:
+                  tokens_data.append(token_info)
+
+          # Generate HTML
+          html_parts = []
+          last_pos = 0
+          for token in sorted(tokens_data, key=lambda t: t['start_byte']):
+              html_parts.append(html.escape(full_text[last_pos:token['start_byte']]))
+              
+              color = generate_color(token['timings']['get_mask (special_map)'])
+              token_text = html.escape(full_text[token['start_byte']:token['end_byte']])
+              data_log = html.escape(json.dumps(token))
+              
+              html_parts.append(f'<span class="token" style="background-color: {color};" data-tokeninfo=\'{data_log}\'>{token_text}</span>')
+              last_pos = token['end_byte']
+          
+          html_parts.append(html.escape(full_text[last_pos:]))
+          code_html = "".join(html_parts)
+
+          output_html = f"""
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <title>Performance Visualization</title>
+          <style>
+              body {{ font-family: sans-serif; display: flex; height: 100vh; margin: 0; }}
+              #code-container {{ flex: {code_pane_flex_ratio}; overflow: auto; padding: 1em; border-right: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; line-height: 1.4; }}
+              #details-container {{ flex: {details_pane_flex_ratio}; overflow: auto; padding: 1em; }}
+              .token {{ cursor: pointer; border-radius: 3px; }}
+              .token:hover {{ outline: 1px solid blue; }}
+              .token.locked {{ outline: 2px solid blue; }}
+              #details-container h3 {{ margin-top: 0; }}
+              #details-content pre {{ background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre; overflow-x: auto; }}
+          </style>
+      </head>
+      <body>
+          <div id="code-container"><pre>{code_html}</pre></div>
+          <div id="details-container">
+              <h3>Token Details</h3>
+              <p>Hover over or click a token on the left to see its details.</p>
+              <div id="details-content"></div>
+          </div>
+
+          <script>
+              let lockedToken = null;
+
+              document.getElementById('code-container').addEventListener('mouseover', (e) => {{
+                  if (e.target.classList.contains('token') && lockedToken === null) {{
+                      updateDetails(e.target);
+                  }}
+              }});
+
+              document.getElementById('code-container').addEventListener('click', (e) => {{
+                  if (e.target.classList.contains('token')) {{
+                      if (lockedToken) {{
+                          lockedToken.classList.remove('locked');
+                      }}
+                      if (lockedToken === e.target) {{
+                          lockedToken = null;
+                          clearDetails();
+                      }} else {{
+                          lockedToken = e.target;
+                          lockedToken.classList.add('locked');
+                          updateDetails(lockedToken);
+                      }}
+                  }}
+              }});
+
+              function updateDetails(tokenElement) {{
+                  const info = JSON.parse(tokenElement.dataset.tokeninfo);
+                  const detailsDiv = document.getElementById('details-content');
+                  
+                  let timingsHtml = '<ul>';
+                  for (const [key, value] of Object.entries(info.timings)) {{
+                      timingsHtml += `<li><strong>${{key}}:</strong> ${{value !== null ? value.toFixed(3) + ' ms' : 'N/A'}}</li>`;
+                  }}
+                  timingsHtml += '</ul>';
+
+                  detailsDiv.innerHTML = `
+                      <h4>Token Info</h4>
+                      <p><strong>Text:</strong> <code>${{html.escape(info.str)}}</code></p>
+                      <p><strong>ID:</strong> ${{info.id}}</p>
+                      <p><strong>Bytes:</strong> [${{info.start_byte}}, ${{info.end_byte}})</p>
+                      <h4>Timings</h4>
+                      ${{timingsHtml}}
+                      <h4>Full Log</h4>
+                      <pre>${{html.escape(info.log)}}</pre>
+                  `;
+              }}
+              
+              function clearDetails() {{
+                  document.getElementById('details-content').innerHTML = '<p>Hover over or click a token on the left to see its details.</p>';
+              }}
+
+              /* -------------------------------------------------------------------
+                 Simple HTML-escaper for the small snippets we put into the details
+                 pane. We can’t rely on the browser’s implicit escaping because we’re
+                 building the markup with template-literals.
+              ------------------------------------------------------------------- */
+              const entityMap = {{
+                  '&':  '&amp;',
+                  '<':  '&lt;',
+                  '>':  '&gt;',
+                  '"':  '&quot;',
+                  "'":  '&#39;',
+                  '/':  '&#x2F;',
+                  '`':  '&#x60;',
+                  '=':  '&#x3D;'
+              }};
+
+              function escapeHtml(string) {{
+                  return String(string).replace(/[&<>"'`=\/]/g, s => entityMap[s]);
+              }}
+
+              /* expose as window.html.escape so that updateDetails() can use it */
+              window.html = {{ escape: escapeHtml }};
+          </script>
+      </body>
+      </html>
+          """
+          
+          output_path.write_text(output_html, encoding='utf-8')
+          print(f"Generated {output_path.resolve()}")
+
+      if __name__ == "__main__":
+          main()
   diffs_applied_this_send: true
 system:
   message: |2
@@ -26566,7 +27175,7 @@ messages:
                           let mut cloned_glr_s = glr_s_at_offset.clone();
 
                           cloned_glr_s.step(TerminalID(match_info.id));
-                          cloned_glr_s.do_phase3();
+                          // cloned_glr_s.do_phase3();
 
                           if cloned_glr_s.is_ok() {
                               let new_offset = offset + match_info.width;
@@ -28334,6 +28943,7 @@ messages:
       use std::sync::Arc;
       use std::time::Instant;
       use rand::prelude::IndexedRandom;
+      use crate::profiler::{print_summary, print_summary_flat, reset};
       // --- Helper Functions ---
 
       /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.
@@ -28461,7 +29071,6 @@ messages:
       // --- Main Integration Tests ---
 
       #[test]
-      #[ignore] // This is a long-running, full integration test.
       fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
           // --- Setup Phase ---
           println!("--- Setting up for JS Constraint Integration Test ---");
@@ -28491,6 +29100,43 @@ messages:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+
+          if false { // Manual vocabulary modifications for debugging
+              println!("\n--- Applying manual vocabulary modifications ---");
+
+              // Filter 1: Keep only tokens with length < 5
+              llm_token_map.retain(|bytes, _| bytes.len() < 5);
+              println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+
+              // Filter 2: Keep only tokens where all alphabetic chars are 'a'
+              // llm_token_map.retain(|bytes, _| {
+              //     bytes.iter().all(|&b| {
+              //         if b.is_ascii_alphabetic() {
+              //             b.to_ascii_lowercase() == b'a'
+              //         } else {
+              //             true
+              //         }
+              //     })
+              // });
+              println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+
+              // Option 3: Set to a few specific tokens (currently inactive)
+              /*
+              let mut specific_tokens = LLMTokenMap::new();
+              specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
+              specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
+              specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+              specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+              specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+              llm_token_map = specific_tokens;
+              println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+              */
+
+              // After filtering, we must recalculate max_original_llm_token_id_val
+              max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
+              println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+              println!("--- Finished manual vocabulary modifications ---\n");
+          }
 
           // 3. Construct the GrammarConstraint.
           let dummy_eof_placeholder = 0;
@@ -28740,18 +29386,31 @@ messages:
           for name in &terminal_names {
               let terminal_obj = terminal(name);
               let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
-                  .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", name));
+                  .unwrap_or_else(|| {
+                      eprintln!("Terminals in parser's terminal map:");
+                      for (name, id) in &parser.terminal_map {
+                          eprintln!("  - '{}' ({})", name, id.0);
+                      }
+                      panic!("Terminal '{}' not found in parser's terminal map.", name);
+                  });
               terminal_ids.push(*terminal_id);
           }
 
           println!("Terminal sequence to parse: {:?}", terminal_names);
           println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
+          // Reset the profiler
+          reset();
+
           // 4. Initialize the parser state and step through the terminals.
           let mut glr_state = parser.init_glr_parser(None);
           for (i, &terminal_id) in terminal_ids.iter().enumerate() {
               println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
               glr_state.step(terminal_id);
+              // Print profiler stats after each step
+              print_summary_flat();
+              print_summary();
+              reset();
               assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
           }
 
@@ -28760,81 +29419,335 @@ messages:
 
           Ok(())
       }
-
       ```
     metadata:
       filename: src/test_constraint_js.rs
   - user: |-
-      Often I want to quickly modify the vocab in `test_js_constraint_integration`, or set it to something custom. Some common changes I wanna make:
-      - include only tokens less than length 5
-      - include only tokens for which all alphabetical chars are the letter 'a' (but no restrictions on non-alphabetical chars)
-      - set the grammar to only a few specific tokens
-      Add these in. Make sure it's neat. It's for me to manually tune the grammar when I'm debugging. Put it in a `if false { ... }` block. Comment out any inactive lines (e.g. inactivate setting the grammar to a few specific tokens).
+      ```python 'analyze_timings.py'
+      import re
+      import sys
+      import html
+      import json
+      from pathlib import Path
+      import math
+
+      def parse_duration(s):
+          """Parses a duration string like '1.234ms' or '567.8µs' or '1.2s' into milliseconds."""
+          s = s.strip().replace(',', '') # handle thousands separators
+          
+          # Use regex to find the numeric part and the unit
+          match = re.match(r'([\d.]+)\s*([a-zA-Zµ]+)', s)
+          if not match:
+              return 0.0
+
+          val_str, unit = match.groups()
+          val = float(val_str)
+          
+          if unit == 'ns':
+              return val / 1_000_000.0
+          if unit == 'µs' or unit == 'us':
+              return val / 1_000.0
+          if unit == 'ms':
+              return val
+          if unit == 's':
+              return val * 1000.0
+          return 0.0
+
+      def generate_color(time_ms):
+          """Generates a color from green to red based on time in ms."""
+          if time_ms is None:
+              return 'rgba(128, 128, 128, 0.2)' # Grey for no data
+          
+          # Use a log scale for better color distribution.
+          # Let's say 1ms is green, 100ms is red.
+          log_min = 0 # log10(1)
+          log_max = 2 # log10(100)
+          
+          if time_ms <= 1:
+              log_time = log_min
+          else:
+              log_time = math.log10(time_ms)
+          
+          # Normalize to 0-1 range
+          ratio = max(0, min(1, (log_time - log_min) / (log_max - log_min)))
+          
+          # HSL color: Hue goes from 120 (green) down to 0 (red)
+          h = 120 * (1 - ratio)
+          s = 80
+          l = 60
+          return f'hsla({h}, {s}%, {l}%, 0.6)'
+
+      def main():
+          if len(sys.argv) < 3:
+              print(f"Usage: python {sys.argv[0]} <path_to_source_code> <path_to_log_file>")
+              sys.exit(1)
+
+          source_path = Path(sys.argv[1])
+          log_path = Path(sys.argv[2])
+          output_path = Path("timings_visualization.html")
+
+          # Pane width configuration: flex-grow ratio for code vs details panes.
+          # For 1/3 code vs 2/3 details split, use 1 and 2. For 50/50, use 1 and 1.
+          code_pane_flex_ratio = 1
+          details_pane_flex_ratio = 5
+
+          full_text = source_path.read_text(encoding='utf-8')
+          log_content = log_path.read_text(encoding='utf-8')
+
+          # Find all "Processing token..." markers to split the log
+          processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
+          
+          initial_log_block = ""
+          if processing_markers:
+              initial_log_block = log_content[:processing_markers[0].start()]
+
+          tokens_data = []
+          for i, marker in enumerate(processing_markers):
+              start_pos = marker.start()
+              end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
+              
+              token_log = log_content[start_pos:end_pos]
+              
+              # The get_mask for the first token is in the initial block before the loop
+              log_for_get_mask = initial_log_block if i == 0 else token_log
+
+              token_info = {}
+              
+              m = re.search(r"Processing token \d+/\d+: (.*?)\(LLMTokenID\((\d+)\)\)", token_log)
+              if m:
+                  token_str_raw = m.group(1).strip()
+                  if token_str_raw.startswith("'") and token_str_raw.endswith("'"):
+                      token_str_raw = token_str_raw[1:-1]
+                  elif token_str_raw.startswith('"') and token_str_raw.endswith('"'):
+                       token_str_raw = token_str_raw[1:-1]
+                  token_info['str'] = bytes(token_str_raw, "utf-8").decode("unicode_escape", "replace")
+                  token_info['id'] = int(m.group(2))
+
+              m = re.search(r"Context Highlight \(Token bytes \[(\d+), (\d+)\)\):", token_log)
+              if m:
+                  token_info['start_byte'] = int(m.group(1))
+                  token_info['end_byte'] = int(m.group(2))
+
+              get_mask_time = None
+              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+              if m_get_mask:
+                  get_mask_time = parse_duration(m_get_mask.group(1))
+
+              commit_time = None
+              m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+              if m_commit:
+                  commit_time = parse_duration(m_commit.group(1))
+                  
+              special_map_time = None
+              m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+              if m_special_map:
+                  special_map_time = parse_duration(m_special_map.group(1))
+
+              token_info['timings'] = {
+                  'get_mask (total)': get_mask_time,
+                  'commit': commit_time,
+                  'get_mask (special_map)': special_map_time
+              }
+              token_info['log'] = token_log
+              
+              if 'start_byte' in token_info:
+                  tokens_data.append(token_info)
+
+          # Generate HTML
+          html_parts = []
+          last_pos = 0
+          for token in sorted(tokens_data, key=lambda t: t['start_byte']):
+              html_parts.append(html.escape(full_text[last_pos:token['start_byte']]))
+              
+              color = generate_color(token['timings']['get_mask (special_map)'])
+              token_text = html.escape(full_text[token['start_byte']:token['end_byte']])
+              data_log = html.escape(json.dumps(token))
+              
+              html_parts.append(f'<span class="token" style="background-color: {color};" data-tokeninfo=\'{data_log}\'>{token_text}</span>')
+              last_pos = token['end_byte']
+          
+          html_parts.append(html.escape(full_text[last_pos:]))
+          code_html = "".join(html_parts)
+
+          output_html = f"""
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <title>Performance Visualization</title>
+          <style>
+              body {{ font-family: sans-serif; display: flex; height: 100vh; margin: 0; }}
+              #code-container {{ flex: {code_pane_flex_ratio}; overflow: auto; padding: 1em; border-right: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; line-height: 1.4; }}
+              #details-container {{ flex: {details_pane_flex_ratio}; overflow: auto; padding: 1em; }}
+              .token {{ cursor: pointer; border-radius: 3px; }}
+              .token:hover {{ outline: 1px solid blue; }}
+              .token.locked {{ outline: 2px solid blue; }}
+              #details-container h3 {{ margin-top: 0; }}
+              #details-content pre {{ background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre; overflow-x: auto; }}
+          </style>
+      </head>
+      <body>
+          <div id="code-container"><pre>{code_html}</pre></div>
+          <div id="details-container">
+              <h3>Token Details</h3>
+              <p>Hover over or click a token on the left to see its details.</p>
+              <div id="details-content"></div>
+          </div>
+
+          <script>
+              let lockedToken = null;
+
+              document.getElementById('code-container').addEventListener('mouseover', (e) => {{
+                  if (e.target.classList.contains('token') && lockedToken === null) {{
+                      updateDetails(e.target);
+                  }}
+              }});
+
+              document.getElementById('code-container').addEventListener('click', (e) => {{
+                  if (e.target.classList.contains('token')) {{
+                      if (lockedToken) {{
+                          lockedToken.classList.remove('locked');
+                      }}
+                      if (lockedToken === e.target) {{
+                          lockedToken = null;
+                          clearDetails();
+                      }} else {{
+                          lockedToken = e.target;
+                          lockedToken.classList.add('locked');
+                          updateDetails(lockedToken);
+                      }}
+                  }}
+              }});
+
+              function updateDetails(tokenElement) {{
+                  const info = JSON.parse(tokenElement.dataset.tokeninfo);
+                  const detailsDiv = document.getElementById('details-content');
+                  
+                  let timingsHtml = '<ul>';
+                  for (const [key, value] of Object.entries(info.timings)) {{
+                      timingsHtml += `<li><strong>${{key}}:</strong> ${{value !== null ? value.toFixed(3) + ' ms' : 'N/A'}}</li>`;
+                  }}
+                  timingsHtml += '</ul>';
+
+                  detailsDiv.innerHTML = `
+                      <h4>Token Info</h4>
+                      <p><strong>Text:</strong> <code>${{html.escape(info.str)}}</code></p>
+                      <p><strong>ID:</strong> ${{info.id}}</p>
+                      <p><strong>Bytes:</strong> [${{info.start_byte}}, ${{info.end_byte}})</p>
+                      <h4>Timings</h4>
+                      ${{timingsHtml}}
+                      <h4>Full Log</h4>
+                      <pre>${{html.escape(info.log)}}</pre>
+                  `;
+              }}
+              
+              function clearDetails() {{
+                  document.getElementById('details-content').innerHTML = '<p>Hover over or click a token on the left to see its details.</p>';
+              }}
+
+              /* -------------------------------------------------------------------
+                 Simple HTML-escaper for the small snippets we put into the details
+                 pane. We can’t rely on the browser’s implicit escaping because we’re
+                 building the markup with template-literals.
+              ------------------------------------------------------------------- */
+              const entityMap = {{
+                  '&':  '&amp;',
+                  '<':  '&lt;',
+                  '>':  '&gt;',
+                  '"':  '&quot;',
+                  "'":  '&#39;',
+                  '/':  '&#x2F;',
+                  '`':  '&#x60;',
+                  '=':  '&#x3D;'
+              }};
+
+              function escapeHtml(string) {{
+                  return String(string).replace(/[&<>"'`=\/]/g, s => entityMap[s]);
+              }}
+
+              /* expose as window.html.escape so that updateDetails() can use it */
+              window.html = {{ escape: escapeHtml }};
+          </script>
+      </body>
+      </html>
+          """
+          
+          output_path.write_text(output_html, encoding='utf-8')
+          print(f"Generated {output_path.resolve()}")
+
+      if __name__ == "__main__":
+          main()
+      ```
+    metadata:
+      filename: analyze_timings.py
+  - user: '`analyze_timings.py` is suppoesed to work on the output of `test_js_constraint_integration`.
+      Right now it seems to be a bit flakey.'
     metadata:
   - assistant: |-
-      Of course! I can add that debugging block to your test file. This will make it easier for you to experiment with different vocabularies when you're trying to track down issues. Here are the changes:
+      Hello! As a helpful assistant, I've analyzed the issue you're having with the `analyze_timings.py` script. It seems like it was making some incorrect assumptions about the structure of the log file produced by `test_js_constraint_integration`, which could lead to inconsistent parsing of timing data.
 
-      In `src/test_constraint_js.rs`, I'll insert the vocabulary modification logic right after the GPT-2 vocabulary is loaded and parsed.
+      I've prepared a patch that corrects the logic for finding the `get_mask` and `commit` timings and simplifies the log parsing. This should make the script much more reliable.
+
+      Here are the changes for `analyze_timings.py`:
 
       ```diff
-      --- a/src/test_constraint_js.rs
-      +++ b/src/test_constraint_js.rs
-      @@ -100,6 +100,38 @@
-           }
-           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+      diff --git a/analyze_timings.py b/analyze_timings.py
+      --- a/analyze_timings.py
+      +++ b/analyze_timings.py
+      @@ -59,20 +59,12 @@
        
-      +    if false { // Manual vocabulary modifications for debugging
-      +        println!("\n--- Applying manual vocabulary modifications ---");
-      +
-      +        // Filter 1: Keep only tokens with length < 5
-      +        llm_token_map.retain(|bytes, _| bytes.len() < 5);
-      +        println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
-      +
-      +        // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-      +        llm_token_map.retain(|bytes, _| {
-      +            bytes.iter().all(|&b| {
-      +                if b.is_ascii_alphabetic() {
-      +                    b.to_ascii_lowercase() == b'a'
-      +                } else {
-      +                    true
-      +                }
-      +            })
-      +        });
-      +        println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
-      +
-      +        // Option 3: Set to a few specific tokens (currently inactive)
-      +        /*
-      +        let mut specific_tokens = LLMTokenMap::new();
-      +        specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
-      +        specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
-      +        specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-      +        specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-      +        specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-      +        llm_token_map = specific_tokens;
-      +        println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
-      +        */
-      +
-      +        // After filtering, we must recalculate max_original_llm_token_id_val
-      +        max_original_llm_token_id_val = llm_token_map.values().map(|id| id.0).max().unwrap_or(0);
-      +        println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
-      +        println!("--- Finished manual vocabulary modifications ---\n");
-      +    }
-      +
-           // 3. Construct the GrammarConstraint.
-           let dummy_eof_placeholder = 0;
-           println!("\nConstructing GrammarConstraint...");
+           # Find all "Processing token..." markers to split the log
+           processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
+      -    
+      -    initial_log_block = ""
+      -    if processing_markers:
+      -        initial_log_block = log_content[:processing_markers[0].start()]
+       
+           tokens_data = []
+           for i, marker in enumerate(processing_markers):
+               start_pos = marker.start()
+               end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
+      -        
+               token_log = log_content[start_pos:end_pos]
+      -        
+      -        # The get_mask for the first token is in the initial block before the loop
+      -        log_for_get_mask = initial_log_block if i == 0 else token_log
+       
+               token_info = {}
+               
+      @@ -90,18 +82,18 @@
+                   token_info['end_byte'] = int(m.group(2))
+       
+               get_mask_time = None
+      -        m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+      +        m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", token_log)
+               if m_get_mask:
+                   get_mask_time = parse_duration(m_get_mask.group(1))
+       
+               commit_time = None
+      -        m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+      +        m_commit = re.search(r"commit took:\s*(.*?)\n", token_log)
+               if m_commit:
+                   commit_time = parse_duration(m_commit.group(1))
+                   
+               special_map_time = None
+      -        m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+      +        m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
+               if m_special_map:
+                   special_map_time = parse_duration(m_special_map.group(1))
+       
 
       ```
 
-      I've added the requested logic inside an `if false` block. You can enable it and uncomment the specific modifications you need for your debugging sessions. I also made sure to recalculate the maximum token ID after any filtering, which is important for the constraint logic. Let me know if you need any other adjustments
+      These changes should resolve the flakiness you were observing. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_js.rs
-      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_js.rs.
+      Identified target file: analyze_timings.py
+      Applying patch to 'analyze_timings.py' using custom patcher...
+      Successfully applied patch and wrote to analyze_timings.py.
     metadata:
 ...

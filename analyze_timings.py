@@ -70,20 +70,12 @@ def main():
 
     # Find all "Processing token..." markers to split the log
     processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
-    
-    initial_log_block = ""
-    if processing_markers:
-        initial_log_block = log_content[:processing_markers[0].start()]
 
     tokens_data = []
     for i, marker in enumerate(processing_markers):
         start_pos = marker.start()
         end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
-        
         token_log = log_content[start_pos:end_pos]
-        
-        # The get_mask for the first token is in the initial block before the loop
-        log_for_get_mask = initial_log_block if i == 0 else token_log
 
         token_info = {}
         
@@ -103,17 +95,17 @@ def main():
             token_info['end_byte'] = int(m.group(2))
 
         get_mask_time = None
-        m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+        m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", token_log)
         if m_get_mask:
             get_mask_time = parse_duration(m_get_mask.group(1))
 
         commit_time = None
-        m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+        m_commit = re.search(r"commit took:\s*(.*?)\n", token_log)
         if m_commit:
             commit_time = parse_duration(m_commit.group(1))
             
         special_map_time = None
-        m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+        m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
         if m_special_map:
             special_map_time = parse_duration(m_special_map.group(1))
 
