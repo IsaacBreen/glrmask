@@ -407,3 +407,55 @@ fn test_js_glr_parser_fuzzing() -> Result<(), Box<dyn std::error::Error>> {
     println!("GLR parser fuzz test completed ({} iterations) without panics.", num_fuzz_iterations);
     Ok(())
 }
+
+#[test]
+fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::error::Error>> {
+    // This test is designed to investigate performance issues with a large number of
+    // phase 3 reductions, by bypassing the GrammarConstraint and tokenization layers
+    // and feeding a sequence of grammar terminals directly to the GLR parser.
+
+    // 1. Load and compile the JavaScript grammar.
+    println!("--- Setting up for JS GLR Parser Direct Terminal Feed Test ---");
+    let grammar_path = "src/js.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    println!("Grammar compiled successfully.");
+
+    let parser = &compiled_grammar.glr_parser;
+
+    // 2. Define the terminal sequence for "let x = 1111111111;".
+    // The tokenizer would produce: "let", IDENTIFIER, "=", NUMERIC_LITERAL, ";"
+    // The IGNORE rule handles whitespace.
+    let terminal_names = vec![
+        "\"let\"",
+        "IDENTIFIER",
+        "\"=\"",
+        "NUMERIC_LITERAL",
+        "\";\"",
+    ];
+
+    // 3. Convert terminal names to TerminalIDs.
+    let mut terminal_ids = Vec::new();
+    for name in &terminal_names {
+        let terminal_obj = terminal(name);
+        let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
+            .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", name));
+        terminal_ids.push(*terminal_id);
+    }
+
+    println!("Terminal sequence to parse: {:?}", terminal_names);
+    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+
+    // 4. Initialize the parser state and step through the terminals.
+    let mut glr_state = parser.init_glr_parser(None);
+    for (i, &terminal_id) in terminal_ids.iter().enumerate() {
+        println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
+        glr_state.step(terminal_id);
+        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
+    }
+
+    println!("\n--- Finished parsing terminal sequence ---");
+    assert!(glr_state.is_ok(), "Final parser state is not OK.");
+
+    Ok(())
+}
