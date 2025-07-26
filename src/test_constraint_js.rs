@@ -209,7 +209,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         //         }
         //     })
         // });
-        println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
         // Option 3: Set to a few specific tokens (currently inactive)
         /*
