@@ -9,7 +9,7 @@
 // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
 use crate::constraint::GrammarConstraint;
-use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
 use crate::glr::parser::GLRParserState;
 use crate::glr::stats::get_stats;
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
@@ -463,18 +463,22 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
     // 2. Define the terminal sequence for "let x = 1111111111;".
     // The tokenizer would produce: "let", IDENTIFIER, "=", NUMERIC_LITERAL, ";"
     // The IGNORE rule handles whitespace.
-    let terminal_names = vec![
-        "\"let\"",
-        "IDENTIFIER",
-        "\"=\"",
-        "NUMERIC_LITERAL",
-        "\";\"",
+    let terminals = vec![
+        // "\"let\"",
+        // "IDENTIFIER",
+        // "\"=\"",
+        // "NUMERIC_LITERAL",
+        // "\";\"",
+        literal(b"let"),
+        regex("IDENTIFIER"),
+        literal(b"="),
+        regex("NUMERIC_LITERAL"),
+        literal(b";"),
     ];
 
     // 3. Convert terminal names to TerminalIDs.
     let mut terminal_ids = Vec::new();
-    for name in &terminal_names {
-        let terminal_obj = regex(name);
+    for terminal_obj in &terminals {
         let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
             .unwrap_or_else(|| {
                 eprintln!("Terminals in parser's terminal map:");
@@ -486,7 +490,7 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
         terminal_ids.push(*terminal_id);
     }
 
-    println!("Terminal sequence to parse: {:?}", terminal_names);
+    println!("Terminal sequence to parse: {:?}", terminals);
     println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
     // Reset the profiler
@@ -501,7 +505,7 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
         print_summary_flat();
         print_summary();
         reset();
-        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
+        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
     }
 
     println!("\n--- Finished parsing terminal sequence ---");
