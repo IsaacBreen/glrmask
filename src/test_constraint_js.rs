@@ -244,6 +244,19 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        if true {
+            // Reinitialize the constraint state fresh
+            constraint_state = grammar_constraint.init();
+            let prefix_token_ids = test_token_sequence_ids[..=i].to_vec();
+            let prefix_bytes: Vec<Vec<u8>> = prefix_token_ids.iter()
+                .map(|&id| grammar_constraint.llm_vocab.llm_token_map.get_by_right(&id).unwrap().clone())
+                .collect();
+            let prefix_bytes: Vec<u8> = prefix_bytes.iter().flat_map(|b| b.clone()).collect();
+            println!("Reinitializing constraint state for token {}: {:?}", i + 1, llm_token_id);
+            println!("  Committing prefix bytes: {:?}", String::from_utf8_lossy(&prefix_bytes));
+            constraint_state.commit_bytes(&prefix_bytes);
+        }
+
         let current_token_str = &tokenized_strs_for_logging[i];
         println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
 
