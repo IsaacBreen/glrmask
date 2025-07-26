@@ -9,7 +9,7 @@
 // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
 use crate::constraint::GrammarConstraint;
-use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParserState;
 use crate::glr::stats::get_stats;
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
@@ -375,7 +375,7 @@ fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> 
         let mut terminal_id_sequence = Vec::new();
         let mut sequence_is_valid = true;
         for token_name in seq_terminal_names {
-            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&terminal(token_name)) {
+            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
                 terminal_id_sequence.push(*terminal_id);
             } else {
                 println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
@@ -474,7 +474,7 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
     // 3. Convert terminal names to TerminalIDs.
     let mut terminal_ids = Vec::new();
     for name in &terminal_names {
-        let terminal_obj = terminal(name);
+        let terminal_obj = regex(name);
         let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
             .unwrap_or_else(|| {
                 eprintln!("Terminals in parser's terminal map:");

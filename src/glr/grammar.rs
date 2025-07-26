@@ -70,7 +70,7 @@ impl Display for Terminal {
     }
 }
 
-pub fn terminal(name: &str) -> Terminal {
+pub fn regex(name: &str) -> Terminal {
     Terminal::Regex(name.to_string())
 }
 
@@ -173,7 +173,7 @@ pub fn nt(name: &str) -> Symbol {
 }
 
 pub fn t(name: &str) -> Symbol {
-    Symbol::Terminal(terminal(name))
+    Symbol::Terminal(regex(name))
 }
 
 pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
