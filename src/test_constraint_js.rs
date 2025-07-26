@@ -161,7 +161,6 @@ fn print_token_context(
 // --- Main Integration Tests ---
 
 #[test]
-#[ignore] // This is a long-running, full integration test.
 fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     // --- Setup Phase ---
     println!("--- Setting up for JS Constraint Integration Test ---");
