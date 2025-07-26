@@ -476,7 +476,7 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
     for name in &terminal_names {
         let terminal_obj = terminal(name);
         let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
-            .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map: {:#?}", name, parser.terminal_map.left_values().map(|t| t.to_string()).collect::<Vec<_>>()));
+            .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map:\n{:#?}", name, parser.terminal_map.left_values().map(|t| t.to_string()).collect::<Vec<_>>()));
         terminal_ids.push(*terminal_id);
     }
 
