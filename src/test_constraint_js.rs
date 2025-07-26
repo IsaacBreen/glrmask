@@ -854,7 +854,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
                 llm_token_id.0
             );
 
-            if false {
+            if true {
                 constraint_state = grammar_constraint.init();
                 println!("  Re-initializing constraint state for token {} ('{}').", i + 1, current_token_str);
                 // Commit the full text up to this token
