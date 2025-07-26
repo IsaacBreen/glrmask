@@ -191,6 +191,43 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
+    if false { // Manual vocabulary modifications for debugging
+        println!("\n--- Applying manual vocabulary modifications ---");
+
+        // Filter 1: Keep only tokens with length < 5
+        llm_token_map.retain(|bytes, _| bytes.len() < 5);
+        println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+
+        // Filter 2: Keep only tokens where all alphabetic chars are 'a'
+        llm_token_map.retain(|bytes, _| {
+            bytes.iter().all(|&b| {
+                if b.is_ascii_alphabetic() {
+                    b.to_ascii_lowercase() == b'a'
+                } else {
+                    true
+                }
+            })
+        });
+        println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+
+        // Option 3: Set to a few specific tokens (currently inactive)
+        /*
+        let mut specific_tokens = LLMTokenMap::new();
+        specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
+        specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
+        specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+        specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+        specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+        llm_token_map = specific_tokens;
+        println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+        */
+
+        // After filtering, we must recalculate max_original_llm_token_id_val
+        max_original_llm_token_id_val = llm_token_map.values().map(|id| id.0).max().unwrap_or(0);
+        println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+        println!("--- Finished manual vocabulary modifications ---\n");
+    }
+
     // 3. Construct the GrammarConstraint.
     let dummy_eof_placeholder = 0;
     println!("\nConstructing GrammarConstraint...");
