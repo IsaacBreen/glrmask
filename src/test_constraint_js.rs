@@ -223,7 +223,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         */
 
         // After filtering, we must recalculate max_original_llm_token_id_val
-        max_original_llm_token_id_val = llm_token_map.values().map(|id| id.0).max().unwrap_or(0);
+        max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
         println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
         println!("--- Finished manual vocabulary modifications ---\n");
     }
