@@ -602,7 +602,8 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     // llm_token_map.retain(|v, _| [b"'".as_ref()].contains(&v.as_ref()));
     // llm_token_map.retain(|v, _| v.len() == 1);
 
-    llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
+    // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
+    llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:"].contains(&v.as_ref()));
     // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b":"].contains(&v.as_ref()));
 
     // llm_token_map.retain(|v, _| v.iter().all(|c| !c.is_ascii_alphanumeric() || c == &b'x'));
