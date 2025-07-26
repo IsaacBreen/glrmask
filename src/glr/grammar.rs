@@ -74,8 +74,8 @@ pub fn regex(name: &str) -> Terminal {
     Terminal::Regex(name.to_string())
 }
 
-pub fn literal(bytes: Vec<u8>) -> Terminal {
-    Terminal::Literal(bytes)
+pub fn literal(bytes: &[u8]) -> Terminal {
+    Terminal::Literal(bytes.to_vec())
 }
 
 impl Terminal {

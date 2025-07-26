@@ -127,7 +127,7 @@ pub fn sequence(exprs: Vec<GrammarExpr>) -> GrammarExpr { GrammarExpr::Sequence(
 pub fn choice(exprs: Vec<GrammarExpr>) -> GrammarExpr { GrammarExpr::Choice(exprs) }
 pub fn optional(expr: GrammarExpr) -> GrammarExpr { GrammarExpr::Optional(Box::new(expr)) }
 pub fn repeat(expr: GrammarExpr) -> GrammarExpr { GrammarExpr::Repeat(Box::new(expr)) }
-pub fn literal(bytes: impl AsRef<Vec<u8>>) -> GrammarExpr { GrammarExpr::Literal(bytes.as_ref().clone()) }
+pub fn literal(bytes: Vec<u8>) -> GrammarExpr { GrammarExpr::Literal(bytes) }
 
 // --- GrammarDefinition: Abstract representation of the grammar ---
 #[derive(Clone, Debug, Eq, PartialEq)]
