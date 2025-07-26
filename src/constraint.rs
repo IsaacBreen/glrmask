@@ -1406,7 +1406,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
 
                     cloned_glr_s.step(TerminalID(match_info.id));
-                    cloned_glr_s.do_phase3();
+                    // cloned_glr_s.do_phase3();
 
                     if cloned_glr_s.is_ok() {
                         let new_offset = offset + match_info.width;

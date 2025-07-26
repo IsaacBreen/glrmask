@@ -479,7 +479,7 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
             .unwrap_or_else(|| {
                 eprintln!("Terminals in parser's terminal map:");
                 for (name, id) in &parser.terminal_map {
-                    eprintln!("  - {}: {:?}", name, id);
+                    eprintln!("  - '{}' ({})", name, id.0);
                 }
                 panic!("Terminal '{}' not found in parser's terminal map.", name);
             });
