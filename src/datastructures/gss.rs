@@ -1097,7 +1097,11 @@ pub fn print_gss_forest(
 
             let is_last = i == predecessors.len() - 1;
             let connector = if is_last { "└──" } else { "├──" };
-            let new_prefix = format!("{}  {}", prefix, if is_last { "  " } else { "│ " });
+            let new_prefix = if is_last {
+                format!("{}  ", prefix)
+            } else {
+                format!("{}│ ", prefix)
+            };
 
             let pred_ptr = Arc::as_ptr(pred_arc);
             let node_ids_len = node_ids.len();

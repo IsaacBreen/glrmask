@@ -356,15 +356,20 @@ impl GLRParser {
                     writeln!(&mut result, "    (No lookahead actions)").unwrap();
                 } else {
                     // Sort by terminal name for consistent output
-                    let mut sorted_actions: Vec<_> = actions.iter().collect();
-                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+                let mut sorted_actions: Vec<_> = actions.iter().collect();
+                sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
 
-                    for (terminal_id, action) in sorted_actions {
-                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
-                        write!(&mut result, "    - On '{}': ", terminal).unwrap();
-                        match action {
-                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                let max_term_len = sorted_actions.iter()
+                    .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                    .max().unwrap_or(0);
+
+                for (terminal_id, action) in sorted_actions {
+                    let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                    let terminal_name = terminal.to_string();
+                    write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                            writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
                                 if production_ids.len() == 1 {
@@ -400,15 +405,20 @@ impl GLRParser {
                     writeln!(&mut result, "    (No lookahead actions)").unwrap();
                 } else {
                     // Sort by terminal name for consistent output
-                    let mut sorted_actions: Vec<_> = actions.iter().collect();
-                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+                let mut sorted_actions: Vec<_> = actions.iter().collect();
+                sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
 
-                    for (terminal_id, action) in sorted_actions {
-                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
-                        write!(&mut result, "    - On '{}': ", terminal).unwrap();
-                        match action {
-                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                let max_term_len = sorted_actions.iter()
+                    .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                    .max().unwrap_or(0);
+
+                for (terminal_id, action) in sorted_actions {
+                    let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                    let terminal_name = terminal.to_string();
+                    write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                            writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
                                 if production_ids.len() == 1 {
@@ -511,19 +521,26 @@ impl Display for GLRParser {
 
             writeln!(f, "    Actions (Phase 1):")?;
             let actions = &row.phase1_shifts_and_reduces;
+            let max_term_len = if actions.is_empty() { 0 } else {
+                actions.keys()
+                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
+                    .max().unwrap_or(0)
+            };
             for (&terminal_id, action) in actions {
                 let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                let terminal_name = terminal.to_string();
+                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
                 match action {
                     Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                        writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                        writeln!(f, " -> Shift {}", next_state_id.0)?;
                     }
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
                         let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                        writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
                     }
                     Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                        writeln!(f, "      - {} -> Conflict:", terminal)?;
+                        writeln!(f, " -> Conflict:")?;
                         if let Some(shift_state) = shift {
                             writeln!(f, "        - Shift {}", shift_state.0)?;
                         }
@@ -543,19 +560,26 @@ impl Display for GLRParser {
 
             writeln!(f, "    Actions (Phase 2):")?;
             let actions = &row.phase2_shifts_and_reduces;
+            let max_term_len = if actions.is_empty() { 0 } else {
+                actions.keys()
+                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
+                    .max().unwrap_or(0)
+            };
             for (&terminal_id, action) in actions {
                 let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                let terminal_name = terminal.to_string();
+                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
                 match action {
                     Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                        writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                        writeln!(f, " -> Shift {}", next_state_id.0)?;
                     }
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
                         let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                        writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
                     }
                     Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                        writeln!(f, "      - {} -> Conflict:", terminal)?;
+                        writeln!(f, " -> Conflict:")?;
                         if let Some(shift_state) = shift {
                             writeln!(f, "        - Shift {}", shift_state.0)?;
                         }
