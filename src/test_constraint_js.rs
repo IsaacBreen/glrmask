@@ -210,11 +210,11 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         //   - "]:" (LLMTokenID(5974))
         //   - "x" (LLMTokenID(87))
         gpt2_raw_vocab = vec![
-            "&".to_string(),
+            "x".to_string(),
             "[".to_string(),
             "]".to_string(),
+            " &".to_string(),
             "]:".to_string(),
-            "x".to_string(),
         ];
 
         println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
