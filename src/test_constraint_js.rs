@@ -285,7 +285,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         if true {
             // Reinitialize the constraint state fresh
             constraint_state = grammar_constraint.init();
-            let prefix_token_ids = test_token_sequence_ids[..=i].to_vec();
+            let prefix_token_ids = test_token_sequence_ids[..i].to_vec();
             let prefix_bytes: Vec<Vec<u8>> = prefix_token_ids.iter()
                 .map(|&id| grammar_constraint.llm_vocab.llm_token_map.get_by_right(&id).unwrap().clone())
                 .collect();
