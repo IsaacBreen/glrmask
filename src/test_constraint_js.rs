@@ -212,18 +212,18 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
         // Option 3: Set to a few specific tokens
-        // let mut specific_tokens = LLMTokenMap::new();
-        // specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
-        // specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
-        // specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
-        // // specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
+        let mut specific_tokens = LLMTokenMap::new();
+        specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
+        specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
+        specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
+        specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
         // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
-        // specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
+        specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
         // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
         // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
         // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
         // llm_token_map = specific_tokens;
-        // println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+        println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
 
         llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
