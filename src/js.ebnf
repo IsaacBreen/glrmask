@@ -261,7 +261,8 @@ REGEX_BODY ::= ( [^/\n\r\\] | '\\' . )+ ; // Any char except /, newline, or back
 REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 
 template_literal ::= '`' ( TEMPLATE_CHAR | template_substitution )* '`' ;
-TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
+// TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
+TEMPLATE_CHAR ::= '\\' . ; // Any char except backtick or backslash, or any escaped char.
 template_substitution ::= '${' expression '}' ;
 
 // Identifiers
