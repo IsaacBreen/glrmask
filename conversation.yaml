@@ -878,12 +878,12 @@ local_system:
           }
       }
 
-      pub fn terminal(name: &str) -> Terminal {
+      pub fn regex(name: &str) -> Terminal {
           Terminal::Regex(name.to_string())
       }
 
-      pub fn literal(bytes: Vec<u8>) -> Terminal {
-          Terminal::Literal(bytes)
+      pub fn literal(bytes: &[u8]) -> Terminal {
+          Terminal::Literal(bytes.to_vec())
       }
 
       impl Terminal {
@@ -981,7 +981,7 @@ local_system:
       }
 
       pub fn t(name: &str) -> Symbol {
-          Symbol::Terminal(terminal(name))
+          Symbol::Terminal(regex(name))
       }
 
       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
@@ -3436,7 +3436,7 @@ local_system:
           non_terminal_map
       }
     src/glr/tests.rs: |
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
@@ -3477,7 +3477,7 @@ local_system:
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
 
-          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+          let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
 
           // Test case 1: "a"
           let tokens1 = vec![a_token];
@@ -3511,8 +3511,8 @@ local_system:
               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
           ];
           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
-          let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
-          let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+          let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+          let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
 
           let tokens4 = vec![b_token];
           let mut state4 = parser_with_b.init_glr_parser(None);
@@ -3553,7 +3553,7 @@ local_system:
           input
               .chars()
               .filter_map(|c| {
-                  parser.terminal_map.get_by_left(&terminal(&c.to_string()))
+                  parser.terminal_map.get_by_left(&regex(&c.to_string()))
                       .copied()
               })
               .collect()
@@ -3571,8 +3571,8 @@ local_system:
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
           
-          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
-          let eof_token = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+          let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           // Test case 1: Valid input "a$"
           let mut state_ok = parser.init_glr_parser(None);
@@ -3591,7 +3591,7 @@ local_system:
           // This test now implicitly checks that the simple grammar passes validation.
           let parser = create_simple_parser();
           println!("Parser: {}", parser);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           // dbg!(&parser); // Keep commented unless debugging needed
 
           let test_cases = [
@@ -3621,7 +3621,7 @@ local_system:
       fn test_expression_parse_table_generation_and_parse() {
           // This test now implicitly checks that the expression grammar passes validation.
           let parser = create_expression_parser();
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           // dbg!(&parser); // Keep commented unless debugging needed
 
           let test_cases = [
@@ -3902,17 +3902,17 @@ local_system:
               prod("Expr", vec![t("id")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("else")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -3939,13 +3939,13 @@ local_system:
               prod("E", vec![t("id")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("+")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("*")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -3978,8 +3978,8 @@ local_system:
               prod("B", vec![t("x")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           state.parse(&tokens);
@@ -4007,8 +4007,8 @@ local_system:
           ];
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
           
           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           // state.step(eof);
@@ -4034,11 +4034,11 @@ local_system:
               prod("S", vec![t("a")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -4110,7 +4110,7 @@ local_system:
 
           // The generation process automatically resolves the right recursion.
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [
               ("b", true),
@@ -4155,7 +4155,7 @@ local_system:
           assert!(analyze::validate(&productions).is_ok());
 
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [
               ("b", true),    // S -> b
@@ -4193,9 +4193,9 @@ local_system:
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof_token_id = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let c_token_id = *parser.terminal_map.get_by_left(&terminal("c")).unwrap();
-          let d_token_id = *parser.terminal_map.get_by_left(&terminal("d")).unwrap();
+          let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+          let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
           
           println!("Parser: {}", parser);
 
@@ -4248,7 +4248,7 @@ local_system:
               prod("B", vec![t("b")]),              // P3
           ];
 
-          let t_int_symbol = Symbol::Terminal(terminal("T_int"));
+          let t_int_symbol = Symbol::Terminal(regex("T_int"));
           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
 
           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
@@ -4312,7 +4312,7 @@ local_system:
           // Helper to tokenize space-separated terminal names
           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
               input_str.split_whitespace() // This is fine, it's a comment
-                  .filter_map(|s| parser.terminal_map.get_by_left(&terminal(s)).copied())
+                  .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
                   .collect()
           }
 
@@ -4475,7 +4475,7 @@ local_system:
           
           // Let's find the actual state IDs from the generated parser.
           let start_state = parser.start_state_id;
-          let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
+          let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
           
           let start_row = &parser.stage_7_table[&start_state];
           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
@@ -4572,7 +4572,7 @@ local_system:
           assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
 
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
 
@@ -7485,7 +7485,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet};
       use crate::finite_automata::{eat_u8, rep1};
       use crate::{choice, choice_fast, groups, seq, seq_fast};
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
       use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
       use std::hash::{Hash, Hasher};
@@ -7538,15 +7538,15 @@ local_system:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0));
-          grammar_token_map.insert(terminal("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
+          grammar_token_map.insert(regex("A"), TerminalID(0));
+          grammar_token_map.insert(regex("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
           println!("Parser: {}", parser);
 
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A"), 0);
-          token_name_map.insert(terminal("EOF"), 1);
+          token_name_map.insert(regex("A"), 0);
+          token_name_map.insert(regex("EOF"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -7600,10 +7600,10 @@ local_system:
 
           // Grammar Terminals mapped to Tokenizer IDs
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
-          grammar_token_map.insert(terminal("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
-          grammar_token_map.insert(terminal("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
-          grammar_token_map.insert(terminal("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
+          grammar_token_map.insert(regex("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
+          grammar_token_map.insert(regex("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+          grammar_token_map.insert(regex("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+          grammar_token_map.insert(regex("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
 
           let productions = vec![
               prod("S", vec![nt("X"), t("EOF")]), // S -> X $
@@ -7665,7 +7665,7 @@ local_system:
           for grammar_tokens in grammar_tokenss {
               let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
               for grammar_token in grammar_tokens {
-                  let grammar_token_id = grammar_token_map.get_by_left(&terminal(grammar_token)).unwrap();
+                  let grammar_token_id = grammar_token_map.get_by_left(&regex(grammar_token)).unwrap();
                   parser_state.step(*grammar_token_id);
               }
               parser_state_for_comp.merge_with(parser_state);
@@ -7721,12 +7721,12 @@ local_system:
           ];
           // Map grammar terminals to IDs matching regex order
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("PLUS"), TerminalID(0));
-          grammar_token_map.insert(terminal("TIMES"), TerminalID(1));
-          grammar_token_map.insert(terminal("LPAREN"), TerminalID(2));
-          grammar_token_map.insert(terminal("RPAREN"), TerminalID(3));
-          grammar_token_map.insert(terminal("I"), TerminalID(4));
-          grammar_token_map.insert(terminal("EOF"), TerminalID(5));
+          grammar_token_map.insert(regex("PLUS"), TerminalID(0));
+          grammar_token_map.insert(regex("TIMES"), TerminalID(1));
+          grammar_token_map.insert(regex("LPAREN"), TerminalID(2));
+          grammar_token_map.insert(regex("RPAREN"), TerminalID(3));
+          grammar_token_map.insert(regex("I"), TerminalID(4));
+          grammar_token_map.insert(regex("EOF"), TerminalID(5));
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
           println!("Parser: {}", parser);
@@ -7767,7 +7767,7 @@ local_system:
           let llm_token = b"(i".to_vec();
           let grammar_tokens = vec!["LPAREN", "I"];
           let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-          let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&terminal(token)).unwrap()).collect::<Vec<_>>();
+          let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex(token)).unwrap()).collect::<Vec<_>>();
 
           let mut constraint_state_for_comp = constraint.init();
           let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
@@ -7908,8 +7908,8 @@ local_system:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          let terminal_a = terminal("A");
-          let terminal_hash_opt_a = terminal("HASH_OPT_A");
+          let terminal_a = regex("A");
+          let terminal_hash_opt_a = regex("HASH_OPT_A");
           grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
           grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -7934,8 +7934,8 @@ local_system:
 
           // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
           let mut token_name_map_for_constraint = BiBTreeMap::new();
-          token_name_map_for_constraint.insert(terminal("A"), 0);
-          token_name_map_for_constraint.insert(terminal("HASH_OPT_A"), 1);
+          token_name_map_for_constraint.insert(regex("A"), 0);
+          token_name_map_for_constraint.insert(regex("HASH_OPT_A"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -7998,8 +7998,8 @@ local_system:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          let terminal_a = terminal("A");
-          let terminal_hash_opt_aa = terminal("HASH_OPT_AA");
+          let terminal_a = regex("A");
+          let terminal_hash_opt_aa = regex("HASH_OPT_AA");
           grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
           grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -8023,8 +8023,8 @@ local_system:
           let max_original_llm_token_id = 2;
 
           let mut token_name_map_for_constraint = BiBTreeMap::new();
-          token_name_map_for_constraint.insert(terminal("A"), 0);
-          token_name_map_for_constraint.insert(terminal("HASH_OPT_AA"), 1);
+          token_name_map_for_constraint.insert(regex("A"), 0);
+          token_name_map_for_constraint.insert(regex("HASH_OPT_AA"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -8098,7 +8098,7 @@ local_system:
 
           // 3. Map grammar terminal "A" to tokenizer group ID 0
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0));
+          grammar_token_map.insert(regex("A"), TerminalID(0));
 
           // 4. Create the Parser
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
@@ -8113,7 +8113,7 @@ local_system:
 
           // 6. Token name map for stats/debugging
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A"), 0); // Maps "A" to tokenizer group ID 0
+          token_name_map.insert(regex("A"), 0); // Maps "A" to tokenizer group ID 0
 
           // 7. Create the GrammarConstraint
           let constraint = GrammarConstraint::new(
@@ -8167,7 +8167,7 @@ local_system:
 
           // 4. Token Name Map
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
+          token_name_map.insert(regex("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
 
           // 5. Create the Parser
           let parser = generate_glr_parser(&productions, 0, None);
@@ -8224,7 +8224,7 @@ local_system:
 
           // 4. Map grammar terminals "DEF_T" to tokenizer group ID 0
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("DEF_T"), TerminalID(0));
+          grammar_token_map.insert(regex("DEF_T"), TerminalID(0));
           // Note: For this minimal test focusing on the initial mask for "def",
           // we don't strictly need an EOF terminal in the grammar or tokenizer if
           // the goal is just to see "def" allowed initially.
@@ -8239,7 +8239,7 @@ local_system:
 
           // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
           let mut token_name_map_for_stats = BiBTreeMap::new();
-          token_name_map_for_stats.insert(terminal("DEF_T"), 0);
+          token_name_map_for_stats.insert(regex("DEF_T"), 0);
 
           // 6. Create the GrammarConstraint
           let constraint = GrammarConstraint::new(
@@ -8289,13 +8289,13 @@ local_system:
 
           // Map grammar terminal to tokenizer group
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A_PLUS"), TerminalID(0));
+          grammar_token_map.insert(regex("A_PLUS"), TerminalID(0));
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
           // Token name map for stats
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A_PLUS"), 0);
+          token_name_map.insert(regex("A_PLUS"), 0);
 
           // Create the constraint, which runs precomputation
           let constraint = GrammarConstraint::new(
@@ -8354,19 +8354,19 @@ local_system:
 
           // Map grammar terminal to tokenizer group
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("X"), TerminalID(0));      // 'x' is group 0
-          grammar_token_map.insert(terminal("SPACE"), TerminalID(1));  // ' ' is group 1
-          grammar_token_map.insert(terminal("EQUALS"), TerminalID(2)); // '=' is group 2
-          grammar_token_map.insert(terminal("ANY"), TerminalID(3));    // Anything else is group 3
+          grammar_token_map.insert(regex("X"), TerminalID(0));      // 'x' is group 0
+          grammar_token_map.insert(regex("SPACE"), TerminalID(1));  // ' ' is group 1
+          grammar_token_map.insert(regex("EQUALS"), TerminalID(2)); // '=' is group 2
+          grammar_token_map.insert(regex("ANY"), TerminalID(3));    // Anything else is group 3
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
           // Token name map for stats
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("X"), 0);
-          token_name_map.insert(terminal("SPACE"), 1);
-          token_name_map.insert(terminal("EQUALS"), 2);
-          token_name_map.insert(terminal("ANY"), 3);
+          token_name_map.insert(regex("X"), 0);
+          token_name_map.insert(regex("SPACE"), 1);
+          token_name_map.insert(regex("EQUALS"), 2);
+          token_name_map.insert(regex("ANY"), 3);
 
           // Create the constraint, which runs precomputation
           let constraint = GrammarConstraint::new(
@@ -8391,9 +8391,9 @@ local_system:
           assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
 
           // Get the grammar token IDs for our terminals
-          let x_tid = *grammar_token_map.get_by_left(&terminal("X")).unwrap();
-          let space_tid = *grammar_token_map.get_by_left(&terminal("SPACE")).unwrap();
-          let equals_tid = *grammar_token_map.get_by_left(&terminal("EQUALS")).unwrap();
+          let x_tid = *grammar_token_map.get_by_left(&regex("X")).unwrap();
+          let space_tid = *grammar_token_map.get_by_left(&regex("SPACE")).unwrap();
+          let equals_tid = *grammar_token_map.get_by_left(&regex("EQUALS")).unwrap();
 
           // Get the LLM token IDs
           let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;
@@ -9119,7 +9119,7 @@ local_system:
       // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
       use crate::constraint::GrammarConstraint;
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
       use crate::glr::parser::GLRParserState;
       use crate::glr::stats::get_stats;
       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
@@ -9301,12 +9301,13 @@ local_system:
           }
           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
-          if false { // Manual vocabulary modifications for debugging
+          if true { // Manual vocabulary modifications for debugging
               println!("\n--- Applying manual vocabulary modifications ---");
 
-              // Filter 1: Keep only tokens with length < 5
-              llm_token_map.retain(|bytes, _| bytes.len() < 5);
-              println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+              // Filter 1: Keep only tokens with length <= x
+              let x = 4;
+              llm_token_map.retain(|bytes, _| bytes.len() <= x);
+              println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
 
               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
               // llm_token_map.retain(|bytes, _| {
@@ -9318,19 +9319,23 @@ local_system:
               //         }
               //     })
               // });
-              println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
-              // Option 3: Set to a few specific tokens (currently inactive)
-              /*
+              // Option 3: Set to a few specific tokens
               let mut specific_tokens = LLMTokenMap::new();
-              specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
-              specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
-              specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-              specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-              specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-              llm_token_map = specific_tokens;
+              specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
+              specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
+              specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
+              specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
+              // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
+              specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
+              // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+              // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+              // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+              // llm_token_map = specific_tokens;
               println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
-              */
+
+              // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
               // After filtering, we must recalculate max_original_llm_token_id_val
               max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
@@ -9394,7 +9399,7 @@ local_system:
               if true {
                   // Reinitialize the constraint state fresh
                   constraint_state = grammar_constraint.init();
-                  let prefix_token_ids = test_token_sequence_ids[..=i].to_vec();
+                  let prefix_token_ids = test_token_sequence_ids[..i].to_vec();
                   let prefix_bytes: Vec<Vec<u8>> = prefix_token_ids.iter()
                       .map(|&id| grammar_constraint.llm_vocab.llm_token_map.get_by_right(&id).unwrap().clone())
                       .collect();
@@ -9485,7 +9490,7 @@ local_system:
               let mut terminal_id_sequence = Vec::new();
               let mut sequence_is_valid = true;
               for token_name in seq_terminal_names {
-                  if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&terminal(token_name)) {
+                  if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
                       terminal_id_sequence.push(*terminal_id);
                   } else {
                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
@@ -9573,30 +9578,34 @@ local_system:
           // 2. Define the terminal sequence for "let x = 1111111111;".
           // The tokenizer would produce: "let", IDENTIFIER, "=", NUMERIC_LITERAL, ";"
           // The IGNORE rule handles whitespace.
-          let terminal_names = vec![
-              "\"let\"",
-              "IDENTIFIER",
-              "\"=\"",
-              "NUMERIC_LITERAL",
-              "\";\"",
+          let terminals = vec![
+              // "\"let\"",
+              // "IDENTIFIER",
+              // "\"=\"",
+              // "NUMERIC_LITERAL",
+              // "\";\"",
+              literal(b"let"),
+              regex("IDENTIFIER"),
+              literal(b"="),
+              regex("NUMERIC_LITERAL"),
+              literal(b";"),
           ];
 
           // 3. Convert terminal names to TerminalIDs.
           let mut terminal_ids = Vec::new();
-          for name in &terminal_names {
-              let terminal_obj = terminal(name);
+          for terminal_obj in &terminals {
               let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
                   .unwrap_or_else(|| {
                       eprintln!("Terminals in parser's terminal map:");
                       for (name, id) in &parser.terminal_map {
-                          eprintln!("  - '{}' ({})", name, id.0);
+                          eprintln!("  - '{}' ({:?}, ID {})", name, name, id.0);
                       }
-                      panic!("Terminal '{}' not found in parser's terminal map.", name);
+                      panic!("Terminal '{}' ({:?}) not found in parser's terminal map.", terminal_obj, terminal_obj);
                   });
               terminal_ids.push(*terminal_id);
           }
 
-          println!("Terminal sequence to parse: {:?}", terminal_names);
+          println!("Terminal sequence to parse: {:?}", terminals);
           println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
           // Reset the profiler
@@ -9607,11 +9616,12 @@ local_system:
           for (i, &terminal_id) in terminal_ids.iter().enumerate() {
               println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
               glr_state.step(terminal_id);
+              glr_state.do_phase3();
               // Print profiler stats after each step
               print_summary_flat();
               print_summary();
               reset();
-              assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
+              assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
           }
 
           println!("\n--- Finished parsing terminal sequence ---");
@@ -9692,20 +9702,12 @@ local_system:
 
           # Find all "Processing token..." markers to split the log
           processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
-          
-          initial_log_block = ""
-          if processing_markers:
-              initial_log_block = log_content[:processing_markers[0].start()]
 
           tokens_data = []
           for i, marker in enumerate(processing_markers):
               start_pos = marker.start()
               end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
-              
               token_log = log_content[start_pos:end_pos]
-              
-              # The get_mask for the first token is in the initial block before the loop
-              log_for_get_mask = initial_log_block if i == 0 else token_log
 
               token_info = {}
               
@@ -9725,17 +9727,17 @@ local_system:
                   token_info['end_byte'] = int(m.group(2))
 
               get_mask_time = None
-              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", token_log)
               if m_get_mask:
                   get_mask_time = parse_duration(m_get_mask.group(1))
 
               commit_time = None
-              m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+              m_commit = re.search(r"commit took:\s*(.*?)\n", token_log)
               if m_commit:
                   commit_time = parse_duration(m_commit.group(1))
                   
               special_map_time = None
-              m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+              m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
               if m_special_map:
                   special_map_time = parse_duration(m_special_map.group(1))
 
@@ -10734,12 +10736,12 @@ local_system:
           }
       }
 
-      pub fn terminal(name: &str) -> Terminal {
+      pub fn regex(name: &str) -> Terminal {
           Terminal::Regex(name.to_string())
       }
 
-      pub fn literal(bytes: Vec<u8>) -> Terminal {
-          Terminal::Literal(bytes)
+      pub fn literal(bytes: &[u8]) -> Terminal {
+          Terminal::Literal(bytes.to_vec())
       }
 
       impl Terminal {
@@ -10837,7 +10839,7 @@ local_system:
       }
 
       pub fn t(name: &str) -> Symbol {
-          Symbol::Terminal(terminal(name))
+          Symbol::Terminal(regex(name))
       }
 
       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
@@ -13292,7 +13294,7 @@ local_system:
           non_terminal_map
       }
     src/glr/tests.rs: |
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
@@ -13333,7 +13335,7 @@ local_system:
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
 
-          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+          let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
 
           // Test case 1: "a"
           let tokens1 = vec![a_token];
@@ -13367,8 +13369,8 @@ local_system:
               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
           ];
           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
-          let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
-          let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+          let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+          let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
 
           let tokens4 = vec![b_token];
           let mut state4 = parser_with_b.init_glr_parser(None);
@@ -13409,7 +13411,7 @@ local_system:
           input
               .chars()
               .filter_map(|c| {
-                  parser.terminal_map.get_by_left(&terminal(&c.to_string()))
+                  parser.terminal_map.get_by_left(&regex(&c.to_string()))
                       .copied()
               })
               .collect()
@@ -13427,8 +13429,8 @@ local_system:
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
           
-          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
-          let eof_token = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+          let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           // Test case 1: Valid input "a$"
           let mut state_ok = parser.init_glr_parser(None);
@@ -13447,7 +13449,7 @@ local_system:
           // This test now implicitly checks that the simple grammar passes validation.
           let parser = create_simple_parser();
           println!("Parser: {}", parser);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           // dbg!(&parser); // Keep commented unless debugging needed
 
           let test_cases = [
@@ -13477,7 +13479,7 @@ local_system:
       fn test_expression_parse_table_generation_and_parse() {
           // This test now implicitly checks that the expression grammar passes validation.
           let parser = create_expression_parser();
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           // dbg!(&parser); // Keep commented unless debugging needed
 
           let test_cases = [
@@ -13758,17 +13760,17 @@ local_system:
               prod("Expr", vec![t("id")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("else")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -13795,13 +13797,13 @@ local_system:
               prod("E", vec![t("id")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("+")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("*")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -13834,8 +13836,8 @@ local_system:
               prod("B", vec![t("x")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           state.parse(&tokens);
@@ -13863,8 +13865,8 @@ local_system:
           ];
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
           
           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           // state.step(eof);
@@ -13890,11 +13892,11 @@ local_system:
               prod("S", vec![t("a")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -13966,7 +13968,7 @@ local_system:
 
           // The generation process automatically resolves the right recursion.
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [
               ("b", true),
@@ -14011,7 +14013,7 @@ local_system:
           assert!(analyze::validate(&productions).is_ok());
 
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [
               ("b", true),    // S -> b
@@ -14049,9 +14051,9 @@ local_system:
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof_token_id = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let c_token_id = *parser.terminal_map.get_by_left(&terminal("c")).unwrap();
-          let d_token_id = *parser.terminal_map.get_by_left(&terminal("d")).unwrap();
+          let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+          let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
           
           println!("Parser: {}", parser);
 
@@ -14104,7 +14106,7 @@ local_system:
               prod("B", vec![t("b")]),              // P3
           ];
 
-          let t_int_symbol = Symbol::Terminal(terminal("T_int"));
+          let t_int_symbol = Symbol::Terminal(regex("T_int"));
           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
 
           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
@@ -14168,7 +14170,7 @@ local_system:
           // Helper to tokenize space-separated terminal names
           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
               input_str.split_whitespace() // This is fine, it's a comment
-                  .filter_map(|s| parser.terminal_map.get_by_left(&terminal(s)).copied())
+                  .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
                   .collect()
           }
 
@@ -14331,7 +14333,7 @@ local_system:
           
           // Let's find the actual state IDs from the generated parser.
           let start_state = parser.start_state_id;
-          let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
+          let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
           
           let start_row = &parser.stage_7_table[&start_state];
           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
@@ -14428,7 +14430,7 @@ local_system:
           assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
 
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
 
@@ -17341,7 +17343,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet};
       use crate::finite_automata::{eat_u8, rep1};
       use crate::{choice, choice_fast, groups, seq, seq_fast};
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
       use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
       use std::hash::{Hash, Hasher};
@@ -17394,15 +17396,15 @@ local_system:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0));
-          grammar_token_map.insert(terminal("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
+          grammar_token_map.insert(regex("A"), TerminalID(0));
+          grammar_token_map.insert(regex("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
           println!("Parser: {}", parser);
 
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A"), 0);
-          token_name_map.insert(terminal("EOF"), 1);
+          token_name_map.insert(regex("A"), 0);
+          token_name_map.insert(regex("EOF"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -17456,10 +17458,10 @@ local_system:
 
           // Grammar Terminals mapped to Tokenizer IDs
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
-          grammar_token_map.insert(terminal("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
-          grammar_token_map.insert(terminal("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
-          grammar_token_map.insert(terminal("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
+          grammar_token_map.insert(regex("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
+          grammar_token_map.insert(regex("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+          grammar_token_map.insert(regex("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+          grammar_token_map.insert(regex("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
 
           let productions = vec![
               prod("S", vec![nt("X"), t("EOF")]), // S -> X $
@@ -17521,7 +17523,7 @@ local_system:
           for grammar_tokens in grammar_tokenss {
               let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
               for grammar_token in grammar_tokens {
-                  let grammar_token_id = grammar_token_map.get_by_left(&terminal(grammar_token)).unwrap();
+                  let grammar_token_id = grammar_token_map.get_by_left(&regex(grammar_token)).unwrap();
                   parser_state.step(*grammar_token_id);
               }
               parser_state_for_comp.merge_with(parser_state);
@@ -17577,12 +17579,12 @@ local_system:
           ];
           // Map grammar terminals to IDs matching regex order
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("PLUS"), TerminalID(0));
-          grammar_token_map.insert(terminal("TIMES"), TerminalID(1));
-          grammar_token_map.insert(terminal("LPAREN"), TerminalID(2));
-          grammar_token_map.insert(terminal("RPAREN"), TerminalID(3));
-          grammar_token_map.insert(terminal("I"), TerminalID(4));
-          grammar_token_map.insert(terminal("EOF"), TerminalID(5));
+          grammar_token_map.insert(regex("PLUS"), TerminalID(0));
+          grammar_token_map.insert(regex("TIMES"), TerminalID(1));
+          grammar_token_map.insert(regex("LPAREN"), TerminalID(2));
+          grammar_token_map.insert(regex("RPAREN"), TerminalID(3));
+          grammar_token_map.insert(regex("I"), TerminalID(4));
+          grammar_token_map.insert(regex("EOF"), TerminalID(5));
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
           println!("Parser: {}", parser);
@@ -17623,7 +17625,7 @@ local_system:
           let llm_token = b"(i".to_vec();
           let grammar_tokens = vec!["LPAREN", "I"];
           let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-          let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&terminal(token)).unwrap()).collect::<Vec<_>>();
+          let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex(token)).unwrap()).collect::<Vec<_>>();
 
           let mut constraint_state_for_comp = constraint.init();
           let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
@@ -17764,8 +17766,8 @@ local_system:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          let terminal_a = terminal("A");
-          let terminal_hash_opt_a = terminal("HASH_OPT_A");
+          let terminal_a = regex("A");
+          let terminal_hash_opt_a = regex("HASH_OPT_A");
           grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
           grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -17790,8 +17792,8 @@ local_system:
 
           // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
           let mut token_name_map_for_constraint = BiBTreeMap::new();
-          token_name_map_for_constraint.insert(terminal("A"), 0);
-          token_name_map_for_constraint.insert(terminal("HASH_OPT_A"), 1);
+          token_name_map_for_constraint.insert(regex("A"), 0);
+          token_name_map_for_constraint.insert(regex("HASH_OPT_A"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -17854,8 +17856,8 @@ local_system:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          let terminal_a = terminal("A");
-          let terminal_hash_opt_aa = terminal("HASH_OPT_AA");
+          let terminal_a = regex("A");
+          let terminal_hash_opt_aa = regex("HASH_OPT_AA");
           grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
           grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -17879,8 +17881,8 @@ local_system:
           let max_original_llm_token_id = 2;
 
           let mut token_name_map_for_constraint = BiBTreeMap::new();
-          token_name_map_for_constraint.insert(terminal("A"), 0);
-          token_name_map_for_constraint.insert(terminal("HASH_OPT_AA"), 1);
+          token_name_map_for_constraint.insert(regex("A"), 0);
+          token_name_map_for_constraint.insert(regex("HASH_OPT_AA"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -17954,7 +17956,7 @@ local_system:
 
           // 3. Map grammar terminal "A" to tokenizer group ID 0
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0));
+          grammar_token_map.insert(regex("A"), TerminalID(0));
 
           // 4. Create the Parser
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
@@ -17969,7 +17971,7 @@ local_system:
 
           // 6. Token name map for stats/debugging
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A"), 0); // Maps "A" to tokenizer group ID 0
+          token_name_map.insert(regex("A"), 0); // Maps "A" to tokenizer group ID 0
 
           // 7. Create the GrammarConstraint
           let constraint = GrammarConstraint::new(
@@ -18023,7 +18025,7 @@ local_system:
 
           // 4. Token Name Map
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
+          token_name_map.insert(regex("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
 
           // 5. Create the Parser
           let parser = generate_glr_parser(&productions, 0, None);
@@ -18080,7 +18082,7 @@ local_system:
 
           // 4. Map grammar terminals "DEF_T" to tokenizer group ID 0
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("DEF_T"), TerminalID(0));
+          grammar_token_map.insert(regex("DEF_T"), TerminalID(0));
           // Note: For this minimal test focusing on the initial mask for "def",
           // we don't strictly need an EOF terminal in the grammar or tokenizer if
           // the goal is just to see "def" allowed initially.
@@ -18095,7 +18097,7 @@ local_system:
 
           // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
           let mut token_name_map_for_stats = BiBTreeMap::new();
-          token_name_map_for_stats.insert(terminal("DEF_T"), 0);
+          token_name_map_for_stats.insert(regex("DEF_T"), 0);
 
           // 6. Create the GrammarConstraint
           let constraint = GrammarConstraint::new(
@@ -18145,13 +18147,13 @@ local_system:
 
           // Map grammar terminal to tokenizer group
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A_PLUS"), TerminalID(0));
+          grammar_token_map.insert(regex("A_PLUS"), TerminalID(0));
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
           // Token name map for stats
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A_PLUS"), 0);
+          token_name_map.insert(regex("A_PLUS"), 0);
 
           // Create the constraint, which runs precomputation
           let constraint = GrammarConstraint::new(
@@ -18210,19 +18212,19 @@ local_system:
 
           // Map grammar terminal to tokenizer group
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("X"), TerminalID(0));      // 'x' is group 0
-          grammar_token_map.insert(terminal("SPACE"), TerminalID(1));  // ' ' is group 1
-          grammar_token_map.insert(terminal("EQUALS"), TerminalID(2)); // '=' is group 2
-          grammar_token_map.insert(terminal("ANY"), TerminalID(3));    // Anything else is group 3
+          grammar_token_map.insert(regex("X"), TerminalID(0));      // 'x' is group 0
+          grammar_token_map.insert(regex("SPACE"), TerminalID(1));  // ' ' is group 1
+          grammar_token_map.insert(regex("EQUALS"), TerminalID(2)); // '=' is group 2
+          grammar_token_map.insert(regex("ANY"), TerminalID(3));    // Anything else is group 3
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
           // Token name map for stats
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("X"), 0);
-          token_name_map.insert(terminal("SPACE"), 1);
-          token_name_map.insert(terminal("EQUALS"), 2);
-          token_name_map.insert(terminal("ANY"), 3);
+          token_name_map.insert(regex("X"), 0);
+          token_name_map.insert(regex("SPACE"), 1);
+          token_name_map.insert(regex("EQUALS"), 2);
+          token_name_map.insert(regex("ANY"), 3);
 
           // Create the constraint, which runs precomputation
           let constraint = GrammarConstraint::new(
@@ -18247,9 +18249,9 @@ local_system:
           assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
 
           // Get the grammar token IDs for our terminals
-          let x_tid = *grammar_token_map.get_by_left(&terminal("X")).unwrap();
-          let space_tid = *grammar_token_map.get_by_left(&terminal("SPACE")).unwrap();
-          let equals_tid = *grammar_token_map.get_by_left(&terminal("EQUALS")).unwrap();
+          let x_tid = *grammar_token_map.get_by_left(&regex("X")).unwrap();
+          let space_tid = *grammar_token_map.get_by_left(&regex("SPACE")).unwrap();
+          let equals_tid = *grammar_token_map.get_by_left(&regex("EQUALS")).unwrap();
 
           // Get the LLM token IDs
           let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;
@@ -18975,7 +18977,7 @@ local_system:
       // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
       use crate::constraint::GrammarConstraint;
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
       use crate::glr::parser::GLRParserState;
       use crate::glr::stats::get_stats;
       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
@@ -19157,12 +19159,13 @@ local_system:
           }
           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
-          if false { // Manual vocabulary modifications for debugging
+          if true { // Manual vocabulary modifications for debugging
               println!("\n--- Applying manual vocabulary modifications ---");
 
-              // Filter 1: Keep only tokens with length < 5
-              llm_token_map.retain(|bytes, _| bytes.len() < 5);
-              println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+              // Filter 1: Keep only tokens with length <= x
+              let x = 4;
+              llm_token_map.retain(|bytes, _| bytes.len() <= x);
+              println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
 
               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
               // llm_token_map.retain(|bytes, _| {
@@ -19174,19 +19177,23 @@ local_system:
               //         }
               //     })
               // });
-              println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
-              // Option 3: Set to a few specific tokens (currently inactive)
-              /*
+              // Option 3: Set to a few specific tokens
               let mut specific_tokens = LLMTokenMap::new();
-              specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
-              specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
-              specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-              specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-              specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-              llm_token_map = specific_tokens;
+              specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
+              specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
+              specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
+              specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
+              // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
+              specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
+              // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+              // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+              // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+              // llm_token_map = specific_tokens;
               println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
-              */
+
+              // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
               // After filtering, we must recalculate max_original_llm_token_id_val
               max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
@@ -19250,7 +19257,7 @@ local_system:
               if true {
                   // Reinitialize the constraint state fresh
                   constraint_state = grammar_constraint.init();
-                  let prefix_token_ids = test_token_sequence_ids[..=i].to_vec();
+                  let prefix_token_ids = test_token_sequence_ids[..i].to_vec();
                   let prefix_bytes: Vec<Vec<u8>> = prefix_token_ids.iter()
                       .map(|&id| grammar_constraint.llm_vocab.llm_token_map.get_by_right(&id).unwrap().clone())
                       .collect();
@@ -19341,7 +19348,7 @@ local_system:
               let mut terminal_id_sequence = Vec::new();
               let mut sequence_is_valid = true;
               for token_name in seq_terminal_names {
-                  if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&terminal(token_name)) {
+                  if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
                       terminal_id_sequence.push(*terminal_id);
                   } else {
                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
@@ -19429,30 +19436,34 @@ local_system:
           // 2. Define the terminal sequence for "let x = 1111111111;".
           // The tokenizer would produce: "let", IDENTIFIER, "=", NUMERIC_LITERAL, ";"
           // The IGNORE rule handles whitespace.
-          let terminal_names = vec![
-              "\"let\"",
-              "IDENTIFIER",
-              "\"=\"",
-              "NUMERIC_LITERAL",
-              "\";\"",
+          let terminals = vec![
+              // "\"let\"",
+              // "IDENTIFIER",
+              // "\"=\"",
+              // "NUMERIC_LITERAL",
+              // "\";\"",
+              literal(b"let"),
+              regex("IDENTIFIER"),
+              literal(b"="),
+              regex("NUMERIC_LITERAL"),
+              literal(b";"),
           ];
 
           // 3. Convert terminal names to TerminalIDs.
           let mut terminal_ids = Vec::new();
-          for name in &terminal_names {
-              let terminal_obj = terminal(name);
+          for terminal_obj in &terminals {
               let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
                   .unwrap_or_else(|| {
                       eprintln!("Terminals in parser's terminal map:");
                       for (name, id) in &parser.terminal_map {
-                          eprintln!("  - '{}' ({})", name, id.0);
+                          eprintln!("  - '{}' ({:?}, ID {})", name, name, id.0);
                       }
-                      panic!("Terminal '{}' not found in parser's terminal map.", name);
+                      panic!("Terminal '{}' ({:?}) not found in parser's terminal map.", terminal_obj, terminal_obj);
                   });
               terminal_ids.push(*terminal_id);
           }
 
-          println!("Terminal sequence to parse: {:?}", terminal_names);
+          println!("Terminal sequence to parse: {:?}", terminals);
           println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
           // Reset the profiler
@@ -19463,11 +19474,12 @@ local_system:
           for (i, &terminal_id) in terminal_ids.iter().enumerate() {
               println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
               glr_state.step(terminal_id);
+              glr_state.do_phase3();
               // Print profiler stats after each step
               print_summary_flat();
               print_summary();
               reset();
-              assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
+              assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
           }
 
           println!("\n--- Finished parsing terminal sequence ---");
@@ -19548,20 +19560,12 @@ local_system:
 
           # Find all "Processing token..." markers to split the log
           processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
-          
-          initial_log_block = ""
-          if processing_markers:
-              initial_log_block = log_content[:processing_markers[0].start()]
 
           tokens_data = []
           for i, marker in enumerate(processing_markers):
               start_pos = marker.start()
               end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
-              
               token_log = log_content[start_pos:end_pos]
-              
-              # The get_mask for the first token is in the initial block before the loop
-              log_for_get_mask = initial_log_block if i == 0 else token_log
 
               token_info = {}
               
@@ -19581,17 +19585,17 @@ local_system:
                   token_info['end_byte'] = int(m.group(2))
 
               get_mask_time = None
-              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", token_log)
               if m_get_mask:
                   get_mask_time = parse_duration(m_get_mask.group(1))
 
               commit_time = None
-              m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+              m_commit = re.search(r"commit took:\s*(.*?)\n", token_log)
               if m_commit:
                   commit_time = parse_duration(m_commit.group(1))
                   
               special_map_time = None
-              m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+              m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
               if m_special_map:
                   special_map_time = parse_duration(m_special_map.group(1))
 
@@ -20618,12 +20622,12 @@ messages:
           }
       }
 
-      pub fn terminal(name: &str) -> Terminal {
+      pub fn regex(name: &str) -> Terminal {
           Terminal::Regex(name.to_string())
       }
 
-      pub fn literal(bytes: Vec<u8>) -> Terminal {
-          Terminal::Literal(bytes)
+      pub fn literal(bytes: &[u8]) -> Terminal {
+          Terminal::Literal(bytes.to_vec())
       }
 
       impl Terminal {
@@ -20721,7 +20725,7 @@ messages:
       }
 
       pub fn t(name: &str) -> Symbol {
-          Symbol::Terminal(terminal(name))
+          Symbol::Terminal(regex(name))
       }
 
       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
@@ -23206,7 +23210,7 @@ messages:
       filename: src/glr/table.rs
   - user: |-
       ```rust 'src/glr/tests.rs'
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
@@ -23247,7 +23251,7 @@ messages:
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
 
-          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
+          let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
 
           // Test case 1: "a"
           let tokens1 = vec![a_token];
@@ -23281,8 +23285,8 @@ messages:
               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
           ];
           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
-          let b_token = *parser_with_b.terminal_map.get_by_left(&terminal("b")).unwrap();
-          let a_token_b = *parser_with_b.terminal_map.get_by_left(&terminal("a")).unwrap();
+          let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+          let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
 
           let tokens4 = vec![b_token];
           let mut state4 = parser_with_b.init_glr_parser(None);
@@ -23323,7 +23327,7 @@ messages:
           input
               .chars()
               .filter_map(|c| {
-                  parser.terminal_map.get_by_left(&terminal(&c.to_string()))
+                  parser.terminal_map.get_by_left(&regex(&c.to_string()))
                       .copied()
               })
               .collect()
@@ -23341,8 +23345,8 @@ messages:
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
           
-          let a_token = *parser.terminal_map.get_by_left(&terminal("a")).unwrap();
-          let eof_token = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+          let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           // Test case 1: Valid input "a$"
           let mut state_ok = parser.init_glr_parser(None);
@@ -23361,7 +23365,7 @@ messages:
           // This test now implicitly checks that the simple grammar passes validation.
           let parser = create_simple_parser();
           println!("Parser: {}", parser);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           // dbg!(&parser); // Keep commented unless debugging needed
 
           let test_cases = [
@@ -23391,7 +23395,7 @@ messages:
       fn test_expression_parse_table_generation_and_parse() {
           // This test now implicitly checks that the expression grammar passes validation.
           let parser = create_expression_parser();
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           // dbg!(&parser); // Keep commented unless debugging needed
 
           let test_cases = [
@@ -23672,17 +23676,17 @@ messages:
               prod("Expr", vec![t("id")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("else")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -23709,13 +23713,13 @@ messages:
               prod("E", vec![t("id")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("+")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("*")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -23748,8 +23752,8 @@ messages:
               prod("B", vec![t("x")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           state.parse(&tokens);
@@ -23777,8 +23781,8 @@ messages:
           ];
           let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
           
           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
           // state.step(eof);
@@ -23804,11 +23808,11 @@ messages:
               prod("S", vec![t("a")]),
           ];
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
           let tokens = vec![
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
-              *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+              *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
           ];
 
           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -23880,7 +23884,7 @@ messages:
 
           // The generation process automatically resolves the right recursion.
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [
               ("b", true),
@@ -23925,7 +23929,7 @@ messages:
           assert!(analyze::validate(&productions).is_ok());
 
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [
               ("b", true),    // S -> b
@@ -23963,9 +23967,9 @@ messages:
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
           let parser = generate_glr_parser(&productions, 0, None);
-          let eof_token_id = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
-          let c_token_id = *parser.terminal_map.get_by_left(&terminal("c")).unwrap();
-          let d_token_id = *parser.terminal_map.get_by_left(&terminal("d")).unwrap();
+          let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+          let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+          let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
           
           println!("Parser: {}", parser);
 
@@ -24018,7 +24022,7 @@ messages:
               prod("B", vec![t("b")]),              // P3
           ];
 
-          let t_int_symbol = Symbol::Terminal(terminal("T_int"));
+          let t_int_symbol = Symbol::Terminal(regex("T_int"));
           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
 
           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
@@ -24082,7 +24086,7 @@ messages:
           // Helper to tokenize space-separated terminal names
           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
               input_str.split_whitespace() // This is fine, it's a comment
-                  .filter_map(|s| parser.terminal_map.get_by_left(&terminal(s)).copied())
+                  .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
                   .collect()
           }
 
@@ -24245,7 +24249,7 @@ messages:
           
           // Let's find the actual state IDs from the generated parser.
           let start_state = parser.start_state_id;
-          let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
+          let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
           
           let start_row = &parser.stage_7_table[&start_state];
           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
@@ -24342,7 +24346,7 @@ messages:
           assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
 
-          let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+          let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
 
           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
 
@@ -27270,7 +27274,7 @@ messages:
       use std::collections::{BTreeMap, BTreeSet};
       use crate::finite_automata::{eat_u8, rep1};
       use crate::{choice, choice_fast, groups, seq, seq_fast};
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
       use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
       use std::hash::{Hash, Hasher};
@@ -27323,15 +27327,15 @@ messages:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0));
-          grammar_token_map.insert(terminal("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
+          grammar_token_map.insert(regex("A"), TerminalID(0));
+          grammar_token_map.insert(regex("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
           println!("Parser: {}", parser);
 
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A"), 0);
-          token_name_map.insert(terminal("EOF"), 1);
+          token_name_map.insert(regex("A"), 0);
+          token_name_map.insert(regex("EOF"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -27385,10 +27389,10 @@ messages:
 
           // Grammar Terminals mapped to Tokenizer IDs
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
-          grammar_token_map.insert(terminal("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
-          grammar_token_map.insert(terminal("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
-          grammar_token_map.insert(terminal("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
+          grammar_token_map.insert(regex("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
+          grammar_token_map.insert(regex("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+          grammar_token_map.insert(regex("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+          grammar_token_map.insert(regex("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
 
           let productions = vec![
               prod("S", vec![nt("X"), t("EOF")]), // S -> X $
@@ -27450,7 +27454,7 @@ messages:
           for grammar_tokens in grammar_tokenss {
               let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
               for grammar_token in grammar_tokens {
-                  let grammar_token_id = grammar_token_map.get_by_left(&terminal(grammar_token)).unwrap();
+                  let grammar_token_id = grammar_token_map.get_by_left(&regex(grammar_token)).unwrap();
                   parser_state.step(*grammar_token_id);
               }
               parser_state_for_comp.merge_with(parser_state);
@@ -27506,12 +27510,12 @@ messages:
           ];
           // Map grammar terminals to IDs matching regex order
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("PLUS"), TerminalID(0));
-          grammar_token_map.insert(terminal("TIMES"), TerminalID(1));
-          grammar_token_map.insert(terminal("LPAREN"), TerminalID(2));
-          grammar_token_map.insert(terminal("RPAREN"), TerminalID(3));
-          grammar_token_map.insert(terminal("I"), TerminalID(4));
-          grammar_token_map.insert(terminal("EOF"), TerminalID(5));
+          grammar_token_map.insert(regex("PLUS"), TerminalID(0));
+          grammar_token_map.insert(regex("TIMES"), TerminalID(1));
+          grammar_token_map.insert(regex("LPAREN"), TerminalID(2));
+          grammar_token_map.insert(regex("RPAREN"), TerminalID(3));
+          grammar_token_map.insert(regex("I"), TerminalID(4));
+          grammar_token_map.insert(regex("EOF"), TerminalID(5));
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
           println!("Parser: {}", parser);
@@ -27552,7 +27556,7 @@ messages:
           let llm_token = b"(i".to_vec();
           let grammar_tokens = vec!["LPAREN", "I"];
           let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-          let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&terminal(token)).unwrap()).collect::<Vec<_>>();
+          let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex(token)).unwrap()).collect::<Vec<_>>();
 
           let mut constraint_state_for_comp = constraint.init();
           let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
@@ -27693,8 +27697,8 @@ messages:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          let terminal_a = terminal("A");
-          let terminal_hash_opt_a = terminal("HASH_OPT_A");
+          let terminal_a = regex("A");
+          let terminal_hash_opt_a = regex("HASH_OPT_A");
           grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
           grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -27719,8 +27723,8 @@ messages:
 
           // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
           let mut token_name_map_for_constraint = BiBTreeMap::new();
-          token_name_map_for_constraint.insert(terminal("A"), 0);
-          token_name_map_for_constraint.insert(terminal("HASH_OPT_A"), 1);
+          token_name_map_for_constraint.insert(regex("A"), 0);
+          token_name_map_for_constraint.insert(regex("HASH_OPT_A"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -27783,8 +27787,8 @@ messages:
           ];
 
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          let terminal_a = terminal("A");
-          let terminal_hash_opt_aa = terminal("HASH_OPT_AA");
+          let terminal_a = regex("A");
+          let terminal_hash_opt_aa = regex("HASH_OPT_AA");
           grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
           grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -27808,8 +27812,8 @@ messages:
           let max_original_llm_token_id = 2;
 
           let mut token_name_map_for_constraint = BiBTreeMap::new();
-          token_name_map_for_constraint.insert(terminal("A"), 0);
-          token_name_map_for_constraint.insert(terminal("HASH_OPT_AA"), 1);
+          token_name_map_for_constraint.insert(regex("A"), 0);
+          token_name_map_for_constraint.insert(regex("HASH_OPT_AA"), 1);
 
           let constraint = GrammarConstraint::new(
               tokenizer,
@@ -27883,7 +27887,7 @@ messages:
 
           // 3. Map grammar terminal "A" to tokenizer group ID 0
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A"), TerminalID(0));
+          grammar_token_map.insert(regex("A"), TerminalID(0));
 
           // 4. Create the Parser
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
@@ -27898,7 +27902,7 @@ messages:
 
           // 6. Token name map for stats/debugging
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A"), 0); // Maps "A" to tokenizer group ID 0
+          token_name_map.insert(regex("A"), 0); // Maps "A" to tokenizer group ID 0
 
           // 7. Create the GrammarConstraint
           let constraint = GrammarConstraint::new(
@@ -27952,7 +27956,7 @@ messages:
 
           // 4. Token Name Map
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
+          token_name_map.insert(regex("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
 
           // 5. Create the Parser
           let parser = generate_glr_parser(&productions, 0, None);
@@ -28009,7 +28013,7 @@ messages:
 
           // 4. Map grammar terminals "DEF_T" to tokenizer group ID 0
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("DEF_T"), TerminalID(0));
+          grammar_token_map.insert(regex("DEF_T"), TerminalID(0));
           // Note: For this minimal test focusing on the initial mask for "def",
           // we don't strictly need an EOF terminal in the grammar or tokenizer if
           // the goal is just to see "def" allowed initially.
@@ -28024,7 +28028,7 @@ messages:
 
           // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
           let mut token_name_map_for_stats = BiBTreeMap::new();
-          token_name_map_for_stats.insert(terminal("DEF_T"), 0);
+          token_name_map_for_stats.insert(regex("DEF_T"), 0);
 
           // 6. Create the GrammarConstraint
           let constraint = GrammarConstraint::new(
@@ -28074,13 +28078,13 @@ messages:
 
           // Map grammar terminal to tokenizer group
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("A_PLUS"), TerminalID(0));
+          grammar_token_map.insert(regex("A_PLUS"), TerminalID(0));
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
           // Token name map for stats
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("A_PLUS"), 0);
+          token_name_map.insert(regex("A_PLUS"), 0);
 
           // Create the constraint, which runs precomputation
           let constraint = GrammarConstraint::new(
@@ -28139,19 +28143,19 @@ messages:
 
           // Map grammar terminal to tokenizer group
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-          grammar_token_map.insert(terminal("X"), TerminalID(0));      // 'x' is group 0
-          grammar_token_map.insert(terminal("SPACE"), TerminalID(1));  // ' ' is group 1
-          grammar_token_map.insert(terminal("EQUALS"), TerminalID(2)); // '=' is group 2
-          grammar_token_map.insert(terminal("ANY"), TerminalID(3));    // Anything else is group 3
+          grammar_token_map.insert(regex("X"), TerminalID(0));      // 'x' is group 0
+          grammar_token_map.insert(regex("SPACE"), TerminalID(1));  // ' ' is group 1
+          grammar_token_map.insert(regex("EQUALS"), TerminalID(2)); // '=' is group 2
+          grammar_token_map.insert(regex("ANY"), TerminalID(3));    // Anything else is group 3
 
           let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
           // Token name map for stats
           let mut token_name_map = BiBTreeMap::new();
-          token_name_map.insert(terminal("X"), 0);
-          token_name_map.insert(terminal("SPACE"), 1);
-          token_name_map.insert(terminal("EQUALS"), 2);
-          token_name_map.insert(terminal("ANY"), 3);
+          token_name_map.insert(regex("X"), 0);
+          token_name_map.insert(regex("SPACE"), 1);
+          token_name_map.insert(regex("EQUALS"), 2);
+          token_name_map.insert(regex("ANY"), 3);
 
           // Create the constraint, which runs precomputation
           let constraint = GrammarConstraint::new(
@@ -28176,9 +28180,9 @@ messages:
           assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
 
           // Get the grammar token IDs for our terminals
-          let x_tid = *grammar_token_map.get_by_left(&terminal("X")).unwrap();
-          let space_tid = *grammar_token_map.get_by_left(&terminal("SPACE")).unwrap();
-          let equals_tid = *grammar_token_map.get_by_left(&terminal("EQUALS")).unwrap();
+          let x_tid = *grammar_token_map.get_by_left(&regex("X")).unwrap();
+          let space_tid = *grammar_token_map.get_by_left(&regex("SPACE")).unwrap();
+          let equals_tid = *grammar_token_map.get_by_left(&regex("EQUALS")).unwrap();
 
           // Get the LLM token IDs
           let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;
@@ -28919,7 +28923,7 @@ messages:
       // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
       use crate::constraint::GrammarConstraint;
-      use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
       use crate::glr::parser::GLRParserState;
       use crate::glr::stats::get_stats;
       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
@@ -29101,12 +29105,13 @@ messages:
           }
           println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
-          if false { // Manual vocabulary modifications for debugging
+          if true { // Manual vocabulary modifications for debugging
               println!("\n--- Applying manual vocabulary modifications ---");
 
-              // Filter 1: Keep only tokens with length < 5
-              llm_token_map.retain(|bytes, _| bytes.len() < 5);
-              println!("  - After length filter (< 5): {} tokens remaining.", llm_token_map.len());
+              // Filter 1: Keep only tokens with length <= x
+              let x = 4;
+              llm_token_map.retain(|bytes, _| bytes.len() <= x);
+              println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
 
               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
               // llm_token_map.retain(|bytes, _| {
@@ -29118,19 +29123,23 @@ messages:
               //         }
               //     })
               // });
-              println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
-              // Option 3: Set to a few specific tokens (currently inactive)
-              /*
+              // Option 3: Set to a few specific tokens
               let mut specific_tokens = LLMTokenMap::new();
-              specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
-              specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
-              specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-              specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-              specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-              llm_token_map = specific_tokens;
+              specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
+              specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
+              specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
+              specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
+              // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
+              specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
+              // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+              // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+              // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+              // llm_token_map = specific_tokens;
               println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
-              */
+
+              // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
               // After filtering, we must recalculate max_original_llm_token_id_val
               max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
@@ -29194,7 +29203,7 @@ messages:
               if true {
                   // Reinitialize the constraint state fresh
                   constraint_state = grammar_constraint.init();
-                  let prefix_token_ids = test_token_sequence_ids[..=i].to_vec();
+                  let prefix_token_ids = test_token_sequence_ids[..i].to_vec();
                   let prefix_bytes: Vec<Vec<u8>> = prefix_token_ids.iter()
                       .map(|&id| grammar_constraint.llm_vocab.llm_token_map.get_by_right(&id).unwrap().clone())
                       .collect();
@@ -29285,7 +29294,7 @@ messages:
               let mut terminal_id_sequence = Vec::new();
               let mut sequence_is_valid = true;
               for token_name in seq_terminal_names {
-                  if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&terminal(token_name)) {
+                  if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
                       terminal_id_sequence.push(*terminal_id);
                   } else {
                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
@@ -29373,30 +29382,34 @@ messages:
           // 2. Define the terminal sequence for "let x = 1111111111;".
           // The tokenizer would produce: "let", IDENTIFIER, "=", NUMERIC_LITERAL, ";"
           // The IGNORE rule handles whitespace.
-          let terminal_names = vec![
-              "\"let\"",
-              "IDENTIFIER",
-              "\"=\"",
-              "NUMERIC_LITERAL",
-              "\";\"",
+          let terminals = vec![
+              // "\"let\"",
+              // "IDENTIFIER",
+              // "\"=\"",
+              // "NUMERIC_LITERAL",
+              // "\";\"",
+              literal(b"let"),
+              regex("IDENTIFIER"),
+              literal(b"="),
+              regex("NUMERIC_LITERAL"),
+              literal(b";"),
           ];
 
           // 3. Convert terminal names to TerminalIDs.
           let mut terminal_ids = Vec::new();
-          for name in &terminal_names {
-              let terminal_obj = terminal(name);
+          for terminal_obj in &terminals {
               let terminal_id = parser.terminal_map.get_by_left(&terminal_obj)
                   .unwrap_or_else(|| {
                       eprintln!("Terminals in parser's terminal map:");
                       for (name, id) in &parser.terminal_map {
-                          eprintln!("  - '{}' ({})", name, id.0);
+                          eprintln!("  - '{}' ({:?}, ID {})", name, name, id.0);
                       }
-                      panic!("Terminal '{}' not found in parser's terminal map.", name);
+                      panic!("Terminal '{}' ({:?}) not found in parser's terminal map.", terminal_obj, terminal_obj);
                   });
               terminal_ids.push(*terminal_id);
           }
 
-          println!("Terminal sequence to parse: {:?}", terminal_names);
+          println!("Terminal sequence to parse: {:?}", terminals);
           println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
 
           // Reset the profiler
@@ -29407,11 +29420,12 @@ messages:
           for (i, &terminal_id) in terminal_ids.iter().enumerate() {
               println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
               glr_state.step(terminal_id);
+              glr_state.do_phase3();
               // Print profiler stats after each step
               print_summary_flat();
               print_summary();
               reset();
-              assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminal_names[i]);
+              assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
           }
 
           println!("\n--- Finished parsing terminal sequence ---");
@@ -29496,20 +29510,12 @@ messages:
 
           # Find all "Processing token..." markers to split the log
           processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
-          
-          initial_log_block = ""
-          if processing_markers:
-              initial_log_block = log_content[:processing_markers[0].start()]
 
           tokens_data = []
           for i, marker in enumerate(processing_markers):
               start_pos = marker.start()
               end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
-              
               token_log = log_content[start_pos:end_pos]
-              
-              # The get_mask for the first token is in the initial block before the loop
-              log_for_get_mask = initial_log_block if i == 0 else token_log
 
               token_info = {}
               
@@ -29529,17 +29535,17 @@ messages:
                   token_info['end_byte'] = int(m.group(2))
 
               get_mask_time = None
-              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
+              m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", token_log)
               if m_get_mask:
                   get_mask_time = parse_duration(m_get_mask.group(1))
 
               commit_time = None
-              m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
+              m_commit = re.search(r"commit took:\s*(.*?)\n", token_log)
               if m_commit:
                   commit_time = parse_duration(m_commit.group(1))
                   
               special_map_time = None
-              m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
+              m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
               if m_special_map:
                   special_map_time = parse_duration(m_special_map.group(1))
 
@@ -29680,74 +29686,162 @@ messages:
       ```
     metadata:
       filename: analyze_timings.py
-  - user: '`analyze_timings.py` is suppoesed to work on the output of `test_js_constraint_integration`.
-      Right now it seems to be a bit flakey.'
+  - user: "Modify the section `// Manual vocabulary modifications for debugging` in
+      `test_js_constraint_integration`. Instead of doing this on the `llm_token_map`,
+      do it earlier on the raw vocab as a `Vec<String>`. Oh yeah, make the raw vocab
+      a `Vec<String>`. i.e. get rid of the u32 IDs in the actual vocab from the file.
+      They're not really important. This should make the `Option 3: Set to a few specific
+      tokens` much more succinct, in particular."
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the issue you're having with the `analyze_timings.py` script. It seems like it was making some incorrect assumptions about the structure of the log file produced by `test_js_constraint_integration`, which could lead to inconsistent parsing of timing data.
+      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with vocabulary and token mappings can sometimes be tricky. Here are the suggested changes to refactor your test.
 
-      I've prepared a patch that corrects the logic for finding the `get_mask` and `commit` timings and simplifies the log parsing. This should make the script much more reliable.
+      I've modified `test_js_constraint_integration` to perform vocabulary filtering on a `Vec<String>` before creating the final `LLMTokenMap`. This makes the filtering logic, especially when setting a specific small vocabulary for debugging, much cleaner and more intuitive. I've also updated the helper function `load_or_download_gpt2_vocab` to support this change by returning a `Vec<String>` of tokens directly.
 
-      Here are the changes for `analyze_timings.py`:
+      Here are the diffs for the changes:
 
       ```diff
-      diff --git a/analyze_timings.py b/analyze_timings.py
-      --- a/analyze_timings.py
-      +++ b/analyze_timings.py
-      @@ -59,20 +59,12 @@
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -26,32 +26,28 @@
+       fn load_or_download_gpt2_vocab(
+           cache_dir: &Path,
+           file_name: &str,
+           url: &str,
+      -) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
+      +) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+           fs::create_dir_all(cache_dir)?;
+           let cache_path = cache_dir.join(file_name);
        
-           # Find all "Processing token..." markers to split the log
-           processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
+      -    if cache_path.exists() {
+      +    let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
+               println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+               let file = File::open(cache_path)?;
+               let reader = BufReader::new(file);
+      -        let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
+      -        Ok(vocab)
+      +        serde_json::from_reader(reader)?
+           } else {
+               println!("Downloading GPT-2 vocab from: {}", url);
+               let response = blocking::get(url)?.error_for_status()?;
+               let content = response.text()?;
+       
+               let mut file = File::create(&cache_path)?;
+               file.write_all(content.as_bytes())?;
+               println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+       
+      -        let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
+      -        Ok(vocab)
+      -    }
+      +        serde_json::from_str(&content)?
+      +    };
+      +    Ok(vocab_map.into_keys().collect())
+       }
+       
+       /// Helper function to print context around a token in a larger text.
+      @@ -130,58 +126,49 @@
+           println!("\nLoading GPT-2 vocabulary...");
+           let cache_dir = Path::new(".cache/test_vocabs");
+           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+           let vocab_file_name = "gpt2_vocab.json";
+      -    let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
       -    
-      -    initial_log_block = ""
-      -    if processing_markers:
-      -        initial_log_block = log_content[:processing_markers[0].start()]
+      -    let mut llm_token_map = LLMTokenMap::new();
+      -    let mut max_original_llm_token_id_val: usize = 0;
+      -    for (token_str, id_val_u32) in gpt2_raw_vocab {
+      -        let id_val = id_val_u32 as usize;
+      -        let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+      -        let token_bytes = token_str.as_bytes().to_vec();
+      -        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+      -        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+      -    }
+      -    println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+      +    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
        
-           tokens_data = []
-           for i, marker in enumerate(processing_markers):
-               start_pos = marker.start()
-               end_pos = processing_markers[i+1].start() if i + 1 < len(processing_markers) else len(log_content)
-      -        
-               token_log = log_content[start_pos:end_pos]
-      -        
-      -        # The get_mask for the first token is in the initial block before the loop
-      -        log_for_get_mask = initial_log_block if i == 0 else token_log
+           if true { // Manual vocabulary modifications for debugging
+               println!("\n--- Applying manual vocabulary modifications ---");
        
-               token_info = {}
-               
-      @@ -90,18 +82,18 @@
-                   token_info['end_byte'] = int(m.group(2))
+               // Filter 1: Keep only tokens with length <= x
+               let x = 4;
+      -        llm_token_map.retain(|bytes, _| bytes.len() <= x);
+      -        println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
+      +        gpt2_raw_vocab.retain(|s| {
+      +            let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+      +            processed.as_bytes().len() <= x
+      +        });
+      +        println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
        
-               get_mask_time = None
-      -        m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", log_for_get_mask)
-      +        m_get_mask = re.search(r"get_mask took:\s*(.*?)\n", token_log)
-               if m_get_mask:
-                   get_mask_time = parse_duration(m_get_mask.group(1))
+               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
+      -        // llm_token_map.retain(|bytes, _| {
+      -        //     bytes.iter().all(|&b| {
+      +        // gpt2_raw_vocab.retain(|s| {
+      +        //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
+               //         if b.is_ascii_alphabetic() {
+               //             b.to_ascii_lowercase() == b'a'
+               //         } else {
+               //             true
+               //         }
+               //     })
+               // });
+      -        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+      +        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
        
-               commit_time = None
-      -        m_commit = re.search(r"commit LLMTokenID\(\d+\) took:\s*(.*?)\n", token_log)
-      +        m_commit = re.search(r"commit took:\s*(.*?)\n", token_log)
-               if m_commit:
-                   commit_time = parse_duration(m_commit.group(1))
-                   
-               special_map_time = None
-      -        m_special_map = re.search(r"after special_map:\s*(.*?)\n", log_for_get_mask)
-      +        m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
-               if m_special_map:
-                   special_map_time = parse_duration(m_special_map.group(1))
+               // Option 3: Set to a few specific tokens
+      -        let mut specific_tokens = LLMTokenMap::new();
+      -        specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
+      -        specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
+      -        specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
+      -        specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
+      -        // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
+      -        specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
+      -        // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+      -        // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+      -        // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
+      -        // llm_token_map = specific_tokens;
+      -        println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+      -
+      -        // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
+      -
+      -        // After filtering, we must recalculate max_original_llm_token_id_val
+      -        max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
+      -        println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+      +        gpt2_raw_vocab = vec![
+      +            "Ġ[".to_string(),
+      +            "Ġx".to_string(),
+      +            "]:".to_string(),
+      +            "]".to_string(),
+      +            "Ġ&".to_string(),
+      +        ];
+      +        println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
+      +
+               println!("--- Finished manual vocabulary modifications ---\n");
+           }
+      +
+      +    let mut llm_token_map = LLMTokenMap::new();
+      +    let mut max_original_llm_token_id_val: usize = 0;
+      +    for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+      +        let id_val = i;
+      +        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+      +        let token_bytes = processed_token_str.as_bytes().to_vec();
+      +        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+      +        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+      +    }
+      +    println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
        
+           // 3. Construct the GrammarConstraint.
+           let dummy_eof_placeholder = 0;
 
       ```
 
-      These changes should resolve the flakiness you were observing. Let me know if you have any other questions
+      These changes should make your debugging and testing workflow more straightforward. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: analyze_timings.py
-      Applying patch to 'analyze_timings.py' using custom patcher...
-      Successfully applied patch and wrote to analyze_timings.py.
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
     metadata:
 ...

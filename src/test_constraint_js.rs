@@ -41,16 +41,15 @@ fn load_or_download_gpt2_vocab(
     cache_dir: &Path,
     file_name: &str,
     url: &str,
-) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     fs::create_dir_all(cache_dir)?;
     let cache_path = cache_dir.join(file_name);
 
-    if cache_path.exists() {
+    let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
         println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
         let file = File::open(cache_path)?;
         let reader = BufReader::new(file);
-        let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
-        Ok(vocab)
+        serde_json::from_reader(reader)?
     } else {
         println!("Downloading GPT-2 vocab from: {}", url);
         let response = blocking::get(url)?.error_for_status()?;
@@ -60,9 +59,9 @@ fn load_or_download_gpt2_vocab(
         file.write_all(content.as_bytes())?;
         println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
 
-        let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
-        Ok(vocab)
-    }
+        serde_json::from_str(&content)?
+    };
+    Ok(vocab_map.into_keys().collect())
 }
 
 /// Helper function to print context around a token in a larger text.
@@ -178,30 +177,22 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     let cache_dir = Path::new(".cache/test_vocabs");
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
     let vocab_file_name = "gpt2_vocab.json";
-    let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-    
-    let mut llm_token_map = LLMTokenMap::new();
-    let mut max_original_llm_token_id_val: usize = 0;
-    for (token_str, id_val_u32) in gpt2_raw_vocab {
-        let id_val = id_val_u32 as usize;
-        let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-        let token_bytes = token_str.as_bytes().to_vec();
-        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-    }
-    println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
     if true { // Manual vocabulary modifications for debugging
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
         let x = 4;
-        llm_token_map.retain(|bytes, _| bytes.len() <= x);
-        println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
+        gpt2_raw_vocab.retain(|s| {
+            let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+            processed.as_bytes().len() <= x
+        });
+        println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
 
         // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-        // llm_token_map.retain(|bytes, _| {
-        //     bytes.iter().all(|&b| {
+        // gpt2_raw_vocab.retain(|s| {
+        //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
         //         if b.is_ascii_alphabetic() {
         //             b.to_ascii_lowercase() == b'a'
         //         } else {
@@ -209,29 +200,31 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         //         }
         //     })
         // });
-        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
         // Option 3: Set to a few specific tokens
-        let mut specific_tokens = LLMTokenMap::new();
-        specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
-        specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
-        specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
-        specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
-        // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
-        specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
-        // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-        // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-        // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-        // llm_token_map = specific_tokens;
-        println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+        gpt2_raw_vocab = vec![
+            "Ġ[".to_string(),
+            "Ġx".to_string(),
+            "]:".to_string(),
+            "]".to_string(),
+            "Ġ&".to_string(),
+        ];
+        println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
 
-        // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
-
-        // After filtering, we must recalculate max_original_llm_token_id_val
-        max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
-        println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
         println!("--- Finished manual vocabulary modifications ---\n");
     }
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let mut max_original_llm_token_id_val: usize = 0;
+    for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+        let id_val = i;
+        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+        let token_bytes = processed_token_str.as_bytes().to_vec();
+        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+    }
+    println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
     // 3. Construct the GrammarConstraint.
     let dummy_eof_placeholder = 0;
