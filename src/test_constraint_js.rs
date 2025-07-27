@@ -215,7 +215,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // /*
         let mut specific_tokens = LLMTokenMap::new();
         // specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
-        specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
+        specific_tokens.insert(b"a".to_vec(), LLMTokenID(264));
         // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
         // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
         specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
