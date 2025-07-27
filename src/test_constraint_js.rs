@@ -195,7 +195,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 1;
+        let x = 4;
         llm_token_map.retain(|bytes, _| bytes.len() <= x);
         println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
 
