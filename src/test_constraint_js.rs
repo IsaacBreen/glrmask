@@ -225,7 +225,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // llm_token_map = specific_tokens;
         println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
 
-        llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
+        // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
         // After filtering, we must recalculate max_original_llm_token_id_val
         max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
