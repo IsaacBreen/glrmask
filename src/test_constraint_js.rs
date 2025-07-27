@@ -216,6 +216,9 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
         specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
         specific_tokens.insert(b"]:".to_vec(), LLMTokenID(326));
+        specific_tokens.insert(b"]".to_vec(), LLMTokenID(326));
+        specific_tokens.insert(b":".to_vec(), LLMTokenID(326));
+        specific_tokens.insert(b"&".to_vec(), LLMTokenID(326));
         // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
         // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
         // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
