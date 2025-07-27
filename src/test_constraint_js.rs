@@ -212,16 +212,16 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
 
         // Option 3: Set to a few specific tokens (currently inactive)
-        // /*
+        /*
         let mut specific_tokens = LLMTokenMap::new();
-        // specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
-        specific_tokens.insert(b"a".to_vec(), LLMTokenID(264));
-        // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-        // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
+        specific_tokens.insert(b"let".to_vec(), LLMTokenID(324));
+        specific_tokens.insert(b" a".to_vec(), LLMTokenID(264));
+        specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
+        specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
         specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
         llm_token_map = specific_tokens;
         println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
-        // */
+        */
 
         // After filtering, we must recalculate max_original_llm_token_id_val
         max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
