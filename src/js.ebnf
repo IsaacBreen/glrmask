@@ -6,7 +6,8 @@ temp ::= property_name ':' assignment_expression ;
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
-IGNORE ::= ( WS | COMMENT )+ ;
+IGNORE ::= ' ' ;
+// IGNORE ::= ( WS | COMMENT )+ ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
 SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ; // Non-greedy match
