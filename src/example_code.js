@@ -1,3 +1,5 @@
+a;a;a;
+
 // [x]: 1
 // [Symbol('description')]: 2
 
