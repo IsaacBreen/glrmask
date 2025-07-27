@@ -2329,7 +2329,7 @@ local_system:
           // #[time_it("GLRParserState::log_gss")]
           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-              return;
+              // return;
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 10000;
 
@@ -5659,7 +5659,7 @@ local_system:
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
       ) -> String {
-          return "".to_string();
+          // return "".to_string();
           // Recursive helper to print predecessors.
           fn print_predecessors_recursive(
               node_arc: &Arc<GSSNode>,
@@ -9151,16 +9151,15 @@ local_system:
           cache_dir: &Path,
           file_name: &str,
           url: &str,
-      ) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
           fs::create_dir_all(cache_dir)?;
           let cache_path = cache_dir.join(file_name);
 
-          if cache_path.exists() {
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
               println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
               let file = File::open(cache_path)?;
               let reader = BufReader::new(file);
-              let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
-              Ok(vocab)
+              serde_json::from_reader(reader)?
           } else {
               println!("Downloading GPT-2 vocab from: {}", url);
               let response = blocking::get(url)?.error_for_status()?;
@@ -9170,9 +9169,9 @@ local_system:
               file.write_all(content.as_bytes())?;
               println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
 
-              let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
-              Ok(vocab)
-          }
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
       }
 
       /// Helper function to print context around a token in a larger text.
@@ -9288,30 +9287,22 @@ local_system:
           let cache_dir = Path::new(".cache/test_vocabs");
           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
           let vocab_file_name = "gpt2_vocab.json";
-          let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-          
-          let mut llm_token_map = LLMTokenMap::new();
-          let mut max_original_llm_token_id_val: usize = 0;
-          for (token_str, id_val_u32) in gpt2_raw_vocab {
-              let id_val = id_val_u32 as usize;
-              let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-              let token_bytes = token_str.as_bytes().to_vec();
-              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-          }
-          println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
           if true { // Manual vocabulary modifications for debugging
               println!("\n--- Applying manual vocabulary modifications ---");
 
               // Filter 1: Keep only tokens with length <= x
               let x = 4;
-              llm_token_map.retain(|bytes, _| bytes.len() <= x);
-              println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
+              gpt2_raw_vocab.retain(|s| {
+                  let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+                  processed.as_bytes().len() <= x
+              });
+              println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
 
               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-              // llm_token_map.retain(|bytes, _| {
-              //     bytes.iter().all(|&b| {
+              // gpt2_raw_vocab.retain(|s| {
+              //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
               //         if b.is_ascii_alphabetic() {
               //             b.to_ascii_lowercase() == b'a'
               //         } else {
@@ -9319,29 +9310,30 @@ local_system:
               //         }
               //     })
               // });
-              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
               // Option 3: Set to a few specific tokens
-              let mut specific_tokens = LLMTokenMap::new();
-              specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
-              specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
-              specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
-              specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
-              // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
-              specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
-              // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-              // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-              // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-              // llm_token_map = specific_tokens;
-              println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+              gpt2_raw_vocab = vec![
+                  "[x]:",
+                  " &",
+              ].iter().map(|s| s.to_string()).collect();
 
-              // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
-              // After filtering, we must recalculate max_original_llm_token_id_val
-              max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
-              println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+              println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
+
               println!("--- Finished manual vocabulary modifications ---\n");
           }
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+          println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
           // 3. Construct the GrammarConstraint.
           let dummy_eof_placeholder = 0;
@@ -12187,7 +12179,7 @@ local_system:
           // #[time_it("GLRParserState::log_gss")]
           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-              return;
+              // return;
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 10000;
 
@@ -15517,7 +15509,7 @@ local_system:
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
       ) -> String {
-          return "".to_string();
+          // return "".to_string();
           // Recursive helper to print predecessors.
           fn print_predecessors_recursive(
               node_arc: &Arc<GSSNode>,
@@ -19009,16 +19001,15 @@ local_system:
           cache_dir: &Path,
           file_name: &str,
           url: &str,
-      ) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
           fs::create_dir_all(cache_dir)?;
           let cache_path = cache_dir.join(file_name);
 
-          if cache_path.exists() {
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
               println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
               let file = File::open(cache_path)?;
               let reader = BufReader::new(file);
-              let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
-              Ok(vocab)
+              serde_json::from_reader(reader)?
           } else {
               println!("Downloading GPT-2 vocab from: {}", url);
               let response = blocking::get(url)?.error_for_status()?;
@@ -19028,9 +19019,9 @@ local_system:
               file.write_all(content.as_bytes())?;
               println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
 
-              let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
-              Ok(vocab)
-          }
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
       }
 
       /// Helper function to print context around a token in a larger text.
@@ -19146,30 +19137,22 @@ local_system:
           let cache_dir = Path::new(".cache/test_vocabs");
           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
           let vocab_file_name = "gpt2_vocab.json";
-          let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-          
-          let mut llm_token_map = LLMTokenMap::new();
-          let mut max_original_llm_token_id_val: usize = 0;
-          for (token_str, id_val_u32) in gpt2_raw_vocab {
-              let id_val = id_val_u32 as usize;
-              let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-              let token_bytes = token_str.as_bytes().to_vec();
-              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-          }
-          println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
           if true { // Manual vocabulary modifications for debugging
               println!("\n--- Applying manual vocabulary modifications ---");
 
               // Filter 1: Keep only tokens with length <= x
               let x = 4;
-              llm_token_map.retain(|bytes, _| bytes.len() <= x);
-              println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
+              gpt2_raw_vocab.retain(|s| {
+                  let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+                  processed.as_bytes().len() <= x
+              });
+              println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
 
               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-              // llm_token_map.retain(|bytes, _| {
-              //     bytes.iter().all(|&b| {
+              // gpt2_raw_vocab.retain(|s| {
+              //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
               //         if b.is_ascii_alphabetic() {
               //             b.to_ascii_lowercase() == b'a'
               //         } else {
@@ -19177,29 +19160,30 @@ local_system:
               //         }
               //     })
               // });
-              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
               // Option 3: Set to a few specific tokens
-              let mut specific_tokens = LLMTokenMap::new();
-              specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
-              specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
-              specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
-              specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
-              // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
-              specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
-              // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-              // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-              // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-              // llm_token_map = specific_tokens;
-              println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+              gpt2_raw_vocab = vec![
+                  "[x]:",
+                  " &",
+              ].iter().map(|s| s.to_string()).collect();
 
-              // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
-              // After filtering, we must recalculate max_original_llm_token_id_val
-              max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
-              println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+              println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
+
               println!("--- Finished manual vocabulary modifications ---\n");
           }
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+          println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
           // 3. Construct the GrammarConstraint.
           let dummy_eof_placeholder = 0;
@@ -22088,7 +22072,7 @@ messages:
           // #[time_it("GLRParserState::log_gss")]
           pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-              return;
+              // return;
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 10000;
 
@@ -25438,7 +25422,7 @@ messages:
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
       ) -> String {
-          return "".to_string();
+          // return "".to_string();
           // Recursive helper to print predecessors.
           fn print_predecessors_recursive(
               node_arc: &Arc<GSSNode>,
@@ -28955,16 +28939,15 @@ messages:
           cache_dir: &Path,
           file_name: &str,
           url: &str,
-      ) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
           fs::create_dir_all(cache_dir)?;
           let cache_path = cache_dir.join(file_name);
 
-          if cache_path.exists() {
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
               println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
               let file = File::open(cache_path)?;
               let reader = BufReader::new(file);
-              let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
-              Ok(vocab)
+              serde_json::from_reader(reader)?
           } else {
               println!("Downloading GPT-2 vocab from: {}", url);
               let response = blocking::get(url)?.error_for_status()?;
@@ -28974,9 +28957,9 @@ messages:
               file.write_all(content.as_bytes())?;
               println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
 
-              let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
-              Ok(vocab)
-          }
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
       }
 
       /// Helper function to print context around a token in a larger text.
@@ -29092,30 +29075,22 @@ messages:
           let cache_dir = Path::new(".cache/test_vocabs");
           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
           let vocab_file_name = "gpt2_vocab.json";
-          let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-          
-          let mut llm_token_map = LLMTokenMap::new();
-          let mut max_original_llm_token_id_val: usize = 0;
-          for (token_str, id_val_u32) in gpt2_raw_vocab {
-              let id_val = id_val_u32 as usize;
-              let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-              let token_bytes = token_str.as_bytes().to_vec();
-              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-          }
-          println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
           if true { // Manual vocabulary modifications for debugging
               println!("\n--- Applying manual vocabulary modifications ---");
 
               // Filter 1: Keep only tokens with length <= x
               let x = 4;
-              llm_token_map.retain(|bytes, _| bytes.len() <= x);
-              println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
+              gpt2_raw_vocab.retain(|s| {
+                  let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+                  processed.as_bytes().len() <= x
+              });
+              println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
 
               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-              // llm_token_map.retain(|bytes, _| {
-              //     bytes.iter().all(|&b| {
+              // gpt2_raw_vocab.retain(|s| {
+              //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
               //         if b.is_ascii_alphabetic() {
               //             b.to_ascii_lowercase() == b'a'
               //         } else {
@@ -29123,29 +29098,30 @@ messages:
               //         }
               //     })
               // });
-              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
+              // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
               // Option 3: Set to a few specific tokens
-              let mut specific_tokens = LLMTokenMap::new();
-              specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
-              specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
-              specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
-              specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
-              // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
-              specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
-              // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-              // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-              // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-              // llm_token_map = specific_tokens;
-              println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
+              gpt2_raw_vocab = vec![
+                  "[x]:",
+                  " &",
+              ].iter().map(|s| s.to_string()).collect();
 
-              // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
 
-              // After filtering, we must recalculate max_original_llm_token_id_val
-              max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
-              println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
+              println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
+
               println!("--- Finished manual vocabulary modifications ---\n");
           }
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+          println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
           // 3. Construct the GrammarConstraint.
           let dummy_eof_placeholder = 0;
@@ -29686,162 +29662,74 @@ messages:
       ```
     metadata:
       filename: analyze_timings.py
-  - user: "Modify the section `// Manual vocabulary modifications for debugging` in
-      `test_js_constraint_integration`. Instead of doing this on the `llm_token_map`,
-      do it earlier on the raw vocab as a `Vec<String>`. Oh yeah, make the raw vocab
-      a `Vec<String>`. i.e. get rid of the u32 IDs in the actual vocab from the file.
-      They're not really important. This should make the `Option 3: Set to a few specific
-      tokens` much more succinct, in particular."
+  - user: Add `crate::debug!(5, ...)` statements to `process_action_queue` for each
+      action, e.g. after `Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {` and
+      `Stage7ShiftsAndReducesLookaheadValue::Reduce {`.  And in the split. Do similar
+      for `do_phase3`.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with vocabulary and token mappings can sometimes be tricky. Here are the suggested changes to refactor your test.
+      Of course! Adding more detailed logging can be very helpful for debugging complex parser behavior. Here are the changes to add the requested `debug!` statements to your GLR parser implementation.
 
-      I've modified `test_js_constraint_integration` to perform vocabulary filtering on a `Vec<String>` before creating the final `LLMTokenMap`. This makes the filtering logic, especially when setting a specific small vocabulary for debugging, much cleaner and more intuitive. I've also updated the helper function `load_or_download_gpt2_vocab` to support this change by returning a `Vec<String>` of tokens directly.
+      I'll add logging for each action type (Shift, Reduce, Split) within the action processing loop, and for the default reductions in phase 3.
 
-      Here are the diffs for the changes:
+      Here is the git diff for `src/glr/parser.rs`:
 
       ```diff
-      --- a/src/test_constraint_js.rs
-      +++ b/src/test_constraint_js.rs
-      @@ -26,32 +26,28 @@
-       fn load_or_download_gpt2_vocab(
-           cache_dir: &Path,
-           file_name: &str,
-           url: &str,
-      -) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
-      +) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-           fs::create_dir_all(cache_dir)?;
-           let cache_path = cache_dir.join(file_name);
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -1010,11 +1010,13 @@
+                       if let Some(action) = action_selector(row).get(&token_id) {
+                           match action {
+                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      +                            crate::debug!(5, "Action: Shift to state {}", to.0);
+                                   let new_parse_state =
+                                       self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                                   shifted_states_todo.push_back(new_parse_state);
+                               }
+                               Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                                   nonterminal_id: nt,
+                                   len,
+                                   ..
+                               } => {
+      +                            crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                   if !s_new_arc.is_empty() {
+                                       let new_parse_state = ParseState { stack: s_new_arc };
+      @@ -1026,12 +1028,14 @@
+                               }
+                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                   if let Some(to) = shift {
+      +                                crate::debug!(5, "Action (Split): Shift to state {}", to.0);
+                                       let new_parse_state =
+                                           self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                                       shifted_states_todo.push_back(new_parse_state);
+                                   }
+                                   for (len, nts) in reduces {
+                                       for (nt, _prod_ids) in nts {
+      +                                    crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
+                                           let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                           if !s_new_arc.is_empty() {
+                                               let new_parse_state = ParseState { stack: s_new_arc };
+      @@ -1144,6 +1148,7 @@
+                       let row = &self.parser.stage_7_table[&state_id];
        
-      -    if cache_path.exists() {
-      +    let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
-               println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
-               let file = File::open(cache_path)?;
-               let reader = BufReader::new(file);
-      -        let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
-      -        Ok(vocab)
-      +        serde_json::from_reader(reader)?
-           } else {
-               println!("Downloading GPT-2 vocab from: {}", url);
-               let response = blocking::get(url)?.error_for_status()?;
-               let content = response.text()?;
-       
-               let mut file = File::create(&cache_path)?;
-               file.write_all(content.as_bytes())?;
-               println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
-       
-      -        let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
-      -        Ok(vocab)
-      -    }
-      +        serde_json::from_str(&content)?
-      +    };
-      +    Ok(vocab_map.into_keys().collect())
-       }
-       
-       /// Helper function to print context around a token in a larger text.
-      @@ -130,58 +126,49 @@
-           println!("\nLoading GPT-2 vocabulary...");
-           let cache_dir = Path::new(".cache/test_vocabs");
-           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
-           let vocab_file_name = "gpt2_vocab.json";
-      -    let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-      -    
-      -    let mut llm_token_map = LLMTokenMap::new();
-      -    let mut max_original_llm_token_id_val: usize = 0;
-      -    for (token_str, id_val_u32) in gpt2_raw_vocab {
-      -        let id_val = id_val_u32 as usize;
-      -        let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-      -        let token_bytes = token_str.as_bytes().to_vec();
-      -        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-      -        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-      -    }
-      -    println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
-      +    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-       
-           if true { // Manual vocabulary modifications for debugging
-               println!("\n--- Applying manual vocabulary modifications ---");
-       
-               // Filter 1: Keep only tokens with length <= x
-               let x = 4;
-      -        llm_token_map.retain(|bytes, _| bytes.len() <= x);
-      -        println!("  - After length filter (<= {x}): {} tokens remaining.", llm_token_map.len());
-      +        gpt2_raw_vocab.retain(|s| {
-      +            let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-      +            processed.as_bytes().len() <= x
-      +        });
-      +        println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
-       
-               // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-      -        // llm_token_map.retain(|bytes, _| {
-      -        //     bytes.iter().all(|&b| {
-      +        // gpt2_raw_vocab.retain(|s| {
-      +        //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
-               //         if b.is_ascii_alphabetic() {
-               //             b.to_ascii_lowercase() == b'a'
-               //         } else {
-               //             true
-               //         }
-               //     })
-               // });
-      -        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", llm_token_map.len());
-      +        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
-       
-               // Option 3: Set to a few specific tokens
-      -        let mut specific_tokens = LLMTokenMap::new();
-      -        specific_tokens.insert(b"[".to_vec(), LLMTokenID(324));
-      -        specific_tokens.insert(b"x".to_vec(), LLMTokenID(325));
-      -        specific_tokens.insert(b"]:".to_vec(), LLMTokenID(327));
-      -        specific_tokens.insert(b"]".to_vec(), LLMTokenID(328));
-      -        // // specific_tokens.insert(b":".to_vec(), LLMTokenID(329));
-      -        specific_tokens.insert(b"&".to_vec(), LLMTokenID(323));
-      -        // // specific_tokens.insert(b" =".to_vec(), LLMTokenID(323));
-      -        // // specific_tokens.insert(b" 1".to_vec(), LLMTokenID(290));
-      -        // // specific_tokens.insert(b";".to_vec(), LLMTokenID(26));
-      -        // llm_token_map = specific_tokens;
-      -        println!("  - Set to a specific small set of tokens: {} tokens.", llm_token_map.len());
-      -
-      -        // llm_token_map.retain(|v, _| [b"x".as_ref(), b"[", b"]", b"]:", b" &"].contains(&v.as_ref()));
-      -
-      -        // After filtering, we must recalculate max_original_llm_token_id_val
-      -        max_original_llm_token_id_val = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
-      -        println!("  - Recalculated max original token ID: {}", max_original_llm_token_id_val);
-      +        gpt2_raw_vocab = vec![
-      +            "Ġ[".to_string(),
-      +            "Ġx".to_string(),
-      +            "]:".to_string(),
-      +            "]".to_string(),
-      +            "Ġ&".to_string(),
-      +        ];
-      +        println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
-      +
-               println!("--- Finished manual vocabulary modifications ---\n");
-           }
-      +
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    let mut max_original_llm_token_id_val: usize = 0;
-      +    for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
-      +        let id_val = i;
-      +        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-      +        let token_bytes = processed_token_str.as_bytes().to_vec();
-      +        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-      +        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-      +    }
-      +    println!("GPT-2 vocab loaded ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
-       
-           // 3. Construct the GrammarConstraint.
-           let dummy_eof_placeholder = 0;
+                       if let Some(ref r) = row.phase3_default_reduce.reduce {
+      +                    crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}", self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.len, state_id.0);
+                           let mut reduced_stack = GSSNode::new_fresh();
+                           for peek in state.stack.peek_iter() {
+                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
 
       ```
 
-      These changes should make your debugging and testing workflow more straightforward. Let me know if you have any other questions
+      These changes introduce logging at level 5 for each specific action the parser takes during its different phases. This should give you a much clearer view of the parser's decision-making process when you enable that debug level. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_js.rs
-      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_js.rs.
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...

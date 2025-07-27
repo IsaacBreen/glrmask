@@ -662,6 +662,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 if let Some(action) = action_selector(row).get(&token_id) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                            crate::debug!(5, "Action: Shift to state {}", to.0);
                             let new_parse_state =
                                 self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                             shifted_states_todo.push_back(new_parse_state);
@@ -671,6 +672,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             len,
                             ..
                         } => {
+                            crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
@@ -682,12 +684,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                             if let Some(to) = shift {
+                                crate::debug!(5, "Action (Split): Shift to state {}", to.0);
                                 let new_parse_state =
                                     self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
+                                    crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                     let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
@@ -853,6 +857,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let row = &self.parser.stage_7_table[&state_id];
 
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
+                    crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}", self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.len, state_id.0);
                     let mut reduced_stack = GSSNode::new_fresh();
                     for peek in state.stack.peek_iter() {
                         // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
