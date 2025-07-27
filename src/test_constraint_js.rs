@@ -203,18 +203,12 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
         // Option 3: Set to a few specific tokens
-        // Remaining tokens in LLMTokenMap:
-        //   - " &" (LLMTokenID(1222))
-        //   - "[" (LLMTokenID(58))
-        //   - "]" (LLMTokenID(60))
-        //   - "]:" (LLMTokenID(5974))
-        //   - "x" (LLMTokenID(87))
         gpt2_raw_vocab = vec![
             "x".to_string(),
             "[".to_string(),
             "]".to_string(),
-            " &".to_string(),
             "]:".to_string(),
+            " &".to_string(),
         ];
 
         println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
