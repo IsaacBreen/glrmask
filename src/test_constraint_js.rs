@@ -337,47 +337,145 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+    // This test serves as a tool for debugging the GrammarConstraint. It does the following:
+    // 1. Defines a test case (an input string and a small vocabulary).
+    // 2. Loads the full JS grammar.
+    // 3. Tokenizes the input string with the full grammar's tokenizer to find relevant terminals.
+    // 4. Minimizes the grammar to only what's necessary for those terminals.
+    // 5. Compiles the minimized grammar and creates a GrammarConstraint.
+    // 6. Feeds the input string to the new constraint to check for correctness.
+    // 7. Saves the minimized grammar to an EBNF file for use in template tests.
+
+    // 1. Define the test case.
+    let input_string = "var x = 1;";
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
+    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
+    let max_token_id = 5;
+
+    // 2. Load the full JS grammar.
+    println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
+    let grammar_path = "src/js.ebnf";
+    let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    println!("Initial production count: {}", full_grammar_def.productions.len());
+
+    // 3. Tokenize the input to find relevant terminals.
+    let full_compiled = CompiledGrammar::from_definition(Arc::new(full_grammar_def.clone()));
+    let tokens = full_compiled.tokenizer.execute(input_string.as_bytes()).matches;
+    let interesting_terminal_ids: BTreeSet<TerminalID> = tokens.iter().map(|t| TerminalID(t.id)).collect();
+    let mut interesting_terminals: BTreeSet<Terminal> = interesting_terminal_ids
+        .iter()
+        .map(|tid| full_compiled.glr_parser.terminal_map.get_by_right(tid).unwrap().clone())
+        .collect();
+    // Also include the ignore terminal if it exists
+    if let Some(ignore_id) = full_grammar_def.ignore_terminal_id {
+        if let Some(ignore_terminal) = full_compiled.glr_parser.terminal_map.get_by_right(&ignore_id) {
+            interesting_terminals.insert(ignore_terminal.clone());
+        }
+    }
+    println!("Interesting terminals for '{}': {:?}", input_string, interesting_terminals);
+
+    // 4. Minimize the grammar.
+    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+        &full_grammar_def.productions,
+        full_grammar_def.start_production_id,
+        &interesting_terminals,
+    );
+
+    // 5. Create and compile the minimized grammar definition.
+    let mut minimized_def = full_grammar_def; // Start with a clone
+    minimized_def.productions = minimized_productions;
+    minimized_def.start_production_id = minimized_start_id;
+    // Filter terminal maps to only include those that are still relevant.
+    let all_terminals_in_minimized_grammar: BTreeSet<Terminal> = minimized_def.productions.iter()
+        .flat_map(|p| p.rhs.iter())
+        .filter_map(|s| match s {
+            Symbol::Terminal(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+
+    minimized_def.literal_to_group_id.retain(|lit, _| all_terminals_in_minimized_grammar.contains(&Terminal::Literal(lit.clone())));
+    minimized_def.regex_name_to_group_id.retain(|name, _| all_terminals_in_minimized_grammar.contains(&Terminal::RegexName(name.clone())));
+    minimized_def.regex_expr_to_group_id.retain(|_, gid| minimized_def.regex_name_to_group_id.contains_right(gid) || minimized_def.literal_to_group_id.contains_right(gid));
+
+
+    println!("\n--- Minimized Grammar ---");
+    println!("{}", minimized_def);
+
+    // 7. Save the minimized grammar to an EBNF file.
+    let minimized_ebnf = minimized_def.to_ebnf();
+    println!("\n--- Minimized Grammar (EBNF) ---");
+    println!("{}", minimized_ebnf);
+    fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
+
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+    println!("\n--- Compiled Minimized Grammar ---");
+    println!("{}", compiled_grammar);
+
+    // 6. Create GrammarConstraint and run the test.
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_token_id + 1),
+        max_token_id,
+    );
+
+    println!("\n--- Running Constraint with Minimized Grammar ---");
+    let mut state = constraint.init();
+    state.commit_bytes(input_string.as_bytes());
+    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
+
+    Ok(())
+}
+
+#[test]
 #[ignore] // This is a template for creating new tests from a minimized grammar.
-fn test_template_from_minimized_ebnf() -> Result<(), Box<dyn std::error::Error>> {
+fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load the minimized EBNF grammar.
     //    To use:
-    //    a) Run `test_js_parser_isolated_and_minimized` to generate `minimized_js.ebnf`.
+    //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
     //    b) Copy this test function and rename it.
-    //    c) Use your IDE's "inline macro" feature on `include_str!` below.
-    //    d) Update `test_case_terminals` with the sequence you want to test.
-    //    e) Remove the `#[ignore]` attribute and run the test.
-    // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
-    let ebnf_source = "";
+    //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
+    //    d) Remove the `#[ignore]` attribute and run the test.
+    let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
     let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
-    let parser = &compiled_grammar.glr_parser;
 
     println!("\n--- Loaded Grammar from EBNF ---");
     println!("{}", compiled_grammar);
 
-    // 2. Define the sequence of terminals to test.
-    //    (Update this with the specific sequence for your new test case)
-    let test_case_terminals: Vec<Terminal> = vec![
-        // Example:
-        // literal(b"["),
-        // regex_name("IDENTIFIER"),
-        // literal(b"]"),
-        // literal(b":"),
-    ];
+    // 2. Define the test case (must match the one in the minimizer test).
+    let input_string = "var x = 1;";
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
+    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
+    let max_token_id = 5;
 
-    // 3. Convert terminal objects to TerminalIDs using the parser's map.
-    let terminal_ids: Vec<TerminalID> = test_case_terminals
-        .iter()
-        .map(|t| *parser.terminal_map.get_by_left(t).unwrap_or_else(|| panic!("Terminal '{:?}' not found in the compiled grammar's terminal map.", t)))
-        .collect();
+    // 3. Create GrammarConstraint and run the test.
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_token_id + 1),
+        max_token_id,
+    );
 
-    // 4. Run the parser and assert success.
-    println!("\n--- Parsing with Loaded Grammar ---");
-    let mut glr_state = parser.init_glr_parser(None);
-    glr_state.parse(&terminal_ids);
+    println!("\n--- Running Constraint with Loaded Grammar ---");
+    let mut state = constraint.init();
+    state.commit_bytes(input_string.as_bytes());
 
-    assert!(glr_state.is_ok(), "Parse failed with the loaded EBNF grammar.");
-    println!("Successfully parsed sequence with loaded grammar.");
+    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
 
     Ok(())
 }
@@ -450,6 +548,52 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
     glr_state.parse(&terminal_ids);
     assert!(glr_state.is_ok(), "Parse failed with minimized grammar.");
     println!("Successfully parsed sequence with minimized grammar.");
+
+    Ok(())
+}
+
+#[test]
+#[ignore] // This is a template for creating new tests from a minimized grammar.
+fn test_template_from_minimized_ebnf() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Load the minimized EBNF grammar.
+    //    To use:
+    //    a) Run `test_js_parser_isolated_and_minimized` to generate `minimized_js.ebnf`.
+    //    b) Copy this test function and rename it.
+    //    c) Use your IDE's "inline macro" feature on `include_str!` below.
+    //    d) Update `test_case_terminals` with the sequence you want to test.
+    //    e) Remove the `#[ignore]` attribute and run the test.
+    // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
+    let ebnf_source = "";
+    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
+    let parser = &compiled_grammar.glr_parser;
+
+    println!("\n--- Loaded Grammar from EBNF ---");
+    println!("{}", compiled_grammar);
+
+    // 2. Define the sequence of terminals to test.
+    //    (Update this with the specific sequence for your new test case)
+    let test_case_terminals: Vec<Terminal> = vec![
+        // Example:
+        // literal(b"["),
+        // regex_name("IDENTIFIER"),
+        // literal(b"]"),
+        // literal(b":"),
+    ];
+
+    // 3. Convert terminal objects to TerminalIDs using the parser's map.
+    let terminal_ids: Vec<TerminalID> = test_case_terminals
+        .iter()
+        .map(|t| *parser.terminal_map.get_by_left(t).unwrap_or_else(|| panic!("Terminal '{:?}' not found in the compiled grammar's terminal map.", t)))
+        .collect();
+
+    // 4. Run the parser and assert success.
+    println!("\n--- Parsing with Loaded Grammar ---");
+    let mut glr_state = parser.init_glr_parser(None);
+    glr_state.parse(&terminal_ids);
+
+    assert!(glr_state.is_ok(), "Parse failed with the loaded EBNF grammar.");
+    println!("Successfully parsed sequence with loaded grammar.");
 
     Ok(())
 }
