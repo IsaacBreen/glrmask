@@ -1540,6 +1540,8 @@ local_system:
                   }
               }
 
+              println!("Current productions after simplification: {}", reachable.len());
+
               if reachable.len() == before_count {
                   break; // Fixed point reached
               }
@@ -8469,7 +8471,8 @@ local_system:
           //    c) Use your IDE's "inline macro" feature on `include_str!` below.
           //    d) Update `test_case_terminals` with the sequence you want to test.
           //    e) Remove the `#[ignore]` attribute and run the test.
-          let ebnf_source = include_str!("../minimized_js.ebnf");
+          // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
+          let ebnf_source = "";
           let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
           let parser = &compiled_grammar.glr_parser;
@@ -10271,6 +10274,8 @@ local_system:
                   }
               }
 
+              println!("Current productions after simplification: {}", reachable.len());
+
               if reachable.len() == before_count {
                   break; // Fixed point reached
               }
@@ -17200,7 +17205,8 @@ local_system:
           //    c) Use your IDE's "inline macro" feature on `include_str!` below.
           //    d) Update `test_case_terminals` with the sequence you want to test.
           //    e) Remove the `#[ignore]` attribute and run the test.
-          let ebnf_source = include_str!("../minimized_js.ebnf");
+          // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
+          let ebnf_source = "";
           let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
           let parser = &compiled_grammar.glr_parser;
@@ -17481,7 +17487,7 @@ local_system:
 
           Ok(())
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -19044,6 +19050,8 @@ messages:
                       println!("Reachable productions:\n{}", display_productions(&reachable));
                   }
               }
+
+              println!("Current productions after simplification: {}", reachable.len());
 
               if reachable.len() == before_count {
                   break; // Fixed point reached
@@ -26034,7 +26042,8 @@ messages:
           //    c) Use your IDE's "inline macro" feature on `include_str!` below.
           //    d) Update `test_case_terminals` with the sequence you want to test.
           //    e) Remove the `#[ignore]` attribute and run the test.
-          let ebnf_source = include_str!("../minimized_js.ebnf");
+          // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
+          let ebnf_source = "";
           let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
           let parser = &compiled_grammar.glr_parser;
@@ -26321,5 +26330,330 @@ messages:
       filename: src/test_constraint_js.rs
   - user: Modify `simplify_grammar_for_test_case` so it returns the new start production
       ID.
+    metadata:
+  - assistant: |-
+      Hello! As a helpful assistant, I've analyzed your request to modify `simplify_grammar_for_test_case`. The goal is to make it return the new start production ID after simplification, which is a great idea for making the grammar minimization more robust.
+
+      Here are the necessary changes to achieve this. I've updated the function in `src/glr/minimizer.rs` to return the new productions along with the new start production index. I also fixed a latent bug where it was using an incorrect index to exempt the start rule from being pruned. Consequently, I've updated the test case in `src/test_constraint_js.rs` that uses this function to handle the new return type.
+
+      Here are the diffs for the files:
+
+      In `src/glr/minimizer.rs`, I'll modify `simplify_grammar_for_test_case` to track and return the new start production ID, and fix the exemption logic.
+
+      ```diff
+      --- a/src/glr/minimizer.rs
+      +++ b/src/glr/minimizer.rs
+      @@ -111,7 +111,7 @@
+       pub fn simplify_grammar_for_test_case(
+           productions: &[Production],
+           start_production_id: usize,
+           interesting_terminals: &BTreeSet<Terminal>,
+      -) -> Vec<Production> {
+      +) -> (Vec<Production>, usize) {
+           let start_nt = &productions[start_production_id].lhs;
+       
+           // 1. Remove productions with terminals not in our test case.
+      @@ -137,8 +137,12 @@
+                   }
+               }
+       
+      +        // Find the index of the start production to exempt it from removal.
+      +        let current_start_prod_id = substituted.iter().position(|p| p.lhs == *start_nt);
+      +
+               // Remove productions that now refer to undefined non-terminals.
+      -        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
+      +        let exempt_indices = if let Some(id) = current_start_prod_id { vec![id] } else { vec![] };
+      +        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &exempt_indices);
+               if cleaned.len() != substituted.len() {
+                   println!("simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions", cleaned.len());
+                   if cleaned.len() < 500 {
+      @@ -156,12 +160,16 @@
+               println!("Current productions after simplification: {}", reachable.len());
+       
+               if reachable.len() == before_count {
+      +            current_productions = reachable;
+                   break; // Fixed point reached
+               }
+               current_productions = reachable;
+           }
+       
+      -    current_productions
+      +    let final_start_id = current_productions.iter().position(|p| p.lhs == *start_nt)
+      +        .expect("Start production was removed during simplification");
+      +
+      +    (current_productions, final_start_id)
+       }
+       
+
+      ```
+
+      Next, in `src/test_constraint_js.rs`, I'll update the call to `simplify_grammar_for_test_case` to correctly handle the new return signature.
+
+      ```diff
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -328,17 +328,18 @@
+           println!("Initial production count: {}", full_grammar_def.productions.len());
+       
+           // 3. Minimize the grammar.
+      -    let minimized_productions = crate::glr::minimizer::simplify_grammar_for_test_case(
+      +    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+               &full_grammar_def.productions,
+               full_grammar_def.start_production_id,
+               &interesting_terminals,
+           );
+       
+           // 5. Create and compile the minimized grammar.
+           let minimized_def = GrammarDefinition {
+               productions: minimized_productions,
+      -        start_production_id: 0, // The minimizer should preserve the augmented start rule at index 0.
+      +        start_production_id: minimized_start_id,
+               literal_to_group_id: full_grammar_def.literal_to_group_id.clone(),
+               regex_name_to_group_id: full_grammar_def.regex_name_to_group_id.clone(),
+               regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
+
+      ```
+
+      These changes should accomplish your goal. Let me know if you have any other questions
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/minimizer.rs
+      Applying patch to 'src/glr/minimizer.rs' using custom patcher...
+      Error applying patch to src/glr/minimizer.rs:
+      Hunk #3 (header: @@ -156,12 +160,16 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              println!("Current productions after simplification: {}", reachable.len());
+
+              if reachable.len() == before_count {
+                  break; // Fixed point reached
+              }
+              current_productions = reachable;
+          }
+
+          current_productions
+      }
+
+      --- Expected Context (from patch, after normalization): ---
+      println!("Current productions after simplification: {}", reachable.len());
+
+      if reachable.len() == before_count {
+      break;
+      }
+      current_productions = reachable;
+      }
+
+      current_productions
+      }
+
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 180 with ratio 0.91 (10/11 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + 
+        println!("Current productions after simplification: {}", reachable.len());
+        
+        if reachable.len() == before_count {
+        break;
+        }
+        current_productions = reachable;
+        }
+        
+        current_productions
+        }
+      - 
+      Problematic diff content:
+      ---
+      --- a/src/glr/minimizer.rs
+      +++ b/src/glr/minimizer.rs
+      @@ -111,7 +111,7 @@
+       pub fn simplify_grammar_for_test_case(
+           productions: &[Production],
+           start_production_id: usize,
+           interesting_terminals: &BTreeSet<Terminal>,
+      -) -> Vec<Production> {
+      +) -> (Vec<Production>, usize) {
+           let start_nt = &productions[start_production_id].lhs;
+       
+           // 1. Remove productions with terminals not in our test case.
+      @@ -137,8 +137,12 @@
+                   }
+               }
+       
+      +        // Find the index of the start production to exempt it from removal.
+      +        let current_start_prod_id = substituted.iter().position(|p| p.lhs == *start_nt);
+      +
+               // Remove productions that now refer to undefined non-terminals.
+      -        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
+      +        let exempt_indices = if let Some(id) = current_start_prod_id { vec![id] } else { vec![] };
+      +        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &exempt_indices);
+               if cleaned.len() != substituted.len() {
+                   println!("simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions", cleaned.len());
+                   if cleaned.len() < 500 {
+      @@ -156,12 +160,16 @@
+               println!("Current productions after simplification: {}", reachable.len());
+       
+               if reachable.len() == before_count {
+      +            current_productions = reachable;
+                   break; // Fixed point reached
+               }
+               current_productions = reachable;
+           }
+       
+      -    current_productions
+      +    let final_start_id = current_productions.iter().position(|p| p.lhs == *start_nt)
+      +        .expect("Start production was removed during simplification");
+      +
+      +    (current_productions, final_start_id)
+       }
+       
+
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/minimizer.rs
+      Applying patch to 'src/glr/minimizer.rs' using custom patcher...
+      Error applying patch to src/glr/minimizer.rs:
+      Hunk #3 (header: @@ -156,12 +160,16 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              println!("Current productions after simplification: {}", reachable.len());
+
+              if reachable.len() == before_count {
+                  break; // Fixed point reached
+              }
+              current_productions = reachable;
+          }
+
+          current_productions
+      }
+
+      --- Expected Context (from patch, after normalization): ---
+      println!("Current productions after simplification: {}", reachable.len());
+
+      if reachable.len() == before_count {
+      break;
+      }
+      current_productions = reachable;
+      }
+
+      current_productions
+      }
+
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 180 with ratio 0.91 (10/11 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + 
+        println!("Current productions after simplification: {}", reachable.len());
+        
+        if reachable.len() == before_count {
+        break;
+        }
+        current_productions = reachable;
+        }
+        
+        current_productions
+        }
+      - 
+      Problematic diff content:
+      ---
+      --- a/src/glr/minimizer.rs
+      +++ b/src/glr/minimizer.rs
+      @@ -111,7 +111,7 @@
+       pub fn simplify_grammar_for_test_case(
+           productions: &[Production],
+           start_production_id: usize,
+           interesting_terminals: &BTreeSet<Terminal>,
+      -) -> Vec<Production> {
+      +) -> (Vec<Production>, usize) {
+           let start_nt = &productions[start_production_id].lhs;
+       
+           // 1. Remove productions with terminals not in our test case.
+      @@ -137,8 +137,12 @@
+                   }
+               }
+       
+      +        // Find the index of the start production to exempt it from removal.
+      +        let current_start_prod_id = substituted.iter().position(|p| p.lhs == *start_nt);
+      +
+               // Remove productions that now refer to undefined non-terminals.
+      -        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
+      +        let exempt_indices = if let Some(id) = current_start_prod_id { vec![id] } else { vec![] };
+      +        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &exempt_indices);
+               if cleaned.len() != substituted.len() {
+                   println!("simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions", cleaned.len());
+                   if cleaned.len() < 500 {
+      @@ -156,12 +160,16 @@
+               println!("Current productions after simplification: {}", reachable.len());
+       
+               if reachable.len() == before_count {
+      +            current_productions = reachable;
+                   break; // Fixed point reached
+               }
+               current_productions = reachable;
+           }
+       
+      -    current_productions
+      +    let final_start_id = current_productions.iter().position(|p| p.lhs == *start_nt)
+      +        .expect("Start production was removed during simplification");
+      +
+      +    (current_productions, final_start_id)
+       }
+       
+
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/minimizer.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/minimizer.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/minimizer.rs
     metadata:
 ...

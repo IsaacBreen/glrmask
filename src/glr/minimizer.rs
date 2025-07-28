@@ -51,7 +51,6 @@ pub fn substitute_single_productions_and_report(
         if substitutions.is_empty() {
             break;
         }
-        println!("substitute_single_productions_and_report: Found {} substitutions: {}", substitutions.len(), substitutions.keys().map(|nt| nt.0.clone()).collect::<Vec<_>>().join(", "));
 
         all_substituted_nts.extend(substitutions.keys().cloned());
 
@@ -132,7 +131,7 @@ pub fn simplify_grammar_for_test_case(
     productions: &[Production],
     start_production_id: usize,
     interesting_terminals: &BTreeSet<Terminal>,
-) -> Vec<Production> {
+) -> (Vec<Production>, usize) {
     let start_nt = &productions[start_production_id].lhs;
 
     // 1. Remove productions with terminals not in our test case.
@@ -156,8 +155,12 @@ pub fn simplify_grammar_for_test_case(
             }
         }
 
+        // Find the index of the start production to exempt it from removal.
+        let current_start_prod_id = substituted.iter().position(|p| p.lhs == *start_nt);
+
         // Remove productions that now refer to undefined non-terminals.
-        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
+        let exempt_indices = if let Some(id) = current_start_prod_id { vec![id] } else { vec![] };
+        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &exempt_indices);
         if cleaned.len() != substituted.len() {
             println!("simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions", cleaned.len());
             if cleaned.len() < 500 {
@@ -182,5 +185,9 @@ pub fn simplify_grammar_for_test_case(
         current_productions = reachable;
     }
 
-    current_productions
+    let final_start_id = current_productions.iter().position(|p| p.lhs == *start_nt)
+        .expect("Start production was removed during simplification");
+
+    (current_productions, final_start_id)
 }
+
