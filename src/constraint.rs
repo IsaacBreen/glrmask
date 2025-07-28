@@ -1395,7 +1395,7 @@ impl<'a> GrammarConstraintState<'a> {
         processing_queue.insert(0, std::mem::take(&mut self.state));
 
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
-            crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
+            crate::debug!(4, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
             for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
                 assert!(offset < llm_token_bytes.len());
 
