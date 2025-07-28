@@ -71,6 +71,14 @@ def main():
     # Find all "Processing token..." markers to split the log
     processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
 
+    # Extract setup log (content before the first token processing marker)
+    setup_log = ""
+    if processing_markers:
+        first_marker_start = processing_markers[0].start()
+        setup_log = log_content[:first_marker_start]
+    else:
+        setup_log = log_content # If no tokens, the whole log might be setup info
+
     tokens_data = []
     for i, marker in enumerate(processing_markers):
         start_pos = marker.start()
@@ -135,6 +143,8 @@ def main():
     html_parts.append(html.escape(full_text[last_pos:]))
     code_html = "".join(html_parts)
 
+    escaped_setup_log = html.escape(setup_log)
+
     output_html = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -155,12 +165,17 @@ def main():
 <body>
     <div id="code-container"><pre>{code_html}</pre></div>
     <div id="details-container">
-        <h3>Token Details</h3>
-        <p>Hover over or click a token on the left to see its details.</p>
-        <div id="details-content"></div>
+        <h3>Details</h3>
+        <div id="details-content">
+            <h4>Setup Log</h4>
+            <pre>{escaped_setup_log}</pre>
+            <hr>
+            <p>Hover over or click a token on the left to see its details.</p>
+        </div>
     </div>
 
     <script>
+        const initialDetailsHtml = document.getElementById('details-content').innerHTML;
         let lockedToken = null;
 
         document.getElementById('code-container').addEventListener('mouseover', (e) => {{
@@ -208,7 +223,7 @@ def main():
         }}
         
         function clearDetails() {{
-            document.getElementById('details-content').innerHTML = '<p>Hover over or click a token on the left to see its details.</p>';
+            document.getElementById('details-content').innerHTML = initialDetailsHtml;
         }}
 
         /* -------------------------------------------------------------------
