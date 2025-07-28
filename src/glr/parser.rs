@@ -762,8 +762,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 shifted_states_todo,
                 |row| &row.phase2_shifts_and_reduces,
             );
+            self.phase = ParserPhase::ReadyForPhase3;
         });
     }
+
 
     #[time_it("GLRParserState::reduce_and_goto")]
     fn reduce_and_goto(
@@ -848,7 +850,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
             next_active.merge(state);
         }
         self.active_state = next_active;
-        self.phase = ParserPhase::ReadyForPhase3;
         self.log_gss("Phase1/2-end", token_id);
     }
 
@@ -1022,8 +1023,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(4, "{} - token '{}' ({}) - nodes: {:?}",
-                      phase, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+        crate::debug!(4, "{} ({:?}) - token '{}' ({}) - nodes: {:?}",
+                      phase, self.phase, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {
