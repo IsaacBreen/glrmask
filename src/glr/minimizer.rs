@@ -1,6 +1,7 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::glr::analyze::remove_productions_with_undefined_nonterminals;
+use crate::interface::display_productions;
 
 /// Removes productions that contain terminals not in the `interesting_terminals` set.
 pub fn remove_productions_with_uninteresting_terminals(
@@ -118,6 +119,9 @@ pub fn simplify_grammar_for_test_case(
     // 1. Remove productions with terminals not in our test case.
     let mut current_productions = remove_productions_with_uninteresting_terminals(productions, interesting_terminals);
     println!("After removing uninteresting terminals: {} productions", current_productions.len());
+    if current_productions.len() < 20 {
+        println!("Current productions:\n{}", display_productions(&current_productions));
+    }
 
     // 2. Iteratively apply other simplifications until a fixed point is reached.
     loop {
@@ -127,18 +131,27 @@ pub fn simplify_grammar_for_test_case(
         let substituted = substitute_single_productions(&current_productions, start_nt);
         if substituted.len() != current_productions.len() {
              println!("After substituting single productions: {} productions", substituted.len());
+            if substituted.len() < 20 {
+                println!("Substituted productions:\n{}", display_productions(&substituted));
+            }
         }
 
         // Remove productions that now refer to undefined non-terminals.
         let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
         if cleaned.len() != substituted.len() {
             println!("After removing undefined non-terminals: {} productions", cleaned.len());
+            if cleaned.len() < 20 {
+                println!("Cleaned productions:\n{}", display_productions(&cleaned));
+            }
         }
 
         // Remove productions that are no longer reachable from the start symbol.
         let reachable = eliminate_unreachable_productions(&cleaned, start_nt);
         if reachable.len() != cleaned.len() {
             println!("After eliminating unreachable productions: {} productions", reachable.len());
+            if reachable.len() < 20 {
+                println!("Reachable productions:\n{}", display_productions(&reachable));
+            }
         }
 
         if reachable.len() == before_count {
