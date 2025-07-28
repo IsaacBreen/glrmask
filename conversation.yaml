@@ -1371,11 +1371,15 @@ local_system:
       }
 
       /// Iteratively substitutes non-terminals that have only one production rule.
-      pub fn substitute_single_productions(
+      /// It returns the new set of productions and a set of non-terminals that were substituted.
+      /// The original productions for the substituted non-terminals are kept.
+      pub fn substitute_single_productions_and_report(
           productions: &[Production],
           start_nt: &NonTerminal,
-      ) -> Vec<Production> {
+      ) -> (Vec<Production>, BTreeSet<NonTerminal>) {
           let mut current_prods = productions.to_vec();
+          let mut all_substituted_nts = BTreeSet::new();
+
           loop {
               let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
               for p in &current_prods {
@@ -1384,9 +1388,10 @@ local_system:
 
               let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
               for (nt, prods) in &prods_by_lhs {
+                  // We can substitute a non-terminal if it has a single production,
+                  // is not the start symbol, and the production is not directly recursive.
                   if prods.len() == 1 && nt != start_nt {
                       let single_prod = prods[0];
-                      // Avoid direct recursion `A -> A ...` which would cause infinite substitution
                       if !single_prod.rhs.iter().any(|s| s == &Symbol::NonTerminal(nt.clone())) {
                           substitutions.insert(nt.clone(), single_prod.rhs.clone());
                       }
@@ -1397,24 +1402,28 @@ local_system:
                   break;
               }
 
+              all_substituted_nts.extend(substitutions.keys().cloned());
+
               let mut next_prods = Vec::new();
               for prod in &current_prods {
-                  // Don't include the definitions of the substituted non-terminals
-                  if substitutions.contains_key(&prod.lhs) {
-                      continue;
-                  }
-
-                  let new_rhs = prod.rhs.iter().flat_map(|symbol| {
-                      if let Symbol::NonTerminal(nt) = symbol {
-                          if let Some(subst_rhs) = substitutions.get(nt) {
-                              subst_rhs.clone()
+                  // We substitute into all productions, including the start production.
+                  // We do NOT substitute into the definitions of the non-terminals
+                  // that are themselves being substituted in this pass.
+                  let new_rhs = if substitutions.contains_key(&prod.lhs) {
+                      prod.rhs.clone()
+                  } else {
+                      prod.rhs.iter().flat_map(|symbol| {
+                          if let Symbol::NonTerminal(nt) = symbol {
+                              if let Some(subst_rhs) = substitutions.get(nt) {
+                                  subst_rhs.clone()
+                              } else {
+                                  vec![symbol.clone()]
+                              }
                           } else {
                               vec![symbol.clone()]
                           }
-                      } else {
-                          vec![symbol.clone()]
-                      }
-                  }).collect();
+                      }).collect()
+                  };
 
                   next_prods.push(Production {
                       lhs: prod.lhs.clone(),
@@ -1423,7 +1432,16 @@ local_system:
               }
               current_prods = next_prods;
           }
-          current_prods
+          (current_prods, all_substituted_nts)
+      }
+
+      /// Removes productions whose LHS is in the given set of non-terminals.
+      pub fn remove_productions_for_nts(productions: &[Production], nts_to_remove: &BTreeSet<NonTerminal>) -> Vec<Production> {
+          productions
+              .iter()
+              .filter(|p| !nts_to_remove.contains(&p.lhs))
+              .cloned()
+              .collect()
       }
 
       /// Removes productions whose LHS non-terminal is not reachable from the start symbol.
@@ -1478,7 +1496,8 @@ local_system:
               let before_count = current_productions.len();
 
               // Substitute non-terminals with a single production rule.
-              let substituted = substitute_single_productions(&current_productions, start_nt);
+              let (substituted_with_defs, substituted_nts) = substitute_single_productions_and_report(&current_productions, start_nt);
+              let substituted = remove_productions_for_nts(&substituted_with_defs, &substituted_nts);
               if substituted.len() != current_productions.len() {
                    println!("simplify_grammar_for_test_case: After substituting single productions: {} productions", substituted.len());
                   if substituted.len() < 500 {
@@ -9957,11 +9976,15 @@ local_system:
       }
 
       /// Iteratively substitutes non-terminals that have only one production rule.
-      pub fn substitute_single_productions(
+      /// It returns the new set of productions and a set of non-terminals that were substituted.
+      /// The original productions for the substituted non-terminals are kept.
+      pub fn substitute_single_productions_and_report(
           productions: &[Production],
           start_nt: &NonTerminal,
-      ) -> Vec<Production> {
+      ) -> (Vec<Production>, BTreeSet<NonTerminal>) {
           let mut current_prods = productions.to_vec();
+          let mut all_substituted_nts = BTreeSet::new();
+
           loop {
               let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
               for p in &current_prods {
@@ -9970,9 +9993,10 @@ local_system:
 
               let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
               for (nt, prods) in &prods_by_lhs {
+                  // We can substitute a non-terminal if it has a single production,
+                  // is not the start symbol, and the production is not directly recursive.
                   if prods.len() == 1 && nt != start_nt {
                       let single_prod = prods[0];
-                      // Avoid direct recursion `A -> A ...` which would cause infinite substitution
                       if !single_prod.rhs.iter().any(|s| s == &Symbol::NonTerminal(nt.clone())) {
                           substitutions.insert(nt.clone(), single_prod.rhs.clone());
                       }
@@ -9983,24 +10007,28 @@ local_system:
                   break;
               }
 
+              all_substituted_nts.extend(substitutions.keys().cloned());
+
               let mut next_prods = Vec::new();
               for prod in &current_prods {
-                  // Don't include the definitions of the substituted non-terminals
-                  if substitutions.contains_key(&prod.lhs) {
-                      continue;
-                  }
-
-                  let new_rhs = prod.rhs.iter().flat_map(|symbol| {
-                      if let Symbol::NonTerminal(nt) = symbol {
-                          if let Some(subst_rhs) = substitutions.get(nt) {
-                              subst_rhs.clone()
+                  // We substitute into all productions, including the start production.
+                  // We do NOT substitute into the definitions of the non-terminals
+                  // that are themselves being substituted in this pass.
+                  let new_rhs = if substitutions.contains_key(&prod.lhs) {
+                      prod.rhs.clone()
+                  } else {
+                      prod.rhs.iter().flat_map(|symbol| {
+                          if let Symbol::NonTerminal(nt) = symbol {
+                              if let Some(subst_rhs) = substitutions.get(nt) {
+                                  subst_rhs.clone()
+                              } else {
+                                  vec![symbol.clone()]
+                              }
                           } else {
                               vec![symbol.clone()]
                           }
-                      } else {
-                          vec![symbol.clone()]
-                      }
-                  }).collect();
+                      }).collect()
+                  };
 
                   next_prods.push(Production {
                       lhs: prod.lhs.clone(),
@@ -10009,7 +10037,16 @@ local_system:
               }
               current_prods = next_prods;
           }
-          current_prods
+          (current_prods, all_substituted_nts)
+      }
+
+      /// Removes productions whose LHS is in the given set of non-terminals.
+      pub fn remove_productions_for_nts(productions: &[Production], nts_to_remove: &BTreeSet<NonTerminal>) -> Vec<Production> {
+          productions
+              .iter()
+              .filter(|p| !nts_to_remove.contains(&p.lhs))
+              .cloned()
+              .collect()
       }
 
       /// Removes productions whose LHS non-terminal is not reachable from the start symbol.
@@ -10064,7 +10101,8 @@ local_system:
               let before_count = current_productions.len();
 
               // Substitute non-terminals with a single production rule.
-              let substituted = substitute_single_productions(&current_productions, start_nt);
+              let (substituted_with_defs, substituted_nts) = substitute_single_productions_and_report(&current_productions, start_nt);
+              let substituted = remove_productions_for_nts(&substituted_with_defs, &substituted_nts);
               if substituted.len() != current_productions.len() {
                    println!("simplify_grammar_for_test_case: After substituting single productions: {} productions", substituted.len());
                   if substituted.len() < 500 {
@@ -18586,11 +18624,15 @@ messages:
       }
 
       /// Iteratively substitutes non-terminals that have only one production rule.
-      pub fn substitute_single_productions(
+      /// It returns the new set of productions and a set of non-terminals that were substituted.
+      /// The original productions for the substituted non-terminals are kept.
+      pub fn substitute_single_productions_and_report(
           productions: &[Production],
           start_nt: &NonTerminal,
-      ) -> Vec<Production> {
+      ) -> (Vec<Production>, BTreeSet<NonTerminal>) {
           let mut current_prods = productions.to_vec();
+          let mut all_substituted_nts = BTreeSet::new();
+
           loop {
               let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
               for p in &current_prods {
@@ -18599,9 +18641,10 @@ messages:
 
               let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
               for (nt, prods) in &prods_by_lhs {
+                  // We can substitute a non-terminal if it has a single production,
+                  // is not the start symbol, and the production is not directly recursive.
                   if prods.len() == 1 && nt != start_nt {
                       let single_prod = prods[0];
-                      // Avoid direct recursion `A -> A ...` which would cause infinite substitution
                       if !single_prod.rhs.iter().any(|s| s == &Symbol::NonTerminal(nt.clone())) {
                           substitutions.insert(nt.clone(), single_prod.rhs.clone());
                       }
@@ -18612,24 +18655,28 @@ messages:
                   break;
               }
 
+              all_substituted_nts.extend(substitutions.keys().cloned());
+
               let mut next_prods = Vec::new();
               for prod in &current_prods {
-                  // Don't include the definitions of the substituted non-terminals
-                  if substitutions.contains_key(&prod.lhs) {
-                      continue;
-                  }
-
-                  let new_rhs = prod.rhs.iter().flat_map(|symbol| {
-                      if let Symbol::NonTerminal(nt) = symbol {
-                          if let Some(subst_rhs) = substitutions.get(nt) {
-                              subst_rhs.clone()
+                  // We substitute into all productions, including the start production.
+                  // We do NOT substitute into the definitions of the non-terminals
+                  // that are themselves being substituted in this pass.
+                  let new_rhs = if substitutions.contains_key(&prod.lhs) {
+                      prod.rhs.clone()
+                  } else {
+                      prod.rhs.iter().flat_map(|symbol| {
+                          if let Symbol::NonTerminal(nt) = symbol {
+                              if let Some(subst_rhs) = substitutions.get(nt) {
+                                  subst_rhs.clone()
+                              } else {
+                                  vec![symbol.clone()]
+                              }
                           } else {
                               vec![symbol.clone()]
                           }
-                      } else {
-                          vec![symbol.clone()]
-                      }
-                  }).collect();
+                      }).collect()
+                  };
 
                   next_prods.push(Production {
                       lhs: prod.lhs.clone(),
@@ -18638,7 +18685,16 @@ messages:
               }
               current_prods = next_prods;
           }
-          current_prods
+          (current_prods, all_substituted_nts)
+      }
+
+      /// Removes productions whose LHS is in the given set of non-terminals.
+      pub fn remove_productions_for_nts(productions: &[Production], nts_to_remove: &BTreeSet<NonTerminal>) -> Vec<Production> {
+          productions
+              .iter()
+              .filter(|p| !nts_to_remove.contains(&p.lhs))
+              .cloned()
+              .collect()
       }
 
       /// Removes productions whose LHS non-terminal is not reachable from the start symbol.
@@ -18693,7 +18749,8 @@ messages:
               let before_count = current_productions.len();
 
               // Substitute non-terminals with a single production rule.
-              let substituted = substitute_single_productions(&current_productions, start_nt);
+              let (substituted_with_defs, substituted_nts) = substitute_single_productions_and_report(&current_productions, start_nt);
+              let substituted = remove_productions_for_nts(&substituted_with_defs, &substituted_nts);
               if substituted.len() != current_productions.len() {
                    println!("simplify_grammar_for_test_case: After substituting single productions: {} productions", substituted.len());
                   if substituted.len() < 500 {
@@ -25885,174 +25942,169 @@ messages:
     metadata:
       filename: src/test_constraint_js.rs
   - user: |-
-      `simplify_grammar_for_test_case` doesn't work correctly right now. It seems to fail to substitute into the start production.
-      e.g.
-      ```
-      simplify_grammar_for_test_case: After removing uninteresting terminals: 267 productions
-      Current productions:
-      start' -> start
-      start -> temp start[0]
-      start[0] -> start[0] temp
-      start[0] -> 
-      temp -> property_name ":"
-      ```
-      ...then...
-      ```
-      simplify_grammar_for_test_case: After substituting single productions: 161 productions
-      Substituted productions:
-      start' -> temp start[0]
-      start[0] -> start[0] property_name ":"
-      start[0] -> 
-      ```
-      ie the production for the nonterminal `temp` has been removed, but `temp` hasn't beeing inserted into `start'`.
-      Fix this. Ensure it's substituted inot the start production too. (I think there was some confusion because I asked it earlier to *not **eliminate*** the start production, but it was instead modified to not *substitute into* or *modify* the start production.)
-      And actually, let's not eliminate the substituted productions. Leave them in the grammar. But return them from the function.
-      Define another function that makes it easy to then remove those productions if the user wishes.
+      Add to this code the ability to *dump to* EBNF format, in addition to the current ability to *read from* it.
+      Use it in `test_js_parser_isolated_and_minimized` to dump the minimized grammar.
     metadata:
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your code. Dealing with grammar transformations can be tricky. Based on your description, it seems like the substitution logic isn't being applied to the start production as expected, and you'd like to refactor how substitutions are handled to make the process more modular.
+      Of course! I can help with that. Adding the ability to serialize a grammar back to the EBNF format is a great way to inspect and debug minimized grammars.
 
-      Here are the suggested changes to fix the issue and improve the design:
+      Here are the necessary changes to implement this functionality and use it in your test.
 
-      ### 1. Refactor `substitute_single_productions`
+      ### 1. Add `to_ebnf()` to `GrammarDefinition`
 
-      I'll replace the existing `substitute_single_productions` function with two new, more focused functions:
-
-      *   `substitute_single_productions_and_report`: This function will perform the substitution iteratively as before, but it will **not** remove the productions of the substituted non-terminals. Instead, it will return both the transformed grammar and a set of non-terminals that were substituted.
-      *   `remove_productions_for_nts`: A simple helper function to filter out productions for a given set of non-terminals.
-
-      This refactoring makes the substitution step non-destructive and gives you more control over the simplification process.
-
-      ### 2. Update `simplify_grammar_for_test_case`
-
-      I'll update `simplify_grammar_for_test_case` to use these new functions. It will now call `substitute_single_productions_and_report` to get the modified grammar and the set of substituted non-terminals, and then explicitly call `remove_productions_for_nts` to complete the step. This change should also resolve the bug where the start production was not being correctly modified.
-
-      Here are the diffs for the required changes:
-
-      In `src/glr/minimizer.rs`, I'll replace the substitution logic and update the main simplification function.
+      I'll add the `to_ebnf` method to your `GrammarDefinition` struct. This method will iterate over the productions, group them by the left-hand side non-terminal, and format them into a readable EBNF string. It will also handle quoting for terminals that are not valid EBNF identifiers.
 
       ```diff
-      --- a/src/glr/minimizer.rs
-      +++ b/src/glr/minimizer.rs
-      @@ -14,56 +14,60 @@
-               .collect()
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -200,6 +200,61 @@
+           result
        }
        
-      -/// Iteratively substitutes non-terminals that have only one production rule.
-      -pub fn substitute_single_productions(
-      +/// Iteratively substitutes non-terminals that have only one production rule.
-      +/// It returns the new set of productions and a set of non-terminals that were substituted.
-      +/// The original productions for the substituted non-terminals are kept.
-      +pub fn substitute_single_productions_and_report(
-           productions: &[Production],
-           start_nt: &NonTerminal,
-      -) -> Vec<Production> {
-      +) -> (Vec<Production>, BTreeSet<NonTerminal>) {
-           let mut current_prods = productions.to_vec();
-      +    let mut all_substituted_nts = BTreeSet::new();
-      +
-           loop {
-               let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
-               for p in &current_prods {
-                   prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
-               }
-       
-               let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
-               for (nt, prods) in &prods_by_lhs {
-      +            // We can substitute a non-terminal if it has a single production,
-      +            // is not the start symbol, and the production is not directly recursive.
-                   if prods.len() == 1 && nt != start_nt {
-                       let single_prod = prods[0];
-      -                // Avoid direct recursion `A -> A ...` which would cause infinite substitution
-                       if !single_prod.rhs.iter().any(|s| s == &Symbol::NonTerminal(nt.clone())) {
-                           substitutions.insert(nt.clone(), single_prod.rhs.clone());
-                       }
-                   }
-               }
-       
-               if substitutions.is_empty() {
-                   break;
-               }
-       
-      +        all_substituted_nts.extend(substitutions.keys().cloned());
-      +
-               let mut next_prods = Vec::new();
-               for prod in &current_prods {
-      -            // Don't include the definitions of the substituted non-terminals
-      -            if substitutions.contains_key(&prod.lhs) {
-      -                continue;
-      -            }
-      -
-      -            let new_rhs = prod.rhs.iter().flat_map(|symbol| {
-      -                if let Symbol::NonTerminal(nt) = symbol {
-      -                    if let Some(subst_rhs) = substitutions.get(nt) {
-      -                        subst_rhs.clone()
-      +            // We substitute into all productions, including the start production.
-      +            // We do NOT substitute into the definitions of the non-terminals
-      +            // that are themselves being substituted in this pass.
-      +            let new_rhs = if substitutions.contains_key(&prod.lhs) {
-      +                prod.rhs.clone()
-      +            } else {
-      +                prod.rhs.iter().flat_map(|symbol| {
-      +                    if let Symbol::NonTerminal(nt) = symbol {
-      +                        if let Some(subst_rhs) = substitutions.get(nt) {
-      +                            subst_rhs.clone()
-      +                        } else {
-      +                            vec![symbol.clone()]
-      +                        }
-                           } else {
-                               vec![symbol.clone()]
-                           }
-      -                } else {
-      -                    vec![symbol.clone()]
-      -                }
-      -            }).collect();
-      +                }).collect()
-      +            };
-       
-                   next_prods.push(Production {
-                       lhs: prod.lhs.clone(),
-      @@ -72,8 +76,16 @@
-               }
-               current_prods = next_prods;
-           }
-      -    current_prods
-      +    (current_prods, all_substituted_nts)
-       }
-      +
-      +/// Removes productions whose LHS is in the given set of non-terminals.
-      +pub fn remove_productions_for_nts(productions: &[Production], nts_to_remove: &BTreeSet<NonTerminal>) -> Vec<Production> {
-      +    productions
-      +        .iter()
-      +        .filter(|p| !nts_to_remove.contains(&p.lhs))
-      +        .cloned()
-      +        .collect()
+      +/// Checks if a string is a valid identifier according to the EBNF tokenizer's rules.
+      +fn is_ebnf_ident(s: &str) -> bool {
+      +    let mut chars = s.chars();
+      +    if let Some(first) = chars.next() {
+      +        if !first.is_ascii_alphabetic() && first != '_' {
+      +            return false;
+      +        }
+      +    } else {
+      +        return false; // empty string
+      +    }
+      +    for c in chars {
+      +        if !c.is_ascii_alphanumeric() && c != '_' {
+      +            return false;
+      +        }
+      +    }
+      +    true
       +}
-       
-       /// Removes productions whose LHS non-terminal is not reachable from the start symbol.
-       pub fn eliminate_unreachable_productions(
-      @@ -115,7 +127,8 @@
-               let before_count = current_productions.len();
-       
-               // Substitute non-terminals with a single production rule.
-      -        let substituted = substitute_single_productions(&current_productions, start_nt);
-      +        let (substituted_with_defs, substituted_nts) = substitute_single_productions_and_report(&current_productions, start_nt);
-      +        let substituted = remove_productions_for_nts(&substituted_with_defs, &substituted_nts);
-               if substituted.len() != current_productions.len() {
-                    println!("simplify_grammar_for_test_case: After substituting single productions: {} productions", substituted.len());
-                   if substituted.len() < 500 {
+      +
+      +impl GrammarDefinition {
+      +    /// Converts the grammar definition back into a string in EBNF format.
+      +    ///
+      +    /// This is useful for debugging and inspecting grammars, especially after minimization.
+      +    /// Note that this is a direct translation of the production rules and will not reconstruct
+      +    /// higher-level EBNF operators like `*`, `+`, or `?`.
+      +    pub fn to_ebnf(&self) -> String {
+      +        let mut ebnf_string = String::new();
+      +
+      +        // Group productions by LHS
+      +        let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&[Symbol]>> = BTreeMap::new();
+      +        for prod in &self.productions {
+      +            prods_by_lhs.entry(prod.lhs.clone()).or_default().push(&prod.rhs);
+      +        }
+      +
+      +        // Process non-terminals in alphabetical order for deterministic output.
+      +        for (nt, rhss) in prods_by_lhs {
+      +            ebnf_string.push_str(&format!("{} ::= ", nt.0));
+      +
+      +            for (i, rhs) in rhss.iter().enumerate() {
+      +                if i > 0 {
+      +                    ebnf_string.push_str("\n  | ");
+      +                }
+      +
+      +                if rhs.is_empty() {
+      +                    // Epsilon production is an empty sequence before the semicolon.
+      +                } else {
+      +                    let rhs_str: Vec<String> = rhs.iter().map(|symbol| match symbol {
+      +                        Symbol::NonTerminal(nt) => nt.0.clone(),
+      +                        Symbol::Terminal(t) => t.to_string(),
+      +                    }).collect();
+      +                    ebnf_string.push_str(&rhs_str.join(" "));
+      +                }
+      +            }
+      +            ebnf_string.push_str(" ;\n");
+      +        }
+      +        ebnf_string
+      +    }
+      +}
+      +
+       impl GrammarDefinition {
+           pub fn simplify(&mut self) {
+               // Simplify the grammar definition
 
       ```
 
-      These changes should correct the substitution logic and provide a cleaner, more modular way to simplify your grammar. Let me know if you have any other questions
+      ### 2. Update `Display` for `Terminal` to handle quoting
+
+      To ensure terminals are correctly formatted as literals when needed, I'll adjust the `Display` implementation for `Terminal`. This makes the `to_ebnf` function cleaner and ensures terminals are always represented correctly.
+
+      ```diff
+      --- a/src/glr/grammar.rs
+      +++ b/src/glr/grammar.rs
+      @@ -55,8 +55,21 @@
+       impl Display for Terminal {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               match self {
+      -            Terminal::RegexName(name) => write!(f, "{}", name),
+      -            Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+      +            Terminal::RegexName(name) => {
+      +                // Check if the name is a valid EBNF identifier. If not, quote it.
+      +                let mut chars = name.chars();
+      +                let is_ident = if let Some(first) = chars.next() {
+      +                    (first.is_ascii_alphabetic() || first == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+      +                } else {
+      +                    false
+      +                };
+      +
+      +                if is_ident {
+      +                    write!(f, "{}", name)
+      +                } else {
+      +                    write!(f, "'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+      +                }
+      +            },
+      +            Terminal::Literal(bytes) => {
+      +                let s = String::from_utf8_lossy(bytes);
+      +                write!(f, "'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+      +            },
+               }
+           }
+       }
+
+      ```
+
+      ### 3. Use `to_ebnf()` in the test
+
+      Finally, I'll update `test_js_parser_isolated_and_minimized` to call the new `to_ebnf()` method and print the result, as you requested.
+
+      ```diff
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -260,6 +260,12 @@
+           println!("\n--- Minimized Grammar ---");
+           println!("{}", minimized_def);
+       
+      +    // DUMP TO EBNF
+      +    let minimized_ebnf = minimized_def.to_ebnf();
+      +    println!("\n--- Minimized Grammar (EBNF) ---");
+      +    println!("{}", minimized_ebnf);
+      +    fs::write("minimized_js.ebnf", minimized_ebnf)?;
+      +
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+       
+           let parser = &compiled_grammar.glr_parser;
+
+      ```
+
+      These changes will provide the requested functionality. The minimized grammar from your test will now be printed to the console in EBNF format and also saved to a file named `minimized_js.ebnf` for easier inspection. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/minimizer.rs
-      Applying patch to 'src/glr/minimizer.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/minimizer.rs.
+      Identified target file: src/interface/interface.rs
+      Applying patch to 'src/interface/interface.rs' using custom patcher...
+      Successfully applied patch and wrote to src/interface/interface.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/grammar.rs
+      Applying patch to 'src/glr/grammar.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/grammar.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
     metadata:
 ...

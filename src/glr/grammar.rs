@@ -64,8 +64,25 @@ impl JSONConvertible for Terminal {
 impl Display for Terminal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Terminal::RegexName(name) => write!(f, "{}", name),
-            Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+            Terminal::RegexName(name) => {
+                // Check if the name is a valid EBNF identifier. If not, quote it.
+                let mut chars = name.chars();
+                let is_ident = if let Some(first) = chars.next() {
+                    (first.is_ascii_alphabetic() || first == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                } else {
+                    false
+                };
+
+                if is_ident {
+                    write!(f, "{}", name)
+                } else {
+                    write!(f, "'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+                }
+            },
+            Terminal::Literal(bytes) => {
+                let s = String::from_utf8_lossy(bytes);
+                write!(f, "'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+            },
         }
     }
 }

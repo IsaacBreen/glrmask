@@ -292,6 +292,64 @@ pub fn display_productions(productions: &[Production]) -> String {
     result
 }
 
+/// Checks if a string is a valid identifier according to the EBNF tokenizer's rules.
+fn is_ebnf_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    if let Some(first) = chars.next() {
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return false;
+        }
+    } else {
+        return false; // empty string
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() && c != '_' {
+            return false;
+        }
+    }
+    true
+}
+
+impl GrammarDefinition {
+    /// Converts the grammar definition back into a string in EBNF format.
+    ///
+    /// This is useful for debugging and inspecting grammars, especially after minimization.
+    /// Note that this is a direct translation of the production rules and will not reconstruct
+    /// higher-level EBNF operators like `*`, `+`, or `?`.
+    pub fn to_ebnf(&self) -> String {
+        let mut ebnf_string = String::new();
+
+        // Group productions by LHS
+        let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&[Symbol]>> = BTreeMap::new();
+        for prod in &self.productions {
+            prods_by_lhs.entry(prod.lhs.clone()).or_default().push(&prod.rhs);
+        }
+
+        // Process non-terminals in alphabetical order for deterministic output.
+        for (nt, rhss) in prods_by_lhs {
+            ebnf_string.push_str(&format!("{} ::= ", nt.0));
+
+            for (i, rhs) in rhss.iter().enumerate() {
+                if i > 0 {
+                    ebnf_string.push_str("\n  | ");
+                }
+
+                if rhs.is_empty() {
+                    // Epsilon production is an empty sequence before the semicolon.
+                } else {
+                    let rhs_str: Vec<String> = rhs.iter().map(|symbol| match symbol {
+                        Symbol::NonTerminal(nt) => nt.0.clone(),
+                        Symbol::Terminal(t) => t.to_string(),
+                    }).collect();
+                    ebnf_string.push_str(&rhs_str.join(" "));
+                }
+            }
+            ebnf_string.push_str(" ;\n");
+        }
+        ebnf_string
+    }
+}
+
 impl GrammarDefinition {
     pub fn simplify(&mut self) {
         // Simplify the grammar definition

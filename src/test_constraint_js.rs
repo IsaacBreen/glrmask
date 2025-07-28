@@ -379,6 +379,12 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
     println!("\n--- Minimized Grammar ---");
     println!("{}", minimized_def);
 
+    // DUMP TO EBNF
+    let minimized_ebnf = minimized_def.to_ebnf();
+    println!("\n--- Minimized Grammar (EBNF) ---");
+    println!("{}", minimized_ebnf);
+    fs::write("minimized_js.ebnf", minimized_ebnf)?;
+
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
 
     let parser = &compiled_grammar.glr_parser;
