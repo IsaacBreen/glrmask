@@ -348,8 +348,8 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     // 7. Saves the minimized grammar to an EBNF file for use in template tests.
 
     // 1. Define the test case.
-    let input_string = "var x = 1;";
-    let llm_token_strs = &["var", " ", "x", "=", "1", ";"];
+    let input_string = include_str!("../src/example_code.js");
+    let llm_token_strs = &["[x]:", " &"];
     let mut llm_token_map = LLMTokenMap::new();
     for (i, &token_str) in llm_token_strs.iter().enumerate() {
         llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
