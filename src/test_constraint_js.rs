@@ -441,7 +441,8 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
     //    b) Copy this test function and rename it.
     //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
     //    d) Remove the `#[ignore]` attribute and run the test.
-    let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
+    // let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
+    let ebnf_source = fs::read_to_string("minimized_js_for_constraint.ebnf")?;
     let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
 
@@ -567,7 +568,7 @@ fn test_template_from_minimized_ebnf() -> Result<(), Box<dyn std::error::Error>>
     //    d) Update `test_case_terminals` with the sequence you want to test.
     //    e) Remove the `#[ignore]` attribute and run the test.
     // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
-    let ebnf_source = "";
+    let ebnf_source = fs::read_to_string("minimized_js.ebnf")?;
     let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
     let parser = &compiled_grammar.glr_parser;
