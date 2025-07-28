@@ -634,7 +634,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
-            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal {} not found in map", nonterminal));
+            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
             let goto = Goto {
                 state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
                 accept: false,
