@@ -1,7 +1,7 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 !ignore IGNORE;
 
-start ::= temp+ ;
+start ::= temp ;
 temp ::= '[' 'x' ']' ':' ;
 program ::= statement_list? ;
 
