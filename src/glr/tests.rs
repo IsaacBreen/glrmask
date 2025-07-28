@@ -1,4 +1,4 @@
-use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
@@ -39,7 +39,7 @@ fn test_repetition_no_eof() {
     let parser = generate_glr_parser(&productions, 0, None);
     println!("Parser: {}", parser);
 
-    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
 
     // Test case 1: "a"
     let tokens1 = vec![a_token];
@@ -73,8 +73,8 @@ fn test_repetition_no_eof() {
         prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
     ];
     let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
-    let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
-    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
+    let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
+    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
 
     let tokens4 = vec![b_token];
     let mut state4 = parser_with_b.init_glr_parser(None);
@@ -115,7 +115,7 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
     input
         .chars()
         .filter_map(|c| {
-            parser.terminal_map.get_by_left(&regex(&c.to_string()))
+            parser.terminal_map.get_by_left(&regex_name(&c.to_string()))
                 .copied()
         })
         .collect()
@@ -133,8 +133,8 @@ fn test_super_simple_grammar() {
     let parser = generate_glr_parser(&productions, 0, None);
     println!("Parser: {}", parser);
     
-    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
-    let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+    let eof_token = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
 
     // Test case 1: Valid input "a$"
     let mut state_ok = parser.init_glr_parser(None);
@@ -153,7 +153,7 @@ fn test_simple_parse_table_generation_and_parse() {
     // This test now implicitly checks that the simple grammar passes validation.
     let parser = create_simple_parser();
     println!("Parser: {}", parser);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     // dbg!(&parser); // Keep commented unless debugging needed
 
     let test_cases = [
@@ -183,7 +183,7 @@ fn test_simple_parse_table_generation_and_parse() {
 fn test_expression_parse_table_generation_and_parse() {
     // This test now implicitly checks that the expression grammar passes validation.
     let parser = create_expression_parser();
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     // dbg!(&parser); // Keep commented unless debugging needed
 
     let test_cases = [
@@ -464,17 +464,17 @@ fn test_ambiguous_dangling_else() {
         prod("Expr", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
-        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("else")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
     ];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -501,13 +501,13 @@ fn test_ambiguous_arithmetic() {
         prod("E", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
-        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("+")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("*")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
     ];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -540,8 +540,8 @@ fn test_reduce_reduce_conflict() {
         prod("B", vec![t("x")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
-    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
     state.parse(&tokens);
@@ -569,8 +569,8 @@ fn test_epsilon_rules_ambiguity() {
     ];
     let parser = generate_glr_parser(&productions, 0, None);
     println!("Parser: {}", parser);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
-    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
     
     // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
     // state.step(eof);
@@ -596,11 +596,11 @@ fn test_highly_ambiguous_potentially_slow() {
         prod("S", vec![t("a")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
-        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
-        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
     ];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -672,7 +672,7 @@ fn test_right_recursive_grammar_parse() {
 
     // The generation process automatically resolves the right recursion.
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
 
     let test_cases = [
         ("b", true),
@@ -717,7 +717,7 @@ fn test_hidden_right_recursion() {
     assert!(analyze::validate(&productions).is_ok());
 
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
 
     let test_cases = [
         ("b", true),    // S -> b
@@ -755,9 +755,9 @@ fn test_nullable_nonterminal_before_terminal() {
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
-    let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
-    let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
+    let eof_token_id = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+    let c_token_id = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
+    let d_token_id = *parser.terminal_map.get_by_left(&regex_name("d")).unwrap();
     
     println!("Parser: {}", parser);
 
@@ -810,7 +810,7 @@ fn test_filter_productions_selectivity() {
         prod("B", vec![t("b")]),              // P3
     ];
 
-    let t_int_symbol = Symbol::Terminal(regex("T_int"));
+    let t_int_symbol = Symbol::Terminal(regex_name("T_int"));
     let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
 
     let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
@@ -874,7 +874,7 @@ fn test_standard_expression_grammar_parse() {
     // Helper to tokenize space-separated terminal names
     fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
         input_str.split_whitespace() // This is fine, it's a comment
-            .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
+            .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
             .collect()
     }
 
@@ -1037,7 +1037,7 @@ fn test_explain_stack() {
     
     // Let's find the actual state IDs from the generated parser.
     let start_state = parser.start_state_id;
-    let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
+    let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
     
     let start_row = &parser.stage_7_table[&start_state];
     let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
@@ -1134,7 +1134,7 @@ fn test_lr1_not_lalr1_grammar() {
     assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
     assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
 
-    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
 
     let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
 

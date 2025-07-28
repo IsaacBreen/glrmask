@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, rep1};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
@@ -56,15 +56,15 @@ fn test_trivial() {
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("A"), TerminalID(0));
-    grammar_token_map.insert(regex("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
+    grammar_token_map.insert(regex_name("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
     println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex("A"), 0);
-    token_name_map.insert(regex("EOF"), 1);
+    token_name_map.insert(regex_name("A"), 0);
+    token_name_map.insert(regex_name("EOF"), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -118,10 +118,10 @@ fn test_constraint_simple() {
 
     // Grammar Terminals mapped to Tokenizer IDs
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
-    grammar_token_map.insert(regex("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
-    grammar_token_map.insert(regex("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
-    grammar_token_map.insert(regex("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
+    grammar_token_map.insert(regex_name("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
+    grammar_token_map.insert(regex_name("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+    grammar_token_map.insert(regex_name("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
 
     let productions = vec![
         prod("S", vec![nt("X"), t("EOF")]), // S -> X $
@@ -183,7 +183,7 @@ fn test_constraint_simple() {
     for grammar_tokens in grammar_tokenss {
         let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
         for grammar_token in grammar_tokens {
-            let grammar_token_id = grammar_token_map.get_by_left(&regex(grammar_token)).unwrap();
+            let grammar_token_id = grammar_token_map.get_by_left(&regex_name(grammar_token)).unwrap();
             parser_state.step(*grammar_token_id);
         }
         parser_state_for_comp.merge_with(parser_state);
@@ -239,12 +239,12 @@ fn test_constraint_expression() {
     ];
     // Map grammar terminals to IDs matching regex order
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("PLUS"), TerminalID(0));
-    grammar_token_map.insert(regex("TIMES"), TerminalID(1));
-    grammar_token_map.insert(regex("LPAREN"), TerminalID(2));
-    grammar_token_map.insert(regex("RPAREN"), TerminalID(3));
-    grammar_token_map.insert(regex("I"), TerminalID(4));
-    grammar_token_map.insert(regex("EOF"), TerminalID(5));
+    grammar_token_map.insert(regex_name("PLUS"), TerminalID(0));
+    grammar_token_map.insert(regex_name("TIMES"), TerminalID(1));
+    grammar_token_map.insert(regex_name("LPAREN"), TerminalID(2));
+    grammar_token_map.insert(regex_name("RPAREN"), TerminalID(3));
+    grammar_token_map.insert(regex_name("I"), TerminalID(4));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(5));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
     println!("Parser: {}", parser);
@@ -285,7 +285,7 @@ fn test_constraint_expression() {
     let llm_token = b"(i".to_vec();
     let grammar_tokens = vec!["LPAREN", "I"];
     let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-    let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex(token)).unwrap()).collect::<Vec<_>>();
+    let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex_name(token)).unwrap()).collect::<Vec<_>>();
 
     let mut constraint_state_for_comp = constraint.init();
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
@@ -426,8 +426,8 @@ fn test_aborted_tokenizer_restart_equivalence() {
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    let terminal_a = regex("A");
-    let terminal_hash_opt_a = regex("HASH_OPT_A");
+    let terminal_a = regex_name("A");
+    let terminal_hash_opt_a = regex_name("HASH_OPT_A");
     grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
     grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -452,8 +452,8 @@ fn test_aborted_tokenizer_restart_equivalence() {
 
     // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
     let mut token_name_map_for_constraint = BiBTreeMap::new();
-    token_name_map_for_constraint.insert(regex("A"), 0);
-    token_name_map_for_constraint.insert(regex("HASH_OPT_A"), 1);
+    token_name_map_for_constraint.insert(regex_name("A"), 0);
+    token_name_map_for_constraint.insert(regex_name("HASH_OPT_A"), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -516,8 +516,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    let terminal_a = regex("A");
-    let terminal_hash_opt_aa = regex("HASH_OPT_AA");
+    let terminal_a = regex_name("A");
+    let terminal_hash_opt_aa = regex_name("HASH_OPT_AA");
     grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
     grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -541,8 +541,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     let max_original_llm_token_id = 2;
 
     let mut token_name_map_for_constraint = BiBTreeMap::new();
-    token_name_map_for_constraint.insert(regex("A"), 0);
-    token_name_map_for_constraint.insert(regex("HASH_OPT_AA"), 1);
+    token_name_map_for_constraint.insert(regex_name("A"), 0);
+    token_name_map_for_constraint.insert(regex_name("HASH_OPT_AA"), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -616,7 +616,7 @@ fn test_a_plus_commit_equivalence() {
 
     // 3. Map grammar terminal "A" to tokenizer group ID 0
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("A"), TerminalID(0));
 
     // 4. Create the Parser
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
@@ -631,7 +631,7 @@ fn test_a_plus_commit_equivalence() {
 
     // 6. Token name map for stats/debugging
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex("A"), 0); // Maps "A" to tokenizer group ID 0
+    token_name_map.insert(regex_name("A"), 0); // Maps "A" to tokenizer group ID 0
 
     // 7. Create the GrammarConstraint
     let constraint = GrammarConstraint::new(
@@ -685,7 +685,7 @@ fn test_hideous_ambiguity() {
 
     // 4. Token Name Map
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
+    token_name_map.insert(regex_name("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
 
     // 5. Create the Parser
     let parser = generate_glr_parser(&productions, 0, None);
@@ -742,7 +742,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 4. Map grammar terminals "DEF_T" to tokenizer group ID 0
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("DEF_T"), TerminalID(0));
+    grammar_token_map.insert(regex_name("DEF_T"), TerminalID(0));
     // Note: For this minimal test focusing on the initial mask for "def",
     // we don't strictly need an EOF terminal in the grammar or tokenizer if
     // the goal is just to see "def" allowed initially.
@@ -757,7 +757,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
     let mut token_name_map_for_stats = BiBTreeMap::new();
-    token_name_map_for_stats.insert(regex("DEF_T"), 0);
+    token_name_map_for_stats.insert(regex_name("DEF_T"), 0);
 
     // 6. Create the GrammarConstraint
     let constraint = GrammarConstraint::new(
@@ -807,13 +807,13 @@ fn test_precompute_a_plus_tokenizer() {
 
     // Map grammar terminal to tokenizer group
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("A_PLUS"), TerminalID(0));
+    grammar_token_map.insert(regex_name("A_PLUS"), TerminalID(0));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex("A_PLUS"), 0);
+    token_name_map.insert(regex_name("A_PLUS"), 0);
 
     // Create the constraint, which runs precomputation
     let constraint = GrammarConstraint::new(
@@ -872,19 +872,19 @@ fn test_precompute_x_eq() {
 
     // Map grammar terminal to tokenizer group
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex("X"), TerminalID(0));      // 'x' is group 0
-    grammar_token_map.insert(regex("SPACE"), TerminalID(1));  // ' ' is group 1
-    grammar_token_map.insert(regex("EQUALS"), TerminalID(2)); // '=' is group 2
-    grammar_token_map.insert(regex("ANY"), TerminalID(3));    // Anything else is group 3
+    grammar_token_map.insert(regex_name("X"), TerminalID(0));      // 'x' is group 0
+    grammar_token_map.insert(regex_name("SPACE"), TerminalID(1));  // ' ' is group 1
+    grammar_token_map.insert(regex_name("EQUALS"), TerminalID(2)); // '=' is group 2
+    grammar_token_map.insert(regex_name("ANY"), TerminalID(3));    // Anything else is group 3
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex("X"), 0);
-    token_name_map.insert(regex("SPACE"), 1);
-    token_name_map.insert(regex("EQUALS"), 2);
-    token_name_map.insert(regex("ANY"), 3);
+    token_name_map.insert(regex_name("X"), 0);
+    token_name_map.insert(regex_name("SPACE"), 1);
+    token_name_map.insert(regex_name("EQUALS"), 2);
+    token_name_map.insert(regex_name("ANY"), 3);
 
     // Create the constraint, which runs precomputation
     let constraint = GrammarConstraint::new(
@@ -909,9 +909,9 @@ fn test_precompute_x_eq() {
     assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
 
     // Get the grammar token IDs for our terminals
-    let x_tid = *grammar_token_map.get_by_left(&regex("X")).unwrap();
-    let space_tid = *grammar_token_map.get_by_left(&regex("SPACE")).unwrap();
-    let equals_tid = *grammar_token_map.get_by_left(&regex("EQUALS")).unwrap();
+    let x_tid = *grammar_token_map.get_by_left(&regex_name("X")).unwrap();
+    let space_tid = *grammar_token_map.get_by_left(&regex_name("SPACE")).unwrap();
+    let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
 
     // Get the LLM token IDs
     let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::fs;
 use std::collections::BTreeMap as StdMap;
 use crate::glr::analyze::{simplify_grammar};
-use crate::glr::grammar::regex;
+use crate::glr::grammar::regex_name;
 use crate::datastructures::u8set::U8Set;
 
 type LLMToken<'a> = &'a [u8];
@@ -144,7 +144,7 @@ impl GrammarDefinition {
     pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
         let mut terminal_to_group_id = BiBTreeMap::new();
         for (name, group_id) in &self.regex_name_to_group_id {
-            let terminal = Terminal::Regex(name.clone());
+            let terminal = Terminal::RegexName(name.clone());
             terminal_to_group_id.insert(terminal, *group_id);
         }
         for (literal, group_id) in &self.literal_to_group_id {
@@ -377,7 +377,7 @@ impl GrammarDefinition {
                 if nonterminal_names.contains(name.as_str()) {
                     Ok((vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()))
                 } else {
-                    Ok((vec![Symbol::Terminal(regex(name))], Vec::new()))
+                    Ok((vec![Symbol::Terminal(regex_name(name))], Vec::new()))
                 }
             }
             GrammarExpr::Sequence(exprs) => {
@@ -777,7 +777,7 @@ impl GrammarDefinition {
                 .into_iter()
                 .filter(|sym| {
                     match sym {
-                        Symbol::Terminal(Terminal::Regex(t)) => !always_null_terminals.contains(t),
+                        Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
                         _                   => true,
                     }
                 })
@@ -811,7 +811,7 @@ impl GrammarDefinition {
             //     productions with the new optional non-terminal.
             for prod in productions.iter_mut() {
                 for sym in &mut prod.rhs {
-                    if let Symbol::Terminal(Terminal::Regex(t)) = sym {
+                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
                         if t == terminal_name {
                             *sym = Symbol::NonTerminal(opt_nt.clone());
                         }
@@ -824,7 +824,7 @@ impl GrammarDefinition {
             //         <opt_nt>  ->  ε
             productions.push(Production {
                 lhs: opt_nt.clone(),
-                rhs: vec![Symbol::Terminal(regex(&terminal_name))],
+                rhs: vec![Symbol::Terminal(regex_name(&terminal_name))],
             });
             productions.push(Production {
                 lhs: opt_nt.clone(),
@@ -1014,7 +1014,7 @@ impl CompiledGrammar {
         let tokenizer = tokenizer_expr_groups_obj.build();
 
         debug!(2, "Building GLR parser from definition");
-        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::Regex(name.clone()), TerminalID(*group_id))).collect();
+        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
         for (val_bytes, group_id) in &definition.literal_to_group_id {
             terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
         }
@@ -1347,14 +1347,14 @@ mod tests {
         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
 
         let mut regex_name_to_group_id = BiBTreeMap::new();
-        regex_name_to_group_id.insert(regex(&"ignore"), 0);
-        regex_name_to_group_id.insert(regex(&"digit"), 1);
-        regex_name_to_group_id.insert(regex(&"alph_lower"), 2);
-        regex_name_to_group_id.insert(regex(&"alph_upper"), 3);
-        regex_name_to_group_id.insert(regex(&"underscore"), 4);
-        regex_name_to_group_id.insert(regex(&"name_start"), 5);
-        regex_name_to_group_id.insert(regex(&"name_middle"), 6);
-        regex_name_to_group_id.insert(regex(&"name"), 7);
+        regex_name_to_group_id.insert(regex_name(&"ignore"), 0);
+        regex_name_to_group_id.insert(regex_name(&"digit"), 1);
+        regex_name_to_group_id.insert(regex_name(&"alph_lower"), 2);
+        regex_name_to_group_id.insert(regex_name(&"alph_upper"), 3);
+        regex_name_to_group_id.insert(regex_name(&"underscore"), 4);
+        regex_name_to_group_id.insert(regex_name(&"name_start"), 5);
+        regex_name_to_group_id.insert(regex_name(&"name_middle"), 6);
+        regex_name_to_group_id.insert(regex_name(&"name"), 7);
 
         // This test was originally for GrammarConstraint::precompute, which is internal.
         // We can't directly test precompute without a full GrammarConstraint.
@@ -1846,7 +1846,7 @@ mod tests {
         let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
         let term_eps_expr = RegexExpr::Epsilon;
         let term_z_expr = eat_u8(b'z');
-        use crate::glr::grammar::regex;
+        use crate::glr::grammar::regex_name;
         let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
         let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
@@ -1874,7 +1874,7 @@ mod tests {
         for prod in &grammar_def.productions {
             // Check for NT -> name_term_x_opt
             if prod.rhs.len() == 1 {
-                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
                     if t == &name_term_x_opt {
                         // This production is NT -> name_term_x_opt. The LHS is a candidate.
                         let candidate_nt_name = prod.lhs.0.clone();
@@ -1905,8 +1905,8 @@ mod tests {
         // Define the set of expected productions
         let expected_prods_set = BTreeSet::from([
             Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
-            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
-            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
         ]);
 
@@ -1932,7 +1932,7 @@ mod tests {
         for prod in &grammar_def.productions {
             for sym in &prod.rhs {
                 if let Sym::Terminal(t) = sym {
-                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
                 }
             }
         }

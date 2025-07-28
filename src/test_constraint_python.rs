@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, Match};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, StateID};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
@@ -128,8 +128,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Create token_name_map for grammar tokens
     // Our tokenizer has one grammar token (GroupID 0)
     let mut token_name_map: BiBTreeMap<Terminal, usize> = BiBTreeMap::new();
-    token_name_map.insert(regex("FSTRING_MIDDLE"), 0);
-    token_name_map.insert(regex("DEF"), 1);
+    token_name_map.insert(regex_name("FSTRING_MIDDLE"), 0);
+    token_name_map.insert(regex_name("DEF"), 1);
 
     // 4. Call precompute
     println!(
@@ -431,7 +431,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let mut current_sequence_token_names_valid = true;
 
         for token_name in seq_terminal_names {
-            if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
+            if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex_name(token_name)) {
                 terminal_id_sequence.push(terminal_id_val);
             } else {
                 println!(
@@ -715,7 +715,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // 2. Get the TerminalID for the terminal we are interested in.
         let newline_terminal_name = "IGNORE[0][0][1]".to_string();
         let newline_terminal_id = grammar_constraint.parser.terminal_map
-            .get_by_left(&regex(&newline_terminal_name))
+            .get_by_left(&regex_name(&newline_terminal_name))
             .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", newline_terminal_name));
 
         // 3. Get the LLMTokenID for the newline character.
@@ -1011,7 +1011,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         for grammar_tokens in grammar_tokenss_for_comp {
             let mut this_parser_state = grammar_constraint.parser.init_glr_parser(Some(constraint_state.parent.llm_vocab.clone()));
             for grammar_token in &grammar_tokens {
-                let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&regex(grammar_token)).unwrap();
+                let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&regex_name(grammar_token)).unwrap();
                 this_parser_state.step(*grammar_token_id);
                 assert!(this_parser_state.is_ok(), "Parser failed to step with token {:?} in sequence {:?}", grammar_token, grammar_tokens);
             }
@@ -1450,7 +1450,7 @@ fn causes_specific_panic(
 
     let mut sequence_terminal_ids = Vec::new();
     for name_str in sequence_to_test_names {
-        let terminal_to_find = regex(name_str);
+        let terminal_to_find = regex_name(name_str);
         if let Some(term_id) = current_terminal_map.get_by_left(&terminal_to_find) {
             sequence_terminal_ids.push(*term_id);
         } else {
@@ -1827,7 +1827,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     // 4. Convert input sequence names to TerminalIDs using the new map
     let mut input_sequence_ids = Vec::new();
     for name_str in &input_sequence_names {
-        let terminal_to_find = regex(name_str);
+        let terminal_to_find = regex_name(name_str);
         if let Some(term_id) = terminal_map_for_minimized.get_by_left(&terminal_to_find) {
             input_sequence_ids.push(*term_id);
         } else {

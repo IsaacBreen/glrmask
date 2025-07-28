@@ -23,14 +23,14 @@ impl Display for NonTerminal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Terminal {
-    Regex(String),
+    RegexName(String),
     Literal(Vec<u8>),
 }
 
 impl JSONConvertible for Terminal {
     fn to_json(&self) -> JSONNode {
         match self {
-            Terminal::Regex(name) => JSONNode::Object({
+            Terminal::RegexName(name) => JSONNode::Object({
                 let mut obj = StdMap::new();
                 obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
                 obj.insert("value".to_string(), JSONNode::String(name.clone()));
@@ -51,7 +51,7 @@ impl JSONConvertible for Terminal {
                 let value_field = obj.remove("value").ok_or_else(|| "Missing field value for Terminal".to_string())?;
 
                 match String::from_json(type_field)?.as_str() {
-                    "Regex" => Ok(Terminal::Regex(String::from_json(value_field)?)),
+                    "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
                     "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
                     _ => Err("Unknown type for Terminal".to_string()),
                 }
@@ -64,14 +64,14 @@ impl JSONConvertible for Terminal {
 impl Display for Terminal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Terminal::Regex(name) => write!(f, "{}", name),
+            Terminal::RegexName(name) => write!(f, "{}", name),
             Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
         }
     }
 }
 
-pub fn regex(name: &str) -> Terminal {
-    Terminal::Regex(name.to_string())
+pub fn regex_name(name: &str) -> Terminal {
+    Terminal::RegexName(name.to_string())
 }
 
 pub fn literal(bytes: &[u8]) -> Terminal {
@@ -80,7 +80,7 @@ pub fn literal(bytes: &[u8]) -> Terminal {
 
 impl Terminal {
     pub fn terminal(name: &str) -> Self {
-        Terminal::Regex(name.to_string())
+        Terminal::RegexName(name.to_string())
     }
 
     pub fn literal(bytes: Vec<u8>) -> Self {
@@ -173,7 +173,7 @@ pub fn nt(name: &str) -> Symbol {
 }
 
 pub fn t(name: &str) -> Symbol {
-    Symbol::Terminal(regex(name))
+    Symbol::Terminal(regex_name(name))
 }
 
 pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {

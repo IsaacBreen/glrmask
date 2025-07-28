@@ -477,7 +477,7 @@ mod tests {
         let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
         let term_eps_expr = RegexExpr::Epsilon;
         let term_z_expr = eat_u8(b'z');
-        use crate::glr::grammar::regex;
+        use crate::glr::grammar::regex_name;
         let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
         let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
@@ -505,7 +505,7 @@ mod tests {
         for prod in &grammar_def.productions {
             // Check for NT -> name_term_x_opt
             if prod.rhs.len() == 1 {
-                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
                     if t == &name_term_x_opt {
                         // This production is NT -> name_term_x_opt. The LHS is a candidate.
                         let candidate_nt_name = prod.lhs.0.clone();
@@ -536,8 +536,8 @@ mod tests {
         // Define the set of expected productions
         let expected_prods_set = BTreeSet::from([
             Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
-            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
-            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
         ]);
 
@@ -563,7 +563,7 @@ mod tests {
         for prod in &grammar_def.productions {
             for sym in &prod.rhs {
                 if let Sym::Terminal(t) = sym {
-                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
                 }
             }
         }
