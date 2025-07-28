@@ -364,12 +364,11 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
 
     // 3. Manually define the interesting terminals for minimization.
     let interesting_terminals: BTreeSet<Terminal> = vec![
-        literal(b"var"),
         regex_name("IGNORE"),
         regex_name("IDENTIFIER"),
-        literal(b"="),
-        regex_name("NUMERIC_LITERAL"),
-        literal(b";"),
+        literal(b"["),
+        literal(b":"),
+        literal(b"]"),
     ]
     .into_iter()
     .collect();
