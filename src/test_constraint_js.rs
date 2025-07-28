@@ -468,6 +468,9 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
         max_token_id,
     );
 
+    println!("\n--- Created GrammarConstraint ---");
+    constraint.dump_precomputed();
+
     println!("\n--- Running Constraint with Loaded Grammar ---");
     let mut state = constraint.init();
     state.commit_bytes(input_string.as_bytes());
