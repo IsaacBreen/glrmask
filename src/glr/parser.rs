@@ -820,6 +820,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
+            self.phase = ParserPhase::ReadyForPhase3; // Skip phase 1 and 2, go straight to phase 3
             return;
         }
 
