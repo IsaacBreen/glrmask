@@ -440,8 +440,9 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
     println!("{}", compiled_grammar);
 
     // 2. Define the test case (must match the one in the minimizer test).
-    let input_string = "var x = 1;";
-    let llm_token_strs = &["var", " ", "x", "=", "1", ";"];
+    // let input_string = include_str!("../src/example_code.js");
+    let input_string = "[x]:";
+    let llm_token_strs = &["[x]:", " &"];
     let mut llm_token_map = LLMTokenMap::new();
     for (i, &token_str) in llm_token_strs.iter().enumerate() {
         llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
