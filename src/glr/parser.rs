@@ -943,7 +943,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             };
             if let Some(action) = shifts_and_reduces.get(&token_id) {
                 crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
-                              self.parser.terminal_map.get_by_by_right(&token_id).unwrap(),
+                              self.parser.terminal_map.get_by_right(&token_id).unwrap(),
                               peek.edge_value().state_id.0, action);
                 // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
                 timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {

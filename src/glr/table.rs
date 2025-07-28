@@ -270,6 +270,7 @@ pub struct NonTerminalID(pub usize);
 impl JSONConvertible for NonTerminalID {
     fn to_json(&self) -> JSONNode { self.0.to_json() }
     fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
+}
 
 
 type Stage1Result = Stage1Table;
@@ -278,7 +279,7 @@ type Stage3Result = Stage3Table;
 type Stage4Result = Stage4Table;
 type Stage5Result = Stage5Table;
 type Stage6Result = Stage6Table;
-pub type Stage7Result = (
+type Stage7Result = (
     Stage7Table,
     BiBTreeMap<BTreeSet<Item>, StateID>,
     StateID,
