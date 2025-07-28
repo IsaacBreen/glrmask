@@ -19,7 +19,7 @@ local_system:
     - src/constraint.rs
     - src/test_constraint_js.rs
     - analyze_timings.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -8555,10 +8555,10 @@ local_system:
               );
 
               helper.run_dfs();
-              // helper.prune_dead_paths();
-              // helper.prune_on_no_terminal_follow();
-              // helper.prune_dead_paths();
-              // helper.prune_on_no_terminal_follow();
+              helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
+              helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -9735,6 +9735,7 @@ local_system:
       use std::sync::Arc;
       use std::time::Instant;
       use rand::prelude::IndexedRandom;
+      use crate::constraint_extra::dump_precompute_trie_recursive;
       use crate::profiler::{print_summary, print_summary_flat, reset};
       // --- Helper Functions ---
 
@@ -10039,6 +10040,139 @@ local_system:
       }
 
       #[test]
+      fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+          // This test serves as a tool for debugging the GrammarConstraint. It does the following:
+          // 1. Defines a test case (an input string and a small vocabulary).
+          // 2. Loads the full JS grammar.
+          // 3. Manually defines a set of interesting terminals to focus the minimization.
+          // 4. Minimizes the grammar to only what's necessary for those terminals.
+          // 5. Compiles the minimized grammar and creates a GrammarConstraint.
+          // 6. Feeds the input string to the new constraint to check for correctness.
+          // 7. Saves the minimized grammar to an EBNF file for use in template tests.
+
+          // 1. Define the test case.
+          // let input_string = include_str!("../src/example_code.js");
+          let input_string = "[x]:";
+          let llm_token_strs = &["[x]:", " &"];
+          let mut llm_token_map = LLMTokenMap::new();
+          for (i, &token_str) in llm_token_strs.iter().enumerate() {
+              llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+          }
+          let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+          // 2. Load the full JS grammar.
+          println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
+          let grammar_path = "src/js.ebnf";
+          let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Initial production count: {}", full_grammar_def.productions.len());
+
+          // 3. Manually define the interesting terminals for minimization.
+          let interesting_terminals: BTreeSet<Terminal> = vec![
+              regex_name("IGNORE"),
+              regex_name("IDENTIFIER"),
+              literal(b"["),
+              literal(b":"),
+              literal(b"]"),
+          ]
+          .into_iter()
+          .collect();
+          println!("Manually specified interesting terminals: {:?}", interesting_terminals);
+
+          // 4. Minimize the grammar.
+          // let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+          //     &full_grammar_def.productions,
+          //     full_grammar_def.start_production_id,
+          //     &interesting_terminals,
+          // );
+          let (minimized_productions, minimized_start_id) = (full_grammar_def.productions.clone(), full_grammar_def.start_production_id);
+
+          // 5. Create and compile the minimized grammar definition.
+          let mut minimized_def = full_grammar_def; // Start with a clone
+          minimized_def.productions = minimized_productions;
+          minimized_def.start_production_id = minimized_start_id;
+
+          println!("\n--- Minimized Grammar ---");
+          println!("{}", minimized_def);
+
+          // 7. Save the minimized grammar to an EBNF file.
+          let minimized_ebnf = minimized_def.to_ebnf();
+          println!("\n--- Minimized Grammar (EBNF) ---");
+          println!("{}", minimized_ebnf);
+          fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
+
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+          println!("\n--- Compiled Minimized Grammar ---");
+          println!("{}", compiled_grammar);
+
+          // 6. Create GrammarConstraint and run the test.
+          let constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map,
+              LLMTokenID(max_token_id + 1),
+              max_token_id,
+          );
+
+          println!("\n--- Created GrammarConstraint ---");
+          constraint.dump_precomputed();
+
+          println!("\n--- Running Constraint with Minimized Grammar ---");
+          let mut state = constraint.init();
+          state.commit_bytes(input_string.as_bytes());
+          assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+          println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
+
+          Ok(())
+      }
+
+      #[test]
+      #[ignore] // This is a template for creating new tests from a minimized grammar.
+      fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
+          // 1. Load the minimized EBNF grammar.
+          //    To use:
+          //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
+          //    b) Copy this test function and rename it.
+          //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
+          //    d) Remove the `#[ignore]` attribute and run the test.
+          // let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
+          let ebnf_source = &fs::read_to_string("minimized_js_for_constraint.ebnf")?;
+          let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
+
+          println!("\n--- Loaded Grammar from EBNF ---");
+          println!("{}", compiled_grammar);
+
+          // 2. Define the test case (must match the one in the minimizer test).
+          // let input_string = include_str!("../src/example_code.js");
+          let input_string = "[x]:";
+          let llm_token_strs = &["[x]:", " &"];
+          let mut llm_token_map = LLMTokenMap::new();
+          for (i, &token_str) in llm_token_strs.iter().enumerate() {
+              llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+          }
+          let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+          // 3. Create GrammarConstraint and run the test.
+          let constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map,
+              LLMTokenID(max_token_id + 1),
+              max_token_id,
+          );
+
+          println!("\n--- Created GrammarConstraint ---");
+          constraint.dump_precomputed();
+
+          println!("\n--- Running Constraint with Loaded Grammar ---");
+          let mut state = constraint.init();
+          state.commit_bytes(input_string.as_bytes());
+
+          assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+          println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
+
+          Ok(())
+      }
+
+      #[test]
       fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
           // This test serves as a tool for debugging the parser. It does the following:
           // 1. Defines a sequence of terminals for a specific JS input string.
@@ -10054,7 +10188,14 @@ local_system:
               literal(b"]"),
               literal(b":"),
           ];
-          let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+          // Add any other terminals you want to ensure are included in the minimized grammar.
+          let additional_interesting_terminals: Vec<Terminal> = vec![
+              // For example, if you want to debug interactions with another token.
+              // literal(b"some_other_token"),
+          ];
+
+          let mut interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+          interesting_terminals.extend(additional_interesting_terminals.into_iter());
 
           // 2. Load the full JS grammar.
           println!("--- Loading and Minimizing JS Grammar ---");
@@ -10121,7 +10262,7 @@ local_system:
           //    d) Update `test_case_terminals` with the sequence you want to test.
           //    e) Remove the `#[ignore]` attribute and run the test.
           // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
-          let ebnf_source = "";
+          let ebnf_source = &fs::read_to_string("minimized_js.ebnf")?;
           let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
           let parser = &compiled_grammar.glr_parser;
@@ -19126,10 +19267,10 @@ local_system:
               );
 
               helper.run_dfs();
-              // helper.prune_dead_paths();
-              // helper.prune_on_no_terminal_follow();
-              // helper.prune_dead_paths();
-              // helper.prune_on_no_terminal_follow();
+              helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
+              helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -20306,6 +20447,7 @@ local_system:
       use std::sync::Arc;
       use std::time::Instant;
       use rand::prelude::IndexedRandom;
+      use crate::constraint_extra::dump_precompute_trie_recursive;
       use crate::profiler::{print_summary, print_summary_flat, reset};
       // --- Helper Functions ---
 
@@ -20610,6 +20752,139 @@ local_system:
       }
 
       #[test]
+      fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+          // This test serves as a tool for debugging the GrammarConstraint. It does the following:
+          // 1. Defines a test case (an input string and a small vocabulary).
+          // 2. Loads the full JS grammar.
+          // 3. Manually defines a set of interesting terminals to focus the minimization.
+          // 4. Minimizes the grammar to only what's necessary for those terminals.
+          // 5. Compiles the minimized grammar and creates a GrammarConstraint.
+          // 6. Feeds the input string to the new constraint to check for correctness.
+          // 7. Saves the minimized grammar to an EBNF file for use in template tests.
+
+          // 1. Define the test case.
+          // let input_string = include_str!("../src/example_code.js");
+          let input_string = "[x]:";
+          let llm_token_strs = &["[x]:", " &"];
+          let mut llm_token_map = LLMTokenMap::new();
+          for (i, &token_str) in llm_token_strs.iter().enumerate() {
+              llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+          }
+          let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+          // 2. Load the full JS grammar.
+          println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
+          let grammar_path = "src/js.ebnf";
+          let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Initial production count: {}", full_grammar_def.productions.len());
+
+          // 3. Manually define the interesting terminals for minimization.
+          let interesting_terminals: BTreeSet<Terminal> = vec![
+              regex_name("IGNORE"),
+              regex_name("IDENTIFIER"),
+              literal(b"["),
+              literal(b":"),
+              literal(b"]"),
+          ]
+          .into_iter()
+          .collect();
+          println!("Manually specified interesting terminals: {:?}", interesting_terminals);
+
+          // 4. Minimize the grammar.
+          // let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+          //     &full_grammar_def.productions,
+          //     full_grammar_def.start_production_id,
+          //     &interesting_terminals,
+          // );
+          let (minimized_productions, minimized_start_id) = (full_grammar_def.productions.clone(), full_grammar_def.start_production_id);
+
+          // 5. Create and compile the minimized grammar definition.
+          let mut minimized_def = full_grammar_def; // Start with a clone
+          minimized_def.productions = minimized_productions;
+          minimized_def.start_production_id = minimized_start_id;
+
+          println!("\n--- Minimized Grammar ---");
+          println!("{}", minimized_def);
+
+          // 7. Save the minimized grammar to an EBNF file.
+          let minimized_ebnf = minimized_def.to_ebnf();
+          println!("\n--- Minimized Grammar (EBNF) ---");
+          println!("{}", minimized_ebnf);
+          fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
+
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+          println!("\n--- Compiled Minimized Grammar ---");
+          println!("{}", compiled_grammar);
+
+          // 6. Create GrammarConstraint and run the test.
+          let constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map,
+              LLMTokenID(max_token_id + 1),
+              max_token_id,
+          );
+
+          println!("\n--- Created GrammarConstraint ---");
+          constraint.dump_precomputed();
+
+          println!("\n--- Running Constraint with Minimized Grammar ---");
+          let mut state = constraint.init();
+          state.commit_bytes(input_string.as_bytes());
+          assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+          println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
+
+          Ok(())
+      }
+
+      #[test]
+      #[ignore] // This is a template for creating new tests from a minimized grammar.
+      fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
+          // 1. Load the minimized EBNF grammar.
+          //    To use:
+          //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
+          //    b) Copy this test function and rename it.
+          //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
+          //    d) Remove the `#[ignore]` attribute and run the test.
+          // let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
+          let ebnf_source = &fs::read_to_string("minimized_js_for_constraint.ebnf")?;
+          let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
+
+          println!("\n--- Loaded Grammar from EBNF ---");
+          println!("{}", compiled_grammar);
+
+          // 2. Define the test case (must match the one in the minimizer test).
+          // let input_string = include_str!("../src/example_code.js");
+          let input_string = "[x]:";
+          let llm_token_strs = &["[x]:", " &"];
+          let mut llm_token_map = LLMTokenMap::new();
+          for (i, &token_str) in llm_token_strs.iter().enumerate() {
+              llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+          }
+          let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+          // 3. Create GrammarConstraint and run the test.
+          let constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map,
+              LLMTokenID(max_token_id + 1),
+              max_token_id,
+          );
+
+          println!("\n--- Created GrammarConstraint ---");
+          constraint.dump_precomputed();
+
+          println!("\n--- Running Constraint with Loaded Grammar ---");
+          let mut state = constraint.init();
+          state.commit_bytes(input_string.as_bytes());
+
+          assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+          println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
+
+          Ok(())
+      }
+
+      #[test]
       fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
           // This test serves as a tool for debugging the parser. It does the following:
           // 1. Defines a sequence of terminals for a specific JS input string.
@@ -20625,7 +20900,14 @@ local_system:
               literal(b"]"),
               literal(b":"),
           ];
-          let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+          // Add any other terminals you want to ensure are included in the minimized grammar.
+          let additional_interesting_terminals: Vec<Terminal> = vec![
+              // For example, if you want to debug interactions with another token.
+              // literal(b"some_other_token"),
+          ];
+
+          let mut interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+          interesting_terminals.extend(additional_interesting_terminals.into_iter());
 
           // 2. Load the full JS grammar.
           println!("--- Loading and Minimizing JS Grammar ---");
@@ -20692,7 +20974,7 @@ local_system:
           //    d) Update `test_case_terminals` with the sequence you want to test.
           //    e) Remove the `#[ignore]` attribute and run the test.
           // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
-          let ebnf_source = "";
+          let ebnf_source = &fs::read_to_string("minimized_js.ebnf")?;
           let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
           let parser = &compiled_grammar.glr_parser;
@@ -21163,7 +21445,7 @@ local_system:
 
       if __name__ == "__main__":
           main()
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -29800,10 +30082,10 @@ messages:
               );
 
               helper.run_dfs();
-              // helper.prune_dead_paths();
-              // helper.prune_on_no_terminal_follow();
-              // helper.prune_dead_paths();
-              // helper.prune_on_no_terminal_follow();
+              helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
+              helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -30985,6 +31267,7 @@ messages:
       use std::sync::Arc;
       use std::time::Instant;
       use rand::prelude::IndexedRandom;
+      use crate::constraint_extra::dump_precompute_trie_recursive;
       use crate::profiler::{print_summary, print_summary_flat, reset};
       // --- Helper Functions ---
 
@@ -31289,6 +31572,139 @@ messages:
       }
 
       #[test]
+      fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+          // This test serves as a tool for debugging the GrammarConstraint. It does the following:
+          // 1. Defines a test case (an input string and a small vocabulary).
+          // 2. Loads the full JS grammar.
+          // 3. Manually defines a set of interesting terminals to focus the minimization.
+          // 4. Minimizes the grammar to only what's necessary for those terminals.
+          // 5. Compiles the minimized grammar and creates a GrammarConstraint.
+          // 6. Feeds the input string to the new constraint to check for correctness.
+          // 7. Saves the minimized grammar to an EBNF file for use in template tests.
+
+          // 1. Define the test case.
+          // let input_string = include_str!("../src/example_code.js");
+          let input_string = "[x]:";
+          let llm_token_strs = &["[x]:", " &"];
+          let mut llm_token_map = LLMTokenMap::new();
+          for (i, &token_str) in llm_token_strs.iter().enumerate() {
+              llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+          }
+          let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+          // 2. Load the full JS grammar.
+          println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
+          let grammar_path = "src/js.ebnf";
+          let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Initial production count: {}", full_grammar_def.productions.len());
+
+          // 3. Manually define the interesting terminals for minimization.
+          let interesting_terminals: BTreeSet<Terminal> = vec![
+              regex_name("IGNORE"),
+              regex_name("IDENTIFIER"),
+              literal(b"["),
+              literal(b":"),
+              literal(b"]"),
+          ]
+          .into_iter()
+          .collect();
+          println!("Manually specified interesting terminals: {:?}", interesting_terminals);
+
+          // 4. Minimize the grammar.
+          // let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+          //     &full_grammar_def.productions,
+          //     full_grammar_def.start_production_id,
+          //     &interesting_terminals,
+          // );
+          let (minimized_productions, minimized_start_id) = (full_grammar_def.productions.clone(), full_grammar_def.start_production_id);
+
+          // 5. Create and compile the minimized grammar definition.
+          let mut minimized_def = full_grammar_def; // Start with a clone
+          minimized_def.productions = minimized_productions;
+          minimized_def.start_production_id = minimized_start_id;
+
+          println!("\n--- Minimized Grammar ---");
+          println!("{}", minimized_def);
+
+          // 7. Save the minimized grammar to an EBNF file.
+          let minimized_ebnf = minimized_def.to_ebnf();
+          println!("\n--- Minimized Grammar (EBNF) ---");
+          println!("{}", minimized_ebnf);
+          fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
+
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+          println!("\n--- Compiled Minimized Grammar ---");
+          println!("{}", compiled_grammar);
+
+          // 6. Create GrammarConstraint and run the test.
+          let constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map,
+              LLMTokenID(max_token_id + 1),
+              max_token_id,
+          );
+
+          println!("\n--- Created GrammarConstraint ---");
+          constraint.dump_precomputed();
+
+          println!("\n--- Running Constraint with Minimized Grammar ---");
+          let mut state = constraint.init();
+          state.commit_bytes(input_string.as_bytes());
+          assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+          println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
+
+          Ok(())
+      }
+
+      #[test]
+      #[ignore] // This is a template for creating new tests from a minimized grammar.
+      fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
+          // 1. Load the minimized EBNF grammar.
+          //    To use:
+          //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
+          //    b) Copy this test function and rename it.
+          //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
+          //    d) Remove the `#[ignore]` attribute and run the test.
+          // let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
+          let ebnf_source = &fs::read_to_string("minimized_js_for_constraint.ebnf")?;
+          let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
+
+          println!("\n--- Loaded Grammar from EBNF ---");
+          println!("{}", compiled_grammar);
+
+          // 2. Define the test case (must match the one in the minimizer test).
+          // let input_string = include_str!("../src/example_code.js");
+          let input_string = "[x]:";
+          let llm_token_strs = &["[x]:", " &"];
+          let mut llm_token_map = LLMTokenMap::new();
+          for (i, &token_str) in llm_token_strs.iter().enumerate() {
+              llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+          }
+          let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+          // 3. Create GrammarConstraint and run the test.
+          let constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map,
+              LLMTokenID(max_token_id + 1),
+              max_token_id,
+          );
+
+          println!("\n--- Created GrammarConstraint ---");
+          constraint.dump_precomputed();
+
+          println!("\n--- Running Constraint with Loaded Grammar ---");
+          let mut state = constraint.init();
+          state.commit_bytes(input_string.as_bytes());
+
+          assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+          println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
+
+          Ok(())
+      }
+
+      #[test]
       fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
           // This test serves as a tool for debugging the parser. It does the following:
           // 1. Defines a sequence of terminals for a specific JS input string.
@@ -31304,7 +31720,14 @@ messages:
               literal(b"]"),
               literal(b":"),
           ];
-          let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+          // Add any other terminals you want to ensure are included in the minimized grammar.
+          let additional_interesting_terminals: Vec<Terminal> = vec![
+              // For example, if you want to debug interactions with another token.
+              // literal(b"some_other_token"),
+          ];
+
+          let mut interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+          interesting_terminals.extend(additional_interesting_terminals.into_iter());
 
           // 2. Load the full JS grammar.
           println!("--- Loading and Minimizing JS Grammar ---");
@@ -31371,7 +31794,7 @@ messages:
           //    d) Update `test_case_terminals` with the sequence you want to test.
           //    e) Remove the `#[ignore]` attribute and run the test.
           // let ebnf_source = include_str!("../minimized_js.ebnf"); // temporarily comment out to avoid compilation errors.
-          let ebnf_source = "";
+          let ebnf_source = &fs::read_to_string("minimized_js.ebnf")?;
           let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
           let parser = &compiled_grammar.glr_parser;
@@ -31850,554 +32273,163 @@ messages:
       ```
     metadata:
       filename: analyze_timings.py
-  - user: |-
-      Right now we have test_js_parser_isolated_and_minimized and test_template_from_minimized_ebnf. This is really useful.
-      But I'd like a version that's for testing the grammar constraint.
-      Do this. ie two new functions, one for isolating and minimizing and another template one.
+  - user: Modify test_js_constraint_isolated_and_minimized and test_template_from_minimized_ebnf_for_constraint
+      to tokenize the input string (as llm tokens) and feed those in one at a time,
+      checking that they're in the mask as expected, similarly to test_js_constraint_integration.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to add new test functions for isolating and minimizing `GrammarConstraint` test cases. This is a great way to create focused, reproducible tests for complex grammar issues.
+      Hello! As a helpful assistant, I'm here to help you with your request. Here are the git diff patches for the requested changes.
 
-      Here are the git diff patches for the requested changes. I've added two new functions to `src/test_constraint_js.rs`:
+      I've updated `test_js_constraint_isolated_and_minimized` and `test_template_from_minimized_ebnf_for_constraint` to tokenize the input string and feed the tokens one by one, checking the mask at each step, similar to how `test_js_constraint_integration` works. This will provide more granular testing of the grammar constraint's behavior.
 
-      1.  `test_js_constraint_isolated_and_minimized()`: This function takes a sample input string and vocabulary, loads the full JavaScript grammar, and then minimizes it to the smallest possible grammar required to parse that specific string. It then runs the `GrammarConstraint` with this minimized grammar and saves the result as `minimized_js_for_constraint.ebnf`.
-      2.  `test_template_from_minimized_ebnf_for_constraint()`: This is an ignored test that serves as a template. You can use it to quickly create a new test case from the EBNF file generated by the minimizer function.
-
-      ### Modified File
-
-      Here is the patch for `src/test_constraint_js.rs`:
+      Here is the diff for the modified file:
 
       ```diff
       --- a/src/test_constraint_js.rs
       +++ b/src/test_constraint_js.rs
-      @@ -311,3 +311,117 @@
-       
-           Ok(())
-       }
-      +
-      +#[test]
-      +fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
-      +    // This test serves as a tool for debugging the GrammarConstraint. It does the following:
-      +    // 1. Defines a test case (an input string and a small vocabulary).
-      +    // 2. Loads the full JS grammar.
-      +    // 3. Tokenizes the input string with the full grammar's tokenizer to find relevant terminals.
-      +    // 4. Minimizes the grammar to only what's necessary for those terminals.
-      +    // 5. Compiles the minimized grammar and creates a GrammarConstraint.
-      +    // 6. Feeds the input string to the new constraint to check for correctness.
-      +    // 7. Saves the minimized grammar to an EBNF file for use in template tests.
-      +
-      +    // 1. Define the test case.
-      +    let input_string = "var x = 1;";
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      +    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      +    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      +    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      +    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      +    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      +    let max_token_id = 5;
-      +
-      +    // 2. Load the full JS grammar.
-      +    println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
-      +    let grammar_path = "src/js.ebnf";
-      +    let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
-      +    println!("Initial production count: {}", full_grammar_def.productions.len());
-      +
-      +    // 3. Tokenize the input to find relevant terminals.
-      +    let full_compiled = CompiledGrammar::from_definition(Arc::new(full_grammar_def.clone()));
-      +    let tokens = full_compiled.tokenizer.execute(input_string.as_bytes()).matches;
-      +    let interesting_terminal_ids: BTreeSet<TerminalID> = tokens.iter().map(|t| TerminalID(t.id)).collect();
-      +    let mut interesting_terminals: BTreeSet<Terminal> = interesting_terminal_ids
-      +        .iter()
-      +        .map(|tid| full_compiled.glr_parser.terminal_map.get_by_right(tid).unwrap().clone())
-      +        .collect();
-      +    // Also include the ignore terminal if it exists
-      +    if let Some(ignore_id) = full_grammar_def.ignore_terminal_id {
-      +        if let Some(ignore_terminal) = full_compiled.glr_parser.terminal_map.get_by_right(&ignore_id) {
-      +            interesting_terminals.insert(ignore_terminal.clone());
-      +        }
-      +    }
-      +    println!("Interesting terminals for '{}': {:?}", input_string, interesting_terminals);
-      +
-      +    // 4. Minimize the grammar.
-      +    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
-      +        &full_grammar_def.productions,
-      +        full_grammar_def.start_production_id,
-      +        &interesting_terminals,
-      +    );
-      +
-      +    // 5. Create and compile the minimized grammar definition.
-      +    let mut minimized_def = full_grammar_def; // Start with a clone
-      +    minimized_def.productions = minimized_productions;
-      +    minimized_def.start_production_id = minimized_start_id;
-      +    // Filter terminal maps to only include those that are still relevant.
-      +    let all_terminals_in_minimized_grammar: BTreeSet<Terminal> = minimized_def.productions.iter()
-      +        .flat_map(|p| p.rhs.iter())
-      +        .filter_map(|s| match s {
-      +            Symbol::Terminal(t) => Some(t.clone()),
-      +            _ => None,
-      +        })
-      +        .collect();
-      +
-      +    minimized_def.literal_to_group_id.retain(|lit, _| all_terminals_in_minimized_grammar.contains(&Terminal::Literal(lit.clone())));
-      +    minimized_def.regex_name_to_group_id.retain(|name, _| all_terminals_in_minimized_grammar.contains(&Terminal::RegexName(name.clone())));
-      +    minimized_def.regex_expr_to_group_id.retain(|_, gid| minimized_def.regex_name_to_group_id.contains_right(gid) || minimized_def.literal_to_group_id.contains_right(gid));
-      +
-      +
-      +    println!("\n--- Minimized Grammar ---");
-      +    println!("{}", minimized_def);
-      +
-      +    // 7. Save the minimized grammar to an EBNF file.
-      +    let minimized_ebnf = minimized_def.to_ebnf();
-      +    println!("\n--- Minimized Grammar (EBNF) ---");
-      +    println!("{}", minimized_ebnf);
-      +    fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
-      +
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
-      +    println!("\n--- Compiled Minimized Grammar ---");
-      +    println!("{}", compiled_grammar);
-      +
-      +    // 6. Create GrammarConstraint and run the test.
-      +    let constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar,
-      +        llm_token_map,
-      +        LLMTokenID(max_token_id + 1),
-      +        max_token_id,
-      +    );
-      +
-      +    println!("\n--- Running Constraint with Minimized Grammar ---");
-      +    let mut state = constraint.init();
-      +    state.commit_bytes(input_string.as_bytes());
-      +    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-      +    println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
-      +
-      +    Ok(())
-      +}
-      +
-      +#[test]
-      +#[ignore] // This is a template for creating new tests from a minimized grammar.
-      +fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
-      +    // 1. Load the minimized EBNF grammar.
-      +    //    To use:
-      +    //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
-      +    //    b) Copy this test function and rename it.
-      +    //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
-      +    //    d) Remove the `#[ignore]` attribute and run the test.
-      +    let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
-      +    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
-      +
-      +    println!("\n--- Loaded Grammar from EBNF ---");
-      +    println!("{}", compiled_grammar);
-      +
-      +    // 2. Define the test case (must match the one in the minimizer test).
-      +    let input_string = "var x = 1;";
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      +    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      +    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      +    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      +    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      +    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      +    let max_token_id = 5;
-      +
-      +    // 3. Create GrammarConstraint and run the test.
-      +    let constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar,
-      +        llm_token_map,
-      +        LLMTokenID(max_token_id + 1),
-      +        max_token_id,
-      +    );
-      +
-      +    println!("\n--- Running Constraint with Loaded Grammar ---");
-      +    let mut state = constraint.init();
-      +    state.commit_bytes(input_string.as_bytes());
-      +
-      +    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-      +    println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
-      +
-      +    Ok(())
-      +}
-
-      ```
-
-      These new tests should provide a powerful workflow for debugging issues with the `GrammarConstraint` by allowing you to isolate problems with a minimal, self-contained grammar. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_js.rs
-      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_js.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/ebnf.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/interface.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/tokenizer_combinators.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/js.ebnf since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_js.rs since previous turn:
-      ```diff
-      --- original version of src/test_constraint_js.rs+++ current version of src/test_constraint_js.rs@@ -337,6 +337,150 @@ }
-       
-       #[test]
-      +fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
-      +    // This test serves as a tool for debugging the GrammarConstraint. It does the following:
-      +    // 1. Defines a test case (an input string and a small vocabulary).
-      +    // 2. Loads the full JS grammar.
-      +    // 3. Tokenizes the input string with the full grammar's tokenizer to find relevant terminals.
-      +    // 4. Minimizes the grammar to only what's necessary for those terminals.
-      +    // 5. Compiles the minimized grammar and creates a GrammarConstraint.
-      +    // 6. Feeds the input string to the new constraint to check for correctness.
-      +    // 7. Saves the minimized grammar to an EBNF file for use in template tests.
-      +
-      +    // 1. Define the test case.
-      +    let input_string = "var x = 1;";
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      +    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      +    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      +    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      +    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      +    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      +    let max_token_id = 5;
-      +
-      +    // 2. Load the full JS grammar.
-      +    println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
-      +    let grammar_path = "src/js.ebnf";
-      +    let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
-      +    println!("Initial production count: {}", full_grammar_def.productions.len());
-      +
-      +    // 3. Tokenize the input to find relevant terminals.
-      +    let full_compiled = CompiledGrammar::from_definition(Arc::new(full_grammar_def.clone()));
-      +    let tokens = full_compiled.tokenizer.execute(input_string.as_bytes()).matches;
-      +    let interesting_terminal_ids: BTreeSet<TerminalID> = tokens.iter().map(|t| TerminalID(t.id)).collect();
-      +    let mut interesting_terminals: BTreeSet<Terminal> = interesting_terminal_ids
-      +        .iter()
-      +        .map(|tid| full_compiled.glr_parser.terminal_map.get_by_right(tid).unwrap().clone())
-      +        .collect();
-      +    // Also include the ignore terminal if it exists
-      +    if let Some(ignore_id) = full_grammar_def.ignore_terminal_id {
-      +        if let Some(ignore_terminal) = full_compiled.glr_parser.terminal_map.get_by_right(&ignore_id) {
-      +            interesting_terminals.insert(ignore_terminal.clone());
-      +        }
-      +    }
-      +    println!("Interesting terminals for '{}': {:?}", input_string, interesting_terminals);
-      +
-      +    // 4. Minimize the grammar.
-      +    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
-      +        &full_grammar_def.productions,
-      +        full_grammar_def.start_production_id,
-      +        &interesting_terminals,
-      +    );
-      +
-      +    // 5. Create and compile the minimized grammar definition.
-      +    let mut minimized_def = full_grammar_def; // Start with a clone
-      +    minimized_def.productions = minimized_productions;
-      +    minimized_def.start_production_id = minimized_start_id;
-      +    // Filter terminal maps to only include those that are still relevant.
-      +    let all_terminals_in_minimized_grammar: BTreeSet<Terminal> = minimized_def.productions.iter()
-      +        .flat_map(|p| p.rhs.iter())
-      +        .filter_map(|s| match s {
-      +            Symbol::Terminal(t) => Some(t.clone()),
-      +            _ => None,
-      +        })
-      +        .collect();
-      +
-      +    minimized_def.literal_to_group_id.retain(|lit, _| all_terminals_in_minimized_grammar.contains(&Terminal::Literal(lit.clone())));
-      +    minimized_def.regex_name_to_group_id.retain(|name, _| all_terminals_in_minimized_grammar.contains(&Terminal::RegexName(name.clone())));
-      +    minimized_def.regex_expr_to_group_id.retain(|_, gid| minimized_def.regex_name_to_group_id.contains_right(gid) || minimized_def.literal_to_group_id.contains_right(gid));
-      +
-      +
-      +    println!("\n--- Minimized Grammar ---");
-      +    println!("{}", minimized_def);
-      +
-      +    // 7. Save the minimized grammar to an EBNF file.
-      +    let minimized_ebnf = minimized_def.to_ebnf();
-      +    println!("\n--- Minimized Grammar (EBNF) ---");
-      +    println!("{}", minimized_ebnf);
-      +    fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
-      +
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
-      +    println!("\n--- Compiled Minimized Grammar ---");
-      +    println!("{}", compiled_grammar);
-      +
-      +    // 6. Create GrammarConstraint and run the test.
-      +    let constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar,
-      +        llm_token_map,
-      +        LLMTokenID(max_token_id + 1),
-      +        max_token_id,
-      +    );
-      +
-      +    println!("\n--- Running Constraint with Minimized Grammar ---");
-      +    let mut state = constraint.init();
-      +    state.commit_bytes(input_string.as_bytes());
-      +    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-      +    println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
-      +
-      +    Ok(())
-      +}
-      +
-      +#[test]
-      +#[ignore] // This is a template for creating new tests from a minimized grammar.
-      +fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
-      +    // 1. Load the minimized EBNF grammar.
-      +    //    To use:
-      +    //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
-      +    //    b) Copy this test function and rename it.
-      +    //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
-      +    //    d) Remove the `#[ignore]` attribute and run the test.
-      +    let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
-      +    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
-      +
-      +    println!("\n--- Loaded Grammar from EBNF ---");
-      +    println!("{}", compiled_grammar);
-      +
-      +    // 2. Define the test case (must match the one in the minimizer test).
-      +    let input_string = "var x = 1;";
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      +    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      +    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      +    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      +    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      +    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      +    let max_token_id = 5;
-      +
-      +    // 3. Create GrammarConstraint and run the test.
-      +    let constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar,
-      +        llm_token_map,
-      +        LLMTokenID(max_token_id + 1),
-      +        max_token_id,
-      +    );
-      +
-      +    println!("\n--- Running Constraint with Loaded Grammar ---");
-      +    let mut state = constraint.init();
-      +    state.commit_bytes(input_string.as_bytes());
-      +
-      +    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-      +    println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
-      +
-      +    Ok(())
-      +}
-      +
-      +#[test]
-       fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
-           // This test serves as a tool for debugging the parser. It does the following:
-           // 1. Defines a sequence of terminals for a specific JS input string.
-
-      ```
-    metadata:
-  - user: |-
-      Diff of analyze_timings.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Right now we have test_js_parser_isolated_and_minimized and test_template_from_minimized_ebnf. This is really useful.
-      But I'd like a version that's for testing the grammar constraint.
-      Do this. ie two new functions, one for isolating and minimizing and another template one.
-
-      Oh ok so for this one the interesting terminals are going to be specified completely manually.
-      Also add the ability in the existing test_js_parser_isolated_and_minimized to specify *additional* tokens of interested, in addition to those in the grammar.
-    metadata:
-  - assistant: |-
-      Of course! Manually specifying interesting terminals for minimization is a great way to zero in on specific grammar interactions. I've updated the tests as you requested.
-
-      Here are the changes for `src/test_constraint_js.rs`:
-
-      1.  **`test_js_constraint_isolated_and_minimized`** now uses a manually defined set of `interesting_terminals` to drive the minimization process, instead of deriving them from an input string. This gives you precise control over what parts of the grammar are preserved.
-      2.  **`test_js_parser_isolated_and_minimized`** has been updated to include a new `additional_interesting_terminals` vector. You can now add any extra terminals to this list to ensure they are included in the minimized grammar, alongside those from the main test sequence.
-
-      ### Modified File
-
-      Here is the patch for `src/test_constraint_js.rs` with the requested modifications.
-
-      ```diff
-      --- a/src/test_constraint_js.rs
-      +++ b/src/test_constraint_js.rs
-      @@ -338,32 +338,32 @@
+      @@ -201,7 +201,6 @@
        
        #[test]
        fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
-           // This test serves as a tool for debugging the GrammarConstraint. It does the following:
+      -    // This test serves as a tool for debugging the GrammarConstraint. It does the following:
            // 1. Defines a test case (an input string and a small vocabulary).
            // 2. Loads the full JS grammar.
-      -    // 3. Tokenizes the input string with the full grammar's tokenizer to find relevant terminals.
-      +    // 3. Manually defines a set of interesting terminals to focus the minimization.
-           // 4. Minimizes the grammar to only what's necessary for those terminals.
+           // 3. Manually defines a set of interesting terminals to focus the minimization.
+      @@ -209,7 +208,6 @@
            // 5. Compiles the minimized grammar and creates a GrammarConstraint.
            // 6. Feeds the input string to the new constraint to check for correctness.
            // 7. Saves the minimized grammar to an EBNF file for use in template tests.
-       
+      -
            // 1. Define the test case.
-           let input_string = "var x = 1;";
-           let mut llm_token_map = LLMTokenMap::new();
-           llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-           llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-           llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-           llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-           llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-           llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-           let max_token_id = 5;
+           // let input_string = include_str!("../src/example_code.js");
+           let input_string = "[x]:";
+      @@ -259,20 +257,56 @@
        
-           // 2. Load the full JS grammar.
-           println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
-           let grammar_path = "src/js.ebnf";
-           let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
-           println!("Initial production count: {}", full_grammar_def.productions.len());
+           // 6. Create GrammarConstraint and run the test.
+           let constraint = GrammarConstraint::from_compiled_grammar(
+               compiled_grammar,
+      -        llm_token_map,
+      +        llm_token_map.clone(),
+               LLMTokenID(max_token_id + 1),
+               max_token_id,
+           );
        
-      -    // 3. Tokenize the input to find relevant terminals.
-      -    let full_compiled = CompiledGrammar::from_definition(Arc::new(full_grammar_def.clone()));
-      -    let tokens = full_compiled.tokenizer.execute(input_string.as_bytes()).matches;
-      -    let interesting_terminal_ids: BTreeSet<TerminalID> = tokens.iter().map(|t| TerminalID(t.id)).collect();
-      -    let mut interesting_terminals: BTreeSet<Terminal> = interesting_terminal_ids
-      -        .iter()
-      -        .map(|tid| full_compiled.glr_parser.terminal_map.get_by_right(tid).unwrap().clone())
-      -        .collect();
-      -    // Also include the ignore terminal if it exists
-      -    if let Some(ignore_id) = full_grammar_def.ignore_terminal_id {
-      -        if let Some(ignore_terminal) = full_compiled.glr_parser.terminal_map.get_by_right(&ignore_id) {
-      -            interesting_terminals.insert(ignore_terminal.clone());
-      -        }
-      -    }
-      -    println!("Interesting terminals for '{}': {:?}", input_string, interesting_terminals);
-      +    // 3. Manually define the interesting terminals for minimization.
-      +    let interesting_terminals: BTreeSet<Terminal> = vec![
-      +        literal(b"var"),
-      +        regex_name("IGNORE"),
-      +        regex_name("IDENTIFIER"),
-      +        literal(b"="),
-      +        regex_name("NUMERIC_LITERAL"),
-      +        literal(b";"),
-      +    ]
-      +    .into_iter()
-      +    .collect();
-      +    println!("Manually specified interesting terminals: {:?}", interesting_terminals);
+           println!("\n--- Created GrammarConstraint ---");
+           constraint.dump_precomputed();
        
-           // 4. Minimize the grammar.
-           let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
-      @@ -458,8 +458,16 @@
-               literal(b"]"),
-               literal(b":"),
-           ];
-      -    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
-      +    // Add any other terminals you want to ensure are included in the minimized grammar.
-      +    let additional_interesting_terminals: Vec<Terminal> = vec![
-      +        // For example, if you want to debug interactions with another token.
-      +        // literal(b"some_other_token"),
-      +    ];
+      -    println!("\n--- Running Constraint with Minimized Grammar ---");
+      +    // --- NEW TOKENIZATION AND STEP-BY-STEP EXECUTION ---
+      +    println!("\n--- Running Constraint with Minimized Grammar (Step-by-Step) ---");
       +
-      +    let mut interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
-      +    interesting_terminals.extend(additional_interesting_terminals.into_iter());
+      +    // Tokenize the input string
+      +    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
+      +        .iter()
+      +        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+      +        .collect();
+      +    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
+      +
+      +    let mut test_token_sequence_ids = Vec::new();
+      +    let mut tokenized_strs_for_logging = Vec::new();
+      +    let mut text_to_process = input_string.as_bytes();
+      +
+      +    while !text_to_process.is_empty() {
+      +        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+      +            Some((token_id, matched_bytes)) => {
+      +                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
+      +                test_token_sequence_ids.push(LLMTokenID(token_id));
+      +                tokenized_strs_for_logging.push(matched_str);
+      +                text_to_process = &text_to_process[matched_bytes.len()..];
+      +            }
+      +            None => {
+      +                panic!("Failed to tokenize. No prefix token found for remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Step through the tokenized sequence
+           let mut state = constraint.init();
+      -    state.commit_bytes(input_string.as_bytes());
+      +    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+      +        let current_token_str = &tokenized_strs_for_logging[i];
+      +        println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+      +
+      +        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+      +
+      +        let current_mask = state.get_mask();
+      +        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
+      +        println!("  Token is in the mask.");
+      +
+      +        state.commit(llm_token_id);
+      +    }
+      +
+           assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+           println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
        
-           // 2. Load the full JS grammar.
-           println!("--- Loading and Minimizing JS Grammar ---");
+      @@ -307,20 +341,55 @@
+           // 3. Create GrammarConstraint and run the test.
+           let constraint = GrammarConstraint::from_compiled_grammar(
+               compiled_grammar,
+      -        llm_token_map,
+      +        llm_token_map.clone(),
+               LLMTokenID(max_token_id + 1),
+               max_token_id,
+           );
+       
+           println!("\n--- Created GrammarConstraint ---");
+           constraint.dump_precomputed();
+       
+      -    println!("\n--- Running Constraint with Loaded Grammar ---");
+      +    // --- NEW TOKENIZATION AND STEP-BY-STEP EXECUTION ---
+      +    println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
+      +
+      +    // Tokenize the input string
+      +    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
+      +        .iter()
+      +        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+      +        .collect();
+      +    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
+      +
+      +    let mut test_token_sequence_ids = Vec::new();
+      +    let mut tokenized_strs_for_logging = Vec::new();
+      +    let mut text_to_process = input_string.as_bytes();
+      +
+      +    while !text_to_process.is_empty() {
+      +        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+      +            Some((token_id, matched_bytes)) => {
+      +                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
+      +                test_token_sequence_ids.push(LLMTokenID(token_id));
+      +                tokenized_strs_for_logging.push(matched_str);
+      +                text_to_process = &text_to_process[matched_bytes.len()..];
+      +            }
+      +            None => {
+      +                panic!("Failed to tokenize. No prefix token found for remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Step through the tokenized sequence
+           let mut state = constraint.init();
+      -    state.commit_bytes(input_string.as_bytes());
+      -
+      +    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+      +        let current_token_str = &tokenized_strs_for_logging[i];
+      +        println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+      +
+      +        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+      +
+      +        let current_mask = state.get_mask();
+      +        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
+      +        println!("  Token is in the mask.");
+      +
+      +        state.commit(llm_token_id);
+      +    }
+           assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+           println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
+       
 
       ```
+
+      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -32407,376 +32439,5 @@ messages:
       Identified target file: src/test_constraint_js.rs
       Applying patch to 'src/test_constraint_js.rs' using custom patcher...
       Successfully applied patch and wrote to src/test_constraint_js.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/ebnf.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/interface.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/interface/tokenizer_combinators.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/js.ebnf since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -346,10 +346,10 @@         );
-       
-               helper.run_dfs();
-      -        // helper.prune_dead_paths();
-      -        // helper.prune_on_no_terminal_follow();
-      -        // helper.prune_dead_paths();
-      -        // helper.prune_on_no_terminal_follow();
-      +        helper.prune_dead_paths();
-      +        helper.prune_on_no_terminal_follow();
-      +        helper.prune_dead_paths();
-      +        helper.prune_on_no_terminal_follow();
-               helper.merge_nodes();
-               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
-           }
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_js.rs since previous turn:
-      ```diff
-      --- original version of src/test_constraint_js.rs+++ current version of src/test_constraint_js.rs@@ -337,6 +337,147 @@ }
-       
-       #[test]
-      +fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
-      +    // This test serves as a tool for debugging the GrammarConstraint. It does the following:
-      +    // 1. Defines a test case (an input string and a small vocabulary).
-      +    // 2. Loads the full JS grammar.
-      +    // 3. Manually defines a set of interesting terminals to focus the minimization.
-      +    // 4. Minimizes the grammar to only what's necessary for those terminals.
-      +    // 5. Compiles the minimized grammar and creates a GrammarConstraint.
-      +    // 6. Feeds the input string to the new constraint to check for correctness.
-      +    // 7. Saves the minimized grammar to an EBNF file for use in template tests.
-      +
-      +    // 1. Define the test case.
-      +    let input_string = "var x = 1;";
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      +    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      +    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      +    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      +    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      +    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      +    let max_token_id = 5;
-      +
-      +    // 2. Load the full JS grammar.
-      +    println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
-      +    let grammar_path = "src/js.ebnf";
-      +    let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
-      +    println!("Initial production count: {}", full_grammar_def.productions.len());
-      +
-      +    // 3. Manually define the interesting terminals for minimization.
-      +    let interesting_terminals: BTreeSet<Terminal> = vec![
-      +        literal(b"var"),
-      +        regex_name("IGNORE"),
-      +        regex_name("IDENTIFIER"),
-      +        literal(b"="),
-      +        regex_name("NUMERIC_LITERAL"),
-      +        literal(b";"),
-      +    ]
-      +    .into_iter()
-      +    .collect();
-      +    println!("Manually specified interesting terminals: {:?}", interesting_terminals);
-      +
-      +    // 4. Minimize the grammar.
-      +    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
-      +        &full_grammar_def.productions,
-      +        full_grammar_def.start_production_id,
-      +        &interesting_terminals,
-      +    );
-      +
-      +    // 5. Create and compile the minimized grammar definition.
-      +    let mut minimized_def = full_grammar_def; // Start with a clone
-      +    minimized_def.productions = minimized_productions;
-      +    minimized_def.start_production_id = minimized_start_id;
-      +    // Filter terminal maps to only include those that are still relevant.
-      +    let all_terminals_in_minimized_grammar: BTreeSet<Terminal> = minimized_def.productions.iter()
-      +        .flat_map(|p| p.rhs.iter())
-      +        .filter_map(|s| match s {
-      +            Symbol::Terminal(t) => Some(t.clone()),
-      +            _ => None,
-      +        })
-      +        .collect();
-      +
-      +    minimized_def.literal_to_group_id.retain(|lit, _| all_terminals_in_minimized_grammar.contains(&Terminal::Literal(lit.clone())));
-      +    minimized_def.regex_name_to_group_id.retain(|name, _| all_terminals_in_minimized_grammar.contains(&Terminal::RegexName(name.clone())));
-      +    minimized_def.regex_expr_to_group_id.retain(|_, gid| minimized_def.regex_name_to_group_id.contains_right(gid) || minimized_def.literal_to_group_id.contains_right(gid));
-      +
-      +
-      +    println!("\n--- Minimized Grammar ---");
-      +    println!("{}", minimized_def);
-      +
-      +    // 7. Save the minimized grammar to an EBNF file.
-      +    let minimized_ebnf = minimized_def.to_ebnf();
-      +    println!("\n--- Minimized Grammar (EBNF) ---");
-      +    println!("{}", minimized_ebnf);
-      +    fs::write("minimized_js_for_constraint.ebnf", minimized_ebnf)?;
-      +
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
-      +    println!("\n--- Compiled Minimized Grammar ---");
-      +    println!("{}", compiled_grammar);
-      +
-      +    // 6. Create GrammarConstraint and run the test.
-      +    let constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar,
-      +        llm_token_map,
-      +        LLMTokenID(max_token_id + 1),
-      +        max_token_id,
-      +    );
-      +
-      +    println!("\n--- Running Constraint with Minimized Grammar ---");
-      +    let mut state = constraint.init();
-      +    state.commit_bytes(input_string.as_bytes());
-      +    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-      +    println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
-      +
-      +    Ok(())
-      +}
-      +
-      +#[test]
-      +#[ignore] // This is a template for creating new tests from a minimized grammar.
-      +fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
-      +    // 1. Load the minimized EBNF grammar.
-      +    //    To use:
-      +    //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
-      +    //    b) Copy this test function and rename it.
-      +    //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
-      +    //    d) Remove the `#[ignore]` attribute and run the test.
-      +    let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
-      +    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
-      +
-      +    println!("\n--- Loaded Grammar from EBNF ---");
-      +    println!("{}", compiled_grammar);
-      +
-      +    // 2. Define the test case (must match the one in the minimizer test).
-      +    let input_string = "var x = 1;";
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      +    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      +    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      +    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      +    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      +    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      +    let max_token_id = 5;
-      +
-      +    // 3. Create GrammarConstraint and run the test.
-      +    let constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar,
-      +        llm_token_map,
-      +        LLMTokenID(max_token_id + 1),
-      +        max_token_id,
-      +    );
-      +
-      +    println!("\n--- Running Constraint with Loaded Grammar ---");
-      +    let mut state = constraint.init();
-      +    state.commit_bytes(input_string.as_bytes());
-      +
-      +    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-      +    println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
-      +
-      +    Ok(())
-      +}
-      +
-      +#[test]
-       fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
-           // This test serves as a tool for debugging the parser. It does the following:
-           // 1. Defines a sequence of terminals for a specific JS input string.
-      @@ -352,7 +493,14 @@         literal(b"]"),
-               literal(b":"),
-           ];
-      -    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
-      +    // Add any other terminals you want to ensure are included in the minimized grammar.
-      +    let additional_interesting_terminals: Vec<Terminal> = vec![
-      +        // For example, if you want to debug interactions with another token.
-      +        // literal(b"some_other_token"),
-      +    ];
-      +
-      +    let mut interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
-      +    interesting_terminals.extend(additional_interesting_terminals.into_iter());
-       
-           // 2. Load the full JS grammar.
-           println!("--- Loading and Minimizing JS Grammar ---");
-
-      ```
-    metadata:
-  - user: |-
-      Diff of analyze_timings.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Defining the llm_token_map is very verbose. Make it in these two tests so
-      that we instead just define the llm tokens as a slice of `&str`s. Then assign
-      llm token IDs as they come.
-    metadata:
-  - assistant: |-
-      You've got it. Defining the vocabulary as a simple slice of strings is much cleaner and less error-prone. I've updated the two tests to build the `llm_token_map` from a `&[&str]`.
-
-      I also noticed that the precomputation step was running some pruning passes that I had commented out for debugging. I've re-enabled them in `src/constraint.rs` to ensure the precomputation is as optimized as intended.
-
-      Here are the patches for the changes.
-
-      ### Modified Files
-
-      1.  **`src/constraint.rs`**: Re-enabled pruning passes in the `precompute` function.
-      2.  **`src/test_constraint_js.rs`**: Simplified vocabulary definition in the two minimizer tests.
-
-      ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -346,10 +346,10 @@
-               );
-       
-               helper.run_dfs();
-      -        // helper.prune_dead_paths();
-      -        // helper.prune_on_no_terminal_follow();
-      -        // helper.prune_dead_paths();
-      -        // helper.prune_on_no_terminal_follow();
-      +        helper.prune_dead_paths();
-      +        helper.prune_on_no_terminal_follow();
-      +        helper.prune_dead_paths();
-      +        helper.prune_on_no_terminal_follow();
-               helper.merge_nodes();
-               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
-           }
-
-      ``````diff
-      --- a/src/test_constraint_js.rs
-      +++ b/src/test_constraint_js.rs
-      @@ -347,15 +347,13 @@
-       
-           // 1. Define the test case.
-           let input_string = "var x = 1;";
-      +    let llm_token_strs = &["var", " ", "x", "=", "1", ";"];
-           let mut llm_token_map = LLMTokenMap::new();
-      -    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      -    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      -    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      -    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      -    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      -    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      -    let max_token_id = 5;
-      +    for (i, &token_str) in llm_token_strs.iter().enumerate() {
-      +        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
-      +    }
-      +    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
-       
-           // 2. Load the full JS grammar.
-           println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
-      @@ -441,15 +439,13 @@
-       
-           // 2. Define the test case (must match the one in the minimizer test).
-           let input_string = "var x = 1;";
-      +    let llm_token_strs = &["var", " ", "x", "=", "1", ";"];
-           let mut llm_token_map = LLMTokenMap::new();
-      -    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-      -    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-      -    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-      -    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-      -    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-      -    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-      -    let max_token_id = 5;
-      +    for (i, &token_str) in llm_token_strs.iter().enumerate() {
-      +        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
-      +    }
-      +    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
-       
-           // 3. Create GrammarConstraint and run the test.
-           let constraint = GrammarConstraint::from_compiled_grammar(
-
-      ```
     metadata:
 ...
