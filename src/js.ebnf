@@ -1,17 +1,10 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 !ignore IGNORE;
 
-start ::= temp+ ;
-//temp ::= '[' 'x' ']' ':' ;
-//temp ::= '[' IDENTIFIER ']' ':' ;
-temp ::= '[' expression ']' ':' ;
-//temp ::= property_name ':' ;
-
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
-IGNORE ::= ' ' ;
-// IGNORE ::= ( WS | COMMENT )+ ;
+IGNORE ::= ( WS | COMMENT )+ ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
 SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ; // Non-greedy match
@@ -266,8 +259,7 @@ REGEX_BODY ::= ( [^/\n\r\\] | '\\' . )+ ; // Any char except /, newline, or back
 REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 
 template_literal ::= '`' ( TEMPLATE_CHAR | template_substitution )* '`' ;
-// TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
-TEMPLATE_CHAR ::= '\\' . ; // Any char except backtick or backslash, or any escaped char.
+TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
 template_substitution ::= '${' expression '}' ;
 
 // Identifiers
