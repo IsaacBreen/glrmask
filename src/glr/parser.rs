@@ -879,7 +879,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut next_active_state = ParseState::new();
 
         let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
-        println!("GLRParserState::do_phase3: Stats: {:?}", stats);
+        // println!("GLRParserState::do_phase3: Stats: {:?}", stats);
 
         crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
