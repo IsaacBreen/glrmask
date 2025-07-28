@@ -846,7 +846,7 @@ impl<'r> Precomputer<'r> {
                                 );
                                 // Print the source node.
                                 // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
-                                inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
+                                inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -900,7 +900,7 @@ impl<'r> Precomputer<'r> {
                                 );
                                 // Print the source node.
                                 // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
-                                inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
+                                inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             }
                         }
                         next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
