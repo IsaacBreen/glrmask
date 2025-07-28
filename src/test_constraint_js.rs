@@ -349,14 +349,12 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
 
     // 1. Define the test case.
     let input_string = "var x = 1;";
+    let llm_token_strs = &["var", " ", "x", "=", "1", ";"];
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-    let max_token_id = 5;
+    for (i, &token_str) in llm_token_strs.iter().enumerate() {
+        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+    }
+    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
 
     // 2. Load the full JS grammar.
     println!("--- Loading and Minimizing JS Grammar for Constraint Test ---");
@@ -451,14 +449,12 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
 
     // 2. Define the test case (must match the one in the minimizer test).
     let input_string = "var x = 1;";
+    let llm_token_strs = &["var", " ", "x", "=", "1", ";"];
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"var".to_vec(), LLMTokenID(0));
-    llm_token_map.insert(b" ".to_vec(), LLMTokenID(1));
-    llm_token_map.insert(b"x".to_vec(), LLMTokenID(2));
-    llm_token_map.insert(b"=".to_vec(), LLMTokenID(3));
-    llm_token_map.insert(b"1".to_vec(), LLMTokenID(4));
-    llm_token_map.insert(b";".to_vec(), LLMTokenID(5));
-    let max_token_id = 5;
+    for (i, &token_str) in llm_token_strs.iter().enumerate() {
+        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+    }
+    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
 
     // 3. Create GrammarConstraint and run the test.
     let constraint = GrammarConstraint::from_compiled_grammar(
