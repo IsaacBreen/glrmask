@@ -384,12 +384,12 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     println!("Manually specified interesting terminals: {:?}", interesting_terminals);
 
     // 4. Minimize the grammar.
-    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
-        &full_grammar_def.productions,
-        full_grammar_def.start_production_id,
-        &interesting_terminals,
-    );
-    // let (minimized_productions, minimized_start_id) = (full_grammar_def.productions.clone(), full_grammar_def.start_production_id);
+    // let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+    //     &full_grammar_def.productions,
+    //     full_grammar_def.start_production_id,
+    //     &interesting_terminals,
+    // );
+    let (minimized_productions, minimized_start_id) = (full_grammar_def.productions.clone(), full_grammar_def.start_production_id);
 
     // 5. Create and compile the minimized grammar definition.
     let mut minimized_def = full_grammar_def; // Start with a clone
