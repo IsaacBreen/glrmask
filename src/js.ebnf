@@ -3,8 +3,9 @@
 
 start ::= temp+ ;
 //temp ::= '[' 'x' ']' ':' ;
-temp ::= property_name ':' ;
-//temp ::= '[' expression ']' ':' ;
+//temp ::= '[' IDENTIFIER ']' ':' ;
+temp ::= '[' expression ']' ':' ;
+//temp ::= property_name ':' ;
 
 program ::= statement_list? ;
 
