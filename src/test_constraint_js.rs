@@ -336,6 +336,169 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A module containing functions to simplify a grammar for creating minimal reproductions.
+mod minimizer {
+    use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    /// Removes productions that contain terminals not present in the `used_terminals` set.
+    /// This is useful for focusing the grammar on only the tokens relevant to a specific test case.
+    pub fn remove_unused_terminal_productions(
+        productions: &[Production],
+        used_terminals: &BTreeSet<Terminal>,
+    ) -> Vec<Production> {
+        productions
+            .iter()
+            .filter(|prod| {
+                prod.rhs.iter().all(|symbol| match symbol {
+                    Symbol::NonTerminal(_) => true, // Don't filter based on non-terminals here
+                    Symbol::Terminal(t) => used_terminals.contains(t),
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Inlines non-terminals that have only one, non-recursive production rule.
+    /// For example, if `A ::= B C` is the only rule for `A`, all occurrences of `A` in other
+    /// rules will be replaced by `B C`. This is repeated until no more substitutions can be made.
+    pub fn substitute_single_productions(productions: &[Production]) -> Vec<Production> {
+        let mut new_productions = productions.to_vec();
+        loop {
+            let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
+            for prod in &new_productions {
+                prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod.clone());
+            }
+
+            let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
+            for (nt, prods) in &prods_by_lhs {
+                if prods.len() == 1 {
+                    let single_prod = &prods[0];
+                    // Avoid substituting recursive rules like A -> A b
+                    if !single_prod.rhs.contains(&Symbol::NonTerminal(nt.clone())) {
+                        substitutions.insert(nt.clone(), single_prod.rhs.clone());
+                    }
+                }
+            }
+
+            if substitutions.is_empty() {
+                break; // No more substitutions to make
+            }
+
+            let mut substituted_productions = Vec::new();
+            for prod in &new_productions {
+                // Don't re-add the productions we are substituting away
+                if substitutions.contains_key(&prod.lhs) {
+                    continue;
+                }
+
+                let new_rhs: Vec<Symbol> = prod.rhs.iter().flat_map(|symbol| {
+                    if let Symbol::NonTerminal(nt) = symbol {
+                        if let Some(subst_rhs) = substitutions.get(nt) {
+                            subst_rhs.clone()
+                        } else {
+                            vec![symbol.clone()]
+                        }
+                    } else {
+                        vec![symbol.clone()]
+                    }
+                }).collect();
+
+                substituted_productions.push(Production {
+                    lhs: prod.lhs.clone(),
+                    rhs: new_rhs,
+                });
+            }
+            new_productions = substituted_productions;
+        }
+        new_productions
+    }
+
+    /// Removes productions whose left-hand side non-terminal is not reachable from the start symbol.
+    pub fn remove_unreachable_productions(
+        productions: &[Production],
+        start_symbol: &NonTerminal,
+    ) -> Vec<Production> {
+        let mut reachable_nts: BTreeSet<NonTerminal> = BTreeSet::new();
+        let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
+
+        reachable_nts.insert(start_symbol.clone());
+        worklist.push_back(start_symbol.clone());
+
+        while let Some(nt) = worklist.pop_front() {
+            for prod in productions {
+                if prod.lhs == nt {
+                    for symbol in &prod.rhs {
+                        if let Symbol::NonTerminal(rhs_nt) = symbol {
+                            if reachable_nts.insert(rhs_nt.clone()) {
+                                worklist.push_back(rhs_nt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        productions
+            .iter()
+            .filter(|prod| reachable_nts.contains(&prod.lhs))
+            .cloned()
+            .collect()
+    }
+
+    /// Removes productions that are non-productive. A non-terminal is productive if it can
+    /// derive a finite string of terminals. This also removes rules that refer to
+    /// non-terminals that have no productions.
+    pub fn remove_non_productive_productions(productions: &[Production]) -> Vec<Production> {
+        let mut productive_nts: BTreeSet<NonTerminal> = BTreeSet::new();
+        let mut changed = true;
+
+        while changed {
+            changed = false;
+            for prod in productions {
+                if productive_nts.contains(&prod.lhs) {
+                    continue;
+                }
+                let is_rhs_productive = prod.rhs.iter().all(|symbol| match symbol {
+                    Symbol::Terminal(_) => true,
+                    Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+                });
+
+                if is_rhs_productive {
+                    if productive_nts.insert(prod.lhs.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        productions
+            .iter()
+            .filter(|prod| {
+                productive_nts.contains(&prod.lhs) &&
+                prod.rhs.iter().all(|symbol| match symbol {
+                    Symbol::Terminal(_) => true,
+                    Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+                })
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+#[test]
+#[ignore = "This is a tool for debugging, not a standard test case."]
+fn test_js_grammar_minimizer() -> Result<(), Box<dyn std::error::Error>> {
+    println!("--- Loading Full JS Grammar ---");
+    let grammar_path = "src/js.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let mut productions = grammar_definition.productions.clone();
+    let start_symbol = grammar_definition.start_symbol.clone();
+    println!("Original grammar has {} productions.", productions.len());
+
+    Ok(())
+}
+
 #[test]
 fn test_js_parser_manual_tokenization_computed_property() -> Result<(), Box<dyn std::error::Error>> {
     // This test isolates the GLR parser by feeding it a manually tokenized sequence,

@@ -11,7 +11,7 @@ local_system:
     - src/glr/tests.rs
     - src/js.ebnf
     - src/test_constraint_js.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -16377,6 +16377,343 @@ messages:
       +    assert!(!glr_state.is_ok(), "Parser state should be invalid after final, unexpected terminal '{}'", last_terminal_name);
       +
       +    println!("\n--- Test passed: parser correctly identified valid prefix and failed on invalid completion. ---");
+      +
+      +    Ok(())
+      +}
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/js.ebnf since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+      --- original version of src/test_constraint_js.rs+++ current version of src/test_constraint_js.rs@@ -337,6 +337,66 @@ }
+       
+       #[test]
+      +fn test_js_parser_manual_tokenization_computed_property() -> Result<(), Box<dyn std::error::Error>> {
+      +    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
+      +    // bypassing the GrammarConstraint and its tokenizer. This is useful for debugging
+      +    // issues that might be in the parser itself versus the constraint/tokenization layers.
+      +    // The input string being tested is `{[x]:}` which is a valid prefix of a JS
+      +    // object, but invalid upon seeing the final '}'.
+      +
+      +    // 1. Load and compile the JavaScript grammar.
+      +    println!("--- Setting up for JS GLR Parser Manual Tokenization Test ---");
+      +    let grammar_path = "src/js.ebnf";
+      +    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      +    println!("Grammar compiled successfully.");
+      +
+      +    let parser = &compiled_grammar.glr_parser;
+      +
+      +    // 2. Define the terminal sequence for `{[x]:}`.
+      +    let terminals = vec![
+      +        literal(b"{"),
+      +        literal(b"["),
+      +        regex("IDENTIFIER"), // for 'x'
+      +        literal(b"]"),
+      +        literal(b":"),
+      +        literal(b"}"),
+      +    ];
+      +
+      +    // 3. Convert terminal objects to TerminalIDs.
+      +    let terminal_ids: Vec<TerminalID> = terminals.iter().enumerate().map(|(i, terminal_obj)| {
+      +        *parser.terminal_map.get_by_left(terminal_obj)
+      +            .unwrap_or_else(|| panic!("Terminal #{} ('{}') not found in parser's terminal map.", i, terminal_obj))
+      +    }).collect();
+      +
+      +    println!("Terminal sequence to parse: {:?}", terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+      +    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+      +
+      +    // 4. Initialize the parser state and step through the terminals.
+      +    let mut glr_state = parser.init_glr_parser(None);
+      +    
+      +    // The prefix `{[x]:` should be valid.
+      +    for i in 0..terminals.len() - 1 {
+      +        let terminal_id = terminal_ids[i];
+      +        let terminal_name = parser.terminal_map.get_by_right(&terminal_id).unwrap();
+      +        println!("\n--- Stepping with prefix terminal {} ('{}') ---", i, terminal_name);
+      +        glr_state.step(terminal_id);
+      +        assert!(glr_state.is_ok(), "Parser state became invalid after prefix terminal {} ('{}')", i, terminal_name);
+      +    }
+      +
+      +    // 5. The final '}' is unexpected after a ':', so the parse should fail here.
+      +    let last_terminal_id = *terminal_ids.last().unwrap();
+      +    let last_terminal_name = parser.terminal_map.get_by_right(&last_terminal_id).unwrap();
+      +    println!("\n--- Stepping with final terminal ('{}') ---", last_terminal_name);
+      +    glr_state.step(last_terminal_id);
+      +    assert!(!glr_state.is_ok(), "Parser state should be invalid after final, unexpected terminal '{}'", last_terminal_name);
+      +
+      +    println!("\n--- Test passed: parser correctly identified valid prefix and failed on invalid completion. ---");
+      +
+      +    Ok(())
+      +}
+      +
+      +#[test]
+       fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> {
+           println!("--- Setting up for JS GLR Parser Sanity Checks ---");
+           let grammar_path = "src/js.ebnf";
+
+      ```
+    metadata:
+  - user: |-
+      This isolates the issue to the grammar/parser. But often what I'll do is I'll modify the grammar itself until I have the simplest version that still reproduces the behaviour I'm interested in.
+      After that, I'll want to create a minimal equivalent test by progressively simplifying/reducing/distilling the grammar down as much as possible, in phases (different *kinds* of simplifications/reductions).
+      If I apply some simplification and it no longer reproduces the error, then I know I've gone too far.
+      Note that 'reproducing' here doesn't just mean *reproducing **a** bug*; it means reproducing **the** bug we're interested in.
+      For that to be the case, the grammar needs to be such that it *should still match the input*.
+      We can always simplify the grammar down to a null grammar that always mismatches any input, and this'll fail on our test input. But that's not useful. We want it to fail on an input that we know it *should **succeed** on*.
+
+      For those simplifications...
+      - for one, we could invalidate tokens that don't appear in the test input, ie remove productions containing those tokens from the grammar.
+      - Another thing we can do is substitute in nonterminals with just one production.
+      - And we can eliminate productions for nonterminals that aren't reachable from the start production (which'll take care of the leftovers from the substitutions in the previous one!).
+      - And, of course, we can eliminate productions with nonterminals that don't themselves have any productions.
+      And we want to print the simplified grammar of course.
+      Group the simplifications together into perhaps a module or something.
+    metadata:
+  - assistant: |-
+      Of course. Creating a tool to systematically reduce a grammar to a minimal failing case is an excellent strategy for debugging complex parsing issues. I'll add a `minimizer` module to `src/test_constraint_js.rs` with the simplification functions you described, along with a new test to demonstrate its use.
+
+      This new test will be ignored by default, as it's a debugging utility rather than a standard regression test. You can run it with `cargo test -- --ignored` when you need to diagnose a specific problem.
+
+      Here are the changes for `src/test_constraint_js.rs`:
+
+      ```diff
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -449,3 +449,168 @@
+       
+           Ok(())
+       }
+      +
+      +/// A module containing functions to simplify a grammar for creating minimal reproductions.
+      +mod minimizer {
+      +    use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      +    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +
+      +    /// Removes productions that contain terminals not present in the `used_terminals` set.
+      +    /// This is useful for focusing the grammar on only the tokens relevant to a specific test case.
+      +    pub fn remove_unused_terminal_productions(
+      +        productions: &[Production],
+      +        used_terminals: &BTreeSet<Terminal>,
+      +    ) -> Vec<Production> {
+      +        productions
+      +            .iter()
+      +            .filter(|prod| {
+      +                prod.rhs.iter().all(|symbol| match symbol {
+      +                    Symbol::NonTerminal(_) => true, // Don't filter based on non-terminals here
+      +                    Symbol::Terminal(t) => used_terminals.contains(t),
+      +                })
+      +            })
+      +            .cloned()
+      +            .collect()
+      +    }
+      +
+      +    /// Inlines non-terminals that have only one, non-recursive production rule.
+      +    /// For example, if `A ::= B C` is the only rule for `A`, all occurrences of `A` in other
+      +    /// rules will be replaced by `B C`. This is repeated until no more substitutions can be made.
+      +    pub fn substitute_single_productions(productions: &[Production]) -> Vec<Production> {
+      +        let mut new_productions = productions.to_vec();
+      +        loop {
+      +            let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
+      +            for prod in &new_productions {
+      +                prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod.clone());
+      +            }
+      +
+      +            let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
+      +            for (nt, prods) in &prods_by_lhs {
+      +                if prods.len() == 1 {
+      +                    let single_prod = &prods[0];
+      +                    // Avoid substituting recursive rules like A -> A b
+      +                    if !single_prod.rhs.contains(&Symbol::NonTerminal(nt.clone())) {
+      +                        substitutions.insert(nt.clone(), single_prod.rhs.clone());
+      +                    }
+      +                }
+      +            }
+      +
+      +            if substitutions.is_empty() {
+      +                break; // No more substitutions to make
+      +            }
+      +
+      +            let mut substituted_productions = Vec::new();
+      +            for prod in &new_productions {
+      +                // Don't re-add the productions we are substituting away
+      +                if substitutions.contains_key(&prod.lhs) {
+      +                    continue;
+      +                }
+      +
+      +                let new_rhs: Vec<Symbol> = prod.rhs.iter().flat_map(|symbol| {
+      +                    if let Symbol::NonTerminal(nt) = symbol {
+      +                        if let Some(subst_rhs) = substitutions.get(nt) {
+      +                            subst_rhs.clone()
+      +                        } else {
+      +                            vec![symbol.clone()]
+      +                        }
+      +                    } else {
+      +                        vec![symbol.clone()]
+      +                    }
+      +                }).collect();
+      +
+      +                substituted_productions.push(Production {
+      +                    lhs: prod.lhs.clone(),
+      +                    rhs: new_rhs,
+      +                });
+      +            }
+      +            new_productions = substituted_productions;
+      +        }
+      +        new_productions
+      +    }
+      +
+      +    /// Removes productions whose left-hand side non-terminal is not reachable from the start symbol.
+      +    pub fn remove_unreachable_productions(
+      +        productions: &[Production],
+      +        start_symbol: &NonTerminal,
+      +    ) -> Vec<Production> {
+      +        let mut reachable_nts: BTreeSet<NonTerminal> = BTreeSet::new();
+      +        let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
+      +
+      +        reachable_nts.insert(start_symbol.clone());
+      +        worklist.push_back(start_symbol.clone());
+      +
+      +        while let Some(nt) = worklist.pop_front() {
+      +            for prod in productions {
+      +                if prod.lhs == nt {
+      +                    for symbol in &prod.rhs {
+      +                        if let Symbol::NonTerminal(rhs_nt) = symbol {
+      +                            if reachable_nts.insert(rhs_nt.clone()) {
+      +                                worklist.push_back(rhs_nt.clone());
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        productions
+      +            .iter()
+      +            .filter(|prod| reachable_nts.contains(&prod.lhs))
+      +            .cloned()
+      +            .collect()
+      +    }
+      +
+      +    /// Removes productions that are non-productive. A non-terminal is productive if it can
+      +    /// derive a finite string of terminals. This also removes rules that refer to
+      +    /// non-terminals that have no productions.
+      +    pub fn remove_non_productive_productions(productions: &[Production]) -> Vec<Production> {
+      +        let mut productive_nts: BTreeSet<NonTerminal> = BTreeSet::new();
+      +        let mut changed = true;
+      +
+      +        while changed {
+      +            changed = false;
+      +            for prod in productions {
+      +                if productive_nts.contains(&prod.lhs) {
+      +                    continue;
+      +                }
+      +                let is_rhs_productive = prod.rhs.iter().all(|symbol| match symbol {
+      +                    Symbol::Terminal(_) => true,
+      +                    Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+      +                });
+      +
+      +                if is_rhs_productive {
+      +                    if productive_nts.insert(prod.lhs.clone()) {
+      +                        changed = true;
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        productions
+      +            .iter()
+      +            .filter(|prod| {
+      +                productive_nts.contains(&prod.lhs) &&
+      +                prod.rhs.iter().all(|symbol| match symbol {
+      +                    Symbol::Terminal(_) => true,
+      +                    Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+      +                })
+      +            })
+      +            .cloned()
+      +            .collect()
+      +    }
+      +}
+      +
+      +#[test]
+      +#[ignore = "This is a tool for debugging, not a standard test case."]
+      +fn test_js_grammar_minimizer() -> Result<(), Box<dyn std::error::Error>> {
+      +    println!("--- Loading Full JS Grammar ---");
+      +    let grammar_path = "src/js.ebnf";
+      +    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      +    let mut productions = grammar_definition.productions.clone();
+      +    let start_symbol = grammar_definition.start_symbol.clone();
+      +    println!("Original grammar has {} productions.", productions.len());
       +
       +    Ok(())
       +}
