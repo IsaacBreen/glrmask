@@ -243,6 +243,12 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Tokenize a sample JS file using a VocabPrefixTree built from the LLM vocab.
     let example_code_path = "src/example_code.js";
     let full_text_to_tokenize = fs::read_to_string(example_code_path)?;
+
+    // Log the source code in a structured way so the analysis script can be self-contained.
+    println!("---BEGIN-SOURCE-JSON---");
+    // Use serde_json to ensure proper escaping.
+    println!("{}", serde_json::to_string(&full_text_to_tokenize)?);
+    println!("---END-SOURCE-JSON---");
     
     let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_vocab.llm_token_map
         .iter()

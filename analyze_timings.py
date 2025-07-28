@@ -52,21 +52,31 @@ def generate_color(time_ms):
     return f'hsla({h}, {s}%, {l}%, 0.6)'
 
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: python {sys.argv[0]} <path_to_source_code> <path_to_log_file>")
+    if len(sys.argv) != 2:
+        print(f"Usage: python {sys.argv[0]} <path_to_log_file>")
         sys.exit(1)
 
-    source_path = Path(sys.argv[1])
-    log_path = Path(sys.argv[2])
+    log_path = Path(sys.argv[1])
     output_path = Path("timings_visualization.html")
 
     # Pane width configuration: flex-grow ratio for code vs details panes.
     # For 1/3 code vs 2/3 details split, use 1 and 2. For 50/50, use 1 and 1.
     code_pane_flex_ratio = 1
     details_pane_flex_ratio = 5
-
-    full_text = source_path.read_text(encoding='utf-8')
+    
     log_content = log_path.read_text(encoding='utf-8')
+
+    # Extract source code from log
+    source_json_match = re.search(r'---BEGIN-SOURCE-JSON---\n(.*?)\n---END-SOURCE-JSON---', log_content, re.DOTALL)
+    if not source_json_match:
+        print("Error: Source code block not found in log file.")
+        print("Please ensure the log contains a block like:\n---BEGIN-SOURCE-JSON---\n\"...source...\"\n---END-SOURCE-JSON---")
+        sys.exit(1)
+    
+    source_json_str = source_json_match.group(1)
+    full_text = json.loads(source_json_str)
+    # The rest of the log is everything outside the source block
+    log_content = log_content[:source_json_match.start()] + log_content[source_json_match.end():]
 
     # Find all "Processing token..." markers to split the log
     processing_markers = list(re.finditer(r'Processing token \d+/\d+', log_content))
