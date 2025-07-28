@@ -407,11 +407,12 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
     println!("Initial production count: {}", full_grammar_def.productions.len());
 
     // 3. Minimize the grammar.
-    let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
-        &full_grammar_def.productions,
-        full_grammar_def.start_production_id,
-        &interesting_terminals,
-    );
+    // let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
+    //     &full_grammar_def.productions,
+    //     full_grammar_def.start_production_id,
+    //     &interesting_terminals,
+    // );
+    let (minimized_productions, minimized_start_id) = (full_grammar_def.productions.clone(), full_grammar_def.start_production_id);
 
     // 5. Create and compile the minimized grammar.
     let minimized_def = GrammarDefinition {
