@@ -12,6 +12,7 @@ use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
+use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
@@ -1017,8 +1018,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     // #[time_it("GLRParserState::log_gss")]
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
+        if !GSS_LOGGING_ENABLED {
+            return;
+        }
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-        return;
         const MAX: usize = 30;
         const PANIC_THRESHOLD: usize = 10000;
 

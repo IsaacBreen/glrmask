@@ -17,6 +17,7 @@ use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use std::ops::{BitAnd, BitOr};
+use crate::profiler::GSS_LOGGING_ENABLED;
 use profiler_macro::{time_it, timeit};
 
 // --- Type Aliases ---
@@ -1060,7 +1061,9 @@ pub fn print_gss_forest(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    return "".to_string();
+    if !GSS_LOGGING_ENABLED {
+        return "".to_string();
+    }
     // Recursive helper to print predecessors.
     fn print_predecessors_recursive(
         node_arc: &Arc<GSSNode>,
