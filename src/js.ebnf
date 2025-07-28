@@ -1,8 +1,11 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 !ignore IGNORE;
 
+//start ::= temp+ ;
+//temp ::= '[' 'x' ']' ':' ;
 start ::= temp+ ;
-temp ::= '[' 'x' ']' ':' ;
+temp ::= property_name ':' ;
+
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
