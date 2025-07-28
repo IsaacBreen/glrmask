@@ -708,6 +708,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            crate::debug!(5, "Action: Split with shift and reduces");
                             if let Some(to) = shift {
                                 crate::debug!(5, "Action (Split): Shift to state {}", to.0);
                                 let new_parse_state =
@@ -729,6 +730,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                         }
                     }
+                } else {
+                    crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
                 }
             }
         }
@@ -990,8 +993,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // This method could be used if multiple GLRParserStates are combined.
     }
 
-    pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
+    pub fn merge_with(&mut self, mut other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
+        match (self.phase, other.phase) {
+            (ParserPhase::ReadyForPhase1, ParserPhase::ReadyForPhase3) => self.do_phase3(),
+            (ParserPhase::ReadyForPhase3, ParserPhase::ReadyForPhase1) => other.do_phase3(),
+            _ => {},
+        }
         self.active_state.merge(other.active_state);
         self.accepted |= other.accepted;
     }
