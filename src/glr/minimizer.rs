@@ -51,6 +51,7 @@ pub fn substitute_single_productions_and_report(
         if substitutions.is_empty() {
             break;
         }
+        println!("substitute_single_productions_and_report: Found {} substitutions: {}", substitutions.len(), substitutions.keys().map(|nt| nt.0.clone()).collect::<Vec<_>>().join(", "));
 
         all_substituted_nts.extend(substitutions.keys().cloned());
 
