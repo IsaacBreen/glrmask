@@ -391,7 +391,6 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-#[ignore] // This is a template for creating new tests from a minimized grammar.
 fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Defines a test case (an input string and a small vocabulary).
     // 2. Loads the full JS grammar.
