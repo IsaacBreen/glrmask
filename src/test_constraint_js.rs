@@ -337,6 +337,66 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_js_parser_manual_tokenization_computed_property() -> Result<(), Box<dyn std::error::Error>> {
+    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
+    // bypassing the GrammarConstraint and its tokenizer. This is useful for debugging
+    // issues that might be in the parser itself versus the constraint/tokenization layers.
+    // The input string being tested is `{[x]:}` which is a valid prefix of a JS
+    // object, but invalid upon seeing the final '}'.
+
+    // 1. Load and compile the JavaScript grammar.
+    println!("--- Setting up for JS GLR Parser Manual Tokenization Test ---");
+    let grammar_path = "src/js.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    println!("Grammar compiled successfully.");
+
+    let parser = &compiled_grammar.glr_parser;
+
+    // 2. Define the terminal sequence for `{[x]:}`.
+    let terminals = vec![
+        literal(b"{"),
+        literal(b"["),
+        regex("IDENTIFIER"), // for 'x'
+        literal(b"]"),
+        literal(b":"),
+        literal(b"}"),
+    ];
+
+    // 3. Convert terminal objects to TerminalIDs.
+    let terminal_ids: Vec<TerminalID> = terminals.iter().enumerate().map(|(i, terminal_obj)| {
+        *parser.terminal_map.get_by_left(terminal_obj)
+            .unwrap_or_else(|| panic!("Terminal #{} ('{}') not found in parser's terminal map.", i, terminal_obj))
+    }).collect();
+
+    println!("Terminal sequence to parse: {:?}", terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+
+    // 4. Initialize the parser state and step through the terminals.
+    let mut glr_state = parser.init_glr_parser(None);
+    
+    // The prefix `{[x]:` should be valid.
+    for i in 0..terminals.len() - 1 {
+        let terminal_id = terminal_ids[i];
+        let terminal_name = parser.terminal_map.get_by_right(&terminal_id).unwrap();
+        println!("\n--- Stepping with prefix terminal {} ('{}') ---", i, terminal_name);
+        glr_state.step(terminal_id);
+        assert!(glr_state.is_ok(), "Parser state became invalid after prefix terminal {} ('{}')", i, terminal_name);
+    }
+
+    // 5. The final '}' is unexpected after a ':', so the parse should fail here.
+    let last_terminal_id = *terminal_ids.last().unwrap();
+    let last_terminal_name = parser.terminal_map.get_by_right(&last_terminal_id).unwrap();
+    println!("\n--- Stepping with final terminal ('{}') ---", last_terminal_name);
+    glr_state.step(last_terminal_id);
+    assert!(!glr_state.is_ok(), "Parser state should be invalid after final, unexpected terminal '{}'", last_terminal_name);
+
+    println!("\n--- Test passed: parser correctly identified valid prefix and failed on invalid completion. ---");
+
+    Ok(())
+}
+
+#[test]
 fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Setting up for JS GLR Parser Sanity Checks ---");
     let grammar_path = "src/js.ebnf";
