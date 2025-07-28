@@ -374,11 +374,7 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
         &interesting_terminals,
     );
 
-    // 4. Print the minimized grammar.
-    println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
-    println!("{}", crate::interface::display_productions(&minimized_productions));
-
-    // 5. Compile the minimized grammar.
+    // 5. Create and compile the minimized grammar.
     let minimized_def = GrammarDefinition {
         productions: minimized_productions,
         start_production_id: 0, // The minimizer should preserve the augmented start rule at index 0.
@@ -387,8 +383,14 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
         regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
         ignore_terminal_id: full_grammar_def.ignore_terminal_id,
     };
+    println!("\n--- Minimized Grammar ---");
+    println!("{}", minimized_def);
+
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+
     let parser = &compiled_grammar.glr_parser;
+    println!("\n--- Parser ----");
+    println!("{}", parser);
 
     // 6. Convert test terminals to IDs using the new parser's map.
     let terminal_ids: Vec<TerminalID> = test_case_terminals
