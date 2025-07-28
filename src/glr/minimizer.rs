@@ -100,6 +100,8 @@ pub fn substitute_single_productions_and_report(
     let mut all_substituted_nts = BTreeSet::new();
 
     loop {
+        let before_prods = current_prods.clone();
+
         // 1. Find all non-terminals involved in cycles. They cannot be substituted.
         let nts_in_cycle = find_all_nts_in_cycles(&current_prods);
 
@@ -112,8 +114,7 @@ pub fn substitute_single_productions_and_report(
         // 3. Find new candidates for substitution.
         let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
         for (nt, prods) in &prods_by_lhs {
-            if !all_substituted_nts.contains(nt) &&
-               prods.len() == 1 &&
+            if prods.len() == 1 &&
                nt != start_nt &&
                !nts_in_cycle.contains(nt) &&
                prods[0].rhs.len() <= max_rhs_len {
@@ -149,6 +150,10 @@ pub fn substitute_single_productions_and_report(
             });
         }
         current_prods = next_prods;
+
+        if current_prods == before_prods {
+            break;
+        }
     }
     (current_prods, all_substituted_nts)
 }
