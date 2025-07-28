@@ -6,3 +6,4 @@ pub mod stats;
 mod tests;
 pub mod analyze;
 pub mod automaton;
+pub mod minimizer;
