@@ -310,6 +310,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         let mask_start = Instant::now();
         let current_mask = constraint_state.get_mask();
         println!("  get_mask took: {:?}", mask_start.elapsed());
+        println!("  Current mask: {:?}", current_mask);
 
         assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
         println!("  Token is in the mask.");
@@ -467,6 +468,7 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
         let mask_start = Instant::now();
         let current_mask = state.get_mask();
         println!("  get_mask took: {:?}", mask_start.elapsed());
+        println!("  Current mask: {:?}", current_mask);
 
         assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
         println!("  Token is in the mask.");
@@ -569,6 +571,7 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
         let mask_start = Instant::now();
         let current_mask = state.get_mask();
         println!("  get_mask took: {:?}", mask_start.elapsed());
+        println!("  Current mask: {:?}", current_mask);
 
         assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
         println!("  Token is in the mask.");
@@ -669,6 +672,7 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
         let mask_start = Instant::now();
         let current_mask = state.get_mask();
         println!("  get_mask took: {:?}", mask_start.elapsed());
+        println!("  Current mask: {:?}", current_mask);
 
         assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
         println!("  Token is in the mask.");
