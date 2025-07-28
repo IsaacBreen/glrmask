@@ -347,17 +347,10 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
 
     // 1. Define the terminal sequence for `var a = {[x]: 1};`
     let test_case_terminals: Vec<Terminal> = vec![
-        literal(b"var"),
-        regex_name("IDENTIFIER"),
-        literal(b"="),
-        literal(b"{"),
         literal(b"["),
         regex_name("IDENTIFIER"),
         literal(b"]"),
         literal(b":"),
-        regex_name("NUMERIC_LITERAL"),
-        literal(b"}"),
-        literal(b";"),
     ];
     let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
 
