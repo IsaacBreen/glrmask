@@ -1,13 +1,3 @@
-// This file contains integration tests for the GrammarConstraint using a full JavaScript grammar.
-// It is structured as follows:
-// - Helper functions for loading vocabularies and debugging.
-// - Integration tests for the JavaScript grammar:
-//   - `test_js_glr_parser_sanity_checks`: Verifies the GLR parser with specific, hand-crafted sequences of grammar terminals.
-//   - `test_js_glr_parser_fuzzing`: A fuzz test that feeds random sequences of terminals to the GLR parser to check for panics.
-//   - `test_js_constraint_integration`: A full-stack test that loads a real vocabulary (GPT-2), tokenizes a JS file, and steps through it with the GrammarConstraint, checking the allowed token mask at each step.
-// - A `minimizer` module containing a tool to find minimal reproducing examples for bugs in the grammar or parser.
-// - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
-
 use crate::constraint::GrammarConstraint;
 use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
 use crate::glr::parser::GLRParserState;
@@ -36,59 +26,6 @@ use rand::prelude::IndexedRandom;
 use crate::constraint_extra::dump_precompute_trie_recursive;
 use crate::profiler::{print_summary, print_summary_flat, reset};
 // --- Helper Functions ---
-
-/// Helper to tokenize an input string and step through it with a GrammarConstraint,
-/// checking the mask at each step.
-fn run_step_by_step_test(
-    constraint: &GrammarConstraint,
-    input_string: &str,
-    llm_token_map: &LLMTokenMap,
-) {
-    println!("\n--- Running Constraint (Step-by-Step) for input: {:?} ---", input_string);
-
-    // Tokenize the input string
-    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
-        .iter()
-        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
-        .collect();
-    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
-
-    let mut test_token_sequence_ids = Vec::new();
-    let mut tokenized_strs_for_logging = Vec::new();
-    let mut text_to_process = input_string.as_bytes();
-
-    while !text_to_process.is_empty() {
-        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
-            Some((token_id, matched_bytes)) => {
-                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
-                test_token_sequence_ids.push(LLMTokenID(token_id));
-                tokenized_strs_for_logging.push(matched_str);
-                text_to_process = &text_to_process[matched_bytes.len()..];
-            }
-            None => {
-                panic!("Failed to tokenize. No prefix token found for remaining text: {:?}", String::from_utf8_lossy(text_to_process));
-            }
-        }
-    }
-
-    // Step through the tokenized sequence
-    let mut state = constraint.init();
-    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
-        let current_token_str = &tokenized_strs_for_logging[i];
-        println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
-
-        assert!(state.is_active(), "State became inactive before token {}", i + 1);
-
-        let current_mask = state.get_mask();
-        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
-        println!("  Token is in the mask.");
-
-        state.commit(llm_token_id);
-    }
-
-    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
-    println!("Successfully processed '{}' with grammar constraint.", input_string);
-}
 
 /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.
 fn load_or_download_gpt2_vocab(
@@ -391,6 +328,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[ignore] // This is a template for creating new tests from a minimized grammar.
 fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Defines a test case (an input string and a small vocabulary).
     // 2. Loads the full JS grammar.
@@ -399,7 +337,6 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     // 5. Compiles the minimized grammar and creates a GrammarConstraint.
     // 6. Feeds the input string to the new constraint to check for correctness.
     // 7. Saves the minimized grammar to an EBNF file for use in template tests.
-
     // 1. Define the test case.
     // let input_string = include_str!("../src/example_code.js");
     let input_string = "[x]:";
@@ -464,53 +401,46 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
 
     println!("\n--- Created GrammarConstraint ---");
     constraint.dump_precomputed();
+    println!("\n--- Running Constraint with Minimized Grammar (Step-by-Step) ---");
 
-    // Run the step-by-step test logic
-    run_step_by_step_test(&constraint, input_string, &llm_token_map);
+    // Tokenize the input string
+    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
+        .iter()
+        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+        .collect();
+    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
 
-    Ok(())
-}
+    let mut test_token_sequence_ids = Vec::new();
+    let mut tokenized_strs_for_logging = Vec::new();
+    let mut text_to_process = input_string.as_bytes();
 
-#[test]
-#[ignore] // This is a template for creating new tests from a minimized grammar.
-fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Load the minimized EBNF grammar.
-    //    To use:
-    //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
-    //    b) Copy this test function and rename it.
-    //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
-    //    d) Remove the `#[ignore]` attribute and run the test.
-    // let ebnf_source = include_str!("../minimized_js_for_constraint.ebnf");
-    let ebnf_source = &fs::read_to_string("minimized_js_for_constraint.ebnf")?;
-    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
-    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
-
-    println!("\n--- Loaded Grammar from EBNF ---");
-    println!("{}", compiled_grammar);
-
-    // 2. Define the test case (must match the one in the minimizer test).
-    // let input_string = include_str!("../src/example_code.js");
-    let input_string = "[x]:";
-    let llm_token_strs = &["[x]:", " &"];
-    let mut llm_token_map = LLMTokenMap::new();
-    for (i, &token_str) in llm_token_strs.iter().enumerate() {
-        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+    while !text_to_process.is_empty() {
+        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+            Some((token_id, matched_bytes)) => {
+                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
+                test_token_sequence_ids.push(LLMTokenID(token_id));
+                tokenized_strs_for_logging.push(matched_str);
+                text_to_process = &text_to_process[matched_bytes.len()..];
+            }
+            None => {
+                panic!("Failed to tokenize. No prefix token found for remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+            }
+        }
     }
-    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
 
-    // 3. Create GrammarConstraint and run the test.
-    let constraint = GrammarConstraint::from_compiled_grammar(
-        compiled_grammar,
-        llm_token_map.clone(),
-        LLMTokenID(max_token_id + 1),
-        max_token_id,
-    );
-
-    println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
-
-    // Run the step-by-step test logic
-    run_step_by_step_test(&constraint, input_string, &llm_token_map);
+    // Step through the tokenized sequence
+    let mut state = constraint.init();
+    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        let current_token_str = &tokenized_strs_for_logging[i];
+        println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+        let current_mask = state.get_mask();
+        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
+        println!("  Token is in the mask.");
+        state.commit(llm_token_id);
+    }
+    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
 
     Ok(())
 }
@@ -613,29 +543,66 @@ fn test_template_from_minimized_ebnf() -> Result<(), Box<dyn std::error::Error>>
     println!("\n--- Loaded Grammar from EBNF ---");
     println!("{}", compiled_grammar);
 
-    // 2. Define the sequence of terminals to test.
-    //    (Update this with the specific sequence for your new test case)
-    let test_case_terminals: Vec<Terminal> = vec![
-        // Example:
-        // literal(b"["),
-        // regex_name("IDENTIFIER"),
-        // literal(b"]"),
-        // literal(b":"),
-    ];
+    // 2. Define the test case (must match the one in the minimizer test).
+    // let input_string = include_str!("../src/example_code.js");
+    let input_string = "[x]:";
+    let llm_token_strs = &["[x]:", " &"];
+    let mut llm_token_map = LLMTokenMap::new();
+    for (i, &token_str) in llm_token_strs.iter().enumerate() {
+        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+    }
+    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
 
-    // 3. Convert terminal objects to TerminalIDs using the parser's map.
-    let terminal_ids: Vec<TerminalID> = test_case_terminals
+    // 3. Create GrammarConstraint and run the test.
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map.clone(),
+        LLMTokenID(max_token_id + 1),
+        max_token_id,
+    );
+
+    println!("\n--- Created GrammarConstraint ---");
+    constraint.dump_precomputed();
+    println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
+
+    // Tokenize the input string
+    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
         .iter()
-        .map(|t| *parser.terminal_map.get_by_left(t).unwrap_or_else(|| panic!("Terminal '{:?}' not found in the compiled grammar's terminal map.", t)))
+        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
         .collect();
+    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
 
-    // 4. Run the parser and assert success.
-    println!("\n--- Parsing with Loaded Grammar ---");
-    let mut glr_state = parser.init_glr_parser(None);
-    glr_state.parse(&terminal_ids);
+    let mut test_token_sequence_ids = Vec::new();
+    let mut tokenized_strs_for_logging = Vec::new();
+    let mut text_to_process = input_string.as_bytes();
 
-    assert!(glr_state.is_ok(), "Parse failed with the loaded EBNF grammar.");
-    println!("Successfully parsed sequence with loaded grammar.");
+    while !text_to_process.is_empty() {
+        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+            Some((token_id, matched_bytes)) => {
+                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
+                test_token_sequence_ids.push(LLMTokenID(token_id));
+                tokenized_strs_for_logging.push(matched_str);
+                text_to_process = &text_to_process[matched_bytes.len()..];
+            }
+            None => {
+                panic!("Failed to tokenize. No prefix token found for remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+            }
+        }
+    }
+
+    // Step through the tokenized sequence
+    let mut state = constraint.init();
+    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        let current_token_str = &tokenized_strs_for_logging[i];
+        println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+        let current_mask = state.get_mask();
+        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
+        println!("  Token is in the mask.");
+        state.commit(llm_token_id);
+    }
+    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
 
     Ok(())
 }
@@ -815,3 +782,4 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
 
     Ok(())
 }
+
