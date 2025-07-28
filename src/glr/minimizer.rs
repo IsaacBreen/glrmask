@@ -118,7 +118,7 @@ pub fn simplify_grammar_for_test_case(
 
     // 1. Remove productions with terminals not in our test case.
     let mut current_productions = remove_productions_with_uninteresting_terminals(productions, interesting_terminals);
-    println!("After removing uninteresting terminals: {} productions", current_productions.len());
+    println!("simplify_grammar_for_test_case: After removing uninteresting terminals: {} productions", current_productions.len());
     if current_productions.len() < 20 {
         println!("Current productions:\n{}", display_productions(&current_productions));
     }
@@ -130,7 +130,7 @@ pub fn simplify_grammar_for_test_case(
         // Substitute non-terminals with a single production rule.
         let substituted = substitute_single_productions(&current_productions, start_nt);
         if substituted.len() != current_productions.len() {
-             println!("After substituting single productions: {} productions", substituted.len());
+             println!("simplify_grammar_for_test_case: After substituting single productions: {} productions", substituted.len());
             if substituted.len() < 20 {
                 println!("Substituted productions:\n{}", display_productions(&substituted));
             }
@@ -139,7 +139,7 @@ pub fn simplify_grammar_for_test_case(
         // Remove productions that now refer to undefined non-terminals.
         let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
         if cleaned.len() != substituted.len() {
-            println!("After removing undefined non-terminals: {} productions", cleaned.len());
+            println!("simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions", cleaned.len());
             if cleaned.len() < 20 {
                 println!("Cleaned productions:\n{}", display_productions(&cleaned));
             }
@@ -148,7 +148,7 @@ pub fn simplify_grammar_for_test_case(
         // Remove productions that are no longer reachable from the start symbol.
         let reachable = eliminate_unreachable_productions(&cleaned, start_nt);
         if reachable.len() != cleaned.len() {
-            println!("After eliminating unreachable productions: {} productions", reachable.len());
+            println!("simplify_grammar_for_test_case: After eliminating unreachable productions: {} productions", reachable.len());
             if reachable.len() < 20 {
                 println!("Reachable productions:\n{}", display_productions(&reachable));
             }
