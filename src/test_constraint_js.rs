@@ -344,7 +344,6 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-#[ignore] // This is a template for creating new tests from a minimized grammar.
 fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
     // This test serves as a tool for debugging the GrammarConstraint. It does the following:
     // 1. Defines a test case (an input string and a small vocabulary).
