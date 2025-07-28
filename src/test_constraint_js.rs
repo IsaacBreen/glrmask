@@ -387,18 +387,18 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     let mut minimized_def = full_grammar_def; // Start with a clone
     minimized_def.productions = minimized_productions;
     minimized_def.start_production_id = minimized_start_id;
-    // Filter terminal maps to only include those that are still relevant.
-    let all_terminals_in_minimized_grammar: BTreeSet<Terminal> = minimized_def.productions.iter()
-        .flat_map(|p| p.rhs.iter())
-        .filter_map(|s| match s {
-            Symbol::Terminal(t) => Some(t.clone()),
-            _ => None,
-        })
-        .collect();
+    // // Filter terminal maps to only include those that are still relevant.
+    // let all_terminals_in_minimized_grammar: BTreeSet<Terminal> = minimized_def.productions.iter()
+    //     .flat_map(|p| p.rhs.iter())
+    //     .filter_map(|s| match s {
+    //         Symbol::Terminal(t) => Some(t.clone()),
+    //         _ => None,
+    //     })
+    //     .collect();
 
-    minimized_def.literal_to_group_id.retain(|lit, _| all_terminals_in_minimized_grammar.contains(&Terminal::Literal(lit.clone())));
-    minimized_def.regex_name_to_group_id.retain(|name, _| all_terminals_in_minimized_grammar.contains(&Terminal::RegexName(name.clone())));
-    minimized_def.regex_expr_to_group_id.retain(|_, gid| minimized_def.regex_name_to_group_id.contains_right(gid) || minimized_def.literal_to_group_id.contains_right(gid));
+    // minimized_def.literal_to_group_id.retain(|lit, _| all_terminals_in_minimized_grammar.contains(&Terminal::Literal(lit.clone())));
+    // minimized_def.regex_name_to_group_id.retain(|name, _| all_terminals_in_minimized_grammar.contains(&Terminal::RegexName(name.clone())));
+    // minimized_def.regex_expr_to_group_id.retain(|_, gid| minimized_def.regex_name_to_group_id.contains_right(gid) || minimized_def.literal_to_group_id.contains_right(gid));
 
 
     println!("\n--- Minimized Grammar ---");
