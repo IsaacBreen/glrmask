@@ -341,7 +341,7 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     // This test serves as a tool for debugging the GrammarConstraint. It does the following:
     // 1. Defines a test case (an input string and a small vocabulary).
     // 2. Loads the full JS grammar.
-    // 3. Tokenizes the input string with the full grammar's tokenizer to find relevant terminals.
+    // 3. Manually defines a set of interesting terminals to focus the minimization.
     // 4. Minimizes the grammar to only what's necessary for those terminals.
     // 5. Compiles the minimized grammar and creates a GrammarConstraint.
     // 6. Feeds the input string to the new constraint to check for correctness.
@@ -364,21 +364,18 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     let mut full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Initial production count: {}", full_grammar_def.productions.len());
 
-    // 3. Tokenize the input to find relevant terminals.
-    let full_compiled = CompiledGrammar::from_definition(Arc::new(full_grammar_def.clone()));
-    let tokens = full_compiled.tokenizer.execute(input_string.as_bytes()).matches;
-    let interesting_terminal_ids: BTreeSet<TerminalID> = tokens.iter().map(|t| TerminalID(t.id)).collect();
-    let mut interesting_terminals: BTreeSet<Terminal> = interesting_terminal_ids
-        .iter()
-        .map(|tid| full_compiled.glr_parser.terminal_map.get_by_right(tid).unwrap().clone())
-        .collect();
-    // Also include the ignore terminal if it exists
-    if let Some(ignore_id) = full_grammar_def.ignore_terminal_id {
-        if let Some(ignore_terminal) = full_compiled.glr_parser.terminal_map.get_by_right(&ignore_id) {
-            interesting_terminals.insert(ignore_terminal.clone());
-        }
-    }
-    println!("Interesting terminals for '{}': {:?}", input_string, interesting_terminals);
+    // 3. Manually define the interesting terminals for minimization.
+    let interesting_terminals: BTreeSet<Terminal> = vec![
+        literal(b"var"),
+        regex_name("IGNORE"),
+        regex_name("IDENTIFIER"),
+        literal(b"="),
+        regex_name("NUMERIC_LITERAL"),
+        literal(b";"),
+    ]
+    .into_iter()
+    .collect();
+    println!("Manually specified interesting terminals: {:?}", interesting_terminals);
 
     // 4. Minimize the grammar.
     let (minimized_productions, minimized_start_id) = crate::glr::minimizer::simplify_grammar_for_test_case(
@@ -496,7 +493,14 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
         literal(b"]"),
         literal(b":"),
     ];
-    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+    // Add any other terminals you want to ensure are included in the minimized grammar.
+    let additional_interesting_terminals: Vec<Terminal> = vec![
+        // For example, if you want to debug interactions with another token.
+        // literal(b"some_other_token"),
+    ];
+
+    let mut interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+    interesting_terminals.extend(additional_interesting_terminals.into_iter());
 
     // 2. Load the full JS grammar.
     println!("--- Loading and Minimizing JS Grammar ---");
