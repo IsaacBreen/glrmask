@@ -119,7 +119,7 @@ pub fn simplify_grammar_for_test_case(
     // 1. Remove productions with terminals not in our test case.
     let mut current_productions = remove_productions_with_uninteresting_terminals(productions, interesting_terminals);
     println!("simplify_grammar_for_test_case: After removing uninteresting terminals: {} productions", current_productions.len());
-    if current_productions.len() < 200 {
+    if current_productions.len() < 500 {
         println!("Current productions:\n{}", display_productions(&current_productions));
     }
 
@@ -131,7 +131,7 @@ pub fn simplify_grammar_for_test_case(
         let substituted = substitute_single_productions(&current_productions, start_nt);
         if substituted.len() != current_productions.len() {
              println!("simplify_grammar_for_test_case: After substituting single productions: {} productions", substituted.len());
-            if substituted.len() < 200 {
+            if substituted.len() < 500 {
                 println!("Substituted productions:\n{}", display_productions(&substituted));
             }
         }
@@ -140,7 +140,7 @@ pub fn simplify_grammar_for_test_case(
         let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
         if cleaned.len() != substituted.len() {
             println!("simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions", cleaned.len());
-            if cleaned.len() < 200 {
+            if cleaned.len() < 500 {
                 println!("Cleaned productions:\n{}", display_productions(&cleaned));
             }
         }
@@ -149,7 +149,7 @@ pub fn simplify_grammar_for_test_case(
         let reachable = eliminate_unreachable_productions(&cleaned, start_nt);
         if reachable.len() != cleaned.len() {
             println!("simplify_grammar_for_test_case: After eliminating unreachable productions: {} productions", reachable.len());
-            if reachable.len() < 200 {
+            if reachable.len() < 500 {
                 println!("Reachable productions:\n{}", display_productions(&reachable));
             }
         }
