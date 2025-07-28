@@ -173,6 +173,8 @@ pub fn simplify_grammar_for_test_case(
             }
         }
 
+        println!("Current productions after simplification: {}", reachable.len());
+
         if reachable.len() == before_count {
             break; // Fixed point reached
         }
