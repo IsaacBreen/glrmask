@@ -421,6 +421,9 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
 
     println!("\n--- Running Constraint with Minimized Grammar (Step-by-Step) ---");
 
+    println!("---BEGIN-SOURCE-JSON---");
+    println!("{}", serde_json::to_string(&input_string.to_string())?);
+    println!("---END-SOURCE-JSON---");
     // Tokenize the input string
     let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
         .iter()
@@ -448,14 +451,31 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
 
     // Step through the tokenized sequence
     let mut state = constraint.init();
+    let all_code_lines: Vec<&str> = input_string.lines().collect();
+    let mut current_text_byte_offset = 0;
+
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
         let current_token_str = &tokenized_strs_for_logging[i];
         println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+
+        let token_start_byte = current_text_byte_offset;
+        let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
+        print_token_context(&input_string, &all_code_lines, token_start_byte, token_end_byte, 2);
+
         assert!(state.is_active(), "State became inactive before token {}", i + 1);
+
+        let mask_start = Instant::now();
         let current_mask = state.get_mask();
+        println!("  get_mask took: {:?}", mask_start.elapsed());
+
         assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
         println!("  Token is in the mask.");
+
+        let commit_start = Instant::now();
         state.commit(llm_token_id);
+        println!("  commit took: {:?}", commit_start.elapsed());
+
+        current_text_byte_offset = token_end_byte;
     }
     assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
     println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
@@ -503,6 +523,9 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
 
     println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
 
+    println!("---BEGIN-SOURCE-JSON---");
+    println!("{}", serde_json::to_string(&input_string.to_string())?);
+    println!("---END-SOURCE-JSON---");
     // Tokenize the input string
     let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
         .iter()
@@ -530,14 +553,31 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
 
     // Step through the tokenized sequence
     let mut state = constraint.init();
+    let all_code_lines: Vec<&str> = input_string.lines().collect();
+    let mut current_text_byte_offset = 0;
+
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
         let current_token_str = &tokenized_strs_for_logging[i];
         println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+
+        let token_start_byte = current_text_byte_offset;
+        let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
+        print_token_context(&input_string, &all_code_lines, token_start_byte, token_end_byte, 2);
+
         assert!(state.is_active(), "State became inactive before token {}", i + 1);
+
+        let mask_start = Instant::now();
         let current_mask = state.get_mask();
+        println!("  get_mask took: {:?}", mask_start.elapsed());
+
         assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
         println!("  Token is in the mask.");
+
+        let commit_start = Instant::now();
         state.commit(llm_token_id);
+        println!("  commit took: {:?}", commit_start.elapsed());
+
+        current_text_byte_offset = token_end_byte;
     }
     assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
     println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
