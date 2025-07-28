@@ -596,7 +596,7 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
     //    b) Copy this test function and rename it.
     //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
     //    d) Remove the `#[ignore]` attribute and run the test.
-    let ebnf_source = "start ::= '[' 'x' ']' ':' ;\nIGNORE ::= ' ';";
+    let ebnf_source = "start ::= '[' 'x' ']' ':' ;\nIGNORE ::= ' ';\n";
     let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
 
