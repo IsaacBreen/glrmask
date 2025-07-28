@@ -164,7 +164,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     // --- Setup Phase ---
     println!("--- Setting up for JS Constraint Integration Test ---");
 
-    // 1. Load and compile the JavaScript grammar from EBNF.
+    // 1. Load and compile the JavaScript grammar.
     let grammar_path = "src/js.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Compiling GrammarDefinition into CompiledGrammar...");
@@ -337,98 +337,73 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_js_parser_isolated_object_literal() -> Result<(), Box<dyn std::error::Error>> {
-    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
-    // bypassing the tokenizer and constraint logic. It tests if the parser can handle
-    // a specific JS construct that might be problematic.
+fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+    // This test serves as a tool for debugging the parser. It does the following:
+    // 1. Defines a sequence of terminals for a specific JS input string.
+    // 2. Loads the full JS grammar.
+    // 3. Minimizes the grammar to only what's necessary for that input string.
+    // 4. Compiles the minimized grammar.
+    // 5. Feeds the terminal sequence to the new parser to check for correctness.
 
-    // 1. Load and compile the JavaScript grammar.
-    println!("--- Setting up for JS GLR Parser Isolated Test ---");
-    let grammar_path = "src/js.ebnf";
-    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
-    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-    println!("Grammar compiled successfully.");
-
-    let parser = &compiled_grammar.glr_parser;
-
-    // 2. Define the terminal sequence for `{[x]:}`
-    // This corresponds to an object literal with a computed property name.
-    let terminals: Vec<Terminal> = vec![
+    // 1. Define the terminal sequence for `var a = {[x]: 1};`
+    let test_case_terminals: Vec<Terminal> = vec![
+        literal(b"var"),
+        regex_name("IDENTIFIER"),
+        literal(b"="),
         literal(b"{"),
         literal(b"["),
         regex_name("IDENTIFIER"),
         literal(b"]"),
         literal(b":"),
+        regex_name("NUMERIC_LITERAL"),
         literal(b"}"),
+        literal(b";"),
     ];
+    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
 
-    // 3. Convert terminal objects to TerminalIDs.
-    let mut terminal_ids = Vec::new();
-    for terminal_obj in &terminals {
-        let terminal_id = parser.terminal_map.get_by_left(terminal_obj)
-            .unwrap_or_else(|| panic!("Terminal '{:?}' not found in parser's terminal map.", terminal_obj));
-        terminal_ids.push(*terminal_id);
-    }
+    // 2. Load the full JS grammar.
+    println!("--- Loading and Minimizing JS Grammar ---");
+    let grammar_path = "src/js.ebnf";
+    let full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    println!("Initial production count: {}", full_grammar_def.productions.len());
 
-    println!("Terminal sequence to parse: {:?}", terminals);
-    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+    // 3. Minimize the grammar.
+    let minimized_productions = crate::glr::minimizer::simplify_grammar_for_test_case(
+        &full_grammar_def.productions,
+        full_grammar_def.start_production_id,
+        &interesting_terminals,
+    );
 
-    // 4. Initialize the parser state and step through the terminals.
+    // 4. Print the minimized grammar.
+    println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+    println!("{}", crate::interface::display_productions(&minimized_productions));
+
+    // 5. Compile the minimized grammar.
+    let minimized_def = GrammarDefinition {
+        productions: minimized_productions,
+        start_production_id: 0, // The minimizer should preserve the augmented start rule at index 0.
+        literal_to_group_id: full_grammar_def.literal_to_group_id.clone(),
+        regex_name_to_group_id: full_grammar_def.regex_name_to_group_id.clone(),
+        regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
+        ignore_terminal_id: full_grammar_def.ignore_terminal_id,
+    };
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+    let parser = &compiled_grammar.glr_parser;
+
+    // 6. Convert test terminals to IDs using the new parser's map.
+    let terminal_ids: Vec<TerminalID> = test_case_terminals
+        .iter()
+        .map(|t| *parser.terminal_map.get_by_left(t).unwrap())
+        .collect();
+
+    // 7. Run the parser and assert success.
+    println!("\n--- Parsing with Minimized Grammar ---");
     let mut glr_state = parser.init_glr_parser(None);
-    for (i, &terminal_id) in terminal_ids.iter().enumerate() {
-        println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
-        glr_state.step(terminal_id);
-        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
-    }
-
-    println!("\n--- Finished parsing terminal sequence ---");
-    assert!(glr_state.is_ok(), "Final parser state is not OK.");
+    glr_state.parse(&terminal_ids);
+    assert!(glr_state.is_ok(), "Parse failed with minimized grammar.");
+    println!("Successfully parsed sequence with minimized grammar.");
 
     Ok(())
-}
-
-mod minimizer {
-    use super::*;
-    use crate::glr::minimizer as grammar_minimizer;
-    use crate::interface::display_productions;
-
-    #[test]
-    #[ignore] // This is a tool for debugging, not a regular test.
-    fn minimize_js_grammar_for_specific_input() {
-        // 1. Load the full JS grammar.
-        let grammar_path = "src/js.ebnf";
-        let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path).unwrap();
-        let initial_productions = grammar_definition.productions;
-        let start_production_id = grammar_definition.start_production_id;
-
-        // 2. Define the terminals present in the test case `var a = {[x]: 1};`
-        let interesting_terminals: BTreeSet<Terminal> = [
-            literal(b"var"),
-            regex_name("IDENTIFIER"),
-            literal(b"="),
-            literal(b"{"),
-            literal(b"["),
-            literal(b"]"),
-            literal(b":"),
-            regex_name("NUMERIC_LITERAL"),
-            literal(b"}"),
-            literal(b";"),
-        ].into_iter().collect();
-
-        // 3. Run the minimizer.
-        println!("--- Minimizing JS grammar for input terminals: {:?} ---", interesting_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
-        println!("Initial production count: {}", initial_productions.len());
-
-        let minimized_productions = grammar_minimizer::simplify_grammar_for_test_case(
-            &initial_productions,
-            start_production_id,
-            &interesting_terminals,
-        );
-
-        // 4. Print the result.
-        println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
-        println!("{}", display_productions(&minimized_productions));
-    }
 }
 
 #[test]

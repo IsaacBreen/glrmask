@@ -4,6 +4,7 @@ local_system:
     - src/glr/automaton.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
+    - src/glr/minimizer.rs
     - src/glr/mod.rs
     - src/glr/parser.rs
     - src/glr/stats.rs
@@ -16,8 +17,7 @@ local_system:
     - src/interface/tokenizer_combinators.rs
     - src/js.ebnf
     - src/test_constraint_js.rs
-    - src/glr/minimizer.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -25856,5 +25856,3451 @@ messages:
       Identified target file: src/test_constraint_js.rs
       Applying patch to 'src/test_constraint_js.rs' using custom patcher...
       Successfully applied patch and wrote to src/test_constraint_js.rs.
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+      --- original version of src/glr/grammar.rs+++ current version of src/glr/grammar.rs@@ -23,14 +23,14 @@ 
+       #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+       pub enum Terminal {
+      -    Regex(String),
+      +    RegexName(String),
+           Literal(Vec<u8>),
+       }
+       
+       impl JSONConvertible for Terminal {
+           fn to_json(&self) -> JSONNode {
+               match self {
+      -            Terminal::Regex(name) => JSONNode::Object({
+      +            Terminal::RegexName(name) => JSONNode::Object({
+                       let mut obj = StdMap::new();
+                       obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                       obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      @@ -51,7 +51,7 @@                 let value_field = obj.remove("value").ok_or_else(|| "Missing field value for Terminal".to_string())?;
+       
+                       match String::from_json(type_field)?.as_str() {
+      -                    "Regex" => Ok(Terminal::Regex(String::from_json(value_field)?)),
+      +                    "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
+                           "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
+                           _ => Err("Unknown type for Terminal".to_string()),
+                       }
+      @@ -64,14 +64,14 @@ impl Display for Terminal {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               match self {
+      -            Terminal::Regex(name) => write!(f, "{}", name),
+      +            Terminal::RegexName(name) => write!(f, "{}", name),
+                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+               }
+           }
+       }
+       
+      -pub fn regex(name: &str) -> Terminal {
+      -    Terminal::Regex(name.to_string())
+      +pub fn regex_name(name: &str) -> Terminal {
+      +    Terminal::RegexName(name.to_string())
+       }
+       
+       pub fn literal(bytes: &[u8]) -> Terminal {
+      @@ -80,7 +80,7 @@ 
+       impl Terminal {
+           pub fn terminal(name: &str) -> Self {
+      -        Terminal::Regex(name.to_string())
+      +        Terminal::RegexName(name.to_string())
+           }
+       
+           pub fn literal(bytes: Vec<u8>) -> Self {
+      @@ -173,7 +173,7 @@ }
+       
+       pub fn t(name: &str) -> Symbol {
+      -    Symbol::Terminal(regex(name))
+      +    Symbol::Terminal(regex_name(name))
+       }
+       
+       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+      --- original version of src/glr/mod.rs+++ current version of src/glr/mod.rs@@ -6,3 +6,4 @@ mod tests;
+       pub mod analyze;
+       pub mod automaton;
+      +pub mod minimizer;
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+      --- original version of src/glr/tests.rs+++ current version of src/glr/tests.rs@@ -1,4 +1,4 @@-use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      @@ -39,7 +39,7 @@     let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+       
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           // Test case 1: "a"
+           let tokens1 = vec![a_token];
+      @@ -73,8 +73,8 @@         prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+           ];
+           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+      -    let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+      -    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
+      +    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           let tokens4 = vec![b_token];
+           let mut state4 = parser_with_b.init_glr_parser(None);
+      @@ -115,7 +115,7 @@     input
+               .chars()
+               .filter_map(|c| {
+      -            parser.terminal_map.get_by_left(&regex(&c.to_string()))
+      +            parser.terminal_map.get_by_left(&regex_name(&c.to_string()))
+                       .copied()
+               })
+               .collect()
+      @@ -133,8 +133,8 @@     let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      -    let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+      +    let eof_token = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           // Test case 1: Valid input "a$"
+           let mut state_ok = parser.init_glr_parser(None);
+      @@ -153,7 +153,7 @@     // This test now implicitly checks that the simple grammar passes validation.
+           let parser = create_simple_parser();
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -183,7 +183,7 @@ fn test_expression_parse_table_generation_and_parse() {
+           // This test now implicitly checks that the expression grammar passes validation.
+           let parser = create_expression_parser();
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -464,17 +464,17 @@         prod("Expr", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("else")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -501,13 +501,13 @@         prod("E", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("+")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("*")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -540,8 +540,8 @@         prod("B", vec![t("x")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           state.parse(&tokens);
+      @@ -569,8 +569,8 @@     ];
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+           
+           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           // state.step(eof);
+      @@ -596,11 +596,11 @@         prod("S", vec![t("a")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -672,7 +672,7 @@ 
+           // The generation process automatically resolves the right recursion.
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),
+      @@ -717,7 +717,7 @@     assert!(analyze::validate(&productions).is_ok());
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),    // S -> b
+      @@ -755,9 +755,9 @@     assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+      -    let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
+      +    let eof_token_id = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let c_token_id = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
+      +    let d_token_id = *parser.terminal_map.get_by_left(&regex_name("d")).unwrap();
+           
+           println!("Parser: {}", parser);
+       
+      @@ -810,7 +810,7 @@         prod("B", vec![t("b")]),              // P3
+           ];
+       
+      -    let t_int_symbol = Symbol::Terminal(regex("T_int"));
+      +    let t_int_symbol = Symbol::Terminal(regex_name("T_int"));
+           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
+       
+           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
+      @@ -874,7 +874,7 @@     // Helper to tokenize space-separated terminal names
+           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
+               input_str.split_whitespace() // This is fine, it's a comment
+      -            .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
+      +            .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
+                   .collect()
+           }
+       
+      @@ -1037,7 +1037,7 @@     
+           // Let's find the actual state IDs from the generated parser.
+           let start_state = parser.start_state_id;
+      -    let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
+      +    let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
+           
+           let start_row = &parser.stage_7_table[&start_state];
+           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
+      @@ -1134,7 +1134,7 @@     assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+       
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/ebnf.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/interface.rs since previous turn:
+      ```diff
+      --- original version of src/interface/interface.rs+++ current version of src/interface/interface.rs@@ -15,7 +15,7 @@ use std::fs;
+       use std::collections::BTreeMap as StdMap;
+       use crate::glr::analyze::{simplify_grammar};
+      -use crate::glr::grammar::regex;
+      +use crate::glr::grammar::regex_name;
+       use crate::datastructures::u8set::U8Set;
+       
+       type LLMToken<'a> = &'a [u8];
+      @@ -144,7 +144,7 @@     pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
+               let mut terminal_to_group_id = BiBTreeMap::new();
+               for (name, group_id) in &self.regex_name_to_group_id {
+      -            let terminal = Terminal::Regex(name.clone());
+      +            let terminal = Terminal::RegexName(name.clone());
+                   terminal_to_group_id.insert(terminal, *group_id);
+               }
+               for (literal, group_id) in &self.literal_to_group_id {
+      @@ -377,7 +377,7 @@                 if nonterminal_names.contains(name.as_str()) {
+                           Ok((vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()))
+                       } else {
+      -                    Ok((vec![Symbol::Terminal(regex(name))], Vec::new()))
+      +                    Ok((vec![Symbol::Terminal(regex_name(name))], Vec::new()))
+                       }
+                   }
+                   GrammarExpr::Sequence(exprs) => {
+      @@ -777,7 +777,7 @@                 .into_iter()
+                       .filter(|sym| {
+                           match sym {
+      -                        Symbol::Terminal(Terminal::Regex(t)) => !always_null_terminals.contains(t),
+      +                        Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
+                               _                   => true,
+                           }
+                       })
+      @@ -811,7 +811,7 @@             //     productions with the new optional non-terminal.
+                   for prod in productions.iter_mut() {
+                       for sym in &mut prod.rhs {
+      -                    if let Symbol::Terminal(Terminal::Regex(t)) = sym {
+      +                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
+                               if t == terminal_name {
+                                   *sym = Symbol::NonTerminal(opt_nt.clone());
+                               }
+      @@ -824,7 +824,7 @@             //         <opt_nt>  ->  ε
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      -                rhs: vec![Symbol::Terminal(regex(&terminal_name))],
+      +                rhs: vec![Symbol::Terminal(regex_name(&terminal_name))],
+                   });
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      @@ -1014,7 +1014,7 @@         let tokenizer = tokenizer_expr_groups_obj.build();
+       
+               debug!(2, "Building GLR parser from definition");
+      -        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::Regex(name.clone()), TerminalID(*group_id))).collect();
+      +        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
+               for (val_bytes, group_id) in &definition.literal_to_group_id {
+                   terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
+               }
+      @@ -1347,14 +1347,14 @@         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
+       
+               let mut regex_name_to_group_id = BiBTreeMap::new();
+      -        regex_name_to_group_id.insert(regex(&"ignore"), 0);
+      -        regex_name_to_group_id.insert(regex(&"digit"), 1);
+      -        regex_name_to_group_id.insert(regex(&"alph_lower"), 2);
+      -        regex_name_to_group_id.insert(regex(&"alph_upper"), 3);
+      -        regex_name_to_group_id.insert(regex(&"underscore"), 4);
+      -        regex_name_to_group_id.insert(regex(&"name_start"), 5);
+      -        regex_name_to_group_id.insert(regex(&"name_middle"), 6);
+      -        regex_name_to_group_id.insert(regex(&"name"), 7);
+      +        regex_name_to_group_id.insert(regex_name(&"ignore"), 0);
+      +        regex_name_to_group_id.insert(regex_name(&"digit"), 1);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_lower"), 2);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_upper"), 3);
+      +        regex_name_to_group_id.insert(regex_name(&"underscore"), 4);
+      +        regex_name_to_group_id.insert(regex_name(&"name_start"), 5);
+      +        regex_name_to_group_id.insert(regex_name(&"name_middle"), 6);
+      +        regex_name_to_group_id.insert(regex_name(&"name"), 7);
+       
+               // This test was originally for GrammarConstraint::precompute, which is internal.
+               // We can't directly test precompute without a full GrammarConstraint.
+      @@ -1846,7 +1846,7 @@         let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -1874,7 +1874,7 @@         for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -1905,8 +1905,8 @@         // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -1932,7 +1932,7 @@         for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/tests.rs since previous turn:
+      ```diff
+      --- original version of src/interface/tests.rs+++ current version of src/interface/tests.rs@@ -477,7 +477,7 @@         let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -505,7 +505,7 @@         for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -536,8 +536,8 @@         // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -563,7 +563,7 @@         for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/tokenizer_combinators.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/js.ebnf since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+      --- original version of src/test_constraint_js.rs+++ current version of src/test_constraint_js.rs@@ -9,7 +9,7 @@ // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
+       
+       use crate::constraint::GrammarConstraint;
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+       use crate::glr::parser::GLRParserState;
+       use crate::glr::stats::get_stats;
+       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      @@ -337,6 +337,101 @@ }
+       
+       #[test]
+      +fn test_js_parser_isolated_object_literal() -> Result<(), Box<dyn std::error::Error>> {
+      +    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
+      +    // bypassing the tokenizer and constraint logic. It tests if the parser can handle
+      +    // a specific JS construct that might be problematic.
+      +
+      +    // 1. Load and compile the JavaScript grammar.
+      +    println!("--- Setting up for JS GLR Parser Isolated Test ---");
+      +    let grammar_path = "src/js.ebnf";
+      +    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      +    println!("Grammar compiled successfully.");
+      +
+      +    let parser = &compiled_grammar.glr_parser;
+      +
+      +    // 2. Define the terminal sequence for `{[x]:}`
+      +    // This corresponds to an object literal with a computed property name.
+      +    let terminals: Vec<Terminal> = vec![
+      +        literal(b"{"),
+      +        literal(b"["),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"]"),
+      +        literal(b":"),
+      +        literal(b"}"),
+      +    ];
+      +
+      +    // 3. Convert terminal objects to TerminalIDs.
+      +    let mut terminal_ids = Vec::new();
+      +    for terminal_obj in &terminals {
+      +        let terminal_id = parser.terminal_map.get_by_left(terminal_obj)
+      +            .unwrap_or_else(|| panic!("Terminal '{:?}' not found in parser's terminal map.", terminal_obj));
+      +        terminal_ids.push(*terminal_id);
+      +    }
+      +
+      +    println!("Terminal sequence to parse: {:?}", terminals);
+      +    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+      +
+      +    // 4. Initialize the parser state and step through the terminals.
+      +    let mut glr_state = parser.init_glr_parser(None);
+      +    for (i, &terminal_id) in terminal_ids.iter().enumerate() {
+      +        println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
+      +        glr_state.step(terminal_id);
+      +        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
+      +    }
+      +
+      +    println!("\n--- Finished parsing terminal sequence ---");
+      +    assert!(glr_state.is_ok(), "Final parser state is not OK.");
+      +
+      +    Ok(())
+      +}
+      +
+      +mod minimizer {
+      +    use super::*;
+      +    use crate::glr::minimizer as grammar_minimizer;
+      +    use crate::interface::display_productions;
+      +
+      +    #[test]
+      +    #[ignore] // This is a tool for debugging, not a regular test.
+      +    fn minimize_js_grammar_for_specific_input() {
+      +        // 1. Load the full JS grammar.
+      +        let grammar_path = "src/js.ebnf";
+      +        let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path).unwrap();
+      +        let initial_productions = grammar_definition.productions;
+      +        let start_production_id = grammar_definition.start_production_id;
+      +
+      +        // 2. Define the terminals present in the test case `var a = {[x]: 1};`
+      +        let interesting_terminals: BTreeSet<Terminal> = [
+      +            literal(b"var"),
+      +            regex_name("IDENTIFIER"),
+      +            literal(b"="),
+      +            literal(b"{"),
+      +            literal(b"["),
+      +            literal(b"]"),
+      +            literal(b":"),
+      +            regex_name("NUMERIC_LITERAL"),
+      +            literal(b"}"),
+      +            literal(b";"),
+      +        ].into_iter().collect();
+      +
+      +        // 3. Run the minimizer.
+      +        println!("--- Minimizing JS grammar for input terminals: {:?} ---", interesting_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+      +        println!("Initial production count: {}", initial_productions.len());
+      +
+      +        let minimized_productions = grammar_minimizer::simplify_grammar_for_test_case(
+      +            &initial_productions,
+      +            start_production_id,
+      +            &interesting_terminals,
+      +        );
+      +
+      +        // 4. Print the result.
+      +        println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      +        println!("{}", display_productions(&minimized_productions));
+      +    }
+      +}
+      +
+      +#[test]
+       fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> {
+           println!("--- Setting up for JS GLR Parser Sanity Checks ---");
+           let grammar_path = "src/js.ebnf";
+      @@ -372,7 +467,7 @@         let mut terminal_id_sequence = Vec::new();
+               let mut sequence_is_valid = true;
+               for token_name in seq_terminal_names {
+      -            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
+      +            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex_name(token_name)) {
+                       terminal_id_sequence.push(*terminal_id);
+                   } else {
+                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
+      @@ -467,9 +562,9 @@         // "NUMERIC_LITERAL",
+               // "\";\"",
+               literal(b"let"),
+      -        regex("IDENTIFIER"),
+      +        regex_name("IDENTIFIER"),
+               literal(b"="),
+      -        regex("NUMERIC_LITERAL"),
+      +        regex_name("NUMERIC_LITERAL"),
+               literal(b";"),
+           ];
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Get rid of `minimize_js_grammar_for_specific_input`. Just do that stuff
+      in `test_js_parser_isolated_object_literal`.
+    metadata:
+  - assistant: |-
+      Of course! Refactoring your tests to isolate components and adding a grammar minimizer is a great way to streamline debugging. Here are the changes to implement this.
+
+      First, I'll apply the change from `Terminal::Regex` to `Terminal::RegexName` across the relevant files. This is a good practice for clarity, distinguishing named regex terminals from other kinds.
+
+      ### `Terminal::Regex` -> `Terminal::RegexName` Refactoring
+
+      ```diff
+      --- a/src/glr/grammar.rs
+      +++ b/src/glr/grammar.rs
+      @@ -23,14 +23,14 @@
+       #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+       pub enum Terminal {
+      -    Regex(String),
+      +    RegexName(String),
+           Literal(Vec<u8>),
+       }
+       
+       impl JSONConvertible for Terminal {
+           fn to_json(&self) -> JSONNode {
+               match self {
+      -            Terminal::Regex(name) => JSONNode::Object({
+      +            Terminal::RegexName(name) => JSONNode::Object({
+                       let mut obj = StdMap::new();
+                       obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                       obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      @@ -51,7 +51,7 @@
+                       let value_field = obj.remove("value").ok_or_else(|| "Missing field value for Terminal".to_string())?;
+       
+                       match String::from_json(type_field)?.as_str() {
+      -                    "Regex" => Ok(Terminal::Regex(String::from_json(value_field)?)),
+      +                    "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
+                           "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
+                           _ => Err("Unknown type for Terminal".to_string()),
+                       }
+      @@ -64,19 +64,19 @@
+       impl Display for Terminal {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               match self {
+      -            Terminal::Regex(name) => write!(f, "{}", name),
+      +            Terminal::RegexName(name) => write!(f, "{}", name),
+                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+               }
+           }
+       }
+       
+      -pub fn regex(name: &str) -> Terminal {
+      -    Terminal::Regex(name.to_string())
+      +pub fn regex_name(name: &str) -> Terminal {
+      +    Terminal::RegexName(name.to_string())
+       }
+       
+       pub fn literal(bytes: &[u8]) -> Terminal {
+           Terminal::Literal(bytes.to_vec())
+       }
+       
+       impl Terminal {
+           pub fn terminal(name: &str) -> Self {
+      -        Terminal::Regex(name.to_string())
+      +        Terminal::RegexName(name.to_string())
+           }
+       
+           pub fn literal(bytes: Vec<u8>) -> Self {
+      @@ -173,7 +173,7 @@
+       }
+       
+       pub fn t(name: &str) -> Symbol {
+      -    Symbol::Terminal(regex(name))
+      +    Symbol::Terminal(regex_name(name))
+       }
+       
+       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
+
+      ```
+
+      ```diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,4 +1,4 @@
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      @@ -39,7 +39,7 @@
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+       
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           // Test case 1: "a"
+           let tokens1 = vec![a_token];
+      @@ -73,8 +73,8 @@
+               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+           ];
+           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+      -    let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+      -    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
+      +    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           let tokens4 = vec![b_token];
+           let mut state4 = parser_with_b.init_glr_parser(None);
+      @@ -115,7 +115,7 @@
+           input
+               .chars()
+               .filter_map(|c| {
+      -            parser.terminal_map.get_by_left(&regex(&c.to_string()))
+      +            parser.terminal_map.get_by_left(&regex_name(&c.to_string()))
+                       .copied()
+               })
+               .collect()
+      @@ -133,8 +133,8 @@
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      -    let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+      +    let eof_token = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           // Test case 1: Valid input "a$"
+           let mut state_ok = parser.init_glr_parser(None);
+      @@ -153,7 +153,7 @@
+           // This test now implicitly checks that the simple grammar passes validation.
+           let parser = create_simple_parser();
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -183,7 +183,7 @@
+       fn test_expression_parse_table_generation_and_parse() {
+           // This test now implicitly checks that the expression grammar passes validation.
+           let parser = create_expression_parser();
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -464,17 +464,17 @@
+               prod("Expr", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("else")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -501,13 +501,13 @@
+               prod("E", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("+")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("*")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -540,8 +540,8 @@
+               prod("B", vec![t("x")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           state.parse(&tokens);
+      @@ -569,8 +569,8 @@
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+           
+           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           // state.step(eof);
+      @@ -596,11 +596,11 @@
+               prod("S", vec![t("a")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -672,7 +672,7 @@
+           // The generation process automatically resolves the right recursion.
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),
+      @@ -717,7 +717,7 @@
+           assert!(analyze::validate(&productions).is_ok());
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),    // S -> b
+      @@ -755,9 +755,9 @@
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+      -    let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
+      +    let eof_token_id = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let c_token_id = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
+      +    let d_token_id = *parser.terminal_map.get_by_left(&regex_name("d")).unwrap();
+           
+           println!("Parser: {}", parser);
+       
+      @@ -810,7 +810,7 @@
+               prod("B", vec![t("b")]),              // P3
+           ];
+       
+      -    let t_int_symbol = Symbol::Terminal(regex("T_int"));
+      +    let t_int_symbol = Symbol::Terminal(regex_name("T_int"));
+           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
+       
+           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
+      @@ -874,7 +874,7 @@
+           // Helper to tokenize space-separated terminal names
+           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
+               input_str.split_whitespace() // This is fine, it's a comment
+      -            .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
+      +            .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
+                   .collect()
+           }
+       
+      @@ -1037,7 +1037,7 @@
+           
+           // Let's find the actual state IDs from the generated parser.
+           let start_state = parser.start_state_id;
+      -    let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
+      +    let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
+           
+           let start_row = &parser.stage_7_table[&start_state];
+           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
+      @@ -1134,7 +1134,7 @@
+           assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+       
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+       
+
+      ```
+
+      ```diff
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -15,7 +15,7 @@
+       use std::fs;
+       use std::collections::BTreeMap as StdMap;
+       use crate::glr::analyze::{simplify_grammar};
+      -use crate::glr::grammar::regex;
+      +use crate::glr::grammar::regex_name;
+       use crate::datastructures::u8set::U8Set;
+       
+       type LLMToken<'a> = &'a [u8];
+      @@ -144,7 +144,7 @@
+           pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
+               let mut terminal_to_group_id = BiBTreeMap::new();
+               for (name, group_id) in &self.regex_name_to_group_id {
+      -            let terminal = Terminal::Regex(name.clone());
+      +            let terminal = Terminal::RegexName(name.clone());
+                   terminal_to_group_id.insert(terminal, *group_id);
+               }
+               for (literal, group_id) in &self.literal_to_group_id {
+      @@ -377,7 +377,7 @@
+                       if nonterminal_names.contains(name.as_str()) {
+                           Ok((vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()))
+                       } else {
+      -                    Ok((vec![Symbol::Terminal(regex(name))], Vec::new()))
+      +                    Ok((vec![Symbol::Terminal(regex_name(name))], Vec::new()))
+                       }
+                   }
+                   GrammarExpr::Sequence(exprs) => {
+      @@ -777,7 +777,7 @@
+                       .into_iter()
+                       .filter(|sym| {
+                           match sym {
+      -                        Symbol::Terminal(Terminal::Regex(t)) => !always_null_terminals.contains(t),
+      +                        Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
+                               _                   => true,
+                           }
+                       })
+      @@ -811,7 +811,7 @@
+                   //     productions with the new optional non-terminal.
+                   for prod in productions.iter_mut() {
+                       for sym in &mut prod.rhs {
+      -                    if let Symbol::Terminal(Terminal::Regex(t)) = sym {
+      +                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
+                               if t == terminal_name {
+                                   *sym = Symbol::NonTerminal(opt_nt.clone());
+                               }
+      @@ -824,7 +824,7 @@
+                   //         <opt_nt>  ->  ε
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      -                rhs: vec![Symbol::Terminal(regex(&terminal_name))],
+      +                rhs: vec![Symbol::Terminal(regex_name(&terminal_name))],
+                   });
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      @@ -1014,7 +1014,7 @@
+               let tokenizer = tokenizer_expr_groups_obj.build();
+       
+               debug!(2, "Building GLR parser from definition");
+      -        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::Regex(name.clone()), TerminalID(*group_id))).collect();
+      +        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
+               for (val_bytes, group_id) in &definition.literal_to_group_id {
+                   terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
+               }
+      @@ -1347,14 +1347,14 @@
+               let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
+       
+               let mut regex_name_to_group_id = BiBTreeMap::new();
+      -        regex_name_to_group_id.insert(regex(&"ignore"), 0);
+      -        regex_name_to_group_id.insert(regex(&"digit"), 1);
+      -        regex_name_to_group_id.insert(regex(&"alph_lower"), 2);
+      -        regex_name_to_group_id.insert(regex(&"alph_upper"), 3);
+      -        regex_name_to_group_id.insert(regex(&"underscore"), 4);
+      -        regex_name_to_group_id.insert(regex(&"name_start"), 5);
+      -        regex_name_to_group_id.insert(regex(&"name_middle"), 6);
+      -        regex_name_to_group_id.insert(regex(&"name"), 7);
+      +        regex_name_to_group_id.insert(regex_name(&"ignore"), 0);
+      +        regex_name_to_group_id.insert(regex_name(&"digit"), 1);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_lower"), 2);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_upper"), 3);
+      +        regex_name_to_group_id.insert(regex_name(&"underscore"), 4);
+      +        regex_name_to_group_id.insert(regex_name(&"name_start"), 5);
+      +        regex_name_to_group_id.insert(regex_name(&"name_middle"), 6);
+      +        regex_name_to_group_id.insert(regex_name(&"name"), 7);
+       
+               // This test was originally for GrammarConstraint::precompute, which is internal.
+               // We can't directly test precompute without a full GrammarConstraint.
+      @@ -1846,7 +1846,7 @@
+               let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -1874,7 +1874,7 @@
+               for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -1905,8 +1905,8 @@
+               // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -1932,7 +1932,7 @@
+               for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ```
+
+      ```diff
+      --- a/src/interface/tests.rs
+      +++ b/src/interface/tests.rs
+      @@ -477,7 +477,7 @@
+               let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -505,7 +505,7 @@
+               for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -536,8 +536,8 @@
+               // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -563,7 +563,7 @@
+               for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ```
+
+      ### Grammar Minimizer and Test Refactoring
+
+      Now, I'll add the new `minimizer` module and refactor the test in `src/test_constraint_js.rs` to use it.
+
+      ```diff
+      --- a/src/glr/mod.rs
+      +++ b/src/glr/mod.rs
+      @@ -6,3 +6,4 @@
+       pub mod stats;
+       mod tests;
+       pub mod analyze;
+       pub mod automaton;
+      +pub mod minimizer;
+
+      ```
+
+      ```diff
+      --- /dev/null
+      +++ b/src/glr/minimizer.rs
+      @@ -0,0 +1,148 @@
+      +use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      +use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use crate::glr::analyze::remove_productions_with_undefined_nonterminals;
+      +
+      +/// Removes productions that contain terminals not in the `interesting_terminals` set.
+      +pub fn remove_productions_with_uninteresting_terminals(
+      +    productions: &[Production],
+      +    interesting_terminals: &BTreeSet<Terminal>,
+      +) -> Vec<Production> {
+      +    productions
+      +        .iter()
+      +        .filter(|prod| {
+      +            prod.rhs.iter().all(|symbol| match symbol {
+      +                Symbol::NonTerminal(_) => true, // Keep non-terminals for now
+      +                Symbol::Terminal(t) => interesting_terminals.contains(t),
+      +            })
+      +        })
+      +        .cloned()
+      +        .collect()
+      +}
+      +
+      +/// Iteratively substitutes non-terminals that have only one production rule.
+      +pub fn substitute_single_productions(
+      +    productions: &[Production],
+      +    start_nt: &NonTerminal,
+      +) -> Vec<Production> {
+      +    let mut current_prods = productions.to_vec();
+      +    loop {
+      +        let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+      +        for p in &current_prods {
+      +            prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+      +        }
+      +
+      +        let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
+      +        for (nt, prods) in &prods_by_lhs {
+      +            if prods.len() == 1 && nt != start_nt {
+      +                let single_prod = prods[0];
+      +                // Avoid direct recursion `A -> A ...` which would cause infinite substitution
+      +                if !single_prod.rhs.iter().any(|s| s == &Symbol::NonTerminal(nt.clone())) {
+      +                    substitutions.insert(nt.clone(), single_prod.rhs.clone());
+      +                }
+      +            }
+      +        }
+      +
+      +        if substitutions.is_empty() {
+      +            break;
+      +        }
+      +
+      +        let mut next_prods = Vec::new();
+      +        for prod in &current_prods {
+      +            // Don't include the definitions of the substituted non-terminals
+      +            if substitutions.contains_key(&prod.lhs) {
+      +                continue;
+      +            }
+      +
+      +            let new_rhs = prod.rhs.iter().flat_map(|symbol| {
+      +                if let Symbol::NonTerminal(nt) = symbol {
+      +                    if let Some(subst_rhs) = substitutions.get(nt) {
+      +                        subst_rhs.clone()
+      +                    } else {
+      +                        vec![symbol.clone()]
+      +                    }
+      +                } else {
+      +                    vec![symbol.clone()]
+      +                }
+      +            }).collect();
+      +
+      +            next_prods.push(Production {
+      +                lhs: prod.lhs.clone(),
+      +                rhs: new_rhs,
+      +            });
+      +        }
+      +        current_prods = next_prods;
+      +    }
+      +    current_prods
+      +}
+      +
+      +/// Removes productions whose LHS non-terminal is not reachable from the start symbol.
+      +pub fn eliminate_unreachable_productions(
+      +    productions: &[Production],
+      +    start_nt: &NonTerminal,
+      +) -> Vec<Production> {
+      +    let mut reachable_nts: BTreeSet<NonTerminal> = BTreeSet::new();
+      +    let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
+      +
+      +    reachable_nts.insert(start_nt.clone());
+      +    worklist.push_back(start_nt.clone());
+      +
+      +    while let Some(nt) = worklist.pop_front() {
+      +        for prod in productions {
+      +            if prod.lhs == nt {
+      +                for symbol in &prod.rhs {
+      +                    if let Symbol::NonTerminal(rhs_nt) = symbol {
+      +                        if reachable_nts.insert(rhs_nt.clone()) {
+      +                            worklist.push_back(rhs_nt.clone());
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    productions
+      +        .iter()
+      +        .filter(|prod| reachable_nts.contains(&prod.lhs))
+      +        .cloned()
+      +        .collect()
+      +}
+      +
+      +/// Applies a series of simplification steps to a grammar to reduce it for a specific test case.
+      +pub fn simplify_grammar_for_test_case(
+      +    productions: &[Production],
+      +    start_production_id: usize,
+      +    interesting_terminals: &BTreeSet<Terminal>,
+      +) -> Vec<Production> {
+      +    let start_nt = &productions[start_production_id].lhs;
+      +
+      +    // 1. Remove productions with terminals not in our test case.
+      +    let mut current_productions = remove_productions_with_uninteresting_terminals(productions, interesting_terminals);
+      +    println!("After removing uninteresting terminals: {} productions", current_productions.len());
+      +
+      +    // 2. Iteratively apply other simplifications until a fixed point is reached.
+      +    loop {
+      +        let before_count = current_productions.len();
+      +
+      +        // Substitute non-terminals with a single production rule.
+      +        let substituted = substitute_single_productions(&current_productions, start_nt);
+      +        if substituted.len() != current_productions.len() {
+      +             println!("After substituting single productions: {} productions", substituted.len());
+      +        }
+      +
+      +        // Remove productions that now refer to undefined non-terminals.
+      +        let cleaned = remove_productions_with_undefined_nonterminals(&substituted, &[start_production_id]);
+      +        if cleaned.len() != substituted.len() {
+      +            println!("After removing undefined non-terminals: {} productions", cleaned.len());
+      +        }
+      +
+      +        // Remove productions that are no longer reachable from the start symbol.
+      +        let reachable = eliminate_unreachable_productions(&cleaned, start_nt);
+      +        if reachable.len() != cleaned.len() {
+      +            println!("After eliminating unreachable productions: {} productions", reachable.len());
+      +        }
+      +
+      +        if reachable.len() == before_count {
+      +            break; // Fixed point reached
+      +        }
+      +        current_productions = reachable;
+      +    }
+      +
+      +    current_productions
+      +}
+
+      ```
+
+      ```diff
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -9,7 +9,7 @@
+       // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
+       
+       use crate::constraint::GrammarConstraint;
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+       use crate::glr::parser::GLRParserState;
+       use crate::glr::stats::get_stats;
+       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      @@ -337,101 +337,68 @@
+       }
+       
+       #[test]
+      -fn test_js_parser_isolated_object_literal() -> Result<(), Box<dyn std::error::Error>> {
+      -    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
+      -    // bypassing the tokenizer and constraint logic. It tests if the parser can handle
+      -    // a specific JS construct that might be problematic.
+      -
+      -    // 1. Load and compile the JavaScript grammar.
+      -    println!("--- Setting up for JS GLR Parser Isolated Test ---");
+      -    let grammar_path = "src/js.ebnf";
+      -    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -    println!("Grammar compiled successfully.");
+      -
+      -    let parser = &compiled_grammar.glr_parser;
+      -
+      -    // 2. Define the terminal sequence for `{[x]:}`
+      -    // This corresponds to an object literal with a computed property name.
+      -    let terminals: Vec<Terminal> = vec![
+      -        literal(b"{"),
+      -        literal(b"["),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"]"),
+      -        literal(b":"),
+      -        literal(b"}"),
+      -    ];
+      -
+      -    // 3. Convert terminal objects to TerminalIDs.
+      -    let mut terminal_ids = Vec::new();
+      -    for terminal_obj in &terminals {
+      -        let terminal_id = parser.terminal_map.get_by_left(terminal_obj)
+      -            .unwrap_or_else(|| panic!("Terminal '{:?}' not found in parser's terminal map.", terminal_obj));
+      -        terminal_ids.push(*terminal_id);
+      -    }
+      -
+      -    println!("Terminal sequence to parse: {:?}", terminals);
+      -    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+      -
+      -    // 4. Initialize the parser state and step through the terminals.
+      -    let mut glr_state = parser.init_glr_parser(None);
+      -    for (i, &terminal_id) in terminal_ids.iter().enumerate() {
+      -        println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
+      -        glr_state.step(terminal_id);
+      -        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
+      -    }
+      -
+      -    println!("\n--- Finished parsing terminal sequence ---");
+      -    assert!(glr_state.is_ok(), "Final parser state is not OK.");
+      -
+      -    // A full parse would require more tokens (e.g. an expression after ':'), but this prefix should be valid.
+      -    // To check for full acceptance, we would need to parse a complete statement.
+      -    // For example: `var a = {[x]: 1};`
+      -    // Let's try that.
+      -    let full_stmt_terminals: Vec<Terminal> = vec![
+      -        literal(b"var"),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"="),
+      -        literal(b"{"),
+      -        literal(b"["),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"]"),
+      -        literal(b":"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        literal(b"}"),
+      -        literal(b";"),
+      -    ];
+      -    let mut full_stmt_ids = Vec::new();
+      -    for terminal_obj in &full_stmt_terminals {
+      -        let terminal_id = parser.terminal_map.get_by_left(terminal_obj).unwrap();
+      -        full_stmt_ids.push(*terminal_id);
+      -    }
+      -
+      -    println!("\n--- Testing full statement ---");
+      -    let mut glr_state_full = parser.init_glr_parser(None);
+      -    glr_state_full.parse(&full_stmt_ids);
+      -    assert!(glr_state_full.is_ok(), "Full statement parse failed.");
+      -
+      -    Ok(())
+      -}
+      -
+      -mod minimizer {
+      -    use super::*;
+      -    use crate::glr::minimizer as grammar_minimizer;
+      -    use crate::interface::display_productions;
+      -
+      -    #[test]
+      -    #[ignore] // This is a tool for debugging, not a regular test.
+      -    fn minimize_js_grammar_for_specific_input() {
+      -        // 1. Load the full JS grammar.
+      -        let grammar_path = "src/js.ebnf";
+      -        let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path).unwrap();
+      -        let initial_productions = grammar_definition.productions;
+      -        let start_production_id = grammar_definition.start_production_id;
+      -
+      -        // 2. Define the terminals present in the test case `var a = {[x]: 1};`
+      -        let interesting_terminals: BTreeSet<Terminal> = [
+      -            literal(b"var"),
+      -            regex_name("IDENTIFIER"),
+      -            literal(b"="),
+      -            literal(b"{"),
+      -            literal(b"["),
+      -            literal(b"]"),
+      -            literal(b":"),
+      -            regex_name("NUMERIC_LITERAL"),
+      -            literal(b"}"),
+      -            literal(b";"),
+      -        ].into_iter().collect();
+      -
+      -        // 3. Run the minimizer.
+      -        println!("--- Minimizing JS grammar for input terminals: {:?} ---", interesting_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+      -        println!("Initial production count: {}", initial_productions.len());
+      -
+      -        let minimized_productions = grammar_minimizer::simplify_grammar_for_test_case(
+      -            &initial_productions,
+      -            start_production_id,
+      -            &interesting_terminals,
+      -        );
+      -
+      -        // 4. Print the result.
+      -        println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      -        println!("{}", display_productions(&minimized_productions));
+      -    }
+      -}
+      +fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+      +    // This test serves as a tool for debugging the parser. It does the following:
+      +    // 1. Defines a sequence of terminals for a specific JS input string.
+      +    // 2. Loads the full JS grammar.
+      +    // 3. Minimizes the grammar to only what's necessary for that input string.
+      +    // 4. Compiles the minimized grammar.
+      +    // 5. Feeds the terminal sequence to the new parser to check for correctness.
+      +
+      +    // 1. Define the terminal sequence for `var a = {[x]: 1};`
+      +    let test_case_terminals: Vec<Terminal> = vec![
+      +        literal(b"var"),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"="),
+      +        literal(b"{"),
+      +        literal(b"["),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"]"),
+      +        literal(b":"),
+      +        regex_name("NUMERIC_LITERAL"),
+      +        literal(b"}"),
+      +        literal(b";"),
+      +    ];
+      +    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+      +
+      +    // 2. Load the full JS grammar.
+      +    println!("--- Loading and Minimizing JS Grammar ---");
+      +    let grammar_path = "src/js.ebnf";
+      +    let full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      +    println!("Initial production count: {}", full_grammar_def.productions.len());
+      +
+      +    // 3. Minimize the grammar.
+      +    let minimized_productions = crate::glr::minimizer::simplify_grammar_for_test_case(
+      +        &full_grammar_def.productions,
+      +        full_grammar_def.start_production_id,
+      +        &interesting_terminals,
+      +    );
+      +
+      +    // 4. Print the minimized grammar.
+      +    println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      +    println!("{}", crate::interface::display_productions(&minimized_productions));
+      +
+      +    // 5. Compile the minimized grammar.
+      +    let minimized_def = GrammarDefinition {
+      +        productions: minimized_productions,
+      +        start_production_id: 0, // The minimizer should preserve the augmented start rule at index 0.
+      +        literal_to_group_id: full_grammar_def.literal_to_group_id.clone(),
+      +        regex_name_to_group_id: full_grammar_def.regex_name_to_group_id.clone(),
+      +        regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
+      +        ignore_terminal_id: full_grammar_def.ignore_terminal_id,
+      +    };
+      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+      +    let parser = &compiled_grammar.glr_parser;
+      +
+      +    // 6. Convert test terminals to IDs using the new parser's map.
+      +    let terminal_ids: Vec<TerminalID> = test_case_terminals
+      +        .iter()
+      +        .map(|t| *parser.terminal_map.get_by_left(t).unwrap())
+      +        .collect();
+      +
+      +    // 7. Run the parser and assert success.
+      +    println!("\n--- Parsing with Minimized Grammar ---");
+      +    let mut glr_state = parser.init_glr_parser(None);
+      +    glr_state.parse(&terminal_ids);
+      +    assert!(glr_state.is_ok(), "Parse failed with minimized grammar.");
+      +    println!("Successfully parsed sequence with minimized grammar.");
+      +
+      +    Ok(())
+      +}
+       
+       #[test]
+       fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> {
+      @@ -467,7 +434,7 @@
+               let mut terminal_id_sequence = Vec::new();
+               let mut sequence_is_valid = true;
+               for token_name in seq_terminal_names {
+      -            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
+      +            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex_name(token_name)) {
+                       terminal_id_sequence.push(*terminal_id);
+                   } else {
+                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
+      @@ -562,9 +529,9 @@
+               // "NUMERIC_LITERAL",
+               // "\";\"",
+               literal(b"let"),
+      -        regex("IDENTIFIER"),
+      +        regex_name("IDENTIFIER"),
+               literal(b"="),
+      -        regex("NUMERIC_LITERAL"),
+      +        regex_name("NUMERIC_LITERAL"),
+               literal(b";"),
+           ];
+       
+
+      ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 7 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/grammar.rs
+      Applying patch to 'src/glr/grammar.rs' using custom patcher...
+      Error applying patch to src/glr/grammar.rs:
+      Hunk #1 (header: @@ -23,14 +23,14 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+      pub enum Terminal {
+          Regex(String),
+          Literal(Vec<u8>),
+      }
+
+      impl JSONConvertible for Terminal {
+          fn to_json(&self) -> JSONNode {
+              match self {
+                  Terminal::Regex(name) => JSONNode::Object({
+                      let mut obj = StdMap::new();
+                      obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                      obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      --- Expected Context (from patch, after normalization): ---
+
+      pub enum Terminal {
+      Regex(String),
+      Literal(Vec<u8>),
+      }
+
+      impl JSONConvertible for Terminal {
+      fn to_json(&self) -> JSONNode {
+      match self {
+      Terminal::Regex(name) => JSONNode::Object({
+      let mut obj = StdMap::new();
+      obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+      obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 24 with ratio 0.85 (11/13 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        
+        pub enum Terminal {
+      - Regex(String),
+      + RegexName(String),
+      ?      ++++
+
+        Literal(Vec<u8>),
+        }
+        
+        impl JSONConvertible for Terminal {
+        fn to_json(&self) -> JSONNode {
+        match self {
+      - Terminal::Regex(name) => JSONNode::Object({
+      + Terminal::RegexName(name) => JSONNode::Object({
+      ?                ++++
+
+        let mut obj = StdMap::new();
+        obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+        obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      Problematic diff content:
+      ---
+      --- a/src/glr/grammar.rs
+      +++ b/src/glr/grammar.rs
+      @@ -23,14 +23,14 @@
+       #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+       pub enum Terminal {
+      -    Regex(String),
+      +    RegexName(String),
+           Literal(Vec<u8>),
+       }
+       
+       impl JSONConvertible for Terminal {
+           fn to_json(&self) -> JSONNode {
+               match self {
+      -            Terminal::Regex(name) => JSONNode::Object({
+      +            Terminal::RegexName(name) => JSONNode::Object({
+                       let mut obj = StdMap::new();
+                       obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                       obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      @@ -51,7 +51,7 @@
+                       let value_field = obj.remove("value").ok_or_else(|| "Missing field value for Terminal".to_string())?;
+       
+                       match String::from_json(type_field)?.as_str() {
+      -                    "Regex" => Ok(Terminal::Regex(String::from_json(value_field)?)),
+      +                    "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
+                           "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
+                           _ => Err("Unknown type for Terminal".to_string()),
+                       }
+      @@ -64,19 +64,19 @@
+       impl Display for Terminal {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               match self {
+      -            Terminal::Regex(name) => write!(f, "{}", name),
+      +            Terminal::RegexName(name) => write!(f, "{}", name),
+                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+               }
+           }
+       }
+       
+      -pub fn regex(name: &str) -> Terminal {
+      -    Terminal::Regex(name.to_string())
+      +pub fn regex_name(name: &str) -> Terminal {
+      +    Terminal::RegexName(name.to_string())
+       }
+       
+       pub fn literal(bytes: &[u8]) -> Terminal {
+           Terminal::Literal(bytes.to_vec())
+       }
+       
+       impl Terminal {
+           pub fn terminal(name: &str) -> Self {
+      -        Terminal::Regex(name.to_string())
+      +        Terminal::RegexName(name.to_string())
+           }
+       
+           pub fn literal(bytes: Vec<u8>) -> Self {
+      @@ -173,7 +173,7 @@
+       }
+       
+       pub fn t(name: &str) -> Symbol {
+      -    Symbol::Terminal(regex(name))
+      +    Symbol::Terminal(regex_name(name))
+       }
+       
+       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
+
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Error applying patch to src/glr/tests.rs:
+      Hunk #1 (header: @@ -1,4 +1,4 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      --- Expected Context (from patch, after normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1 with ratio 0.75 (3/4 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      + use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+      ?                                             +++++
+
+        use crate::glr::parser::{GLRParser, GLRParserState};
+        use crate::glr::table::{generate_glr_parser, TerminalID};
+        use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      Problematic diff content:
+      ---
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,4 +1,4 @@
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      @@ -39,7 +39,7 @@
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+       
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           // Test case 1: "a"
+           let tokens1 = vec![a_token];
+      @@ -73,8 +73,8 @@
+               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+           ];
+           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+      -    let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+      -    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
+      +    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           let tokens4 = vec![b_token];
+           let mut state4 = parser_with_b.init_glr_parser(None);
+      @@ -115,7 +115,7 @@
+           input
+               .chars()
+               .filter_map(|c| {
+      -            parser.terminal_map.get_by_left(&regex(&c.to_string()))
+      +            parser.terminal_map.get_by_left(&regex_name(&c.to_string()))
+                       .copied()
+               })
+               .collect()
+      @@ -133,8 +133,8 @@
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      -    let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+      +    let eof_token = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           // Test case 1: Valid input "a$"
+           let mut state_ok = parser.init_glr_parser(None);
+      @@ -153,7 +153,7 @@
+           // This test now implicitly checks that the simple grammar passes validation.
+           let parser = create_simple_parser();
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -183,7 +183,7 @@
+       fn test_expression_parse_table_generation_and_parse() {
+           // This test now implicitly checks that the expression grammar passes validation.
+           let parser = create_expression_parser();
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -464,17 +464,17 @@
+               prod("Expr", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("else")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -501,13 +501,13 @@
+               prod("E", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("+")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("*")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -540,8 +540,8 @@
+               prod("B", vec![t("x")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           state.parse(&tokens);
+      @@ -569,8 +569,8 @@
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+           
+           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           // state.step(eof);
+      @@ -596,11 +596,11 @@
+               prod("S", vec![t("a")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -672,7 +672,7 @@
+           // The generation process automatically resolves the right recursion.
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),
+      @@ -717,7 +717,7 @@
+           assert!(analyze::validate(&productions).is_ok());
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),    // S -> b
+      @@ -755,9 +755,9 @@
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+      -    let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
+      +    let eof_token_id = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let c_token_id = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
+      +    let d_token_id = *parser.terminal_map.get_by_left(&regex_name("d")).unwrap();
+           
+           println!("Parser: {}", parser);
+       
+      @@ -810,7 +810,7 @@
+               prod("B", vec![t("b")]),              // P3
+           ];
+       
+      -    let t_int_symbol = Symbol::Terminal(regex("T_int"));
+      +    let t_int_symbol = Symbol::Terminal(regex_name("T_int"));
+           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
+       
+           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
+      @@ -874,7 +874,7 @@
+           // Helper to tokenize space-separated terminal names
+           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
+               input_str.split_whitespace() // This is fine, it's a comment
+      -            .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
+      +            .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
+                   .collect()
+           }
+       
+      @@ -1037,7 +1037,7 @@
+           
+           // Let's find the actual state IDs from the generated parser.
+           let start_state = parser.start_state_id;
+      -    let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
+      +    let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
+           
+           let start_row = &parser.stage_7_table[&start_state];
+           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
+      @@ -1134,7 +1134,7 @@
+           assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+       
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+       
+
+      ---
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/interface/interface.rs
+      Applying patch to 'src/interface/interface.rs' using custom patcher...
+      Error applying patch to src/interface/interface.rs:
+      Hunk #1 (header: @@ -15,7 +15,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use std::fs;
+      use std::collections::BTreeMap as StdMap;
+      use crate::glr::analyze::{simplify_grammar};
+      use crate::glr::grammar::regex;
+      use crate::datastructures::u8set::U8Set;
+
+      type LLMToken<'a> = &'a [u8];
+      --- Expected Context (from patch, after normalization): ---
+      use std::fs;
+      use std::collections::BTreeMap as StdMap;
+      use crate::glr::analyze::{simplify_grammar};
+      use crate::glr::grammar::regex;
+      use crate::datastructures::u8set::U8Set;
+
+      type LLMToken<'a> = &'a [u8];
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 15 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        use std::fs;
+        use std::collections::BTreeMap as StdMap;
+        use crate::glr::analyze::{simplify_grammar};
+      - use crate::glr::grammar::regex;
+      + use crate::glr::grammar::regex_name;
+      ?                               +++++
+
+        use crate::datastructures::u8set::U8Set;
+        
+        type LLMToken<'a> = &'a [u8];
+      Problematic diff content:
+      ---
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -15,7 +15,7 @@
+       use std::fs;
+       use std::collections::BTreeMap as StdMap;
+       use crate::glr::analyze::{simplify_grammar};
+      -use crate::glr::grammar::regex;
+      +use crate::glr::grammar::regex_name;
+       use crate::datastructures::u8set::U8Set;
+       
+       type LLMToken<'a> = &'a [u8];
+      @@ -144,7 +144,7 @@
+           pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
+               let mut terminal_to_group_id = BiBTreeMap::new();
+               for (name, group_id) in &self.regex_name_to_group_id {
+      -            let terminal = Terminal::Regex(name.clone());
+      +            let terminal = Terminal::RegexName(name.clone());
+                   terminal_to_group_id.insert(terminal, *group_id);
+               }
+               for (literal, group_id) in &self.literal_to_group_id {
+      @@ -377,7 +377,7 @@
+                       if nonterminal_names.contains(name.as_str()) {
+                           Ok((vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()))
+                       } else {
+      -                    Ok((vec![Symbol::Terminal(regex(name))], Vec::new()))
+      +                    Ok((vec![Symbol::Terminal(regex_name(name))], Vec::new()))
+                       }
+                   }
+                   GrammarExpr::Sequence(exprs) => {
+      @@ -777,7 +777,7 @@
+                       .into_iter()
+                       .filter(|sym| {
+                           match sym {
+      -                        Symbol::Terminal(Terminal::Regex(t)) => !always_null_terminals.contains(t),
+      +                        Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
+                               _                   => true,
+                           }
+                       })
+      @@ -811,7 +811,7 @@
+                   //     productions with the new optional non-terminal.
+                   for prod in productions.iter_mut() {
+                       for sym in &mut prod.rhs {
+      -                    if let Symbol::Terminal(Terminal::Regex(t)) = sym {
+      +                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
+                               if t == terminal_name {
+                                   *sym = Symbol::NonTerminal(opt_nt.clone());
+                               }
+      @@ -824,7 +824,7 @@
+                   //         <opt_nt>  ->  ε
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      -                rhs: vec![Symbol::Terminal(regex(&terminal_name))],
+      +                rhs: vec![Symbol::Terminal(regex_name(&terminal_name))],
+                   });
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      @@ -1014,7 +1014,7 @@
+               let tokenizer = tokenizer_expr_groups_obj.build();
+       
+               debug!(2, "Building GLR parser from definition");
+      -        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::Regex(name.clone()), TerminalID(*group_id))).collect();
+      +        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
+               for (val_bytes, group_id) in &definition.literal_to_group_id {
+                   terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
+               }
+      @@ -1347,14 +1347,14 @@
+               let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
+       
+               let mut regex_name_to_group_id = BiBTreeMap::new();
+      -        regex_name_to_group_id.insert(regex(&"ignore"), 0);
+      -        regex_name_to_group_id.insert(regex(&"digit"), 1);
+      -        regex_name_to_group_id.insert(regex(&"alph_lower"), 2);
+      -        regex_name_to_group_id.insert(regex(&"alph_upper"), 3);
+      -        regex_name_to_group_id.insert(regex(&"underscore"), 4);
+      -        regex_name_to_group_id.insert(regex(&"name_start"), 5);
+      -        regex_name_to_group_id.insert(regex(&"name_middle"), 6);
+      -        regex_name_to_group_id.insert(regex(&"name"), 7);
+      +        regex_name_to_group_id.insert(regex_name(&"ignore"), 0);
+      +        regex_name_to_group_id.insert(regex_name(&"digit"), 1);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_lower"), 2);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_upper"), 3);
+      +        regex_name_to_group_id.insert(regex_name(&"underscore"), 4);
+      +        regex_name_to_group_id.insert(regex_name(&"name_start"), 5);
+      +        regex_name_to_group_id.insert(regex_name(&"name_middle"), 6);
+      +        regex_name_to_group_id.insert(regex_name(&"name"), 7);
+       
+               // This test was originally for GrammarConstraint::precompute, which is internal.
+               // We can't directly test precompute without a full GrammarConstraint.
+      @@ -1846,7 +1846,7 @@
+               let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -1874,7 +1874,7 @@
+               for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -1905,8 +1905,8 @@
+               // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -1932,7 +1932,7 @@
+               for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ---
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/interface/tests.rs
+      Applying patch to 'src/interface/tests.rs' using custom patcher...
+      Error applying patch to src/interface/tests.rs:
+      Hunk #1 (header: @@ -477,7 +477,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+              let term_eps_expr = RegexExpr::Epsilon;
+              let term_z_expr = eat_u8(b'z');
+              use crate::glr::grammar::regex;
+              let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                  .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+              let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      --- Expected Context (from patch, after normalization): ---
+      let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+      let term_eps_expr = RegexExpr::Epsilon;
+      let term_z_expr = eat_u8(b'z');
+      use crate::glr::grammar::regex;
+      let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+      .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+      let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 477 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+        let term_eps_expr = RegexExpr::Epsilon;
+        let term_z_expr = eat_u8(b'z');
+      - use crate::glr::grammar::regex;
+      + use crate::glr::grammar::regex_name;
+      ?                               +++++
+
+        let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+        .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+        let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      Problematic diff content:
+      ---
+      --- a/src/interface/tests.rs
+      +++ b/src/interface/tests.rs
+      @@ -477,7 +477,7 @@
+               let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -505,7 +505,7 @@
+               for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -536,8 +536,8 @@
+               // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -563,7 +563,7 @@
+               for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ---
+
+      --- Processing Diff Block 5 ---
+      Identified target file: src/glr/mod.rs
+      Applying patch to 'src/glr/mod.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/mod.rs.
+
+      --- Processing Diff Block 6 ---
+      Identified target file: src/glr/minimizer.rs
+      Detected new file (--- /dev/null or missing --- line).
+      Applying patch to 'src/glr/minimizer.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/minimizer.rs.
+
+      --- Processing Diff Block 7 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Error applying patch to src/test_constraint_js.rs:
+      Hunk #1 (header: @@ -9,7 +9,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
+
+      use crate::constraint::GrammarConstraint;
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      use crate::glr::parser::GLRParserState;
+      use crate::glr::stats::get_stats;
+      use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      --- Expected Context (from patch, after normalization): ---
+
+
+      use crate::constraint::GrammarConstraint;
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      use crate::glr::parser::GLRParserState;
+      use crate::glr::stats::get_stats;
+      use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 9 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        
+        
+        use crate::constraint::GrammarConstraint;
+      - use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      + use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+      ?                                             +++++
+
+        use crate::glr::parser::GLRParserState;
+        use crate::glr::stats::get_stats;
+        use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      Problematic diff content:
+      ---
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -9,7 +9,7 @@
+       // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
+       
+       use crate::constraint::GrammarConstraint;
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+       use crate::glr::parser::GLRParserState;
+       use crate::glr::stats::get_stats;
+       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      @@ -337,101 +337,68 @@
+       }
+       
+       #[test]
+      -fn test_js_parser_isolated_object_literal() -> Result<(), Box<dyn std::error::Error>> {
+      -    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
+      -    // bypassing the tokenizer and constraint logic. It tests if the parser can handle
+      -    // a specific JS construct that might be problematic.
+      -
+      -    // 1. Load and compile the JavaScript grammar.
+      -    println!("--- Setting up for JS GLR Parser Isolated Test ---");
+      -    let grammar_path = "src/js.ebnf";
+      -    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -    println!("Grammar compiled successfully.");
+      -
+      -    let parser = &compiled_grammar.glr_parser;
+      -
+      -    // 2. Define the terminal sequence for `{[x]:}`
+      -    // This corresponds to an object literal with a computed property name.
+      -    let terminals: Vec<Terminal> = vec![
+      -        literal(b"{"),
+      -        literal(b"["),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"]"),
+      -        literal(b":"),
+      -        literal(b"}"),
+      -    ];
+      -
+      -    // 3. Convert terminal objects to TerminalIDs.
+      -    let mut terminal_ids = Vec::new();
+      -    for terminal_obj in &terminals {
+      -        let terminal_id = parser.terminal_map.get_by_left(terminal_obj)
+      -            .unwrap_or_else(|| panic!("Terminal '{:?}' not found in parser's terminal map.", terminal_obj));
+      -        terminal_ids.push(*terminal_id);
+      -    }
+      -
+      -    println!("Terminal sequence to parse: {:?}", terminals);
+      -    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+      -
+      -    // 4. Initialize the parser state and step through the terminals.
+      -    let mut glr_state = parser.init_glr_parser(None);
+      -    for (i, &terminal_id) in terminal_ids.iter().enumerate() {
+      -        println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
+      -        glr_state.step(terminal_id);
+      -        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
+      -    }
+      -
+      -    println!("\n--- Finished parsing terminal sequence ---");
+      -    assert!(glr_state.is_ok(), "Final parser state is not OK.");
+      -
+      -    // A full parse would require more tokens (e.g. an expression after ':'), but this prefix should be valid.
+      -    // To check for full acceptance, we would need to parse a complete statement.
+      -    // For example: `var a = {[x]: 1};`
+      -    // Let's try that.
+      -    let full_stmt_terminals: Vec<Terminal> = vec![
+      -        literal(b"var"),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"="),
+      -        literal(b"{"),
+      -        literal(b"["),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"]"),
+      -        literal(b":"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        literal(b"}"),
+      -        literal(b";"),
+      -    ];
+      -    let mut full_stmt_ids = Vec::new();
+      -    for terminal_obj in &full_stmt_terminals {
+      -        let terminal_id = parser.terminal_map.get_by_left(terminal_obj).unwrap();
+      -        full_stmt_ids.push(*terminal_id);
+      -    }
+      -
+      -    println!("\n--- Testing full statement ---");
+      -    let mut glr_state_full = parser.init_glr_parser(None);
+      -    glr_state_full.parse(&full_stmt_ids);
+      -    assert!(glr_state_full.is_ok(), "Full statement parse failed.");
+      -
+      -    Ok(())
+      -}
+      -
+      -mod minimizer {
+      -    use super::*;
+      -    use crate::glr::minimizer as grammar_minimizer;
+      -    use crate::interface::display_productions;
+      -
+      -    #[test]
+      -    #[ignore] // This is a tool for debugging, not a regular test.
+      -    fn minimize_js_grammar_for_specific_input() {
+      -        // 1. Load the full JS grammar.
+      -        let grammar_path = "src/js.ebnf";
+      -        let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path).unwrap();
+      -        let initial_productions = grammar_definition.productions;
+      -        let start_production_id = grammar_definition.start_production_id;
+      -
+      -        // 2. Define the terminals present in the test case `var a = {[x]: 1};`
+      -        let interesting_terminals: BTreeSet<Terminal> = [
+      -            literal(b"var"),
+      -            regex_name("IDENTIFIER"),
+      -            literal(b"="),
+      -            literal(b"{"),
+      -            literal(b"["),
+      -            literal(b"]"),
+      -            literal(b":"),
+      -            regex_name("NUMERIC_LITERAL"),
+      -            literal(b"}"),
+      -            literal(b";"),
+      -        ].into_iter().collect();
+      -
+      -        // 3. Run the minimizer.
+      -        println!("--- Minimizing JS grammar for input terminals: {:?} ---", interesting_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+      -        println!("Initial production count: {}", initial_productions.len());
+      -
+      -        let minimized_productions = grammar_minimizer::simplify_grammar_for_test_case(
+      -            &initial_productions,
+      -            start_production_id,
+      -            &interesting_terminals,
+      -        );
+      -
+      -        // 4. Print the result.
+      -        println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      -        println!("{}", display_productions(&minimized_productions));
+      -    }
+      -}
+      +fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+      +    // This test serves as a tool for debugging the parser. It does the following:
+      +    // 1. Defines a sequence of terminals for a specific JS input string.
+      +    // 2. Loads the full JS grammar.
+      +    // 3. Minimizes the grammar to only what's necessary for that input string.
+      +    // 4. Compiles the minimized grammar.
+      +    // 5. Feeds the terminal sequence to the new parser to check for correctness.
+      +
+      +    // 1. Define the terminal sequence for `var a = {[x]: 1};`
+      +    let test_case_terminals: Vec<Terminal> = vec![
+      +        literal(b"var"),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"="),
+      +        literal(b"{"),
+      +        literal(b"["),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"]"),
+      +        literal(b":"),
+      +        regex_name("NUMERIC_LITERAL"),
+      +        literal(b"}"),
+      +        literal(b";"),
+      +    ];
+      +    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+      +
+      +    // 2. Load the full JS grammar.
+      +    println!("--- Loading and Minimizing JS Grammar ---");
+      +    let grammar_path = "src/js.ebnf";
+      +    let full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      +    println!("Initial production count: {}", full_grammar_def.productions.len());
+      +
+      +    // 3. Minimize the grammar.
+      +    let minimized_productions = crate::glr::minimizer::simplify_grammar_for_test_case(
+      +        &full_grammar_def.productions,
+      +        full_grammar_def.start_production_id,
+      +        &interesting_terminals,
+      +    );
+      +
+      +    // 4. Print the minimized grammar.
+      +    println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      +    println!("{}", crate::interface::display_productions(&minimized_productions));
+      +
+      +    // 5. Compile the minimized grammar.
+      +    let minimized_def = GrammarDefinition {
+      +        productions: minimized_productions,
+      +        start_production_id: 0, // The minimizer should preserve the augmented start rule at index 0.
+      +        literal_to_group_id: full_grammar_def.literal_to_group_id.clone(),
+      +        regex_name_to_group_id: full_grammar_def.regex_name_to_group_id.clone(),
+      +        regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
+      +        ignore_terminal_id: full_grammar_def.ignore_terminal_id,
+      +    };
+      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+      +    let parser = &compiled_grammar.glr_parser;
+      +
+      +    // 6. Convert test terminals to IDs using the new parser's map.
+      +    let terminal_ids: Vec<TerminalID> = test_case_terminals
+      +        .iter()
+      +        .map(|t| *parser.terminal_map.get_by_left(t).unwrap())
+      +        .collect();
+      +
+      +    // 7. Run the parser and assert success.
+      +    println!("\n--- Parsing with Minimized Grammar ---");
+      +    let mut glr_state = parser.init_glr_parser(None);
+      +    glr_state.parse(&terminal_ids);
+      +    assert!(glr_state.is_ok(), "Parse failed with minimized grammar.");
+      +    println!("Successfully parsed sequence with minimized grammar.");
+      +
+      +    Ok(())
+      +}
+       
+       #[test]
+       fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> {
+      @@ -467,7 +434,7 @@
+               let mut terminal_id_sequence = Vec::new();
+               let mut sequence_is_valid = true;
+               for token_name in seq_terminal_names {
+      -            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
+      +            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex_name(token_name)) {
+                       terminal_id_sequence.push(*terminal_id);
+                   } else {
+                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
+      @@ -562,9 +529,9 @@
+               // "NUMERIC_LITERAL",
+               // "\";\"",
+               literal(b"let"),
+      -        regex("IDENTIFIER"),
+      +        regex_name("IDENTIFIER"),
+               literal(b"="),
+      -        regex("NUMERIC_LITERAL"),
+      +        regex_name("NUMERIC_LITERAL"),
+               literal(b";"),
+           ];
+       
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 7 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/grammar.rs
+      Applying patch to 'src/glr/grammar.rs' using custom patcher...
+      Error applying patch to src/glr/grammar.rs:
+      Hunk #1 (header: @@ -23,14 +23,14 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+      pub enum Terminal {
+          Regex(String),
+          Literal(Vec<u8>),
+      }
+
+      impl JSONConvertible for Terminal {
+          fn to_json(&self) -> JSONNode {
+              match self {
+                  Terminal::Regex(name) => JSONNode::Object({
+                      let mut obj = StdMap::new();
+                      obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                      obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      --- Expected Context (from patch, after normalization): ---
+
+      pub enum Terminal {
+      Regex(String),
+      Literal(Vec<u8>),
+      }
+
+      impl JSONConvertible for Terminal {
+      fn to_json(&self) -> JSONNode {
+      match self {
+      Terminal::Regex(name) => JSONNode::Object({
+      let mut obj = StdMap::new();
+      obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+      obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 24 with ratio 0.85 (11/13 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        
+        pub enum Terminal {
+      - Regex(String),
+      + RegexName(String),
+      ?      ++++
+
+        Literal(Vec<u8>),
+        }
+        
+        impl JSONConvertible for Terminal {
+        fn to_json(&self) -> JSONNode {
+        match self {
+      - Terminal::Regex(name) => JSONNode::Object({
+      + Terminal::RegexName(name) => JSONNode::Object({
+      ?                ++++
+
+        let mut obj = StdMap::new();
+        obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+        obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      Problematic diff content:
+      ---
+      --- a/src/glr/grammar.rs
+      +++ b/src/glr/grammar.rs
+      @@ -23,14 +23,14 @@
+       #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+       pub enum Terminal {
+      -    Regex(String),
+      +    RegexName(String),
+           Literal(Vec<u8>),
+       }
+       
+       impl JSONConvertible for Terminal {
+           fn to_json(&self) -> JSONNode {
+               match self {
+      -            Terminal::Regex(name) => JSONNode::Object({
+      +            Terminal::RegexName(name) => JSONNode::Object({
+                       let mut obj = StdMap::new();
+                       obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                       obj.insert("value".to_string(), JSONNode::String(name.clone()));
+      @@ -51,7 +51,7 @@
+                       let value_field = obj.remove("value").ok_or_else(|| "Missing field value for Terminal".to_string())?;
+       
+                       match String::from_json(type_field)?.as_str() {
+      -                    "Regex" => Ok(Terminal::Regex(String::from_json(value_field)?)),
+      +                    "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
+                           "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
+                           _ => Err("Unknown type for Terminal".to_string()),
+                       }
+      @@ -64,19 +64,19 @@
+       impl Display for Terminal {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               match self {
+      -            Terminal::Regex(name) => write!(f, "{}", name),
+      +            Terminal::RegexName(name) => write!(f, "{}", name),
+                   Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
+               }
+           }
+       }
+       
+      -pub fn regex(name: &str) -> Terminal {
+      -    Terminal::Regex(name.to_string())
+      +pub fn regex_name(name: &str) -> Terminal {
+      +    Terminal::RegexName(name.to_string())
+       }
+       
+       pub fn literal(bytes: &[u8]) -> Terminal {
+           Terminal::Literal(bytes.to_vec())
+       }
+       
+       impl Terminal {
+           pub fn terminal(name: &str) -> Self {
+      -        Terminal::Regex(name.to_string())
+      +        Terminal::RegexName(name.to_string())
+           }
+       
+           pub fn literal(bytes: Vec<u8>) -> Self {
+      @@ -173,7 +173,7 @@
+       }
+       
+       pub fn t(name: &str) -> Symbol {
+      -    Symbol::Terminal(regex(name))
+      +    Symbol::Terminal(regex_name(name))
+       }
+       
+       pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
+
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Error applying patch to src/glr/tests.rs:
+      Hunk #1 (header: @@ -1,4 +1,4 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      --- Expected Context (from patch, after normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1 with ratio 0.75 (3/4 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      + use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+      ?                                             +++++
+
+        use crate::glr::parser::{GLRParser, GLRParserState};
+        use crate::glr::table::{generate_glr_parser, TerminalID};
+        use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      Problematic diff content:
+      ---
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,4 +1,4 @@
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+       use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      @@ -39,7 +39,7 @@
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+       
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           // Test case 1: "a"
+           let tokens1 = vec![a_token];
+      @@ -73,8 +73,8 @@
+               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
+           ];
+           let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+      -    let b_token = *parser_with_b.terminal_map.get_by_left(&regex("b")).unwrap();
+      -    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex("a")).unwrap();
+      +    let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
+      +    let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
+       
+           let tokens4 = vec![b_token];
+           let mut state4 = parser_with_b.init_glr_parser(None);
+      @@ -115,7 +115,7 @@
+           input
+               .chars()
+               .filter_map(|c| {
+      -            parser.terminal_map.get_by_left(&regex(&c.to_string()))
+      +            parser.terminal_map.get_by_left(&regex_name(&c.to_string()))
+                       .copied()
+               })
+               .collect()
+      @@ -133,8 +133,8 @@
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           
+      -    let a_token = *parser.terminal_map.get_by_left(&regex("a")).unwrap();
+      -    let eof_token = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+      +    let eof_token = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           // Test case 1: Valid input "a$"
+           let mut state_ok = parser.init_glr_parser(None);
+      @@ -153,7 +153,7 @@
+           // This test now implicitly checks that the simple grammar passes validation.
+           let parser = create_simple_parser();
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -183,7 +183,7 @@
+       fn test_expression_parse_table_generation_and_parse() {
+           // This test now implicitly checks that the expression grammar passes validation.
+           let parser = create_expression_parser();
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           // dbg!(&parser); // Keep commented unless debugging needed
+       
+           let test_cases = [
+      @@ -464,17 +464,17 @@
+               prod("Expr", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("if")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("then")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("else")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("then")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("else")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("other")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -501,13 +501,13 @@
+               prod("E", vec![t("id")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("+")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("*")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("+")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("*")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -540,8 +540,8 @@
+               prod("B", vec![t("x")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           state.parse(&tokens);
+      @@ -569,8 +569,8 @@
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let tokens = vec![*parser.terminal_map.get_by_left(&regex("x")).unwrap()];
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
+           
+           // let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+           // state.step(eof);
+      @@ -596,11 +596,11 @@
+               prod("S", vec![t("a")]),
+           ];
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+           let tokens = vec![
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      -        *parser.terminal_map.get_by_left(&regex("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+      +        *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
+           ];
+       
+           let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -672,7 +672,7 @@
+           // The generation process automatically resolves the right recursion.
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),
+      @@ -717,7 +717,7 @@
+           assert!(analyze::validate(&productions).is_ok());
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [
+               ("b", true),    // S -> b
+      @@ -755,9 +755,9 @@
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+           let parser = generate_glr_parser(&productions, 0, None);
+      -    let eof_token_id = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      -    let c_token_id = *parser.terminal_map.get_by_left(&regex("c")).unwrap();
+      -    let d_token_id = *parser.terminal_map.get_by_left(&regex("d")).unwrap();
+      +    let eof_token_id = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+      +    let c_token_id = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
+      +    let d_token_id = *parser.terminal_map.get_by_left(&regex_name("d")).unwrap();
+           
+           println!("Parser: {}", parser);
+       
+      @@ -810,7 +810,7 @@
+               prod("B", vec![t("b")]),              // P3
+           ];
+       
+      -    let t_int_symbol = Symbol::Terminal(regex("T_int"));
+      +    let t_int_symbol = Symbol::Terminal(regex_name("T_int"));
+           let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
+       
+           let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
+      @@ -874,7 +874,7 @@
+           // Helper to tokenize space-separated terminal names
+           fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
+               input_str.split_whitespace() // This is fine, it's a comment
+      -            .filter_map(|s| parser.terminal_map.get_by_left(&regex(s)).copied())
+      +            .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
+                   .collect()
+           }
+       
+      @@ -1037,7 +1037,7 @@
+           
+           // Let's find the actual state IDs from the generated parser.
+           let start_state = parser.start_state_id;
+      -    let b_token_id = *parser.terminal_map.get_by_left(&regex("b")).unwrap();
+      +    let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
+           
+           let start_row = &parser.stage_7_table[&start_state];
+           let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
+      @@ -1134,7 +1134,7 @@
+           assert_eq!(stats.num_reduce_reduce_conflicts, 0, "LR(1) parser should not have R/R conflicts for this grammar");
+           assert_eq!(stats.num_shift_reduce_conflicts, 0, "LR(1) parser should not have S/R conflicts for this grammar");
+       
+      -    let eof = *parser.terminal_map.get_by_left(&regex("$")).unwrap();
+      +    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+       
+           let test_cases = [("aec", true), ("afd", false), ("bfc", false), ("bed", true), ("aed", true), ("afc", false), ("bec", true), ("bfd", false), ("e", false), ("ac", false)];
+       
+
+      ---
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/interface/interface.rs
+      Applying patch to 'src/interface/interface.rs' using custom patcher...
+      Error applying patch to src/interface/interface.rs:
+      Hunk #1 (header: @@ -15,7 +15,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use std::fs;
+      use std::collections::BTreeMap as StdMap;
+      use crate::glr::analyze::{simplify_grammar};
+      use crate::glr::grammar::regex;
+      use crate::datastructures::u8set::U8Set;
+
+      type LLMToken<'a> = &'a [u8];
+      --- Expected Context (from patch, after normalization): ---
+      use std::fs;
+      use std::collections::BTreeMap as StdMap;
+      use crate::glr::analyze::{simplify_grammar};
+      use crate::glr::grammar::regex;
+      use crate::datastructures::u8set::U8Set;
+
+      type LLMToken<'a> = &'a [u8];
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 15 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        use std::fs;
+        use std::collections::BTreeMap as StdMap;
+        use crate::glr::analyze::{simplify_grammar};
+      - use crate::glr::grammar::regex;
+      + use crate::glr::grammar::regex_name;
+      ?                               +++++
+
+        use crate::datastructures::u8set::U8Set;
+        
+        type LLMToken<'a> = &'a [u8];
+      Problematic diff content:
+      ---
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -15,7 +15,7 @@
+       use std::fs;
+       use std::collections::BTreeMap as StdMap;
+       use crate::glr::analyze::{simplify_grammar};
+      -use crate::glr::grammar::regex;
+      +use crate::glr::grammar::regex_name;
+       use crate::datastructures::u8set::U8Set;
+       
+       type LLMToken<'a> = &'a [u8];
+      @@ -144,7 +144,7 @@
+           pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
+               let mut terminal_to_group_id = BiBTreeMap::new();
+               for (name, group_id) in &self.regex_name_to_group_id {
+      -            let terminal = Terminal::Regex(name.clone());
+      +            let terminal = Terminal::RegexName(name.clone());
+                   terminal_to_group_id.insert(terminal, *group_id);
+               }
+               for (literal, group_id) in &self.literal_to_group_id {
+      @@ -377,7 +377,7 @@
+                       if nonterminal_names.contains(name.as_str()) {
+                           Ok((vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()))
+                       } else {
+      -                    Ok((vec![Symbol::Terminal(regex(name))], Vec::new()))
+      +                    Ok((vec![Symbol::Terminal(regex_name(name))], Vec::new()))
+                       }
+                   }
+                   GrammarExpr::Sequence(exprs) => {
+      @@ -777,7 +777,7 @@
+                       .into_iter()
+                       .filter(|sym| {
+                           match sym {
+      -                        Symbol::Terminal(Terminal::Regex(t)) => !always_null_terminals.contains(t),
+      +                        Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
+                               _                   => true,
+                           }
+                       })
+      @@ -811,7 +811,7 @@
+                   //     productions with the new optional non-terminal.
+                   for prod in productions.iter_mut() {
+                       for sym in &mut prod.rhs {
+      -                    if let Symbol::Terminal(Terminal::Regex(t)) = sym {
+      +                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
+                               if t == terminal_name {
+                                   *sym = Symbol::NonTerminal(opt_nt.clone());
+                               }
+      @@ -824,7 +824,7 @@
+                   //         <opt_nt>  ->  ε
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      -                rhs: vec![Symbol::Terminal(regex(&terminal_name))],
+      +                rhs: vec![Symbol::Terminal(regex_name(&terminal_name))],
+                   });
+                   productions.push(Production {
+                       lhs: opt_nt.clone(),
+      @@ -1014,7 +1014,7 @@
+               let tokenizer = tokenizer_expr_groups_obj.build();
+       
+               debug!(2, "Building GLR parser from definition");
+      -        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::Regex(name.clone()), TerminalID(*group_id))).collect();
+      +        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
+               for (val_bytes, group_id) in &definition.literal_to_group_id {
+                   terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
+               }
+      @@ -1347,14 +1347,14 @@
+               let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
+       
+               let mut regex_name_to_group_id = BiBTreeMap::new();
+      -        regex_name_to_group_id.insert(regex(&"ignore"), 0);
+      -        regex_name_to_group_id.insert(regex(&"digit"), 1);
+      -        regex_name_to_group_id.insert(regex(&"alph_lower"), 2);
+      -        regex_name_to_group_id.insert(regex(&"alph_upper"), 3);
+      -        regex_name_to_group_id.insert(regex(&"underscore"), 4);
+      -        regex_name_to_group_id.insert(regex(&"name_start"), 5);
+      -        regex_name_to_group_id.insert(regex(&"name_middle"), 6);
+      -        regex_name_to_group_id.insert(regex(&"name"), 7);
+      +        regex_name_to_group_id.insert(regex_name(&"ignore"), 0);
+      +        regex_name_to_group_id.insert(regex_name(&"digit"), 1);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_lower"), 2);
+      +        regex_name_to_group_id.insert(regex_name(&"alph_upper"), 3);
+      +        regex_name_to_group_id.insert(regex_name(&"underscore"), 4);
+      +        regex_name_to_group_id.insert(regex_name(&"name_start"), 5);
+      +        regex_name_to_group_id.insert(regex_name(&"name_middle"), 6);
+      +        regex_name_to_group_id.insert(regex_name(&"name"), 7);
+       
+               // This test was originally for GrammarConstraint::precompute, which is internal.
+               // We can't directly test precompute without a full GrammarConstraint.
+      @@ -1846,7 +1846,7 @@
+               let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -1874,7 +1874,7 @@
+               for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -1905,8 +1905,8 @@
+               // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -1932,7 +1932,7 @@
+               for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ---
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/interface/tests.rs
+      Applying patch to 'src/interface/tests.rs' using custom patcher...
+      Error applying patch to src/interface/tests.rs:
+      Hunk #1 (header: @@ -477,7 +477,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+              let term_eps_expr = RegexExpr::Epsilon;
+              let term_z_expr = eat_u8(b'z');
+              use crate::glr::grammar::regex;
+              let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                  .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+              let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      --- Expected Context (from patch, after normalization): ---
+      let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+      let term_eps_expr = RegexExpr::Epsilon;
+      let term_z_expr = eat_u8(b'z');
+      use crate::glr::grammar::regex;
+      let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+      .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+      let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 477 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+        let term_eps_expr = RegexExpr::Epsilon;
+        let term_z_expr = eat_u8(b'z');
+      - use crate::glr::grammar::regex;
+      + use crate::glr::grammar::regex_name;
+      ?                               +++++
+
+        let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+        .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+        let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      Problematic diff content:
+      ---
+      --- a/src/interface/tests.rs
+      +++ b/src/interface/tests.rs
+      @@ -477,7 +477,7 @@
+               let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
+               let term_eps_expr = RegexExpr::Epsilon;
+               let term_z_expr = eat_u8(b'z');
+      -        use crate::glr::grammar::regex;
+      +        use crate::glr::grammar::regex_name;
+               let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
+                   .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
+               let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
+      @@ -505,7 +505,7 @@
+               for prod in &grammar_def.productions {
+                   // Check for NT -> name_term_x_opt
+                   if prod.rhs.len() == 1 {
+      -                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+      +                if let Sym::Terminal(Terminal::RegexName(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                           if t == &name_term_x_opt {
+                               // This production is NT -> name_term_x_opt. The LHS is a candidate.
+                               let candidate_nt_name = prod.lhs.0.clone();
+      @@ -536,8 +536,8 @@
+               // Define the set of expected productions
+               let expected_prods_set = BTreeSet::from([
+                   Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
+      -            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex(&name_term_z))] },
+      -            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex(&name_term_x_opt))] },
+      +            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(regex_name(&name_term_z))] },
+      +            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(regex_name(&name_term_x_opt))] },
+                   Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
+               ]);
+       
+      @@ -563,7 +563,7 @@
+               for prod in &grammar_def.productions {
+                   for sym in &prod.rhs {
+                       if let Sym::Terminal(t) = sym {
+      -                    assert_ne!(t, &regex(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+      +                    assert_ne!(t, &regex_name(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                       }
+                   }
+               }
+
+      ---
+
+      --- Processing Diff Block 5 ---
+      Identified target file: src/glr/mod.rs
+      Applying patch to 'src/glr/mod.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/mod.rs.
+
+      --- Processing Diff Block 6 ---
+      Identified target file: src/glr/minimizer.rs
+      Detected new file (--- /dev/null or missing --- line).
+      Applying patch to 'src/glr/minimizer.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/minimizer.rs.
+
+      --- Processing Diff Block 7 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Error applying patch to src/test_constraint_js.rs:
+      Hunk #1 (header: @@ -9,7 +9,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
+
+      use crate::constraint::GrammarConstraint;
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      use crate::glr::parser::GLRParserState;
+      use crate::glr::stats::get_stats;
+      use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      --- Expected Context (from patch, after normalization): ---
+
+
+      use crate::constraint::GrammarConstraint;
+      use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      use crate::glr::parser::GLRParserState;
+      use crate::glr::stats::get_stats;
+      use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 9 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        
+        
+        use crate::constraint::GrammarConstraint;
+      - use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      + use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+      ?                                             +++++
+
+        use crate::glr::parser::GLRParserState;
+        use crate::glr::stats::get_stats;
+        use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      Problematic diff content:
+      ---
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -9,7 +9,7 @@
+       // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
+       
+       use crate::constraint::GrammarConstraint;
+      -use crate::glr::grammar::{nt, prod, t, regex, NonTerminal, Production, Symbol, Terminal, literal};
+      +use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+       use crate::glr::parser::GLRParserState;
+       use crate::glr::stats::get_stats;
+       use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
+      @@ -337,101 +337,68 @@
+       }
+       
+       #[test]
+      -fn test_js_parser_isolated_object_literal() -> Result<(), Box<dyn std::error::Error>> {
+      -    // This test isolates the GLR parser by feeding it a manually tokenized sequence,
+      -    // bypassing the tokenizer and constraint logic. It tests if the parser can handle
+      -    // a specific JS construct that might be problematic.
+      -
+      -    // 1. Load and compile the JavaScript grammar.
+      -    println!("--- Setting up for JS GLR Parser Isolated Test ---");
+      -    let grammar_path = "src/js.ebnf";
+      -    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -    println!("Grammar compiled successfully.");
+      -
+      -    let parser = &compiled_grammar.glr_parser;
+      -
+      -    // 2. Define the terminal sequence for `{[x]:}`
+      -    // This corresponds to an object literal with a computed property name.
+      -    let terminals: Vec<Terminal> = vec![
+      -        literal(b"{"),
+      -        literal(b"["),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"]"),
+      -        literal(b":"),
+      -        literal(b"}"),
+      -    ];
+      -
+      -    // 3. Convert terminal objects to TerminalIDs.
+      -    let mut terminal_ids = Vec::new();
+      -    for terminal_obj in &terminals {
+      -        let terminal_id = parser.terminal_map.get_by_left(terminal_obj)
+      -            .unwrap_or_else(|| panic!("Terminal '{:?}' not found in parser's terminal map.", terminal_obj));
+      -        terminal_ids.push(*terminal_id);
+      -    }
+      -
+      -    println!("Terminal sequence to parse: {:?}", terminals);
+      -    println!("Corresponding Terminal IDs: {:?}", terminal_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+      -
+      -    // 4. Initialize the parser state and step through the terminals.
+      -    let mut glr_state = parser.init_glr_parser(None);
+      -    for (i, &terminal_id) in terminal_ids.iter().enumerate() {
+      -        println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
+      -        glr_state.step(terminal_id);
+      -        assert!(glr_state.is_ok(), "Parser state became invalid after terminal {} ({:?})", i, terminals[i]);
+      -    }
+      -
+      -    println!("\n--- Finished parsing terminal sequence ---");
+      -    assert!(glr_state.is_ok(), "Final parser state is not OK.");
+      -
+      -    // A full parse would require more tokens (e.g. an expression after ':'), but this prefix should be valid.
+      -    // To check for full acceptance, we would need to parse a complete statement.
+      -    // For example: `var a = {[x]: 1};`
+      -    // Let's try that.
+      -    let full_stmt_terminals: Vec<Terminal> = vec![
+      -        literal(b"var"),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"="),
+      -        literal(b"{"),
+      -        literal(b"["),
+      -        regex_name("IDENTIFIER"),
+      -        literal(b"]"),
+      -        literal(b":"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        literal(b"}"),
+      -        literal(b";"),
+      -    ];
+      -    let mut full_stmt_ids = Vec::new();
+      -    for terminal_obj in &full_stmt_terminals {
+      -        let terminal_id = parser.terminal_map.get_by_left(terminal_obj).unwrap();
+      -        full_stmt_ids.push(*terminal_id);
+      -    }
+      -
+      -    println!("\n--- Testing full statement ---");
+      -    let mut glr_state_full = parser.init_glr_parser(None);
+      -    glr_state_full.parse(&full_stmt_ids);
+      -    assert!(glr_state_full.is_ok(), "Full statement parse failed.");
+      -
+      -    Ok(())
+      -}
+      -
+      -mod minimizer {
+      -    use super::*;
+      -    use crate::glr::minimizer as grammar_minimizer;
+      -    use crate::interface::display_productions;
+      -
+      -    #[test]
+      -    #[ignore] // This is a tool for debugging, not a regular test.
+      -    fn minimize_js_grammar_for_specific_input() {
+      -        // 1. Load the full JS grammar.
+      -        let grammar_path = "src/js.ebnf";
+      -        let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path).unwrap();
+      -        let initial_productions = grammar_definition.productions;
+      -        let start_production_id = grammar_definition.start_production_id;
+      -
+      -        // 2. Define the terminals present in the test case `var a = {[x]: 1};`
+      -        let interesting_terminals: BTreeSet<Terminal> = [
+      -            literal(b"var"),
+      -            regex_name("IDENTIFIER"),
+      -            literal(b"="),
+      -            literal(b"{"),
+      -            literal(b"["),
+      -            literal(b"]"),
+      -            literal(b":"),
+      -            regex_name("NUMERIC_LITERAL"),
+      -            literal(b"}"),
+      -            literal(b";"),
+      -        ].into_iter().collect();
+      -
+      -        // 3. Run the minimizer.
+      -        println!("--- Minimizing JS grammar for input terminals: {:?} ---", interesting_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+      -        println!("Initial production count: {}", initial_productions.len());
+      -
+      -        let minimized_productions = grammar_minimizer::simplify_grammar_for_test_case(
+      -            &initial_productions,
+      -            start_production_id,
+      -            &interesting_terminals,
+      -        );
+      -
+      -        // 4. Print the result.
+      -        println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      -        println!("{}", display_productions(&minimized_productions));
+      -    }
+      -}
+      +fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
+      +    // This test serves as a tool for debugging the parser. It does the following:
+      +    // 1. Defines a sequence of terminals for a specific JS input string.
+      +    // 2. Loads the full JS grammar.
+      +    // 3. Minimizes the grammar to only what's necessary for that input string.
+      +    // 4. Compiles the minimized grammar.
+      +    // 5. Feeds the terminal sequence to the new parser to check for correctness.
+      +
+      +    // 1. Define the terminal sequence for `var a = {[x]: 1};`
+      +    let test_case_terminals: Vec<Terminal> = vec![
+      +        literal(b"var"),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"="),
+      +        literal(b"{"),
+      +        literal(b"["),
+      +        regex_name("IDENTIFIER"),
+      +        literal(b"]"),
+      +        literal(b":"),
+      +        regex_name("NUMERIC_LITERAL"),
+      +        literal(b"}"),
+      +        literal(b";"),
+      +    ];
+      +    let interesting_terminals: BTreeSet<Terminal> = test_case_terminals.iter().cloned().collect();
+      +
+      +    // 2. Load the full JS grammar.
+      +    println!("--- Loading and Minimizing JS Grammar ---");
+      +    let grammar_path = "src/js.ebnf";
+      +    let full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      +    println!("Initial production count: {}", full_grammar_def.productions.len());
+      +
+      +    // 3. Minimize the grammar.
+      +    let minimized_productions = crate::glr::minimizer::simplify_grammar_for_test_case(
+      +        &full_grammar_def.productions,
+      +        full_grammar_def.start_production_id,
+      +        &interesting_terminals,
+      +    );
+      +
+      +    // 4. Print the minimized grammar.
+      +    println!("\n--- Minimized Grammar ({} productions) ---", minimized_productions.len());
+      +    println!("{}", crate::interface::display_productions(&minimized_productions));
+      +
+      +    // 5. Compile the minimized grammar.
+      +    let minimized_def = GrammarDefinition {
+      +        productions: minimized_productions,
+      +        start_production_id: 0, // The minimizer should preserve the augmented start rule at index 0.
+      +        literal_to_group_id: full_grammar_def.literal_to_group_id.clone(),
+      +        regex_name_to_group_id: full_grammar_def.regex_name_to_group_id.clone(),
+      +        regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
+      +        ignore_terminal_id: full_grammar_def.ignore_terminal_id,
+      +    };
+      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(minimized_def));
+      +    let parser = &compiled_grammar.glr_parser;
+      +
+      +    // 6. Convert test terminals to IDs using the new parser's map.
+      +    let terminal_ids: Vec<TerminalID> = test_case_terminals
+      +        .iter()
+      +        .map(|t| *parser.terminal_map.get_by_left(t).unwrap())
+      +        .collect();
+      +
+      +    // 7. Run the parser and assert success.
+      +    println!("\n--- Parsing with Minimized Grammar ---");
+      +    let mut glr_state = parser.init_glr_parser(None);
+      +    glr_state.parse(&terminal_ids);
+      +    assert!(glr_state.is_ok(), "Parse failed with minimized grammar.");
+      +    println!("Successfully parsed sequence with minimized grammar.");
+      +
+      +    Ok(())
+      +}
+       
+       #[test]
+       fn test_js_glr_parser_sanity_checks() -> Result<(), Box<dyn std::error::Error>> {
+      @@ -467,7 +434,7 @@
+               let mut terminal_id_sequence = Vec::new();
+               let mut sequence_is_valid = true;
+               for token_name in seq_terminal_names {
+      -            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex(token_name)) {
+      +            if let Some(terminal_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&regex_name(token_name)) {
+                       terminal_id_sequence.push(*terminal_id);
+                   } else {
+                       println!("  Warning: Terminal name '{}' not found in grammar for sequence {}. Skipping.", token_name, seq_idx);
+      @@ -562,9 +529,9 @@
+               // "NUMERIC_LITERAL",
+               // "\";\"",
+               literal(b"let"),
+      -        regex("IDENTIFIER"),
+      +        regex_name("IDENTIFIER"),
+               literal(b"="),
+      -        regex("NUMERIC_LITERAL"),
+      +        regex_name("NUMERIC_LITERAL"),
+               literal(b";"),
+           ];
+       
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/grammar.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/tests.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/interface/interface.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/interface/tests.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/mod.rs"
+        },
+        {
+          "action": "create",
+          "filepath": "src/glr/minimizer.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/test_constraint_js.rs"
+        }
+      ]
+      Found 6 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/grammar.rs
+      Received code for required file: src/glr/tests.rs
+      Received code for required file: src/interface/interface.rs
+      Received code for required file: src/glr/mod.rs
+      Received code for required file: src/glr/minimizer.rs
+      Received code for required file: src/test_constraint_js.rs
+      Missing code blocks for: {'src/interface/tests.rs'}
+      Requesting missing code blocks...
+
+      --- LLM Code Generation Attempt 2/5 ---
+      Found 1 code blocks with filepaths in attempt 2.
+      Received code for required file: src/interface/tests.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/interface/interface.rs
+      Successfully replaced file: src/glr/mod.rs
+      Successfully replaced file: src/test_constraint_js.rs
+      Successfully replaced file: src/glr/tests.rs
+      Successfully created file: src/glr/minimizer.rs
+      Successfully replaced file: src/interface/tests.rs
+      Successfully replaced file: src/glr/grammar.rs
     metadata:
 ...
