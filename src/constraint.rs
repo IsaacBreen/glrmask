@@ -838,7 +838,7 @@ impl<'r> Precomputer<'r> {
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
-                                let inserter = EdgeInserter::new(
+                                let mut inserter = EdgeInserter::new(
                                     src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
@@ -892,7 +892,7 @@ impl<'r> Precomputer<'r> {
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
-                                let inserter = EdgeInserter::new(
+                                let mut inserter = EdgeInserter::new(
                                     src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
