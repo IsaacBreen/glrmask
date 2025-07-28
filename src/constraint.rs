@@ -871,13 +871,15 @@ impl<'r> Precomputer<'r> {
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.lock().unwrap().value.end));
 
-                            let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                            let tags = self.tags.borrow();
-                            let eligible_children = children_of_src.iter().filter(|child_wrapper| {
-                                tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_wrapper.lock().unwrap().value.end
-                            }).map(|w| w.as_arc().clone());
-                            inserter = inserter.try_destinations_iter(eligible_children);
-                            drop(tags);
+                            if false {
+                                let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
+                                let tags = self.tags.borrow();
+                                let eligible_children = children_of_src.iter().filter(|child_wrapper| {
+                                    tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_wrapper.lock().unwrap().value.end
+                                }).map(|w| w.as_arc().clone());
+                                inserter = inserter.try_destinations_iter(eligible_children);
+                                drop(tags);
+                            }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
                             dest_nodes_in_queue.insert(ArcPtrWrapper::new(result_node.clone()));
