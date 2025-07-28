@@ -586,6 +586,106 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Load the minimized EBNF grammar.
+    //    To use:
+    //    a) Run `test_js_constraint_isolated_and_minimized` to generate `minimized_js_for_constraint.ebnf`.
+    //    b) Copy this test function and rename it.
+    //    c) Update `input_string` and `llm_token_map` with the sequence you want to test.
+    //    d) Remove the `#[ignore]` attribute and run the test.
+    let ebnf_source = "start\' ::= \'[\' \'x\' \']\' \':\' ;\n";
+    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
+
+    println!("\n--- Loaded Grammar from EBNF ---");
+    println!("{}", compiled_grammar);
+
+    // 2. Define the test case (must match the one in the minimizer test).
+    // let input_string = include_str!("../src/example_code.js");
+    let input_string = "[x]:";
+    let llm_token_strs = &["[x]:", " &"];
+    let mut llm_token_map = LLMTokenMap::new();
+    for (i, &token_str) in llm_token_strs.iter().enumerate() {
+        llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(i));
+    }
+    let max_token_id = if llm_token_strs.is_empty() { 0 } else { llm_token_strs.len() - 1 };
+
+    // 3. Create GrammarConstraint and run the test.
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map.clone(),
+        LLMTokenID(max_token_id + 1),
+        max_token_id,
+    );
+
+    println!("\n--- Created GrammarConstraint ---");
+    constraint.dump_precomputed();
+
+    println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
+
+    println!("---BEGIN-SOURCE-JSON---");
+    println!("{}", serde_json::to_string(&input_string.to_string())?);
+    println!("---END-SOURCE-JSON---");
+    // Tokenize the input string
+    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = llm_token_map
+        .iter()
+        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+        .collect();
+    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
+
+    let mut test_token_sequence_ids = Vec::new();
+    let mut tokenized_strs_for_logging = Vec::new();
+    let mut text_to_process = input_string.as_bytes();
+
+    while !text_to_process.is_empty() {
+        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+            Some((token_id, matched_bytes)) => {
+                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
+                test_token_sequence_ids.push(LLMTokenID(token_id));
+                tokenized_strs_for_logging.push(matched_str);
+                text_to_process = &text_to_process[matched_bytes.len()..];
+            }
+            None => {
+                panic!("Failed to tokenize. No prefix token found for remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+            }
+        }
+    }
+
+    // Step through the tokenized sequence
+    let mut state = constraint.init();
+    let all_code_lines: Vec<&str> = input_string.lines().collect();
+    let mut current_text_byte_offset = 0;
+
+    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        let current_token_str = &tokenized_strs_for_logging[i];
+        println!("Processing token {}/{}: {:?} (LLMTokenID({}))", i + 1, test_token_sequence_ids.len(), current_token_str, llm_token_id.0);
+
+        let token_start_byte = current_text_byte_offset;
+        let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
+        print_token_context(&input_string, &all_code_lines, token_start_byte, token_end_byte, 2);
+
+        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+
+        let mask_start = Instant::now();
+        let current_mask = state.get_mask();
+        println!("  get_mask took: {:?}", mask_start.elapsed());
+
+        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
+        println!("  Token is in the mask.");
+
+        let commit_start = Instant::now();
+        state.commit(llm_token_id);
+        println!("  commit took: {:?}", commit_start.elapsed());
+
+        current_text_byte_offset = token_end_byte;
+    }
+    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
+
+    Ok(())
+}
+
+#[test]
 fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Error>> {
     // This test serves as a tool for debugging the parser. It does the following:
     // 1. Defines a sequence of terminals for a specific JS input string.
