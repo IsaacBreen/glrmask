@@ -33,6 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use rand::prelude::IndexedRandom;
+use crate::constraint_extra::dump_precompute_trie_recursive;
 use crate::profiler::{print_summary, print_summary_flat, reset};
 // --- Helper Functions ---
 
@@ -420,6 +421,9 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
         LLMTokenID(max_token_id + 1),
         max_token_id,
     );
+
+    println!("\n--- Created GrammarConstraint ---");
+    constraint.dump_precomputed();
 
     println!("\n--- Running Constraint with Minimized Grammar ---");
     let mut state = constraint.init();
