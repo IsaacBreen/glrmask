@@ -1,7 +1,8 @@
 use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
-use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
 
 

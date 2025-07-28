@@ -1,5 +1,6 @@
-use super::items::{compute_closure, compute_goto, split_on_dot, Item, LRType};
-use crate::glr::grammar::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, NonTerminal, Production, Symbol, Terminal};
+use super::items::{Item, LRType};
+use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -7,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
 pub use crate::types::{TerminalID};
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use crate::interface::display_productions;
 // Added for derive macro pattern
@@ -269,7 +270,6 @@ pub struct NonTerminalID(pub usize);
 impl JSONConvertible for NonTerminalID {
     fn to_json(&self) -> JSONNode { self.0.to_json() }
     fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
-}
 
 
 type Stage1Result = Stage1Table;
@@ -278,7 +278,7 @@ type Stage3Result = Stage3Table;
 type Stage4Result = Stage4Table;
 type Stage5Result = Stage5Table;
 type Stage6Result = Stage6Table;
-type Stage7Result = (
+pub type Stage7Result = (
     Stage7Table,
     BiBTreeMap<BTreeSet<Item>, StateID>,
     StateID,

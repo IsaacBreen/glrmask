@@ -16,7 +16,8 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
-use crate::glr::items::{compute_closure, Item, LRType, LR_TYPE};
+use crate::glr::automaton::compute_closure;
+use crate::glr::items::{Item, LRType, LR_TYPE};
 use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
@@ -504,7 +505,7 @@ impl Display for GLRParser {
         let non_terminal_map = &self.non_terminal_map;
         let item_set_map = &self.item_set_map;
 
-        use crate::glr::items::{compute_closure, Item};
+        use crate::glr::items::{Item};
         use std::collections::BTreeSet;
 
         writeln!(f, "Parse Table:")?;
@@ -942,7 +943,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             };
             if let Some(action) = shifts_and_reduces.get(&token_id) {
                 crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
-                              self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                              self.parser.terminal_map.get_by_by_right(&token_id).unwrap(),
                               peek.edge_value().state_id.0, action);
                 // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
                 timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {

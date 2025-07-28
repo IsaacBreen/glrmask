@@ -5,3 +5,4 @@ pub mod parser;
 pub mod stats;
 mod tests;
 pub mod analyze;
+pub mod automaton;

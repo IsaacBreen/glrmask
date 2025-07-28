@@ -1,6 +1,6 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
 // Added for derive macro pattern
@@ -87,42 +87,6 @@ impl Item {
     }
 }
 
-pub fn compute_first_set_for_item(
-    item: &Item,
-    productions: &[Production],
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-    nullable_nonterminals: &BTreeSet<NonTerminal>,
-) -> BTreeSet<Option<Terminal>> {
-    if let Some((symbol, next_item)) = item.next() {
-        match symbol {
-            Symbol::Terminal(t) => {
-                // If the next symbol is a terminal, the first is just that terminal
-                BTreeSet::from([Some(t)])
-            }
-            Symbol::NonTerminal(nt) => {
-                let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default().into_iter()
-                    .map(Some)
-                    .collect();
-
-                if nullable_nonterminals.contains(&nt) {
-                    // If the non-terminal is nullable, we also need to include the firsts for the next item
-                    let next_firsts = compute_first_set_for_item(
-                        &next_item,
-                        productions,
-                        first_sets,
-                        nullable_nonterminals,
-                    );
-                    first_set.extend(next_firsts);
-                }
-                first_set
-            }
-        }
-    } else {
-        // The dot is at the end. The first is the lookahead.
-        BTreeSet::from([item.lookahead.clone()])
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LRType {
     LALR,
@@ -131,73 +95,3 @@ pub enum LRType {
 
 pub const LR_TYPE: LRType = LRType::LALR;
 // pub const LR_TYPE: LRType = LRType::LR1;
-
-pub fn compute_closure(
-    items: &BTreeSet<Item>,
-    productions: &[Production],
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-    nullable_nonterminals: &BTreeSet<NonTerminal>,
-    follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-
-) -> BTreeSet<Item> {
-    // crate::debug!(3, "Computing closure");
-    let mut closure = items.clone();
-    let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-
-    while let Some(item) = worklist.pop_front() {
-        if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
-            for prod in productions.iter().filter(|p| p.lhs == nt) {
-                let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
-                for lookahead in lookaheads {
-                    let new_item = Item {
-                        production: prod.clone(),
-                        dot_position: 0,
-                        lookahead,
-                    };
-                    if closure.insert(new_item.clone()) {
-                        worklist.push_back(new_item);
-                    }
-                }
-            }
-        }
-    }
-
-    if LR_TYPE == LRType::LALR {
-        let mut lalr_closure = BTreeSet::new();
-        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-
-        // Separate reduce and non-reduce items, and group reduce items by core
-        for item in closure {
-        reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-        }
-
-        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-        for ((prod, dot_pos), _) in reduce_item_cores {
-            if let Some(follows) = follow_sets.get(&prod.lhs) {
-                for lookahead in follows {
-                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-                }
-            }
-        }
-        return lalr_closure;
-    }
-    closure
-}
-
-pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
-    items.iter()
-        .filter_map(|item| item.next())
-        .map(|(_, next_item)| next_item)
-        .collect()
-}
-
-pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
-    let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
-    for item in items {
-        result
-            .entry(item.production.rhs.get(item.dot_position).cloned())
-            .or_default()
-            .insert(item.clone());
-    }
-    result
-}
