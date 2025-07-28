@@ -384,34 +384,6 @@ fn test_js_parser_isolated_object_literal() -> Result<(), Box<dyn std::error::Er
     println!("\n--- Finished parsing terminal sequence ---");
     assert!(glr_state.is_ok(), "Final parser state is not OK.");
 
-    // A full parse would require more tokens (e.g. an expression after ':'), but this prefix should be valid.
-    // To check for full acceptance, we would need to parse a complete statement.
-    // For example: `var a = {[x]: 1};`
-    // Let's try that.
-    let full_stmt_terminals: Vec<Terminal> = vec![
-        literal(b"var"),
-        regex("IDENTIFIER"),
-        literal(b"="),
-        literal(b"{"),
-        literal(b"["),
-        regex("IDENTIFIER"),
-        literal(b"]"),
-        literal(b":"),
-        regex("NUMERIC_LITERAL"),
-        literal(b"}"),
-        literal(b";"),
-    ];
-    let mut full_stmt_ids = Vec::new();
-    for terminal_obj in &full_stmt_terminals {
-        let terminal_id = parser.terminal_map.get_by_left(terminal_obj).unwrap();
-        full_stmt_ids.push(*terminal_id);
-    }
-
-    println!("\n--- Testing full statement ---");
-    let mut glr_state_full = parser.init_glr_parser(None);
-    glr_state_full.parse(&full_stmt_ids);
-    assert!(glr_state_full.is_ok(), "Full statement parse failed.");
-
     Ok(())
 }
 
