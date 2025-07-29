@@ -1177,7 +1177,7 @@ impl<'a> GrammarConstraintState<'a> {
                             .map(|s| s.to_string())
                             .unwrap_or("UNKNOWN_TERMINAL".to_string());
                         // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
-                        glr_s.do_phase1_and_2(*gtid);
+                        glr_s.process_token(*gtid);
                         // });
 
                         crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
