@@ -2168,6 +2168,76 @@ local_system:
           }
       }
 
+      fn format_actions(
+          f: &mut std::fmt::Formatter<'_>,
+          actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+          productions: &[Production],
+          indent: &str,
+      ) -> std::fmt::Result {
+          if actions.is_empty() {
+              return writeln!(f, "{} (none)", indent);
+          }
+
+          // Group terminals by action
+          let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
+          for (tid, action) in actions {
+              let terminal = terminal_map.get_by_right(tid).unwrap();
+              grouped_actions.entry(action).or_default().insert(terminal);
+          }
+
+          for (action, terminals) in grouped_actions {
+              // Format action
+              let action_str = match action {
+                  Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                      format!("Shift {}", next_state_id.0)
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                      let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                      let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                      format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                      let mut s = "Conflict:".to_string();
+                      let inner_indent = format!("\n{}        ", indent); // indent + "        "
+                      if let Some(shift_state) = shift {
+                          let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
+                      }
+                      for (_len, nts) in reduces {
+                          for (_nt_id, prod_ids) in nts {
+                              for prod_id_val in prod_ids {
+                                  let prod = productions.get(prod_id_val.0).unwrap();
+                                  let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
+                              }
+                          }
+                      }
+                      s
+                  }
+              };
+
+              // Format terminals
+              let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
+              terminal_names.sort();
+
+              const MAX_TERMS_TO_SHOW: usize = 5;
+              let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
+                  (&terminal_names[..MAX_TERMS_TO_SHOW], true)
+              } else {
+                  (terminal_names.as_slice(), false)
+              };
+
+              let mut terms_str = terms_to_show.join(", ");
+              if truncated {
+                  let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
+              }
+
+              writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+          }
+
+          Ok(())
+      }
+
       impl Display for GLRParser {
           fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
               let stage_7_table = &self.stage_7_table;
@@ -2223,82 +2293,10 @@ local_system:
                   }
 
                   writeln!(f, "    Actions (Phase 1):")?;
-                  let actions = &row.phase1_shifts_and_reduces;
-                  let max_term_len = if actions.is_empty() { 0 } else {
-                      actions.keys()
-                          .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                          .max().unwrap_or(0)
-                  };
-                  for (&terminal_id, action) in actions {
-                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                      let terminal_name = terminal.to_string();
-                      write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                      match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                              writeln!(f, " -> Shift {}", next_state_id.0)?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                              writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              writeln!(f, " -> Conflict:")?;
-                              if let Some(shift_state) = shift {
-                                  writeln!(f, "        - Shift {}", shift_state.0)?;
-                              }
-                              for (len, nts) in reduces {
-                                  writeln!(f, "        - Reduce (len {}):", len)?;
-                                  for (nt_id, prod_ids) in nts {
-                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                      for prod_id_val in prod_ids {
-                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
+                  format_actions(f, &row.phase1_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
                   writeln!(f, "    Actions (Phase 2):")?;
-                  let actions = &row.phase2_shifts_and_reduces;
-                  let max_term_len = if actions.is_empty() { 0 } else {
-                      actions.keys()
-                          .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                          .max().unwrap_or(0)
-                  };
-                  for (&terminal_id, action) in actions {
-                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                      let terminal_name = terminal.to_string();
-                      write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                      match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                              writeln!(f, " -> Shift {}", next_state_id.0)?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                              writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              writeln!(f, " -> Conflict:")?;
-                              if let Some(shift_state) = shift {
-                                  writeln!(f, "        - Shift {}", shift_state.0)?;
-                              }
-                              for (len, nts) in reduces {
-                                  writeln!(f, "        - Reduce (len {}):", len)?;
-                                  for (nt_id, prod_ids) in nts {
-                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                      for prod_id_val in prod_ids {
-                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
+                  format_actions(f, &row.phase2_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
                   writeln!(f, "    Default Action (Phase 3):")?;
                   if let Some(reduce) = &row.phase3_default_reduce.reduce {
@@ -7152,6 +7150,76 @@ local_system:
           }
       }
 
+      fn format_actions(
+          f: &mut std::fmt::Formatter<'_>,
+          actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+          productions: &[Production],
+          indent: &str,
+      ) -> std::fmt::Result {
+          if actions.is_empty() {
+              return writeln!(f, "{} (none)", indent);
+          }
+
+          // Group terminals by action
+          let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
+          for (tid, action) in actions {
+              let terminal = terminal_map.get_by_right(tid).unwrap();
+              grouped_actions.entry(action).or_default().insert(terminal);
+          }
+
+          for (action, terminals) in grouped_actions {
+              // Format action
+              let action_str = match action {
+                  Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                      format!("Shift {}", next_state_id.0)
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                      let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                      let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                      format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                      let mut s = "Conflict:".to_string();
+                      let inner_indent = format!("\n{}        ", indent); // indent + "        "
+                      if let Some(shift_state) = shift {
+                          let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
+                      }
+                      for (_len, nts) in reduces {
+                          for (_nt_id, prod_ids) in nts {
+                              for prod_id_val in prod_ids {
+                                  let prod = productions.get(prod_id_val.0).unwrap();
+                                  let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
+                              }
+                          }
+                      }
+                      s
+                  }
+              };
+
+              // Format terminals
+              let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
+              terminal_names.sort();
+
+              const MAX_TERMS_TO_SHOW: usize = 5;
+              let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
+                  (&terminal_names[..MAX_TERMS_TO_SHOW], true)
+              } else {
+                  (terminal_names.as_slice(), false)
+              };
+
+              let mut terms_str = terms_to_show.join(", ");
+              if truncated {
+                  let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
+              }
+
+              writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+          }
+
+          Ok(())
+      }
+
       impl Display for GLRParser {
           fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
               let stage_7_table = &self.stage_7_table;
@@ -7207,82 +7275,10 @@ local_system:
                   }
 
                   writeln!(f, "    Actions (Phase 1):")?;
-                  let actions = &row.phase1_shifts_and_reduces;
-                  let max_term_len = if actions.is_empty() { 0 } else {
-                      actions.keys()
-                          .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                          .max().unwrap_or(0)
-                  };
-                  for (&terminal_id, action) in actions {
-                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                      let terminal_name = terminal.to_string();
-                      write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                      match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                              writeln!(f, " -> Shift {}", next_state_id.0)?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                              writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              writeln!(f, " -> Conflict:")?;
-                              if let Some(shift_state) = shift {
-                                  writeln!(f, "        - Shift {}", shift_state.0)?;
-                              }
-                              for (len, nts) in reduces {
-                                  writeln!(f, "        - Reduce (len {}):", len)?;
-                                  for (nt_id, prod_ids) in nts {
-                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                      for prod_id_val in prod_ids {
-                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
+                  format_actions(f, &row.phase1_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
                   writeln!(f, "    Actions (Phase 2):")?;
-                  let actions = &row.phase2_shifts_and_reduces;
-                  let max_term_len = if actions.is_empty() { 0 } else {
-                      actions.keys()
-                          .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                          .max().unwrap_or(0)
-                  };
-                  for (&terminal_id, action) in actions {
-                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                      let terminal_name = terminal.to_string();
-                      write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                      match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                              writeln!(f, " -> Shift {}", next_state_id.0)?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                              writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              writeln!(f, " -> Conflict:")?;
-                              if let Some(shift_state) = shift {
-                                  writeln!(f, "        - Shift {}", shift_state.0)?;
-                              }
-                              for (len, nts) in reduces {
-                                  writeln!(f, "        - Reduce (len {}):", len)?;
-                                  for (nt_id, prod_ids) in nts {
-                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                      for prod_id_val in prod_ids {
-                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
+                  format_actions(f, &row.phase2_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
                   writeln!(f, "    Default Action (Phase 3):")?;
                   if let Some(reduce) = &row.phase3_default_reduce.reduce {
@@ -12189,6 +12185,76 @@ messages:
           }
       }
 
+      fn format_actions(
+          f: &mut std::fmt::Formatter<'_>,
+          actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+          productions: &[Production],
+          indent: &str,
+      ) -> std::fmt::Result {
+          if actions.is_empty() {
+              return writeln!(f, "{} (none)", indent);
+          }
+
+          // Group terminals by action
+          let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
+          for (tid, action) in actions {
+              let terminal = terminal_map.get_by_right(tid).unwrap();
+              grouped_actions.entry(action).or_default().insert(terminal);
+          }
+
+          for (action, terminals) in grouped_actions {
+              // Format action
+              let action_str = match action {
+                  Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                      format!("Shift {}", next_state_id.0)
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                      let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                      let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                      format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                      let mut s = "Conflict:".to_string();
+                      let inner_indent = format!("\n{}        ", indent); // indent + "        "
+                      if let Some(shift_state) = shift {
+                          let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
+                      }
+                      for (_len, nts) in reduces {
+                          for (_nt_id, prod_ids) in nts {
+                              for prod_id_val in prod_ids {
+                                  let prod = productions.get(prod_id_val.0).unwrap();
+                                  let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
+                              }
+                          }
+                      }
+                      s
+                  }
+              };
+
+              // Format terminals
+              let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
+              terminal_names.sort();
+
+              const MAX_TERMS_TO_SHOW: usize = 5;
+              let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
+                  (&terminal_names[..MAX_TERMS_TO_SHOW], true)
+              } else {
+                  (terminal_names.as_slice(), false)
+              };
+
+              let mut terms_str = terms_to_show.join(", ");
+              if truncated {
+                  let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
+              }
+
+              writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+          }
+
+          Ok(())
+      }
+
       impl Display for GLRParser {
           fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
               let stage_7_table = &self.stage_7_table;
@@ -12244,82 +12310,10 @@ messages:
                   }
 
                   writeln!(f, "    Actions (Phase 1):")?;
-                  let actions = &row.phase1_shifts_and_reduces;
-                  let max_term_len = if actions.is_empty() { 0 } else {
-                      actions.keys()
-                          .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                          .max().unwrap_or(0)
-                  };
-                  for (&terminal_id, action) in actions {
-                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                      let terminal_name = terminal.to_string();
-                      write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                      match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                              writeln!(f, " -> Shift {}", next_state_id.0)?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                              writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              writeln!(f, " -> Conflict:")?;
-                              if let Some(shift_state) = shift {
-                                  writeln!(f, "        - Shift {}", shift_state.0)?;
-                              }
-                              for (len, nts) in reduces {
-                                  writeln!(f, "        - Reduce (len {}):", len)?;
-                                  for (nt_id, prod_ids) in nts {
-                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                      for prod_id_val in prod_ids {
-                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
+                  format_actions(f, &row.phase1_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
                   writeln!(f, "    Actions (Phase 2):")?;
-                  let actions = &row.phase2_shifts_and_reduces;
-                  let max_term_len = if actions.is_empty() { 0 } else {
-                      actions.keys()
-                          .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                          .max().unwrap_or(0)
-                  };
-                  for (&terminal_id, action) in actions {
-                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                      let terminal_name = terminal.to_string();
-                      write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                      match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                              writeln!(f, " -> Shift {}", next_state_id.0)?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                              let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                              writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              writeln!(f, " -> Conflict:")?;
-                              if let Some(shift_state) = shift {
-                                  writeln!(f, "        - Shift {}", shift_state.0)?;
-                              }
-                              for (len, nts) in reduces {
-                                  writeln!(f, "        - Reduce (len {}):", len)?;
-                                  for (nt_id, prod_ids) in nts {
-                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                      for prod_id_val in prod_ids {
-                                          let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
+                  format_actions(f, &row.phase2_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
                   writeln!(f, "    Default Action (Phase 3):")?;
                   if let Some(reduce) = &row.phase3_default_reduce.reduce {
@@ -15037,486 +15031,232 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      ```
-        State 0:
-          Items:
-            - [additive_expression -> multiplicative_expression • additive_expression[0], {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
-          Actions (Phase 1):
-          Actions (Phase 2):
-            - BIGINT_LITERAL             -> Reduce additive_expression[0] (len 0) via rules [299]
-            - BOOLEAN_LITERAL            -> Reduce additive_expression[0] (len 0) via rules [299]
-            - ELISION                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - IDENTIFIER                 -> Reduce additive_expression[0] (len 0) via rules [299]
-            - IGNORE                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - NULL_LITERAL               -> Reduce additive_expression[0] (len 0) via rules [299]
-            - NUMERIC_LITERAL            -> Reduce additive_expression[0] (len 0) via rules [299]
-            - REGULAR_EXPRESSION_LITERAL -> Reduce additive_expression[0] (len 0) via rules [299]
-            - STRING_LITERAL             -> Reduce additive_expression[0] (len 0) via rules [299]
-            - TEMPLATE_CHAR              -> Reduce additive_expression[0] (len 0) via rules [299]
-            - ';'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '{'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '}'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - ':'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'var'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'let'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'const'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - ','                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '='                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'if'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '('                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - ')'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'else'                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'while'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'do'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'for'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'in'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'of'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'switch'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'case'                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'default'                  -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'with'                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'try'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'catch'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'finally'                  -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'async'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'function'                 -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '*'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '...'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'return'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'break'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'continue'                 -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'throw'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'debugger'                 -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '['                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - ']'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'import'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'from'                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'as'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'export'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '+='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '-='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '*='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '/='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '%='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '<<='                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '>>='                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '>>>='                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '&='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '^='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '|='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '**='                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '=>'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '?'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '??'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '||'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '&&'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '|'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '^'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '&'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '=='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '!='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '==='                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '!=='                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '<'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '>'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '<='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '>='                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'instanceof'               -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '<<'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '>>'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '>>>'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '+'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '-'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '/'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '%'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '**'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'delete'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'void'                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'typeof'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '++'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '--'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '~'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '!'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'await'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'new'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'super'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '?.'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '.'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'this'                     -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'yield'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'get'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'set'                      -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'class'                    -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'extends'                  -> Reduce additive_expression[0] (len 0) via rules [299]
-            - 'static'                   -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '#'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '`'                        -> Reduce additive_expression[0] (len 0) via rules [299]
-            - '${'                       -> Reduce additive_expression[0] (len 0) via rules [299]
-          Default Action (Phase 3):
-            - Default Reduce additive_expression[0] (len 0) via rules [299]
-            - No clone and merge
-          Gotos:
-            - additive_expression[0] -> 1
-        State 1:
-          Items:
-            - [additive_expression -> multiplicative_expression additive_expression[0] •, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
-            - [additive_expression[0] -> additive_expression[0] • additive_expression[0][0] multiplicative_expression, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
-          Actions (Phase 1):
-            - '+' -> Shift 4
-            - '-' -> Shift 5
-          Actions (Phase 2):
-            - BIGINT_LITERAL             -> Reduce additive_expression (len 2) via rules [297]
-            - BOOLEAN_LITERAL            -> Reduce additive_expression (len 2) via rules [297]
-            - ELISION                    -> Reduce additive_expression (len 2) via rules [297]
-            - IDENTIFIER                 -> Reduce additive_expression (len 2) via rules [297]
-            - IGNORE                     -> Reduce additive_expression (len 2) via rules [297]
-            - NULL_LITERAL               -> Reduce additive_expression (len 2) via rules [297]
-            - NUMERIC_LITERAL            -> Reduce additive_expression (len 2) via rules [297]
-            - REGULAR_EXPRESSION_LITERAL -> Reduce additive_expression (len 2) via rules [297]
-            - STRING_LITERAL             -> Reduce additive_expression (len 2) via rules [297]
-            - TEMPLATE_CHAR              -> Reduce additive_expression (len 2) via rules [297]
-            - ';'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '{'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '}'                        -> Reduce additive_expression (len 2) via rules [297]
-            - ':'                        -> Reduce additive_expression (len 2) via rules [297]
-            - 'var'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'let'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'const'                    -> Reduce additive_expression (len 2) via rules [297]
-            - ','                        -> Reduce additive_expression (len 2) via rules [297]
-            - '='                        -> Reduce additive_expression (len 2) via rules [297]
-            - 'if'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '('                        -> Reduce additive_expression (len 2) via rules [297]
-            - ')'                        -> Reduce additive_expression (len 2) via rules [297]
-            - 'else'                     -> Reduce additive_expression (len 2) via rules [297]
-            - 'while'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'do'                       -> Reduce additive_expression (len 2) via rules [297]
-            - 'for'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'in'                       -> Reduce additive_expression (len 2) via rules [297]
-            - 'of'                       -> Reduce additive_expression (len 2) via rules [297]
-            - 'switch'                   -> Reduce additive_expression (len 2) via rules [297]
-            - 'case'                     -> Reduce additive_expression (len 2) via rules [297]
-            - 'default'                  -> Reduce additive_expression (len 2) via rules [297]
-            - 'with'                     -> Reduce additive_expression (len 2) via rules [297]
-            - 'try'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'catch'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'finally'                  -> Reduce additive_expression (len 2) via rules [297]
-            - 'async'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'function'                 -> Reduce additive_expression (len 2) via rules [297]
-            - '*'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '...'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'return'                   -> Reduce additive_expression (len 2) via rules [297]
-            - 'break'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'continue'                 -> Reduce additive_expression (len 2) via rules [297]
-            - 'throw'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'debugger'                 -> Reduce additive_expression (len 2) via rules [297]
-            - '['                        -> Reduce additive_expression (len 2) via rules [297]
-            - ']'                        -> Reduce additive_expression (len 2) via rules [297]
-            - 'import'                   -> Reduce additive_expression (len 2) via rules [297]
-            - 'from'                     -> Reduce additive_expression (len 2) via rules [297]
-            - 'as'                       -> Reduce additive_expression (len 2) via rules [297]
-            - 'export'                   -> Reduce additive_expression (len 2) via rules [297]
-            - '+='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '-='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '*='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '/='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '%='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '<<='                      -> Reduce additive_expression (len 2) via rules [297]
-            - '>>='                      -> Reduce additive_expression (len 2) via rules [297]
-            - '>>>='                     -> Reduce additive_expression (len 2) via rules [297]
-            - '&='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '^='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '|='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '**='                      -> Reduce additive_expression (len 2) via rules [297]
-            - '=>'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '?'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '??'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '||'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '&&'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '|'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '^'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '&'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '=='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '!='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '==='                      -> Reduce additive_expression (len 2) via rules [297]
-            - '!=='                      -> Reduce additive_expression (len 2) via rules [297]
-            - '<'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '>'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '<='                       -> Reduce additive_expression (len 2) via rules [297]
-            - '>='                       -> Reduce additive_expression (len 2) via rules [297]
-            - 'instanceof'               -> Reduce additive_expression (len 2) via rules [297]
-            - '<<'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '>>'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '>>>'                      -> Reduce additive_expression (len 2) via rules [297]
-            - '+'                        -> Conflict:
-              - Shift 4
-              - Reduce (len 2):
-                - additive_expression -> additive_expression
-            - '-'                        -> Conflict:
-              - Shift 5
-              - Reduce (len 2):
-                - additive_expression -> additive_expression
-            - '/'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '%'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '**'                       -> Reduce additive_expression (len 2) via rules [297]
-            - 'delete'                   -> Reduce additive_expression (len 2) via rules [297]
-            - 'void'                     -> Reduce additive_expression (len 2) via rules [297]
-            - 'typeof'                   -> Reduce additive_expression (len 2) via rules [297]
-            - '++'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '--'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '~'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '!'                        -> Reduce additive_expression (len 2) via rules [297]
-            - 'await'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'new'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'super'                    -> Reduce additive_expression (len 2) via rules [297]
-            - '?.'                       -> Reduce additive_expression (len 2) via rules [297]
-            - '.'                        -> Reduce additive_expression (len 2) via rules [297]
-            - 'this'                     -> Reduce additive_expression (len 2) via rules [297]
-            - 'yield'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'get'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'set'                      -> Reduce additive_expression (len 2) via rules [297]
-            - 'class'                    -> Reduce additive_expression (len 2) via rules [297]
-            - 'extends'                  -> Reduce additive_expression (len 2) via rules [297]
-            - 'static'                   -> Reduce additive_expression (len 2) via rules [297]
-            - '#'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '`'                        -> Reduce additive_expression (len 2) via rules [297]
-            - '${'                       -> Reduce additive_expression (len 2) via rules [297]
-          Default Action (Phase 3):
-            - Default Reduce additive_expression (len 2) via rules [297]
-            - Clone and merge
-          Gotos:
-            - additive_expression[0][0] -> 2
-        State 2:
-          Items:
-            - [additive_expression[0] -> additive_expression[0] additive_expression[0][0] • multiplicative_expression, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
-          Actions (Phase 1):
-          Actions (Phase 2):
-            - BIGINT_LITERAL             -> Reduce unary_expression_rr (len 0) via rules [313]
-            - BOOLEAN_LITERAL            -> Reduce unary_expression_rr (len 0) via rules [313]
-            - IDENTIFIER                 -> Reduce unary_expression_rr (len 0) via rules [313]
-            - NULL_LITERAL               -> Reduce unary_expression_rr (len 0) via rules [313]
-            - NUMERIC_LITERAL            -> Reduce unary_expression_rr (len 0) via rules [313]
-            - REGULAR_EXPRESSION_LITERAL -> Reduce unary_expression_rr (len 0) via rules [313]
-            - STRING_LITERAL             -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '{'                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '('                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'async'                    -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'function'                 -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '['                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '+'                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '-'                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'delete'                   -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'void'                     -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'typeof'                   -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '++'                       -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '--'                       -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '~'                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '!'                        -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'await'                    -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'new'                      -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'super'                    -> Reduce unary_expression_rr (len 0) via rules [313]
-            - 'this'                     -> Reduce unary_expression_rr (len 0) via rules [313]
-            - '`'                        -> Reduce unary_expression_rr (len 0) via rules [313]
-          Default Action (Phase 3):
-            - Default Reduce unary_expression_rr (len 0) via rules [313]
-            - No clone and merge
-          Gotos:
-            - multiplicative_expression -> 3
-            - exponentiation_expression -> 388
-            - unary_expression -> 194
-            - unary_expression_rr -> 587
-
-      ```
-      State printing right now looks something like this.
-      This isn't great. Really messy.
-      Clean it up.
-      There's way too much repetition. e.g. "Reduce unary_expression_rr (len 0) via rules [313]" is repeated so many times.
+      Implement methods on Stage7ShiftsAndReducesLookaheadValue that mutate it nicely. e.g. there should be a method that adds a shift to it, and one that adds a reduce. And one that simplifies it.
+      A quick and dirty implementation of adding a shift, for example, could be to convert itself, whatever it is, into a Split (using a private method that does this), and then do the thing like add the shift (panicking if there's already a shift there), then simplify it down.
+      Actually no, there should NOT be a method that adds a shift. Only one that adds a reduce, and one that simplifies it down.
+      Don't simplify down automatically after adding a reduce. Should never be in that situation.
+      Simplification is basically just for cases where we eg add a reduce or add a shift where there was none before. Then the user should simplify.
+      Simplification just tries to simplify it to either a Shift if there's a shift and no reduces, or a Reduce if there's no shift and exactly one reduce.
+      Use those methods to simplify the code a little, esp the parse table building.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you clean up your state printing logic. Dealing with verbose and repetitive output can indeed be messy.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the suggested changes to improve your code by adding methods to `Stage7ShiftsAndReducesLookaheadValue` for better manipulation and simplifying the parse table generation logic.
 
-      Here are the suggested changes to group actions by terminal in your `GLRParser`'s `Display` implementation. This will make the output much more concise and readable.
-
-      ### `src/glr/parser.rs`
-
-      I'll introduce a new helper function `format_actions` to handle the grouping and formatting logic, and then call it from the `Display` implementation for `GLRParser`. This keeps the main implementation clean and encapsulates the formatting logic.
+      Here is the diff for the modified file:
 
       ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -610,6 +610,80 @@
-           }
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -80,6 +80,63 @@
+           },
        }
        
-      +fn format_actions(
-      +    f: &mut std::fmt::Formatter<'_>,
-      +    actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      +    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-      +    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-      +    productions: &[Production],
-      +    indent: &str,
-      +) -> std::fmt::Result {
-      +    if actions.is_empty() {
-      +        return writeln!(f, "{} (none)", indent);
-      +    }
+      +impl Stage7ShiftsAndReducesLookaheadValue {
+      +    /// Adds a reduce action to the current value, converting it to a `Split` if necessary.
+      +    pub fn add_reduce(&mut self, len: usize, nonterminal_id: NonTerminalID, production_ids: BTreeSet<ProductionID>) {
+      +        // Take ownership of self to work with it, then assign back.
+      +        let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy value
       +
-      +    // Group terminals by action
-      +    let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
-      +    for (tid, action) in actions {
-      +        let terminal = terminal_map.get_by_right(tid).unwrap();
-      +        grouped_actions.entry(action).or_default().insert(terminal);
-      +    }
-      +
-      +    for (action, terminals) in grouped_actions {
-      +        // Format action
-      +        let action_str = match action {
-      +            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-      +                format!("Shift {}", next_state_id.0)
-      +            }
-      +            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-      +                let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
-      +                let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-      +                format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
-      +            }
-      +            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      +                let mut s = "Conflict:".to_string();
-      +                let inner_indent = format!("\n{}        ", indent); // indent + "        "
-      +                if let Some(shift_state) = shift {
-      +                    let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
+      +        let new_self = match temp_self {
+      +            Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
+      +                let mut reduces = BTreeMap::new();
+      +                reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
+      +                Stage7ShiftsAndReducesLookaheadValue::Split {
+      +                    shift: Some(state_id),
+      +                    reduces,
       +                }
-      +                for (_len, nts) in reduces {
-      +                    for (_nt_id, prod_ids) in nts {
-      +                        for prod_id_val in prod_ids {
-      +                            let prod = productions.get(prod_id_val.0).unwrap();
-      +                            let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
-      +                        }
-      +                    }
+      +            }
+      +            Stage7ShiftsAndReducesLookaheadValue::Reduce {
+      +                nonterminal_id: old_nt_id,
+      +                len: old_len,
+      +                production_ids: old_pids,
+      +            } => {
+      +                let mut reduces = BTreeMap::new();
+      +                reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
+      +                reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
+      +                Stage7ShiftsAndReducesLookaheadValue::Split {
+      +                    shift: None,
+      +                    reduces,
       +                }
-      +                s
+      +            }
+      +            Stage7ShiftsAndReducesLookaheadValue::Split { shift, mut reduces } => {
+      +                reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
+      +                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }
       +            }
       +        };
+      +        *self = new_self;
+      +    }
       +
-      +        // Format terminals
-      +        let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-      +        terminal_names.sort();
-      +
-      +        const MAX_TERMS_TO_SHOW: usize = 5;
-      +        let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
-      +            (&terminal_names[..MAX_TERMS_TO_SHOW], true)
-      +        } else {
-      +            (terminal_names.as_slice(), false)
-      +        };
-      +
-      +        let mut terms_str = terms_to_show.join(", ");
-      +        if truncated {
-      +            let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
+      +    /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
+      +    /// - A `Split` with a shift and no reduces becomes a `Shift`.
+      +    /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
+      +    pub fn simplify(&mut self) {
+      +        if let Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } = self {
+      +            if reduces.is_empty() {
+      +                if let Some(shift_id) = *shift {
+      +                    *self = Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id);
+      +                }
+      +            } else if shift.is_none() && reduces.len() == 1 && reduces.values().next().unwrap().len() == 1 {
+      +                // No shift, and only one kind of reduce (one len, one nt).
+      +                let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy
+      +                if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self {
+      +                    let (len, mut nts) = reduces.into_iter().next().unwrap();
+      +                    let (nt_id, pids) = nts.into_iter().next().unwrap();
+      +                    *self = Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids: pids };
+      +                }
+      +            }
       +        }
-      +
-      +        writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
       +    }
-      +
-      +    Ok(())
       +}
       +
-       impl Display for GLRParser {
-           fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-               let stage_7_table = &self.stage_7_table;
-      @@ -656,81 +730,11 @@
-                   }
+       impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
+           fn to_json(&self) -> JSONNode {
+               let mut obj = StdMap::new();
+      @@ -600,40 +657,32 @@
        
-                   writeln!(f, "    Actions (Phase 1):")?;
-      -            let actions = &row.phase1_shifts_and_reduces;
-      -            let max_term_len = if actions.is_empty() { 0 } else {
-      -                actions.keys()
-      -                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-      -                    .max().unwrap_or(0)
-      -            };
-      -            for (&terminal_id, action) in actions {
-      -                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-      -                let terminal_name = terminal.to_string();
-      -                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-      -                match action {
-      -                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-      -                        writeln!(f, " -> Shift {}", next_state_id.0)?;
-      -                    }
-      -                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-      -                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-      -                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-      -                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-      -                    }
-      -                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      -                        writeln!(f, " -> Conflict:")?;
-      -                        if let Some(shift_state) = shift {
-      -                            writeln!(f, "        - Shift {}", shift_state.0)?;
-      -                        }
-      -                        for (len, nts) in reduces {
-      -                            writeln!(f, "        - Reduce (len {}):", len)?;
-      -                            for (nt_id, prod_ids) in nts {
-      -                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-      -                                for prod_id_val in prod_ids {
-      -                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-      -                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-      -                                }
-      -                            }
-      -                        }
-      -                    }
-      -                }
+           for (item_set, row) in stage_6_table {
+               let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+      -        
+      +
+               // Phase 2 map contains all possible actions for a state.
+               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
+       
+               for (terminal, action) in &row.shifts_and_reduces {
+                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+      -            let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+      -
+      -            let mut reduces_by_len_and_nt: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+      +            let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
+      +
+      +            // 1. Add shift if it exists
+      +            if let Some(shift_item_set) = &action.shift {
+      +                let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
+      +                final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
+      +            }
+      +
+      +            // 2. Group reduces and then add them
+      +            let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
+                   for &production_id in &action.reduces {
+                       let production = &productions[production_id.0];
+                       let len = production.rhs.len();
+                       let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+      -                reduces_by_len_and_nt.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
       -            }
-      +            format_actions(f, &row.phase1_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
-       
-                   writeln!(f, "    Actions (Phase 2):")?;
-      -            let actions = &row.phase2_shifts_and_reduces;
-      -            let max_term_len = if actions.is_empty() { 0 } else {
-      -                actions.keys()
-      -                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-      -                    .max().unwrap_or(0)
-      -            };
-      -            for (&terminal_id, action) in actions {
-      -                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-      -                let terminal_name = terminal.to_string();
-      -                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-      -                match action {
-      -                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-      -                        writeln!(f, " -> Shift {}", next_state_id.0)?;
+      -
+      -            let converted_action = if let Some(shift_id) = shift_state_id {
+      -                if reduces_by_len_and_nt.is_empty() {
+      -                    Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id)
+      +                reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
+      +            }
+      +
+      +            for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
+      +                if let Some(ref mut act) = final_action {
+      +                    act.add_reduce(len, nonterminal_id, production_ids);
+                       } else {
+      -                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
+      +                    // This is the first action, and it's a reduce.
+      +                    final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
+                       }
+      -            } else {
+      -                if reduces_by_len_and_nt.is_empty() {
+      -                    panic!("Action without shift or reduce for terminal {:?}", terminal);
+      -                } else if reduces_by_len_and_nt.len() == 1 {
+      -                    let (len, nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
+      -                    if nts.len() == 1 {
+      -                        let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
+      -                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }
+      -                    } else {
+      -                        Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
       -                    }
-      -                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-      -                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-      -                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-      -                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-      -                    }
-      -                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      -                        writeln!(f, " -> Conflict:")?;
-      -                        if let Some(shift_state) = shift {
-      -                            writeln!(f, "        - Shift {}", shift_state.0)?;
-      -                        }
-      -                        for (len, nts) in reduces {
-      -                            writeln!(f, "        - Reduce (len {}):", len)?;
-      -                            for (nt_id, prod_ids) in nts {
-      -                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-      -                                for prod_id_val in prod_ids {
-      -                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-      -                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-      -                                }
-      -                            }
-      -                        }
-      -                    }
+      -                } else {
+      -                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: reduces_by_len_and_nt }
       -                }
-      -            }
-      +            format_actions(f, &row.phase2_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
+      -            };
+      -            phase2_shifts_and_reduces.insert(terminal_id, converted_action);
+      +            }
+      +
+      +            let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+      +            final_action.simplify();
+      +            phase2_shifts_and_reduces.insert(terminal_id, final_action);
+               }
        
-                   writeln!(f, "    Default Action (Phase 3):")?;
-                   if let Some(reduce) = &row.phase3_default_reduce.reduce {
+               // --- Promotion Logic ---
+      @@ -715,33 +707,29 @@
+                   let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
+                   
+                   let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
+      -                match action {
+      -                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
+      -                        if *action_nt_id == nonterminal_id && *action_len == len => None,
+      -                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
+      -                        let mut reduces = reduces.clone();
+      -                        use std::collections::btree_map::Entry;
+      -                        match reduces.entry(len) {
+      -                            Entry::Occupied(mut entry) => {
+      -                                if entry.get_mut().remove(&nonterminal_id).is_some() {
+      -                                    if entry.get().is_empty() {
+      -                                        entry.remove();
+      -                                    }
+      -                                }
+      -                                match (shift, reduces.iter().map(|(_, nts)| nts.len()).sum::<usize>()) {
+      -                                    (None, 0) => None,
+      -                                    (None, 1) => {
+      -                                        let (len, nonterminal_id_to_production_ids) = reduces.into_iter().next().unwrap();
+      -                                        let (nonterminal_id, production_ids) = nonterminal_id_to_production_ids.into_iter().next().unwrap();
+      -                                        Some((tid, Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }))
+      -                                    },
+      -                                    (Some(shift_id), 0) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Shift(*shift_id))),
+      -                                    (&shift, 2..) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })),
+      -                                    (&shift @ Some(_), 1..) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })),
+      -                                }
+      -                            },
+      -                            Entry::Vacant(_) => Some((tid, action.clone())),
+      +                let mut new_action = action.clone();
+      +                let mut was_modified = false;
+      +
+      +                match &mut new_action {
+      +                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
+      +                        if *action_nt_id == nonterminal_id && *action_len == len => {
+      +                        // This whole action is the promoted one, so we remove it from phase1.
+      +                        return None;
+      +                    }
+      +                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+      +                        // Check if the promoted reduce is part of this split.
+      +                        if let Some(nts) = reduces.get_mut(&len) {
+      +                            if nts.remove(&nonterminal_id).is_some() {
+      +                                was_modified = true;
+      +                                // If this was the last NT for this length, remove the length entry.
+      +                                if nts.is_empty() {
+      +                                    reduces.remove(&len);
+      +                                }
+      +                            }
+                               }
+      -                    },
+      -                    _ => Some((tid, action.clone()))
+      +                    }
+      +                    _ => {} // Shift or non-matching Reduce, keep as is.
+                       }
+      +
+      +                if was_modified {
+      +                    // We modified a Split, now simplify it.
+      +                    new_action.simplify();
+      +                }
+      +                Some((tid, new_action))
+                   }).collect::<Stage7Phase1ShiftsAndReduces>();
+       
+                   let phase3 = Stage7Phase3DefaultReduce {
 
       ```
 
-      These changes should give you a much cleaner and more readable output for your parser states. Let me know if you have any other questions
+      These changes introduce the requested helper methods on `Stage7ShiftsAndReducesLookaheadValue` and refactor the table generation logic to be more modular and readable. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
 ...

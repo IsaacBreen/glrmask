@@ -74,6 +74,64 @@ pub enum Stage7ShiftsAndReducesLookaheadValue {
     },
 }
 
+impl Stage7ShiftsAndReducesLookaheadValue {
+    /// Adds a reduce action to the current value, converting it to a `Split` if necessary.
+    pub fn add_reduce(&mut self, len: usize, nonterminal_id: NonTerminalID, production_ids: BTreeSet<ProductionID>) {
+        // Take ownership of self to work with it, then assign back.
+        let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy value
+
+        let new_self = match temp_self {
+            Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
+                let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+                reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
+                Stage7ShiftsAndReducesLookaheadValue::Split {
+                    shift: Some(state_id),
+                    reduces,
+                }
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                nonterminal_id: old_nt_id,
+                len: old_len,
+                production_ids: old_pids,
+            } => {
+                let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+                reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
+                reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
+                Stage7ShiftsAndReducesLookaheadValue::Split {
+                    shift: None,
+                    reduces,
+                }
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Split { shift, mut reduces } => {
+                reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }
+            }
+        };
+        *self = new_self;
+    }
+
+    /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
+    /// - A `Split` with a shift and no reduces becomes a `Shift`.
+    /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
+    pub fn simplify(&mut self) {
+        if let Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } = self {
+            if reduces.is_empty() {
+                if let Some(shift_id) = *shift {
+                    *self = Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id);
+                }
+            } else if shift.is_none() && reduces.len() == 1 && reduces.values().next().unwrap().len() == 1 {
+                // No shift, and only one kind of reduce (one len, one nt).
+                let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy
+                if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self {
+                    let (len, mut nts) = reduces.into_iter().next().unwrap();
+                    let (nt_id, pids) = nts.into_iter().next().unwrap();
+                    *self = Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids: pids };
+                }
+            }
+        }
+    }
+}
+
 impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
@@ -517,44 +575,41 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
     for (item_set, row) in stage_6_table {
         let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-        
+
         // Phase 2 map contains all possible actions for a state.
         let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
         for (terminal, action) in &row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
-            let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+            let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
 
-            let mut reduces_by_len_and_nt: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+            // 1. Add shift if it exists
+            if let Some(shift_item_set) = &action.shift {
+                let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
+                final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
+            }
+
+            // 2. Group reduces and then add them
+            let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
             for &production_id in &action.reduces {
                 let production = &productions[production_id.0];
                 let len = production.rhs.len();
                 let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                reduces_by_len_and_nt.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
             }
 
-            let converted_action = if let Some(shift_id) = shift_state_id {
-                if reduces_by_len_and_nt.is_empty() {
-                    Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id)
+            for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
+                if let Some(ref mut act) = final_action {
+                    act.add_reduce(len, nonterminal_id, production_ids);
                 } else {
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
+                    // This is the first action, and it's a reduce.
+                    final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
                 }
-            } else {
-                if reduces_by_len_and_nt.is_empty() {
-                    panic!("Action without shift or reduce for terminal {:?}", terminal);
-                } else if reduces_by_len_and_nt.len() == 1 {
-                    let (len, nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
-                    if nts.len() == 1 {
-                        let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }
-                    } else {
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
-                    }
-                } else {
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: reduces_by_len_and_nt }
-                }
-            };
-            phase2_shifts_and_reduces.insert(terminal_id, converted_action);
+            }
+
+            let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+            final_action.simplify();
+            phase2_shifts_and_reduces.insert(terminal_id, final_action);
         }
 
         // --- Promotion Logic ---
@@ -586,36 +641,35 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
             
             let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
-                match action {
+                let mut new_action = action.clone();
+                let mut was_modified = false;
+
+                match &mut new_action {
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-                        if *action_nt_id == nonterminal_id && *action_len == len => None,
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces, .. } => {
-                        let mut reduces = reduces.clone();
-                        use std::collections::btree_map::Entry;
-                        match reduces.entry(len) {
-                            Entry::Occupied(mut entry) => {
-                                if entry.get_mut().remove(&nonterminal_id).is_some() {
-                                    if entry.get().is_empty() {
-                                        entry.remove();
-                                    }
+                        if *action_nt_id == nonterminal_id && *action_len == len => {
+                        // This whole action is the promoted one, so we remove it from phase1.
+                        return None;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                        // Check if the promoted reduce is part of this split.
+                        if let Some(nts) = reduces.get_mut(&len) {
+                            if nts.remove(&nonterminal_id).is_some() {
+                                was_modified = true;
+                                // If this was the last NT for this length, remove the length entry.
+                                if nts.is_empty() {
+                                    reduces.remove(&len);
                                 }
-                                match (shift, reduces.iter().map(|(_, nts)| nts.len()).sum::<usize>()) {
-                                    (None, 0) => None,
-                                    (None, 1) => {
-                                        let (len, nonterminal_id_to_production_ids) = reduces.into_iter().next().unwrap();
-                                        let (nonterminal_id, production_ids) = nonterminal_id_to_production_ids.into_iter().next().unwrap();
-                                        Some((tid, Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }))
-                                    },
-                                    (Some(shift_id), 0) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Shift(*shift_id))),
-                                    (&shift, 2..) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })),
-                                    (&shift @ Some(_), 1..) => Some((tid, Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })),
-                                }
-                            },
-                            Entry::Vacant(_) => Some((tid, action.clone())),
+                            }
                         }
-                    },
-                    _ => Some((tid, action.clone()))
+                    }
+                    _ => {} // Shift or non-matching Reduce, keep as is.
                 }
+
+                if was_modified {
+                    // We modified a Split, now simplify it.
+                    new_action.simplify();
+                }
+                Some((tid, new_action))
             }).collect::<Stage7Phase1ShiftsAndReduces>();
 
             let phase3 = Stage7Phase3DefaultReduce {
