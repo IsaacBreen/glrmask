@@ -356,7 +356,7 @@ impl GLRParser {
                         // Print the core item part
                         write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
                         for (i, symbol) in production.rhs.iter().enumerate() {
-                            if i == *dot_pos {
+                            if i == dot_pos {
                                 write!(&mut result, " •").unwrap();
                             }
                             match symbol {
@@ -364,7 +364,7 @@ impl GLRParser {
                                 Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
                             }
                         }
-                        if *dot_pos == production.rhs.len() {
+                        if dot_pos == production.rhs.len() {
                             write!(&mut result, " •").unwrap();
                         }
                         write!(&mut result, ", {{").unwrap();
