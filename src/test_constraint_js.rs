@@ -285,7 +285,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
-        if true {
+        if false {
             // Reinitialize the constraint state fresh
             constraint_state = grammar_constraint.init();
             let prefix_token_ids = test_token_sequence_ids[..i].to_vec();
