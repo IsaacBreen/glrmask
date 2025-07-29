@@ -233,7 +233,7 @@ impl JSONConvertible for GrammarDefinition {
 
                 let literal_terminals_node = obj.remove("literal_terminals")
                     .ok_or_else(|| "Missing field literal_terminals for GrammarDefinition".to_string())?;
-                if let JSONNode::Array(literals_list) = literals_list {
+                if let JSONNode::Array(literals_list) = literal_terminals_node {
                     for literal_node in literals_list {
                         if let JSONNode::Object(mut literal_obj) = literal_node {
                             let value = Vec::<u8>::from_json(literal_obj.remove("value").ok_or("Missing value")?)?;
@@ -1996,3 +1996,4 @@ mod tests {
         }
     }
 }
+

@@ -10,12 +10,12 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
+    - src/js.ebnf
     - src/interface/ebnf.rs
     - src/interface/interface.rs
     - src/interface/mod.rs
     - src/interface/tests.rs
     - src/interface/tokenizer_combinators.rs
-    - src/js.ebnf
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -2589,13 +2589,6 @@ local_system:
                           crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                         self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                         r.len, state_id.0, state.stack.num_predecessors());
-                          timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                          self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                          r.len, state_id.0), {
-                              // For each peek in the current state, reduce and goto.
-                              // This is the core of phase 3: reducing all stacks with the same state_id.
-                              // We will merge the results into a new stack part.
-                          });
                           let mut reduced_stack = GSSNode::new_fresh();
                           for peek in state.stack.peek_iter() {
                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
@@ -4899,7 +4892,7 @@ local_system:
           let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
           
           let start_row = &parser.stage_7_table[&start_state];
-          let shift_action = &start_row.shifts_and_reduces_full[&b_token_id];
+          let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
 
           let state_after_b = match shift_action {
               crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
@@ -5019,7 +5012,7 @@ local_system:
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
     src/js.ebnf: |
       // Instruct the parser to ignore Whitespace and Comments between tokens.
-      #![ignore(IGNORE)]
+      !ignore IGNORE;
 
       program ::= statement_list? ;
 
@@ -5313,7 +5306,7 @@ local_system:
               (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
               (?P<charclass>\[([^\]\\]|\\.)*\]) |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
+              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
               (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
               (?P<ws>\s+) |
               (?P<error>.)
@@ -5400,21 +5393,17 @@ local_system:
               let mut ignore_symbol_name = None;
 
               while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      self.consume_grammar_op("#")?;
-                      self.expect_grammar_op("!")?;
-                      self.expect_grammar_op("[")?;
+                  if self.peek_grammar_op("!") {
                       if ignore_symbol_name.is_some() {
-                          return Err("Duplicate ignore directive found".to_string());
+                          return Err("Duplicate ignore directive found".to_string())
                       }
+                      self.consume_grammar_op("!")?;
                       let directive_name = self.expect_ident()?;
                       if directive_name != "ignore" {
-                          return Err(format!("Unknown directive: {}", directive_name));
+                          return Err(format!("Unknown directive: {}", directive_name))
                       }
-                      self.expect_grammar_op("(")?;
                       let symbol_name = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      self.expect_grammar_op("]")?;
+                      self.expect_grammar_op(";")?;
                       ignore_symbol_name = Some(symbol_name);
                   } else {
                       let (rule_name, rule_expr) = self.parse_rule()?;
@@ -10871,13 +10860,6 @@ local_system:
                           crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                         self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                         r.len, state_id.0, state.stack.num_predecessors());
-                          timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                          self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                          r.len, state_id.0), {
-                              // For each peek in the current state, reduce and goto.
-                              // This is the core of phase 3: reducing all stacks with the same state_id.
-                              // We will merge the results into a new stack part.
-                          });
                           let mut reduced_stack = GSSNode::new_fresh();
                           for peek in state.stack.peek_iter() {
                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
@@ -13181,7 +13163,7 @@ local_system:
           let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
           
           let start_row = &parser.stage_7_table[&start_state];
-          let shift_action = &start_row.shifts_and_reduces_full[&b_token_id];
+          let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
 
           let state_after_b = match shift_action {
               crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
@@ -13301,7 +13283,7 @@ local_system:
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
     src/js.ebnf: |
       // Instruct the parser to ignore Whitespace and Comments between tokens.
-      #![ignore(IGNORE)]
+      !ignore IGNORE;
 
       program ::= statement_list? ;
 
@@ -13595,7 +13577,7 @@ local_system:
               (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
               (?P<charclass>\[([^\]\\]|\\.)*\]) |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
+              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
               (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
               (?P<ws>\s+) |
               (?P<error>.)
@@ -13682,21 +13664,17 @@ local_system:
               let mut ignore_symbol_name = None;
 
               while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      self.consume_grammar_op("#")?;
-                      self.expect_grammar_op("!")?;
-                      self.expect_grammar_op("[")?;
+                  if self.peek_grammar_op("!") {
                       if ignore_symbol_name.is_some() {
-                          return Err("Duplicate ignore directive found".to_string());
+                          return Err("Duplicate ignore directive found".to_string())
                       }
+                      self.consume_grammar_op("!")?;
                       let directive_name = self.expect_ident()?;
                       if directive_name != "ignore" {
-                          return Err(format!("Unknown directive: {}", directive_name));
+                          return Err(format!("Unknown directive: {}", directive_name))
                       }
-                      self.expect_grammar_op("(")?;
                       let symbol_name = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      self.expect_grammar_op("]")?;
+                      self.expect_grammar_op(";")?;
                       ignore_symbol_name = Some(symbol_name);
                   } else {
                       let (rule_name, rule_expr) = self.parse_rule()?;
@@ -19206,13 +19184,6 @@ messages:
                           crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                         self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                         r.len, state_id.0, state.stack.num_predecessors());
-                          timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                          self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                          r.len, state_id.0), {
-                              // For each peek in the current state, reduce and goto.
-                              // This is the core of phase 3: reducing all stacks with the same state_id.
-                              // We will merge the results into a new stack part.
-                          });
                           let mut reduced_stack = GSSNode::new_fresh();
                           for peek in state.stack.peek_iter() {
                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
@@ -21531,7 +21502,7 @@ messages:
           let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
           
           let start_row = &parser.stage_7_table[&start_state];
-          let shift_action = &start_row.shifts_and_reduces_full[&b_token_id];
+          let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
 
           let state_after_b = match shift_action {
               crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
@@ -21656,7 +21627,7 @@ messages:
   - user: |-
       ```text 'src/js.ebnf'
       // Instruct the parser to ignore Whitespace and Comments between tokens.
-      #![ignore(IGNORE)]
+      !ignore IGNORE;
 
       program ::= statement_list? ;
 
@@ -21955,7 +21926,7 @@ messages:
               (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
               (?P<charclass>\[([^\]\\]|\\.)*\]) |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
+              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
               (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
               (?P<ws>\s+) |
               (?P<error>.)
@@ -22042,21 +22013,17 @@ messages:
               let mut ignore_symbol_name = None;
 
               while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      self.consume_grammar_op("#")?;
-                      self.expect_grammar_op("!")?;
-                      self.expect_grammar_op("[")?;
+                  if self.peek_grammar_op("!") {
                       if ignore_symbol_name.is_some() {
-                          return Err("Duplicate ignore directive found".to_string());
+                          return Err("Duplicate ignore directive found".to_string())
                       }
+                      self.consume_grammar_op("!")?;
                       let directive_name = self.expect_ident()?;
                       if directive_name != "ignore" {
-                          return Err(format!("Unknown directive: {}", directive_name));
+                          return Err(format!("Unknown directive: {}", directive_name))
                       }
-                      self.expect_grammar_op("(")?;
                       let symbol_name = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      self.expect_grammar_op("]")?;
+                      self.expect_grammar_op(";")?;
                       ignore_symbol_name = Some(symbol_name);
                   } else {
                       let (rule_name, rule_expr) = self.parse_rule()?;
@@ -24966,22 +24933,32 @@ messages:
       ```
     metadata:
       filename: src/interface/tokenizer_combinators.rs
-  - user: |-
+  - user: Modify this so that in the EBNF format, 'internal' things are marked like
+      Rust marks features and stuff, ie like `#![ignore(IGNORE)]` instead of `!ignore
+      IGNORE;`.
+    metadata:
+  - assistant: |-
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Modifying the EBNF directive syntax to a more Rust-like attribute style is a great idea for consistency. Here are the required changes to implement this feature.
+
+      I'll update the EBNF parser to recognize the new `#![ignore(SYMBOL)]` format and also update the provided `js.ebnf` file to use this new syntax.
+
+      Here are the diffs for the modified files:
+
+      In `src/interface/ebnf.rs`, I'll adjust the tokenizer and the parser logic to handle the new directive format.
+
       ```diff
-      diff --git a/src/interface/ebnf.rs b/src/interface/ebnf.rs
-      index 1b56138..79c3cd4 100644
       --- a/src/interface/ebnf.rs
       +++ b/src/interface/ebnf.rs
-      @@ -23,7 +23,7 @@ fn get_token_regex() -> &'static Regex {
+      @@ -16,7 +16,7 @@
                (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
                (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
                (?P<charclass>\[([^\]\\]|\\.)*\]) |
       -        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
-      +        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
+      +        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|#) |
                (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
                (?P<ws>\s+) |
                (?P<error>.)
-      @@ -110,17 +110,21 @@ impl EbnfParser {
+      @@ -89,20 +89,24 @@
                let mut ignore_symbol_name = None;
        
                while self.tokens.peek().is_some() {
@@ -25008,102 +24985,40 @@ messages:
                        ignore_symbol_name = Some(symbol_name);
                    } else {
                        let (rule_name, rule_expr) = self.parse_rule()?;
+                       if seen_names.contains(&rule_name) {
+                           return Err(format!("Duplicate rule name: {}", rule_name));
 
       ```
-      EBNF parsing if failing right now. It happened since I made this change. Fix it. eg
-      ```
-      Error: "Expected op '[', found Some(CharClass(\"[ignore(IGNORE)]\"))"
-      ```
-    metadata:
-  - assistant: ''
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      No assistant message found to apply changes from.
 
-      ---
+      And here is the corresponding change in `src/js.ebnf` to use the new syntax.
 
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+      ```diff
+      --- a/src/js.ebnf
+      +++ b/src/js.ebnf
+      @@ -1,5 +1,5 @@
+       // Instruct the parser to ignore Whitespace and Comments between tokens.
+      -!ignore IGNORE;
+      +#![ignore(IGNORE)]
+       
+       program ::= statement_list? ;
+       
+
+      ```
+
+      These changes should implement the new directive syntax as you requested. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
-      No assistant message found to apply changes from.
+      Found 2 diff block(s) to process using custom patcher.
 
-      LLM apply output:
-      Using model 'gemini/gemini-2.5-flash' for code completion.
+      --- Processing Diff Block 1 ---
+      Identified target file: src/interface/ebnf.rs
+      Applying patch to 'src/interface/ebnf.rs' using custom patcher...
+      Successfully applied patch and wrote to src/interface/ebnf.rs.
 
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/glr/analyze.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/automaton.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/grammar.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/minimizer.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/parser.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/stats.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/table.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/tests.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/interface/ebnf.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/interface/interface.rs"
-        }
-      ]
-      Found 9 code blocks with filepaths in attempt 1.
-      Received code for required file: src/glr/analyze.rs
-      Received code for required file: src/glr/automaton.rs
-      Received code for required file: src/glr/grammar.rs
-      Received code for required file: src/glr/minimizer.rs
-      Received code for required file: src/glr/parser.rs
-      Received code for required file: src/glr/stats.rs
-      Received code for required file: src/glr/table.rs
-      Received code for required file: src/glr/tests.rs
-      Received code for required file: src/interface/ebnf.rs
-      Missing code blocks for: {'src/interface/interface.rs'}
-      Requesting missing code blocks...
-
-      --- LLM Code Generation Attempt 2/5 ---
-      Found 1 code blocks with filepaths in attempt 2.
-      Received code for required file: src/interface/interface.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/glr/automaton.rs
-      Successfully replaced file: src/interface/interface.rs
-      Successfully replaced file: src/glr/tests.rs
-      Successfully replaced file: src/interface/ebnf.rs
-      Successfully replaced file: src/glr/minimizer.rs
-      Successfully replaced file: src/glr/grammar.rs
-      Successfully replaced file: src/glr/parser.rs
-      Successfully replaced file: src/glr/analyze.rs
-      Successfully replaced file: src/glr/table.rs
-      Successfully replaced file: src/glr/stats.rs
+      --- Processing Diff Block 2 ---
+      Identified target file: src/js.ebnf
+      Applying patch to 'src/js.ebnf' using custom patcher...
+      Successfully applied patch and wrote to src/js.ebnf.
     metadata:
 ...
