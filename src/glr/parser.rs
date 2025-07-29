@@ -885,7 +885,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
         // timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
         timeit!("GLRParserState::step::phase3", {
-            while let Some(((state_id, _depth), state)) = work_map.pop_last() {
+            while let Some(((_depth, state_id), state)) = work_map.pop_last() {
                 let row = &self.parser.stage_7_table[&state_id];
 
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
