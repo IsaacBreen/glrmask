@@ -10,7 +10,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -14957,6 +14957,187 @@ messages:
       ```
 
       This change will transform the messy, repetitive item listing into a clean, grouped format, which should significantly improve the readability of your parser's state representation. Let me know if you have any other parts of the output you'd like to tidy up
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -506,8 +506,9 @@         let non_terminal_map = &self.non_terminal_map;
+               let item_set_map = &self.item_set_map;
+       
+      +        use crate::glr::grammar::{Production, Symbol, Terminal};
+               use crate::glr::items::{Item};
+      -        use std::collections::BTreeSet;
+      +        use std::collections::{BTreeMap, BTreeSet};
+       
+               writeln!(f, "Parse Table:")?;
+               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
+      @@ -516,8 +517,39 @@ 
+                   if let Some(items) = item_set_map.get_by_right(&state_id) {
+                       writeln!(f, "    Items:")?;
+      +                // Group items by core: (production, dot_position)
+      +                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                       for item in items {
+      -                    writeln!(f, "      - {}", item)?;
+      +                    grouped_items
+      +                        .entry((&item.production, item.dot_position))
+      +                        .or_default()
+      +                        .insert(item.lookahead.clone());
+      +                }
+      +
+      +                // Print grouped items
+      +                for ((production, dot_pos), lookaheads) in grouped_items {
+      +                    // Print the core item part
+      +                    write!(f, "      - [{} ->", production.lhs.0)?;
+      +                    for (i, symbol) in production.rhs.iter().enumerate() {
+      +                        if i == dot_pos {
+      +                            write!(f, " •")?;
+      +                        }
+      +                        match symbol {
+      +                            Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+      +                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+      +                        }
+      +                    }
+      +                    if dot_pos == production.rhs.len() {
+      +                        write!(f, " •")?;
+      +                    }
+      +                    write!(f, ", {{")?;
+      +
+      +                    // Print the set of lookaheads
+      +                    let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+      +                    lookahead_strs.sort();
+      +                    write!(f, "{}", lookahead_strs.join(", "))?;
+      +
+      +                    writeln!(f, "}}]")?;
+                       }
+                   }
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: What about `explain_stack`?
+    metadata:
+  - assistant: |-
+      You are absolutely right! I focused on the general `Display` implementation but missed cleaning up the `explain_stack` function, which suffers from the same readability issue. My apologies.
+
+      Here is the patch for `src/glr/parser.rs` to apply the same grouping logic to the `explain_stack` function.
+
+      ### Modified `src/glr/parser.rs`
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -361,11 +361,41 @@
+                   if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                       // For LR(1), the item set in the map is the full state (closure).
+                       writeln!(&mut result, "  Items:").unwrap();
+                       if items.is_empty() {
+                           writeln!(&mut result, "    (None)").unwrap();
+                       } else {
+      -                    for item in items {
+      -                        writeln!(&mut result, "    - {}", item).unwrap();
+      +                    // Group items by core: (production, dot_position)
+      +                    let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+      +                    for item in items {
+      +                        grouped_items
+      +                            .entry((&item.production, item.dot_position))
+      +                            .or_default()
+      +                            .insert(item.lookahead.clone());
+      +                    }
+      +
+      +                    // Print grouped items
+      +                    for ((production, dot_pos), lookaheads) in grouped_items {
+      +                        // Print the core item part
+      +                        write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+      +                        for (i, symbol) in production.rhs.iter().enumerate() {
+      +                            if i == *dot_pos {
+      +                                write!(&mut result, " •").unwrap();
+      +                            }
+      +                            match symbol {
+      +                                Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+      +                                Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+      +                            }
+      +                        }
+      +                        if *dot_pos == production.rhs.len() {
+      +                            write!(&mut result, " •").unwrap();
+      +                        }
+      +                        write!(&mut result, ", {{").unwrap();
+      +
+      +                        // Print the set of lookaheads
+      +                        let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+      +                        lookahead_strs.sort();
+      +                        write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+      +
+      +                        writeln!(&mut result, "}}]").unwrap();
+                           }
+                       }
+                   } else {
+
+      ```
+
+      This change ensures that both the general parser display and the specific `explain_stack` output are clean, readable, and consistent.
     metadata:
   - user: |
       Apply result (git-llm mode):

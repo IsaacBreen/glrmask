@@ -342,8 +342,39 @@ impl GLRParser {
                 if items.is_empty() {
                     writeln!(&mut result, "    (None)").unwrap();
                 } else {
+                    // Group items by core: (production, dot_position)
+                    let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                     for item in items {
-                        writeln!(&mut result, "    - {}", item).unwrap();
+                        grouped_items
+                            .entry((&item.production, item.dot_position))
+                            .or_default()
+                            .insert(item.lookahead.clone());
+                    }
+
+                    // Print grouped items
+                    for ((production, dot_pos), lookaheads) in grouped_items {
+                        // Print the core item part
+                        write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                        for (i, symbol) in production.rhs.iter().enumerate() {
+                            if i == *dot_pos {
+                                write!(&mut result, " •").unwrap();
+                            }
+                            match symbol {
+                                Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                            }
+                        }
+                        if *dot_pos == production.rhs.len() {
+                            write!(&mut result, " •").unwrap();
+                        }
+                        write!(&mut result, ", {{").unwrap();
+
+                        // Print the set of lookaheads
+                        let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                        lookahead_strs.sort();
+                        write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                        writeln!(&mut result, "}}]").unwrap();
                     }
                 }
             } else {
