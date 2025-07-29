@@ -875,8 +875,8 @@ impl<'r> Precomputer<'r> {
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.lock().unwrap().value.end));
 
                             if true {
-                                // let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().get(&Some(terminal_id)).cloned().unwrap_or_default().keys().cloned().collect();
+                                if true { let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect(); }
+                                else { let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().get(&Some(terminal_id)).cloned().unwrap_or_default().keys().cloned().collect(); }
                                 let tags = self.tags.borrow();
                                 let eligible_children = children_of_src.iter().filter(|child_wrapper| {
                                     tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_wrapper.lock().unwrap().value.end
