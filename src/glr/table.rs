@@ -75,41 +75,6 @@ pub enum Stage7ShiftsAndReducesLookaheadValue {
 }
 
 impl Stage7ShiftsAndReducesLookaheadValue {
-    /// Adds a reduce action to the current value, converting it to a `Split` if necessary.
-    pub fn add_reduce(&mut self, len: usize, nonterminal_id: NonTerminalID, production_ids: BTreeSet<ProductionID>) {
-        // Take ownership of self to work with it, then assign back.
-        let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy value
-
-        let new_self = match temp_self {
-            Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
-                Stage7ShiftsAndReducesLookaheadValue::Split {
-                    shift: Some(state_id),
-                    reduces,
-                }
-            }
-            Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                nonterminal_id: old_nt_id,
-                len: old_len,
-                production_ids: old_pids,
-            } => {
-                let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
-                reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                Stage7ShiftsAndReducesLookaheadValue::Split {
-                    shift: None,
-                    reduces,
-                }
-            }
-            Stage7ShiftsAndReducesLookaheadValue::Split { shift, mut reduces } => {
-                reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }
-            }
-        };
-        *self = new_self;
-    }
-
     /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
     /// - A `Split` with a shift and no reduces becomes a `Shift`.
     /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
