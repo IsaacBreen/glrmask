@@ -164,7 +164,7 @@ impl JSONConvertible for Reduce {
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Stage7Phase3DefaultReduce {
-    pub clone_and_merge: bool,
+    pub clone_and_merge: bool, // Indicates that there are phase 1 actions to be performed here.
     pub reduce: Option<Reduce>,
 }
 
