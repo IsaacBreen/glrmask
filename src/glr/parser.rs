@@ -889,7 +889,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let row = &self.parser.stage_7_table[&state_id];
 
                 if let Some(ref r) = row.phase3_default_reduce.reduce {
-                    crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}", self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.len, state_id.0);
+                    crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
+                                  self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                                  r.len, state_id.0, state.stack.num_predecessors());
                     let mut reduced_stack = GSSNode::new_fresh();
                     for peek in state.stack.peek_iter() {
                         // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
