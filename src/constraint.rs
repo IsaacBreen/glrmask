@@ -287,7 +287,7 @@ impl GrammarConstraint {
             crate::debug!(3, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
         }
 
-        let mut terminal_follow_map_ids: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+        let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
             let t1_id = *grammar_term_map.get_by_left(&terminal1).unwrap();
             let mut following_ids = BTreeSet::new();
@@ -296,18 +296,18 @@ impl GrammarConstraint {
                 following_ids.insert(t2_id);
             }
             if !following_ids.is_empty() {
-                terminal_follow_map_ids.insert(t1_id, following_ids);
+                terminal_follow_map.insert(t1_id, following_ids);
             }
         }
 
-        crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
+        crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
         let precomputed = Self::precompute(
             &tokenizer, // This is the tokenizer parameter being moved into the struct
-            &internal_llm_token_map_for_precompute, 
+            &internal_llm_token_map_for_precompute,
             &token_name_map,
-            internal_max_llm_token, 
-            &terminal_follow_map_ids, // Pass the new map
+            internal_max_llm_token,
+            &terminal_follow_map, // Pass the new map
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
@@ -332,16 +332,16 @@ impl GrammarConstraint {
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
-        terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
         let mut helper = Precomputer::new(
             tokenizer,
-            internal_llm_token_map,    
-            internal_max_llm_token, 
+            internal_llm_token_map,
+            internal_max_llm_token,
             MERGE_THRESHOLD,
-            terminal_follow_map_ids, // Pass to Precomputer::new
+            terminal_follow_map, // Pass to Precomputer::new
             ignore_terminal_id,
         );
 
