@@ -595,13 +595,16 @@ impl<'r> Precomputer<'r> {
     
     fn prune_on_no_terminal_follow(&mut self) {
         crate::debug!(2, "Pruning based on terminal follow sets.");
-    
-        let initial_nodes_and_values: Vec<_> = self.roots.values()
-            .map(|root_arc| (root_arc.clone(), BTreeSet::<GrammarTokenID>::new()))
-            .collect();
-    
+
         let terminal_follow_map = &self.terminal_follow_map;
         let ignore_terminal_id = self.ignore_terminal_id;
+
+        // Collect all terminals from the tokenizer.
+        let all_terminals: BTreeSet<GrammarTokenID> = terminal_follow_map.keys().cloned().collect();
+
+        let initial_nodes_and_values: Vec<_> = self.roots.values()
+            .map(|root_arc| (root_arc.clone(), all_terminals.clone()))
+            .collect();
 
         Trie::special_map(
             initial_nodes_and_values,
