@@ -581,33 +581,36 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         for (terminal, action) in &row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
-            let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
 
-            // 1. Add shift if it exists
-            if let Some(shift_item_set) = &action.shift {
-                let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
-                final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
-            }
+            // 1. Get the potential shift action.
+            let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+                *item_set_map.get_by_left(shift_item_set).unwrap()
+            });
 
-            // 2. Group reduces and then add them
-            let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
+            // 2. Group all reduce actions.
+            let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
             for &production_id in &action.reduces {
                 let production = &productions[production_id.0];
                 let len = production.rhs.len();
                 let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
+                reduces
+                    .entry(len)
+                    .or_default()
+                    .entry(nonterminal_id)
+                    .or_default()
+                    .insert(production_id);
             }
 
-            for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
-                if let Some(ref mut act) = final_action {
-                    act.add_reduce(len, nonterminal_id, production_ids);
-                } else {
-                    // This is the first action, and it's a reduce.
-                    final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
-                }
+            // 3. Create a combined action and simplify it.
+            if maybe_shift.is_none() && reduces.is_empty() {
+                // This should not happen because we iterate over terminals that have actions from stage 6.
+                panic!("Action without shift or reduce for terminal {:?}", terminal);
             }
 
-            let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+            let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                shift: maybe_shift,
+                reduces,
+            };
             final_action.simplify();
             phase2_shifts_and_reduces.insert(terminal_id, final_action);
         }

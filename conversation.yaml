@@ -2219,22 +2219,12 @@ local_system:
               // Format terminals
               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
               terminal_names.sort();
+              let terms_str = terminal_names.join(", ");
 
-              const MAX_TERMS_TO_SHOW: usize = 5;
-              let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
-                  (&terminal_names[..MAX_TERMS_TO_SHOW], true)
-              } else {
-                  (terminal_names.as_slice(), false)
-              };
-
-              let mut terms_str = terms_to_show.join(", ");
-              if truncated {
-                  let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
-              }
-
-              writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+              // Put action on its own line, then terminals on the next, to avoid extremely long lines.
+              writeln!(f, "{}- {}", indent, action_str)?;
+              writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
           }
-
           Ok(())
       }
 
@@ -3032,7 +3022,7 @@ local_system:
 
               let new_self = match temp_self {
                   Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
                       reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
                       Stage7ShiftsAndReducesLookaheadValue::Split {
                           shift: Some(state_id),
@@ -3044,7 +3034,7 @@ local_system:
                       len: old_len,
                       production_ids: old_pids,
                   } => {
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
                       reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
                       reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
                       Stage7ShiftsAndReducesLookaheadValue::Split {
@@ -7255,22 +7245,12 @@ local_system:
               // Format terminals
               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
               terminal_names.sort();
+              let terms_str = terminal_names.join(", ");
 
-              const MAX_TERMS_TO_SHOW: usize = 5;
-              let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
-                  (&terminal_names[..MAX_TERMS_TO_SHOW], true)
-              } else {
-                  (terminal_names.as_slice(), false)
-              };
-
-              let mut terms_str = terms_to_show.join(", ");
-              if truncated {
-                  let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
-              }
-
-              writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+              // Put action on its own line, then terminals on the next, to avoid extremely long lines.
+              writeln!(f, "{}- {}", indent, action_str)?;
+              writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
           }
-
           Ok(())
       }
 
@@ -8068,7 +8048,7 @@ local_system:
 
               let new_self = match temp_self {
                   Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
                       reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
                       Stage7ShiftsAndReducesLookaheadValue::Split {
                           shift: Some(state_id),
@@ -8080,7 +8060,7 @@ local_system:
                       len: old_len,
                       production_ids: old_pids,
                   } => {
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
                       reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
                       reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
                       Stage7ShiftsAndReducesLookaheadValue::Split {
@@ -12344,22 +12324,12 @@ messages:
               // Format terminals
               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
               terminal_names.sort();
+              let terms_str = terminal_names.join(", ");
 
-              const MAX_TERMS_TO_SHOW: usize = 5;
-              let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
-                  (&terminal_names[..MAX_TERMS_TO_SHOW], true)
-              } else {
-                  (terminal_names.as_slice(), false)
-              };
-
-              let mut terms_str = terms_to_show.join(", ");
-              if truncated {
-                  let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
-              }
-
-              writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+              // Put action on its own line, then terminals on the next, to avoid extremely long lines.
+              writeln!(f, "{}- {}", indent, action_str)?;
+              writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
           }
-
           Ok(())
       }
 
@@ -13167,7 +13137,7 @@ messages:
 
               let new_self = match temp_self {
                   Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
                       reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
                       Stage7ShiftsAndReducesLookaheadValue::Split {
                           shift: Some(state_id),
@@ -13179,7 +13149,7 @@ messages:
                       len: old_len,
                       production_ids: old_pids,
                   } => {
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
                       reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
                       reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
                       Stage7ShiftsAndReducesLookaheadValue::Split {
@@ -15193,77 +15163,96 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      ```
-        State 0:
-          Items:
-            - [additive_expression -> multiplicative_expression • additive_expression[0], {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
-          Actions (Phase 1):
-             (none)
-          Actions (Phase 2):
-            - On { '!', '!=', '!==', '#', '${', ... (109 total) }: Reduce additive_expression[0] (len 0) via rules [299]
-          Default Action (Phase 3):
-            - Default Reduce additive_expression[0] (len 0) via rules [299]
-            - No clone and merge
-          Gotos:
-            - additive_expression[0] -> 1
-      ```
-      I don't like the way the terminals here are truncated. Fix it. But we do need some clean way of writing it. Maybe we write the reduce first? That way we can scan up and down to see the actions...
+      Simplify the first big loop in stage_7.
+      Instead of
+      `let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;`,
+      let's have
+      `let mut maybe_shift: Option<StateID>;`
+      Then we can just make a split action with that maybe shift and `reduces_by_len_and_nt` as-is, and simplify it. Easy.
     metadata:
   - assistant: |-
-      Of course. Dealing with verbose output is important for readability. Truncating terminal lists can hide important information, and long lines are hard to read.
+      Of course! Dealing with complex state transitions and action tables can be tricky. Simplifying the logic for combining shift and reduce actions will definitely improve readability and maintainability. Here are the changes to achieve that.
 
-      Here are the changes to improve the display format of the parser table by putting actions on their own line, followed by the full list of terminals they apply to.
+      I've refactored the loop in `stage_7` to first determine the potential shift action and gather all reduce actions. Then, it constructs a `Split` action with both, and finally simplifies it into a `Shift`, `Reduce`, or `Split` as appropriate. This removes the need for the more complex incremental building of the action.
 
-      Here is the diff for `src/glr/parser.rs`:
+      Here is the diff for `src/glr/table.rs`:
 
       ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -623,20 +623,11 @@
-               // Format terminals
-               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-               terminal_names.sort();
-      -
-      -        const MAX_TERMS_TO_SHOW: usize = 5;
-      -        let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
-      -            (&terminal_names[..MAX_TERMS_TO_SHOW], true)
-      -        } else {
-      -            (terminal_names.as_slice(), false)
-      -        };
-      -
-      -        let mut terms_str = terms_to_show.join(", ");
-      -        if truncated {
-      -            let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
-      -        }
-      -
-      -        writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
-      -    }
-      -
-      +        let terms_str = terminal_names.join(", ");
-      +
-      +        // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-      +        writeln!(f, "{}- {}", indent, action_str)?;
-      +        writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
-      +    }
-           Ok(())
-       }
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -600,41 +600,35 @@
+               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
        
+               for (terminal, action) in &row.shifts_and_reduces {
+                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+      -            let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
+      -
+      -            // 1. Add shift if it exists
+      -            if let Some(shift_item_set) = &action.shift {
+      -                let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
+      -                final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
+      -            }
+      -
+      -            // 2. Group reduces and then add them
+      -            let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
+      +
+      +            // 1. Get the potential shift action.
+      +            let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+      +                *item_set_map.get_by_left(shift_item_set).unwrap()
+      +            });
+      +
+      +            // 2. Group all reduce actions.
+      +            let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                   for &production_id in &action.reduces {
+                       let production = &productions[production_id.0];
+                       let len = production.rhs.len();
+                       let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+      -                reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
+      -            }
+      -
+      -            for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
+      -                if let Some(ref mut act) = final_action {
+      -                    act.add_reduce(len, nonterminal_id, production_ids);
+      -                } else {
+      -                    // This is the first action, and it's a reduce.
+      -                    final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
+      -                }
+      -            }
+      -
+      -            let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+      +                reduces
+      +                    .entry(len)
+      +                    .or_default()
+      +                    .entry(nonterminal_id)
+      +                    .or_default()
+      +                    .insert(production_id);
+      +            }
+      +
+      +            // 3. Create a combined action and simplify it.
+      +            if maybe_shift.is_none() && reduces.is_empty() {
+      +                // This should not happen because we iterate over terminals that have actions from stage 6.
+      +                panic!("Action without shift or reduce for terminal {:?}", terminal);
+      +            }
+      +
+      +            let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+      +                shift: maybe_shift,
+      +                reduces,
+      +            };
+                   final_action.simplify();
+                   phase2_shifts_and_reduces.insert(terminal_id, final_action);
+               }
 
       ```
 
-      I've modified the `format_actions` helper function in `src/glr/parser.rs`. This change does two things:
-      1.  It removes the logic that truncates the list of terminals.
-      2.  It changes the output format to first print the action (e.g., "Reduce ...", "Shift ...", or "Conflict: ...") on one line, and then print the list of terminals it applies to on the next line, indented.
-
-      This should make the parser table output much cleaner and more readable, especially for states with actions that apply to many terminals. Let me know if you have any other questions
+      This change is self-contained within the `stage_7` function and makes the logic for constructing the final action table much more direct. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
 ...
