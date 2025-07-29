@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
 use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, Reduce, Stage7Table, StateID};
+use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -784,105 +784,4 @@ pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
     }
 
     compatible_pairs
-}
-
-/// Represents one step in a pre-computed chain of default reductions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReductionChainStep {
-    /// Push a sequence of states onto the stack. This happens when a chain of
-    /// reductions terminates, or is interrupted by a state that has phase 1 actions.
-    Push(Vec<StateID>),
-    /// Perform a reduction on the real parse stack. The length is the remaining
-    /// number of items to pop.
-    Reduce(Reduce),
-}
-
-/// For a given state that is reached after a GOTO, computes the chain of
-/// default reductions that would follow.
-fn compute_chain_for_goto(
-    s_after_goto: StateID,
-    table: &Stage7Table,
-) -> Vec<ReductionChainStep> {
-    let mut virtual_stack = vec![s_after_goto];
-    let mut chain_result = Vec::new();
-
-    loop {
-        let current_s = *virtual_stack.last().unwrap();
-        let row = &table[&current_s];
-        let default_reduce = &row.phase3_default_reduce;
-
-        // If the current state also has phase 1/2 actions, the stack up to this
-        // point represents a set of states ready for the next token.
-        if default_reduce.clone_and_merge {
-            chain_result.push(ReductionChainStep::Push(virtual_stack.clone()));
-            virtual_stack.clear();
-        }
-
-        if let Some(ref reduce_action) = default_reduce.reduce {
-            if reduce_action.len > virtual_stack.len() {
-                // Reduction is larger than the virtual stack. The remainder must be
-                // popped from the real GSS.
-                let remainder = Reduce {
-                    len: reduce_action.len - virtual_stack.len(),
-                    ..reduce_action.clone()
-                };
-                chain_result.push(ReductionChainStep::Reduce(remainder));
-                break;
-            }
-
-            // Perform the reduction on the virtual stack.
-            virtual_stack.truncate(virtual_stack.len() - reduce_action.len);
-
-            if virtual_stack.is_empty() {
-                // The reduction consumed the entire virtual stack. The GOTO part of
-                // the reduction remains to be done on the real stack. We model this
-                // as a reduction of length 1.
-                let remainder = Reduce {
-                    len: 1,
-                    ..reduce_action.clone()
-                };
-                chain_result.push(ReductionChainStep::Reduce(remainder));
-                break;
-            }
-
-            // Continue the chain: perform the GOTO.
-            let revealed_s = *virtual_stack.last().unwrap();
-            let goto_action = &table[&revealed_s].gotos[&reduce_action.nonterminal_id];
-            if let Some(next_s) = goto_action.state_id {
-                virtual_stack.push(next_s);
-            } else {
-                // This would be an accept action, which terminates the chain.
-                // The current stack is a final configuration.
-                chain_result.push(ReductionChainStep::Push(virtual_stack));
-                break;
-            }
-        } else {
-            // No default reduction, the chain ends.
-            if !virtual_stack.is_empty() {
-                chain_result.push(ReductionChainStep::Push(virtual_stack));
-            }
-            break;
-        }
-    }
-
-    chain_result
-}
-
-pub fn compute_all_reduction_chains(
-    table: &Stage7Table,
-) -> BTreeMap<StateID, BTreeMap<NonTerminalID, Vec<ReductionChainStep>>> {
-    let mut all_chains = BTreeMap::new();
-    for (&s_id, row) in table {
-        let mut chains_for_state = BTreeMap::new();
-        for (&nt_id, goto) in &row.gotos {
-            if let Some(s_after_goto) = goto.state_id {
-                let chain = compute_chain_for_goto(s_after_goto, table);
-                chains_for_state.insert(nt_id, chain);
-            }
-        }
-        if !chains_for_state.is_empty() {
-            all_chains.insert(s_id, chains_for_state);
-        }
-    }
-    all_chains
 }
