@@ -3015,41 +3015,6 @@ local_system:
       }
 
       impl Stage7ShiftsAndReducesLookaheadValue {
-          /// Adds a reduce action to the current value, converting it to a `Split` if necessary.
-          pub fn add_reduce(&mut self, len: usize, nonterminal_id: NonTerminalID, production_ids: BTreeSet<ProductionID>) {
-              // Take ownership of self to work with it, then assign back.
-              let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy value
-
-              let new_self = match temp_self {
-                  Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                      reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split {
-                          shift: Some(state_id),
-                          reduces,
-                      }
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                      nonterminal_id: old_nt_id,
-                      len: old_len,
-                      production_ids: old_pids,
-                  } => {
-                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                      reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
-                      reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split {
-                          shift: None,
-                          reduces,
-                      }
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, mut reduces } => {
-                      reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }
-                  }
-              };
-              *self = new_self;
-          }
-
           /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
           /// - A `Split` with a shift and no reduces becomes a `Shift`.
           /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
@@ -3521,33 +3486,36 @@ local_system:
 
               for (terminal, action) in &row.shifts_and_reduces {
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
-                  let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
 
-                  // 1. Add shift if it exists
-                  if let Some(shift_item_set) = &action.shift {
-                      let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
-                      final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
-                  }
+                  // 1. Get the potential shift action.
+                  let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+                      *item_set_map.get_by_left(shift_item_set).unwrap()
+                  });
 
-                  // 2. Group reduces and then add them
-                  let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
+                  // 2. Group all reduce actions.
+                  let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
                   for &production_id in &action.reduces {
                       let production = &productions[production_id.0];
                       let len = production.rhs.len();
                       let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                      reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
+                      reduces
+                          .entry(len)
+                          .or_default()
+                          .entry(nonterminal_id)
+                          .or_default()
+                          .insert(production_id);
                   }
 
-                  for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
-                      if let Some(ref mut act) = final_action {
-                          act.add_reduce(len, nonterminal_id, production_ids);
-                      } else {
-                          // This is the first action, and it's a reduce.
-                          final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
-                      }
+                  // 3. Create a combined action and simplify it.
+                  if maybe_shift.is_none() && reduces.is_empty() {
+                      // This should not happen because we iterate over terminals that have actions from stage 6.
+                      panic!("Action without shift or reduce for terminal {:?}", terminal);
                   }
 
-                  let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+                  let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                      shift: maybe_shift,
+                      reduces,
+                  };
                   final_action.simplify();
                   phase2_shifts_and_reduces.insert(terminal_id, final_action);
               }
@@ -8041,41 +8009,6 @@ local_system:
       }
 
       impl Stage7ShiftsAndReducesLookaheadValue {
-          /// Adds a reduce action to the current value, converting it to a `Split` if necessary.
-          pub fn add_reduce(&mut self, len: usize, nonterminal_id: NonTerminalID, production_ids: BTreeSet<ProductionID>) {
-              // Take ownership of self to work with it, then assign back.
-              let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy value
-
-              let new_self = match temp_self {
-                  Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                      reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split {
-                          shift: Some(state_id),
-                          reduces,
-                      }
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                      nonterminal_id: old_nt_id,
-                      len: old_len,
-                      production_ids: old_pids,
-                  } => {
-                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                      reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
-                      reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split {
-                          shift: None,
-                          reduces,
-                      }
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, mut reduces } => {
-                      reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }
-                  }
-              };
-              *self = new_self;
-          }
-
           /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
           /// - A `Split` with a shift and no reduces becomes a `Shift`.
           /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
@@ -8547,33 +8480,36 @@ local_system:
 
               for (terminal, action) in &row.shifts_and_reduces {
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
-                  let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
 
-                  // 1. Add shift if it exists
-                  if let Some(shift_item_set) = &action.shift {
-                      let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
-                      final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
-                  }
+                  // 1. Get the potential shift action.
+                  let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+                      *item_set_map.get_by_left(shift_item_set).unwrap()
+                  });
 
-                  // 2. Group reduces and then add them
-                  let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
+                  // 2. Group all reduce actions.
+                  let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
                   for &production_id in &action.reduces {
                       let production = &productions[production_id.0];
                       let len = production.rhs.len();
                       let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                      reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
+                      reduces
+                          .entry(len)
+                          .or_default()
+                          .entry(nonterminal_id)
+                          .or_default()
+                          .insert(production_id);
                   }
 
-                  for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
-                      if let Some(ref mut act) = final_action {
-                          act.add_reduce(len, nonterminal_id, production_ids);
-                      } else {
-                          // This is the first action, and it's a reduce.
-                          final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
-                      }
+                  // 3. Create a combined action and simplify it.
+                  if maybe_shift.is_none() && reduces.is_empty() {
+                      // This should not happen because we iterate over terminals that have actions from stage 6.
+                      panic!("Action without shift or reduce for terminal {:?}", terminal);
                   }
 
-                  let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+                  let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                      shift: maybe_shift,
+                      reduces,
+                  };
                   final_action.simplify();
                   phase2_shifts_and_reduces.insert(terminal_id, final_action);
               }
@@ -13130,41 +13066,6 @@ messages:
       }
 
       impl Stage7ShiftsAndReducesLookaheadValue {
-          /// Adds a reduce action to the current value, converting it to a `Split` if necessary.
-          pub fn add_reduce(&mut self, len: usize, nonterminal_id: NonTerminalID, production_ids: BTreeSet<ProductionID>) {
-              // Take ownership of self to work with it, then assign back.
-              let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy value
-
-              let new_self = match temp_self {
-                  Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                      reduces.entry(len).or_default().insert(nonterminal_id, production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split {
-                          shift: Some(state_id),
-                          reduces,
-                      }
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                      nonterminal_id: old_nt_id,
-                      len: old_len,
-                      production_ids: old_pids,
-                  } => {
-                      let mut reduces: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-                      reduces.entry(old_len).or_default().insert(old_nt_id, old_pids);
-                      reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split {
-                          shift: None,
-                          reduces,
-                      }
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, mut reduces } => {
-                      reduces.entry(len).or_default().entry(nonterminal_id).or_default().extend(production_ids);
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }
-                  }
-              };
-              *self = new_self;
-          }
-
           /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
           /// - A `Split` with a shift and no reduces becomes a `Shift`.
           /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
@@ -13636,33 +13537,36 @@ messages:
 
               for (terminal, action) in &row.shifts_and_reduces {
                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
-                  let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
 
-                  // 1. Add shift if it exists
-                  if let Some(shift_item_set) = &action.shift {
-                      let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
-                      final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
-                  }
+                  // 1. Get the potential shift action.
+                  let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+                      *item_set_map.get_by_left(shift_item_set).unwrap()
+                  });
 
-                  // 2. Group reduces and then add them
-                  let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
+                  // 2. Group all reduce actions.
+                  let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
                   for &production_id in &action.reduces {
                       let production = &productions[production_id.0];
                       let len = production.rhs.len();
                       let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                      reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
+                      reduces
+                          .entry(len)
+                          .or_default()
+                          .entry(nonterminal_id)
+                          .or_default()
+                          .insert(production_id);
                   }
 
-                  for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
-                      if let Some(ref mut act) = final_action {
-                          act.add_reduce(len, nonterminal_id, production_ids);
-                      } else {
-                          // This is the first action, and it's a reduce.
-                          final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
-                      }
+                  // 3. Create a combined action and simplify it.
+                  if maybe_shift.is_none() && reduces.is_empty() {
+                      // This should not happen because we iterate over terminals that have actions from stage 6.
+                      panic!("Action without shift or reduce for terminal {:?}", terminal);
                   }
 
-                  let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
+                  let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                      shift: maybe_shift,
+                      reduces,
+                  };
                   final_action.simplify();
                   phase2_shifts_and_reduces.insert(terminal_id, final_action);
               }
@@ -15163,96 +15067,60 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Simplify the first big loop in stage_7.
-      Instead of
-      `let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;`,
-      let's have
-      `let mut maybe_shift: Option<StateID>;`
-      Then we can just make a split action with that maybe shift and `reduces_by_len_and_nt` as-is, and simplify it. Easy.
+      ```
+        State 0:
+          Items:
+            - [additive_expression -> multiplicative_expression • additive_expression[0], {'!', '!=', ...}]
+          Actions (Phase 1):
+             (none)
+          Actions (Phase 2):
+            - Reduce additive_expression[0] (len 0) via rules [299]
+              on { '!', '!=', ... }
+          Default Action (Phase 3):
+            - Default Reduce additive_expression[0] (len 0) via rules [299]
+            - No clone and merge
+          Gotos:
+            - additive_expression[0] -> 1
+      ```
+      Remove the linebreak between these lines
+      ```
+            - Reduce additive_expression[0] (len 0) via rules [299]
+              on { '!', '!=', ... }
+      ```
+      Modify the code to ensure this.
     metadata:
   - assistant: |-
-      Of course! Dealing with complex state transitions and action tables can be tricky. Simplifying the logic for combining shift and reduce actions will definitely improve readability and maintainability. Here are the changes to achieve that.
+      Hello! As a helpful assistant, I can certainly help you with your request. Dealing with formatting issues in log or display outputs can be tricky. Here are the changes to get the output you want.
 
-      I've refactored the loop in `stage_7` to first determine the potential shift action and gather all reduce actions. Then, it constructs a `Split` action with both, and finally simplifies it into a `Shift`, `Reduce`, or `Split` as appropriate. This removes the need for the more complex incremental building of the action.
+      I'll modify the `format_actions` function in `src/glr/parser.rs` to combine the action description and the terminals it applies to onto a single line.
 
-      Here is the diff for `src/glr/table.rs`:
+      Here is the git diff for the change:
 
       ```diff
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -600,41 +600,35 @@
-               let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -680,9 +680,7 @@
+               let terms_str = terminal_names.join(", ");
        
-               for (terminal, action) in &row.shifts_and_reduces {
-                   let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
-      -            let mut final_action: Option<Stage7ShiftsAndReducesLookaheadValue> = None;
-      -
-      -            // 1. Add shift if it exists
-      -            if let Some(shift_item_set) = &action.shift {
-      -                let shift_state_id = *item_set_map.get_by_left(shift_item_set).unwrap();
-      -                final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state_id));
-      -            }
-      -
-      -            // 2. Group reduces and then add them
-      -            let mut reduces_by_len_and_nt: BTreeMap<(usize, NonTerminalID), BTreeSet<ProductionID>> = BTreeMap::new();
-      +
-      +            // 1. Get the potential shift action.
-      +            let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
-      +                *item_set_map.get_by_left(shift_item_set).unwrap()
-      +            });
-      +
-      +            // 2. Group all reduce actions.
-      +            let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                   for &production_id in &action.reduces {
-                       let production = &productions[production_id.0];
-                       let len = production.rhs.len();
-                       let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-      -                reduces_by_len_and_nt.entry((len, nonterminal_id)).or_default().insert(production_id);
-      -            }
-      -
-      -            for ((len, nonterminal_id), production_ids) in reduces_by_len_and_nt {
-      -                if let Some(ref mut act) = final_action {
-      -                    act.add_reduce(len, nonterminal_id, production_ids);
-      -                } else {
-      -                    // This is the first action, and it's a reduce.
-      -                    final_action = Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids });
-      -                }
-      -            }
-      -
-      -            let mut final_action = final_action.expect(&format!("Action without shift or reduce for terminal {:?}", terminal));
-      +                reduces
-      +                    .entry(len)
-      +                    .or_default()
-      +                    .entry(nonterminal_id)
-      +                    .or_default()
-      +                    .insert(production_id);
-      +            }
-      +
-      +            // 3. Create a combined action and simplify it.
-      +            if maybe_shift.is_none() && reduces.is_empty() {
-      +                // This should not happen because we iterate over terminals that have actions from stage 6.
-      +                panic!("Action without shift or reduce for terminal {:?}", terminal);
-      +            }
-      +
-      +            let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
-      +                shift: maybe_shift,
-      +                reduces,
-      +            };
-                   final_action.simplify();
-                   phase2_shifts_and_reduces.insert(terminal_id, final_action);
-               }
+               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
+      -        writeln!(f, "{}- {}", indent, action_str)?;
+      -        writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
+      +        writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
+           }
+           Ok(())
+       }
 
       ```
 
-      This change is self-contained within the `stage_7` function and makes the logic for constructing the final action table much more direct. Let me know if you have any other questions
+      This change adjusts the `Display` implementation for `GLRParser` by modifying its helper function `format_actions`. It replaces two `writeln!` macros with a single one, which will produce the compact output format you're looking for. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...

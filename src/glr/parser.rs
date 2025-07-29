@@ -584,8 +584,7 @@ fn format_actions(
         let terms_str = terminal_names.join(", ");
 
         // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-        writeln!(f, "{}- {}", indent, action_str)?;
-        writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
+        writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
     }
     Ok(())
 }
