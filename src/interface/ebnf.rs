@@ -23,7 +23,7 @@ fn get_token_regex() -> &'static Regex {
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<charclass>\[([^\]\\]|\\.)*\]) |
-        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
+        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|#) |
         (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
         (?P<ws>\s+) |
         (?P<error>.)
@@ -110,17 +110,21 @@ impl EbnfParser {
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
-            if self.peek_grammar_op("!") {
+            if self.peek_grammar_op("#") {
+                self.consume_grammar_op("#")?;
+                self.expect_grammar_op("!")?;
+                self.expect_grammar_op("[")?;
                 if ignore_symbol_name.is_some() {
-                    return Err("Duplicate ignore directive found".to_string())
+                    return Err("Duplicate ignore directive found".to_string());
                 }
-                self.consume_grammar_op("!")?;
                 let directive_name = self.expect_ident()?;
                 if directive_name != "ignore" {
-                    return Err(format!("Unknown directive: {}", directive_name))
+                    return Err(format!("Unknown directive: {}", directive_name));
                 }
+                self.expect_grammar_op("(")?;
                 let symbol_name = self.expect_ident()?;
-                self.expect_grammar_op(";")?;
+                self.expect_grammar_op(")")?;
+                self.expect_grammar_op("]")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
                 let (rule_name, rule_expr) = self.parse_rule()?;
