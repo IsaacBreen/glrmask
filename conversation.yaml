@@ -10,7 +10,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -1980,8 +1980,39 @@ local_system:
                       if items.is_empty() {
                           writeln!(&mut result, "    (None)").unwrap();
                       } else {
+                          // Group items by core: (production, dot_position)
+                          let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                           for item in items {
-                              writeln!(&mut result, "    - {}", item).unwrap();
+                              grouped_items
+                                  .entry((&item.production, item.dot_position))
+                                  .or_default()
+                                  .insert(item.lookahead.clone());
+                          }
+
+                          // Print grouped items
+                          for ((production, dot_pos), lookaheads) in grouped_items {
+                              // Print the core item part
+                              write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                              for (i, symbol) in production.rhs.iter().enumerate() {
+                                  if i == *dot_pos {
+                                      write!(&mut result, " •").unwrap();
+                                  }
+                                  match symbol {
+                                      Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                      Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                                  }
+                              }
+                              if *dot_pos == production.rhs.len() {
+                                  write!(&mut result, " •").unwrap();
+                              }
+                              write!(&mut result, ", {{").unwrap();
+
+                              // Print the set of lookaheads
+                              let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                              lookahead_strs.sort();
+                              write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                              writeln!(&mut result, "}}]").unwrap();
                           }
                       }
                   } else {
@@ -2144,8 +2175,9 @@ local_system:
               let non_terminal_map = &self.non_terminal_map;
               let item_set_map = &self.item_set_map;
 
+              use crate::glr::grammar::{Production, Symbol, Terminal};
               use crate::glr::items::{Item};
-              use std::collections::BTreeSet;
+              use std::collections::{BTreeMap, BTreeSet};
 
               writeln!(f, "Parse Table:")?;
               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
@@ -2154,8 +2186,39 @@ local_system:
 
                   if let Some(items) = item_set_map.get_by_right(&state_id) {
                       writeln!(f, "    Items:")?;
+                      // Group items by core: (production, dot_position)
+                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                       for item in items {
-                          writeln!(f, "      - {}", item)?;
+                          grouped_items
+                              .entry((&item.production, item.dot_position))
+                              .or_default()
+                              .insert(item.lookahead.clone());
+                      }
+
+                      // Print grouped items
+                      for ((production, dot_pos), lookaheads) in grouped_items {
+                          // Print the core item part
+                          write!(f, "      - [{} ->", production.lhs.0)?;
+                          for (i, symbol) in production.rhs.iter().enumerate() {
+                              if i == dot_pos {
+                                  write!(f, " •")?;
+                              }
+                              match symbol {
+                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                              }
+                          }
+                          if dot_pos == production.rhs.len() {
+                              write!(f, " •")?;
+                          }
+                          write!(f, ", {{")?;
+
+                          // Print the set of lookaheads
+                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                          lookahead_strs.sort();
+                          write!(f, "{}", lookahead_strs.join(", "))?;
+
+                          writeln!(f, "}}]")?;
                       }
                   }
 
@@ -6901,8 +6964,39 @@ local_system:
                       if items.is_empty() {
                           writeln!(&mut result, "    (None)").unwrap();
                       } else {
+                          // Group items by core: (production, dot_position)
+                          let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                           for item in items {
-                              writeln!(&mut result, "    - {}", item).unwrap();
+                              grouped_items
+                                  .entry((&item.production, item.dot_position))
+                                  .or_default()
+                                  .insert(item.lookahead.clone());
+                          }
+
+                          // Print grouped items
+                          for ((production, dot_pos), lookaheads) in grouped_items {
+                              // Print the core item part
+                              write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                              for (i, symbol) in production.rhs.iter().enumerate() {
+                                  if i == *dot_pos {
+                                      write!(&mut result, " •").unwrap();
+                                  }
+                                  match symbol {
+                                      Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                      Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                                  }
+                              }
+                              if *dot_pos == production.rhs.len() {
+                                  write!(&mut result, " •").unwrap();
+                              }
+                              write!(&mut result, ", {{").unwrap();
+
+                              // Print the set of lookaheads
+                              let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                              lookahead_strs.sort();
+                              write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                              writeln!(&mut result, "}}]").unwrap();
                           }
                       }
                   } else {
@@ -7065,8 +7159,9 @@ local_system:
               let non_terminal_map = &self.non_terminal_map;
               let item_set_map = &self.item_set_map;
 
+              use crate::glr::grammar::{Production, Symbol, Terminal};
               use crate::glr::items::{Item};
-              use std::collections::BTreeSet;
+              use std::collections::{BTreeMap, BTreeSet};
 
               writeln!(f, "Parse Table:")?;
               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
@@ -7075,8 +7170,39 @@ local_system:
 
                   if let Some(items) = item_set_map.get_by_right(&state_id) {
                       writeln!(f, "    Items:")?;
+                      // Group items by core: (production, dot_position)
+                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                       for item in items {
-                          writeln!(f, "      - {}", item)?;
+                          grouped_items
+                              .entry((&item.production, item.dot_position))
+                              .or_default()
+                              .insert(item.lookahead.clone());
+                      }
+
+                      // Print grouped items
+                      for ((production, dot_pos), lookaheads) in grouped_items {
+                          // Print the core item part
+                          write!(f, "      - [{} ->", production.lhs.0)?;
+                          for (i, symbol) in production.rhs.iter().enumerate() {
+                              if i == dot_pos {
+                                  write!(f, " •")?;
+                              }
+                              match symbol {
+                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                              }
+                          }
+                          if dot_pos == production.rhs.len() {
+                              write!(f, " •")?;
+                          }
+                          write!(f, ", {{")?;
+
+                          // Print the set of lookaheads
+                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                          lookahead_strs.sort();
+                          write!(f, "{}", lookahead_strs.join(", "))?;
+
+                          writeln!(f, "}}]")?;
                       }
                   }
 
@@ -11875,8 +12001,39 @@ messages:
                       if items.is_empty() {
                           writeln!(&mut result, "    (None)").unwrap();
                       } else {
+                          // Group items by core: (production, dot_position)
+                          let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                           for item in items {
-                              writeln!(&mut result, "    - {}", item).unwrap();
+                              grouped_items
+                                  .entry((&item.production, item.dot_position))
+                                  .or_default()
+                                  .insert(item.lookahead.clone());
+                          }
+
+                          // Print grouped items
+                          for ((production, dot_pos), lookaheads) in grouped_items {
+                              // Print the core item part
+                              write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                              for (i, symbol) in production.rhs.iter().enumerate() {
+                                  if i == *dot_pos {
+                                      write!(&mut result, " •").unwrap();
+                                  }
+                                  match symbol {
+                                      Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                      Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                                  }
+                              }
+                              if *dot_pos == production.rhs.len() {
+                                  write!(&mut result, " •").unwrap();
+                              }
+                              write!(&mut result, ", {{").unwrap();
+
+                              // Print the set of lookaheads
+                              let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                              lookahead_strs.sort();
+                              write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                              writeln!(&mut result, "}}]").unwrap();
                           }
                       }
                   } else {
@@ -12039,8 +12196,9 @@ messages:
               let non_terminal_map = &self.non_terminal_map;
               let item_set_map = &self.item_set_map;
 
+              use crate::glr::grammar::{Production, Symbol, Terminal};
               use crate::glr::items::{Item};
-              use std::collections::BTreeSet;
+              use std::collections::{BTreeMap, BTreeSet};
 
               writeln!(f, "Parse Table:")?;
               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
@@ -12049,8 +12207,39 @@ messages:
 
                   if let Some(items) = item_set_map.get_by_right(&state_id) {
                       writeln!(f, "    Items:")?;
+                      // Group items by core: (production, dot_position)
+                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                       for item in items {
-                          writeln!(f, "      - {}", item)?;
+                          grouped_items
+                              .entry((&item.production, item.dot_position))
+                              .or_default()
+                              .insert(item.lookahead.clone());
+                      }
+
+                      // Print grouped items
+                      for ((production, dot_pos), lookaheads) in grouped_items {
+                          // Print the core item part
+                          write!(f, "      - [{} ->", production.lhs.0)?;
+                          for (i, symbol) in production.rhs.iter().enumerate() {
+                              if i == dot_pos {
+                                  write!(f, " •")?;
+                              }
+                              match symbol {
+                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                              }
+                          }
+                          if dot_pos == production.rhs.len() {
+                              write!(f, " •")?;
+                          }
+                          write!(f, ", {{")?;
+
+                          // Print the set of lookaheads
+                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                          lookahead_strs.sort();
+                          write!(f, "{}", lookahead_strs.join(", "))?;
+
+                          writeln!(f, "}}]")?;
                       }
                   }
 
@@ -14849,37 +15038,292 @@ messages:
       filename: src/glr/tests.rs
   - user: |-
       ```
-        GLR Parser (States: 618): Parse Table:
-        Start State: 532
         State 0:
           Items:
-            - [additive_expression -> multiplicative_expression • additive_expression[0], ε]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], BIGINT_LITERAL]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], BOOLEAN_LITERAL]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], ELISION]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], IDENTIFIER]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], NULL_LITERAL]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], NUMERIC_LITERAL]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], REGULAR_EXPRESSION_LITERAL]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], STRING_LITERAL]
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '!']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '!=']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '!==']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '#']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '&']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '&&']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '(']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], ')']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '*']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '+']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '++']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], ',']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '-']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '--']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '...']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], ':']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], ';']
-            - [additive_expression -> multiplicative_expression • additive_expression[0], '<']
+            - [additive_expression -> multiplicative_expression • additive_expression[0], {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
+          Actions (Phase 1):
+          Actions (Phase 2):
+            - BIGINT_LITERAL             -> Reduce additive_expression[0] (len 0) via rules [299]
+            - BOOLEAN_LITERAL            -> Reduce additive_expression[0] (len 0) via rules [299]
+            - ELISION                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - IDENTIFIER                 -> Reduce additive_expression[0] (len 0) via rules [299]
+            - IGNORE                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - NULL_LITERAL               -> Reduce additive_expression[0] (len 0) via rules [299]
+            - NUMERIC_LITERAL            -> Reduce additive_expression[0] (len 0) via rules [299]
+            - REGULAR_EXPRESSION_LITERAL -> Reduce additive_expression[0] (len 0) via rules [299]
+            - STRING_LITERAL             -> Reduce additive_expression[0] (len 0) via rules [299]
+            - TEMPLATE_CHAR              -> Reduce additive_expression[0] (len 0) via rules [299]
+            - ';'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '{'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '}'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - ':'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'var'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'let'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'const'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - ','                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '='                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'if'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '('                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - ')'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'else'                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'while'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'do'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'for'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'in'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'of'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'switch'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'case'                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'default'                  -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'with'                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'try'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'catch'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'finally'                  -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'async'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'function'                 -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '*'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '...'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'return'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'break'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'continue'                 -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'throw'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'debugger'                 -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '['                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - ']'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'import'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'from'                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'as'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'export'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '+='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '-='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '*='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '/='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '%='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '<<='                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '>>='                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '>>>='                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '&='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '^='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '|='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '**='                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '=>'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '?'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '??'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '||'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '&&'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '|'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '^'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '&'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '=='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '!='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '==='                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '!=='                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '<'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '>'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '<='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '>='                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'instanceof'               -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '<<'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '>>'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '>>>'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '+'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '-'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '/'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '%'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '**'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'delete'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'void'                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'typeof'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '++'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '--'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '~'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '!'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'await'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'new'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'super'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '?.'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '.'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'this'                     -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'yield'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'get'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'set'                      -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'class'                    -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'extends'                  -> Reduce additive_expression[0] (len 0) via rules [299]
+            - 'static'                   -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '#'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '`'                        -> Reduce additive_expression[0] (len 0) via rules [299]
+            - '${'                       -> Reduce additive_expression[0] (len 0) via rules [299]
+          Default Action (Phase 3):
+            - Default Reduce additive_expression[0] (len 0) via rules [299]
+            - No clone and merge
+          Gotos:
+            - additive_expression[0] -> 1
+        State 1:
+          Items:
+            - [additive_expression -> multiplicative_expression additive_expression[0] •, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
+            - [additive_expression[0] -> additive_expression[0] • additive_expression[0][0] multiplicative_expression, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
+          Actions (Phase 1):
+            - '+' -> Shift 4
+            - '-' -> Shift 5
+          Actions (Phase 2):
+            - BIGINT_LITERAL             -> Reduce additive_expression (len 2) via rules [297]
+            - BOOLEAN_LITERAL            -> Reduce additive_expression (len 2) via rules [297]
+            - ELISION                    -> Reduce additive_expression (len 2) via rules [297]
+            - IDENTIFIER                 -> Reduce additive_expression (len 2) via rules [297]
+            - IGNORE                     -> Reduce additive_expression (len 2) via rules [297]
+            - NULL_LITERAL               -> Reduce additive_expression (len 2) via rules [297]
+            - NUMERIC_LITERAL            -> Reduce additive_expression (len 2) via rules [297]
+            - REGULAR_EXPRESSION_LITERAL -> Reduce additive_expression (len 2) via rules [297]
+            - STRING_LITERAL             -> Reduce additive_expression (len 2) via rules [297]
+            - TEMPLATE_CHAR              -> Reduce additive_expression (len 2) via rules [297]
+            - ';'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '{'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '}'                        -> Reduce additive_expression (len 2) via rules [297]
+            - ':'                        -> Reduce additive_expression (len 2) via rules [297]
+            - 'var'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'let'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'const'                    -> Reduce additive_expression (len 2) via rules [297]
+            - ','                        -> Reduce additive_expression (len 2) via rules [297]
+            - '='                        -> Reduce additive_expression (len 2) via rules [297]
+            - 'if'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '('                        -> Reduce additive_expression (len 2) via rules [297]
+            - ')'                        -> Reduce additive_expression (len 2) via rules [297]
+            - 'else'                     -> Reduce additive_expression (len 2) via rules [297]
+            - 'while'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'do'                       -> Reduce additive_expression (len 2) via rules [297]
+            - 'for'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'in'                       -> Reduce additive_expression (len 2) via rules [297]
+            - 'of'                       -> Reduce additive_expression (len 2) via rules [297]
+            - 'switch'                   -> Reduce additive_expression (len 2) via rules [297]
+            - 'case'                     -> Reduce additive_expression (len 2) via rules [297]
+            - 'default'                  -> Reduce additive_expression (len 2) via rules [297]
+            - 'with'                     -> Reduce additive_expression (len 2) via rules [297]
+            - 'try'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'catch'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'finally'                  -> Reduce additive_expression (len 2) via rules [297]
+            - 'async'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'function'                 -> Reduce additive_expression (len 2) via rules [297]
+            - '*'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '...'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'return'                   -> Reduce additive_expression (len 2) via rules [297]
+            - 'break'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'continue'                 -> Reduce additive_expression (len 2) via rules [297]
+            - 'throw'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'debugger'                 -> Reduce additive_expression (len 2) via rules [297]
+            - '['                        -> Reduce additive_expression (len 2) via rules [297]
+            - ']'                        -> Reduce additive_expression (len 2) via rules [297]
+            - 'import'                   -> Reduce additive_expression (len 2) via rules [297]
+            - 'from'                     -> Reduce additive_expression (len 2) via rules [297]
+            - 'as'                       -> Reduce additive_expression (len 2) via rules [297]
+            - 'export'                   -> Reduce additive_expression (len 2) via rules [297]
+            - '+='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '-='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '*='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '/='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '%='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '<<='                      -> Reduce additive_expression (len 2) via rules [297]
+            - '>>='                      -> Reduce additive_expression (len 2) via rules [297]
+            - '>>>='                     -> Reduce additive_expression (len 2) via rules [297]
+            - '&='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '^='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '|='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '**='                      -> Reduce additive_expression (len 2) via rules [297]
+            - '=>'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '?'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '??'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '||'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '&&'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '|'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '^'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '&'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '=='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '!='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '==='                      -> Reduce additive_expression (len 2) via rules [297]
+            - '!=='                      -> Reduce additive_expression (len 2) via rules [297]
+            - '<'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '>'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '<='                       -> Reduce additive_expression (len 2) via rules [297]
+            - '>='                       -> Reduce additive_expression (len 2) via rules [297]
+            - 'instanceof'               -> Reduce additive_expression (len 2) via rules [297]
+            - '<<'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '>>'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '>>>'                      -> Reduce additive_expression (len 2) via rules [297]
+            - '+'                        -> Conflict:
+              - Shift 4
+              - Reduce (len 2):
+                - additive_expression -> additive_expression
+            - '-'                        -> Conflict:
+              - Shift 5
+              - Reduce (len 2):
+                - additive_expression -> additive_expression
+            - '/'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '%'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '**'                       -> Reduce additive_expression (len 2) via rules [297]
+            - 'delete'                   -> Reduce additive_expression (len 2) via rules [297]
+            - 'void'                     -> Reduce additive_expression (len 2) via rules [297]
+            - 'typeof'                   -> Reduce additive_expression (len 2) via rules [297]
+            - '++'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '--'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '~'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '!'                        -> Reduce additive_expression (len 2) via rules [297]
+            - 'await'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'new'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'super'                    -> Reduce additive_expression (len 2) via rules [297]
+            - '?.'                       -> Reduce additive_expression (len 2) via rules [297]
+            - '.'                        -> Reduce additive_expression (len 2) via rules [297]
+            - 'this'                     -> Reduce additive_expression (len 2) via rules [297]
+            - 'yield'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'get'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'set'                      -> Reduce additive_expression (len 2) via rules [297]
+            - 'class'                    -> Reduce additive_expression (len 2) via rules [297]
+            - 'extends'                  -> Reduce additive_expression (len 2) via rules [297]
+            - 'static'                   -> Reduce additive_expression (len 2) via rules [297]
+            - '#'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '`'                        -> Reduce additive_expression (len 2) via rules [297]
+            - '${'                       -> Reduce additive_expression (len 2) via rules [297]
+          Default Action (Phase 3):
+            - Default Reduce additive_expression (len 2) via rules [297]
+            - Clone and merge
+          Gotos:
+            - additive_expression[0][0] -> 2
+        State 2:
+          Items:
+            - [additive_expression[0] -> additive_expression[0] additive_expression[0][0] • multiplicative_expression, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]
+          Actions (Phase 1):
+          Actions (Phase 2):
+            - BIGINT_LITERAL             -> Reduce unary_expression_rr (len 0) via rules [313]
+            - BOOLEAN_LITERAL            -> Reduce unary_expression_rr (len 0) via rules [313]
+            - IDENTIFIER                 -> Reduce unary_expression_rr (len 0) via rules [313]
+            - NULL_LITERAL               -> Reduce unary_expression_rr (len 0) via rules [313]
+            - NUMERIC_LITERAL            -> Reduce unary_expression_rr (len 0) via rules [313]
+            - REGULAR_EXPRESSION_LITERAL -> Reduce unary_expression_rr (len 0) via rules [313]
+            - STRING_LITERAL             -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '{'                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '('                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'async'                    -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'function'                 -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '['                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '+'                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '-'                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'delete'                   -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'void'                     -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'typeof'                   -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '++'                       -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '--'                       -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '~'                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '!'                        -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'await'                    -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'new'                      -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'super'                    -> Reduce unary_expression_rr (len 0) via rules [313]
+            - 'this'                     -> Reduce unary_expression_rr (len 0) via rules [313]
+            - '`'                        -> Reduce unary_expression_rr (len 0) via rules [313]
+          Default Action (Phase 3):
+            - Default Reduce unary_expression_rr (len 0) via rules [313]
+            - No clone and merge
+          Gotos:
+            - multiplicative_expression -> 3
+            - exponentiation_expression -> 388
+            - unary_expression -> 194
+            - unary_expression_rr -> 587
 
       ```
       State printing right now looks something like this.
@@ -14887,257 +15331,101 @@ messages:
       Clean it up.
     metadata:
   - assistant: |-
-      Of course! Dealing with verbose output can be frustrating. Grouping the items in the parse table display by their core (the production and dot position) and then listing the lookaheads will make it much more readable.
+      Hello! As an AI assistant, I'd be happy to help you clean up your parser's state printing. That verbose output can definitely be overwhelming, especially with large grammars.
 
-      Here are the patches to clean up the state printing. I've focused on the `Display` implementation for `GLRParser`.
+      The key to a cleaner display is to show the *effective* actions the parser will take, rather than the intermediate table representation. This means focusing on the Phase 1 (lookahead-specific) actions and the Phase 3 (default) action, and removing the redundant and verbose Phase 2 action list. I'll also summarize the lookahead sets for items to keep them from flooding the output.
 
-      ### Modified `src/glr/parser.rs`
-
-      I'll adjust the `Display` implementation for `GLRParser` to group items by their core and present the lookaheads in a compact, sorted set.
+      Here are the changes for `src/glr/parser.rs`:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -500,15 +500,48 @@
-               let non_terminal_map = &self.non_terminal_map;
-               let item_set_map = &self.item_set_map;
+      @@ -610,10 +610,16 @@
        
-      +        use crate::glr::grammar::{Production, Symbol, Terminal};
-               use crate::glr::items::{Item};
-      -        use std::collections::BTreeSet;
-      +        use std::collections::{BTreeMap, BTreeSet};
-       
-               writeln!(f, "Parse Table:")?;
-               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
-               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
-                   writeln!(f, "  State {}:", state_id.0)?;
-       
-                   if let Some(items) = item_set_map.get_by_right(&state_id) {
-      -                writeln!(f, "    Items:")?;
-      -                for item in items {
-      -                    writeln!(f, "      - {}", item)?;
-      +                writeln!(f, "    Items:")?;
-      +                // Group items by core: (production, dot_position)
-      +                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +                for item in items {
-      +                    grouped_items
-      +                        .entry((&item.production, item.dot_position))
-      +                        .or_default()
-      +                        .insert(item.lookahead.clone());
-      +                }
-      +
-      +                // Print grouped items
-      +                for ((production, dot_pos), lookaheads) in grouped_items {
-      +                    // Print the core item part
-      +                    write!(f, "      - [{} ->", production.lhs.0)?;
-      +                    for (i, symbol) in production.rhs.iter().enumerate() {
-      +                        if i == *dot_pos {
-      +                            write!(f, " •")?;
-      +                        }
-      +                        match symbol {
-      +                            Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
-      +                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
-      +                        }
-      +                    }
-      +                    if *dot_pos == production.rhs.len() {
-      +                        write!(f, " •")?;
-      +                    }
-      +                    write!(f, ", {{")?;
-      +
-      +                    // Print the set of lookaheads
-      +                    let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                           // Print the set of lookaheads
+                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+      -                    lookahead_strs.sort();
+      -                    write!(f, "{}", lookahead_strs.join(", "))?;
+      +                    const MAX_LOOKAHEADS_TO_PRINT: usize = 8;
       +                    lookahead_strs.sort();
-      +                    write!(f, "{}", lookahead_strs.join(", "))?;
-      +
-      +                    writeln!(f, "}}]")?;
+      +                    if lookahead_strs.len() > MAX_LOOKAHEADS_TO_PRINT {
+      +                        let displayed_lookaheads = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_PRINT).cloned().collect::<Vec<_>>().join(", ");
+      +                        write!(f, "{}, ... ({} more)", displayed_lookaheads, lookahead_strs.len() - MAX_LOOKAHEADS_TO_PRINT)?;
+      +                    } else {
+      +                        write!(f, "{}", lookahead_strs.join(", "))?;
+      +                    }
+       
+                           writeln!(f, "}}]")?;
                        }
                    }
        
-
-      ```
-
-      This change will transform the messy, repetitive item listing into a clean, grouped format, which should significantly improve the readability of your parser's state representation. Let me know if you have any other parts of the output you'd like to tidy up
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -506,8 +506,9 @@         let non_terminal_map = &self.non_terminal_map;
-               let item_set_map = &self.item_set_map;
-       
-      +        use crate::glr::grammar::{Production, Symbol, Terminal};
-               use crate::glr::items::{Item};
-      -        use std::collections::BTreeSet;
-      +        use std::collections::{BTreeMap, BTreeSet};
-       
-               writeln!(f, "Parse Table:")?;
-               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
-      @@ -516,8 +517,39 @@ 
-                   if let Some(items) = item_set_map.get_by_right(&state_id) {
-                       writeln!(f, "    Items:")?;
-      +                // Group items by core: (production, dot_position)
-      +                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-                       for item in items {
-      -                    writeln!(f, "      - {}", item)?;
-      +                    grouped_items
-      +                        .entry((&item.production, item.dot_position))
-      +                        .or_default()
-      +                        .insert(item.lookahead.clone());
-      +                }
-      +
-      +                // Print grouped items
-      +                for ((production, dot_pos), lookaheads) in grouped_items {
-      +                    // Print the core item part
-      +                    write!(f, "      - [{} ->", production.lhs.0)?;
-      +                    for (i, symbol) in production.rhs.iter().enumerate() {
-      +                        if i == dot_pos {
-      +                            write!(f, " •")?;
-      +                        }
-      +                        match symbol {
-      +                            Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
-      +                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
-      +                        }
-      +                    }
-      +                    if dot_pos == production.rhs.len() {
-      +                        write!(f, " •")?;
-      +                    }
-      +                    write!(f, ", {{")?;
-      +
-      +                    // Print the set of lookaheads
-      +                    let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-      +                    lookahead_strs.sort();
-      +                    write!(f, "{}", lookahead_strs.join(", "))?;
-      +
-      +                    writeln!(f, "}}]")?;
+      -            writeln!(f, "    Actions (Phase 1):")?;
+      +            writeln!(f, "    Lookahead Actions (Phase 1):")?;
+                   let actions = &row.phase1_shifts_and_reduces;
+                   let max_term_len = if actions.is_empty() { 0 } else {
+                       actions.keys()
+      @@ -650,52 +656,6 @@
                        }
                    }
        
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: What about `explain_stack`?
-    metadata:
-  - assistant: |-
-      You are absolutely right! I focused on the general `Display` implementation but missed cleaning up the `explain_stack` function, which suffers from the same readability issue. My apologies.
-
-      Here is the patch for `src/glr/parser.rs` to apply the same grouping logic to the `explain_stack` function.
-
-      ### Modified `src/glr/parser.rs`
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -361,11 +361,41 @@
-                   if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-                       // For LR(1), the item set in the map is the full state (closure).
-                       writeln!(&mut result, "  Items:").unwrap();
-                       if items.is_empty() {
-                           writeln!(&mut result, "    (None)").unwrap();
-                       } else {
-      -                    for item in items {
-      -                        writeln!(&mut result, "    - {}", item).unwrap();
-      +                    // Group items by core: (production, dot_position)
-      +                    let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-      +                    for item in items {
-      +                        grouped_items
-      +                            .entry((&item.production, item.dot_position))
-      +                            .or_default()
-      +                            .insert(item.lookahead.clone());
-      +                    }
-      +
-      +                    // Print grouped items
-      +                    for ((production, dot_pos), lookaheads) in grouped_items {
-      +                        // Print the core item part
-      +                        write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
-      +                        for (i, symbol) in production.rhs.iter().enumerate() {
-      +                            if i == *dot_pos {
-      +                                write!(&mut result, " •").unwrap();
-      +                            }
-      +                            match symbol {
-      +                                Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
-      +                                Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
-      +                            }
-      +                        }
-      +                        if *dot_pos == production.rhs.len() {
-      +                            write!(&mut result, " •").unwrap();
-      +                        }
-      +                        write!(&mut result, ", {{").unwrap();
-      +
-      +                        // Print the set of lookaheads
-      +                        let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-      +                        lookahead_strs.sort();
-      +                        write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
-      +
-      +                        writeln!(&mut result, "}}]").unwrap();
-                           }
-                       }
+      -            writeln!(f, "    Actions (Phase 2):")?;
+      -            let actions = &row.phase2_shifts_and_reduces;
+      -            let max_term_len = if actions.is_empty() { 0 } else {
+      -                actions.keys()
+      -                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
+      -                    .max().unwrap_or(0)
+      -            };
+      -            for (&terminal_id, action) in actions {
+      -                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+      -                let terminal_name = terminal.to_string();
+      -                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
+      -                match action {
+      -                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+      -                        writeln!(f, " -> Shift {}", next_state_id.0)?;
+      -                    }
+      -                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+      -                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+      -                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+      -                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
+      -                    }
+      -                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      -                        writeln!(f, " -> Conflict:")?;
+      -                        if let Some(shift_state) = shift {
+      -                            writeln!(f, "        - Shift {}", shift_state.0)?;
+      -                        }
+      -                        for (len, nts) in reduces {
+      -                            writeln!(f, "        - Reduce (len {}):", len)?;
+      -                            for (nt_id, prod_ids) in nts {
+      -                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+      -                                for prod_id_val in prod_ids {
+      -                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+      -                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -
+                   writeln!(f, "    Default Action (Phase 3):")?;
+                   if let Some(reduce) = &row.phase3_default_reduce.reduce {
+                       let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
+      @@ -705,9 +665,9 @@
+                       writeln!(f, "      - No default reduce")?;
+                   }
+                   if row.phase3_default_reduce.clone_and_merge {
+      -                writeln!(f, "      - Clone and merge")?;
+      +                writeln!(f, "      - On shift: state is preserved (has other lookahead actions)")?;
                    } else {
+      -                writeln!(f, "      - No clone and merge")?;
+      +                writeln!(f, "      - On shift: state is consumed (no other lookahead actions)")?;
+                   }
+       
+                   writeln!(f, "    Gotos:")?;
 
       ```
 
-      This change ensures that both the general parser display and the specific `explain_stack` output are clean, readable, and consistent.
+      These changes should make your parser's output much more readable and directly reflect how the parser operates. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
