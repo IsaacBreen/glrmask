@@ -39,7 +39,7 @@ impl JSONConvertible for Terminal {
             Terminal::Literal(bytes) => JSONNode::Object({
                 let mut obj = StdMap::new();
                 obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
-                obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                obj.insert("value".to_string(), bytes.to_json());
                 obj
             }),
         }
@@ -199,3 +199,4 @@ pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
         rhs,
     }
 }
+

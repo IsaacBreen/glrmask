@@ -247,7 +247,7 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
         }
         crate::debug!(2, "Removing {} productions with undefined non-terminals.", removed_productions.len());
         let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions.iter().flat_map(|(i, prod)| prod.rhs.iter().filter_map(|symbol| match symbol {
-            Symbol::NonTerminal(nt) => Some(nt.clone()),
+            NonTerminal(nt) => Some(nt.clone()),
             _ => None,
         })).collect();
         crate::debug!(2, "Missing non-terminals ({}) in productions:", all_rhs_nonterminals.len());
@@ -492,7 +492,10 @@ pub fn filter_productions_by_reachability(
 }
 
 pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
-    todo!()
+    let productions = remove_productions_with_undefined_nonterminals(initial_productions, &[start_production_id]);
+    let new_start_production_id = productions.iter().position(|p| p.lhs == initial_productions[start_production_id].lhs)
+        .expect("Start production was removed during simplification");
+    (productions, new_start_production_id)
 }
 
 /// Helper function to find the last symbol in a rule's RHS that is not a nullable non-terminal.
@@ -608,7 +611,7 @@ pub fn resolve_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    todo!("resolve_right_recursion");
+    resolve_direct_right_recursion(productions, new_name_generator);
 }
 
 pub fn resolve_direct_right_recursion(
@@ -785,3 +788,4 @@ pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
 
     compatible_pairs
 }
+

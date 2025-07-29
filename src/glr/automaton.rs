@@ -253,3 +253,4 @@ pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet
     }
     result
 }
+

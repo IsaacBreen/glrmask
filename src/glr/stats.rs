@@ -151,3 +151,4 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         state_stats: all_state_stats,
     }
 }
+
