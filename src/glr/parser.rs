@@ -506,8 +506,9 @@ impl Display for GLRParser {
         let non_terminal_map = &self.non_terminal_map;
         let item_set_map = &self.item_set_map;
 
+        use crate::glr::grammar::{Production, Symbol, Terminal};
         use crate::glr::items::{Item};
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeMap, BTreeSet};
 
         writeln!(f, "Parse Table:")?;
         writeln!(f, "  Start State: {}", self.start_state_id.0)?;
@@ -516,8 +517,39 @@ impl Display for GLRParser {
 
             if let Some(items) = item_set_map.get_by_right(&state_id) {
                 writeln!(f, "    Items:")?;
+                // Group items by core: (production, dot_position)
+                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                 for item in items {
-                    writeln!(f, "      - {}", item)?;
+                    grouped_items
+                        .entry((&item.production, item.dot_position))
+                        .or_default()
+                        .insert(item.lookahead.clone());
+                }
+
+                // Print grouped items
+                for ((production, dot_pos), lookaheads) in grouped_items {
+                    // Print the core item part
+                    write!(f, "      - [{} ->", production.lhs.0)?;
+                    for (i, symbol) in production.rhs.iter().enumerate() {
+                        if i == dot_pos {
+                            write!(f, " •")?;
+                        }
+                        match symbol {
+                            Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                        }
+                    }
+                    if dot_pos == production.rhs.len() {
+                        write!(f, " •")?;
+                    }
+                    write!(f, ", {{")?;
+
+                    // Print the set of lookaheads
+                    let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                    lookahead_strs.sort();
+                    write!(f, "{}", lookahead_strs.join(", "))?;
+
+                    writeln!(f, "}}]")?;
                 }
             }
 
