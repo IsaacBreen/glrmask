@@ -867,10 +867,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Key is (depth, state_id) to process shortest stacks first.
         let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
 
+        // let get_depth = |peek: &GSSNode| peek.max_depth();
+        let get_depth = |peek: &GSSNode| 0;
+
         // Peel off the top edges to populate the initial work map.
         for peek in self.active_state.stack.peek_iter() {
             let isolated_state = ParseState { stack: Arc::new(peek.isolated_parent()) };
-            let depth = isolated_state.stack.max_depth();
+            let depth = get_depth(&isolated_state.stack);
             let state_id = peek.edge_value().state_id;
             work_map.entry((depth, state_id))
                 .and_modify(|s| s.merge(isolated_state.clone()))
@@ -906,7 +909,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // Deconstruct the result and put it back into the work map.
                         for new_peek in Arc::new(reduced_stack).peek_iter() {
                             let isolated = ParseState { stack: Arc::new(new_peek.isolated_parent()) };
-                            let new_depth = isolated.stack.max_depth();
+                            let new_depth = get_depth(&isolated.stack);
                             let new_state_id = new_peek.edge_value().state_id;
                             work_map.entry((new_depth, new_state_id))
                                 .and_modify(|s| s.merge(isolated.clone()))
