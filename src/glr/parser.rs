@@ -864,15 +864,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
 
-        // Key is (state_id, depth) to process by state ID then depth.
-        let mut work_map: BTreeMap<(StateID, usize), ParseState> = BTreeMap::new();
+        // Key is (depth, state_id) to process shortest stacks first.
+        let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
 
         // Peel off the top edges to populate the initial work map.
         for peek in self.active_state.stack.peek_iter() {
             let isolated_state = ParseState { stack: Arc::new(peek.isolated_parent()) };
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
-            work_map.entry((state_id, depth))
+            work_map.entry((depth, state_id))
                 .and_modify(|s| s.merge(isolated_state.clone()))
                 .or_insert(isolated_state);
         }
@@ -906,7 +906,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let isolated = ParseState { stack: Arc::new(new_peek.isolated_parent()) };
                             let new_depth = isolated.stack.max_depth();
                             let new_state_id = new_peek.edge_value().state_id;
-                            work_map.entry((new_state_id, new_depth))
+                            work_map.entry((new_depth, new_state_id))
                                 .and_modify(|s| s.merge(isolated.clone()))
                                 .or_insert(isolated);
                         }
