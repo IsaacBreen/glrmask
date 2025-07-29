@@ -356,7 +356,7 @@ impl GLRParser {
                         // Print the core item part
                         write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
                         for (i, symbol) in production.rhs.iter().enumerate() {
-                            if i == dot_pos {
+                            if i == *dot_pos {
                                 write!(&mut result, " •").unwrap();
                             }
                             match symbol {
@@ -364,7 +364,7 @@ impl GLRParser {
                                 Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
                             }
                         }
-                        if dot_pos == production.rhs.len() {
+                        if *dot_pos == production.rhs.len() {
                             write!(&mut result, " •").unwrap();
                         }
                         write!(&mut result, ", {{").unwrap();
@@ -577,21 +577,54 @@ impl Display for GLRParser {
 
                     // Print the set of lookaheads
                     let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                    const MAX_LOOKAHEADS_TO_PRINT: usize = 8;
                     lookahead_strs.sort();
-                    if lookahead_strs.len() > MAX_LOOKAHEADS_TO_PRINT {
-                        let displayed_lookaheads = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_PRINT).cloned().collect::<Vec<_>>().join(", ");
-                        write!(f, "{}, ... ({} more)", displayed_lookaheads, lookahead_strs.len() - MAX_LOOKAHEADS_TO_PRINT)?;
-                    } else {
-                        write!(f, "{}", lookahead_strs.join(", "))?;
-                    }
+                    write!(f, "{}", lookahead_strs.join(", "))?;
 
                     writeln!(f, "}}]")?;
                 }
             }
 
-            writeln!(f, "    Lookahead Actions (Phase 1):")?;
+            writeln!(f, "    Actions (Phase 1):")?;
             let actions = &row.phase1_shifts_and_reduces;
+            let max_term_len = if actions.is_empty() { 0 } else {
+                actions.keys()
+                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
+                    .max().unwrap_or(0)
+            };
+            for (&terminal_id, action) in actions {
+                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                let terminal_name = terminal.to_string();
+                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                        writeln!(f, " -> Shift {}", next_state_id.0)?;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                        writeln!(f, " -> Conflict:")?;
+                        if let Some(shift_state) = shift {
+                            writeln!(f, "        - Shift {}", shift_state.0)?;
+                        }
+                        for (len, nts) in reduces {
+                            writeln!(f, "        - Reduce (len {}):", len)?;
+                            for (nt_id, prod_ids) in nts {
+                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                for prod_id_val in prod_ids {
+                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            writeln!(f, "    Actions (Phase 2):")?;
+            let actions = &row.phase2_shifts_and_reduces;
             let max_term_len = if actions.is_empty() { 0 } else {
                 actions.keys()
                     .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
@@ -638,9 +671,9 @@ impl Display for GLRParser {
                 writeln!(f, "      - No default reduce")?;
             }
             if row.phase3_default_reduce.clone_and_merge {
-                writeln!(f, "      - On shift: state is preserved (has other lookahead actions)")?;
+                writeln!(f, "      - Clone and merge")?;
             } else {
-                writeln!(f, "      - On shift: state is consumed (no other lookahead actions)")?;
+                writeln!(f, "      - No clone and merge")?;
             }
 
             writeln!(f, "    Gotos:")?;
