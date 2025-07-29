@@ -770,9 +770,9 @@ pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
             let (state_id2, row2) = states_and_rows[j];
 
             // Condition 1: Check for identical actions across all phases.
-            let actions_are_identical = row1.phase1_shifts_and_reduces == row2.phase1_shifts_and_reduces
-                && row1.phase2_shifts_and_reduces == row2.phase2_shifts_and_reduces
-                && row1.phase3_default_reduce == row2.phase3_default_reduce;
+            let actions_are_identical = row1.shifts_and_reduces_without_default_reduce == row2.shifts_and_reduces_without_default_reduce
+                && row1.shifts_and_reduces_full == row2.shifts_and_reduces_full
+                && row1.default_reduce == row2.default_reduce;
 
             if actions_are_identical {
                 // Condition 2: Check for compatible gotos.

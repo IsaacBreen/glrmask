@@ -19,7 +19,7 @@ use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
+use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
 /// originate from a **reduce** should be put.
@@ -149,9 +149,9 @@ impl JSONConvertible for StopReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParserPhase {
     /// The parser has completed all reductions for the current state and is ready for a new token.
-    ReadyForPhase1,
+    ReadyForToken,
     /// The parser has processed a token (shifts and lookahead-reduces) and is ready for default reductions.
-    ReadyForPhase3,
+    ReadyForDefaultReductions,
 }
 
 #[derive(Clone)]
@@ -286,7 +286,7 @@ impl GLRParser {
             parser: self,
             active_state: ParseState::new(),
             accepted: false,
-            phase: ParserPhase::ReadyForPhase1, // It's empty, so it's ready for a token.
+            phase: ParserPhase::ReadyForToken, // It's empty, so it's ready for a token.
         }
     }
 
@@ -296,7 +296,7 @@ impl GLRParser {
             parser: self,
             active_state: initial_parse_state,
             accepted: false,
-            phase: ParserPhase::ReadyForPhase3, // An initial state might have default reductions.
+            phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
         };
         parser_state
     }
@@ -305,7 +305,7 @@ impl GLRParser {
             parser: self,
             active_state: parse_state,
             accepted: false,
-            phase: ParserPhase::ReadyForPhase3,
+            phase: ParserPhase::ReadyForDefaultReductions,
         };
         parser_state
     }
@@ -383,8 +383,8 @@ impl GLRParser {
 
             // Get and print actions
             if let Some(row) = self.stage_7_table.get(&state_id) {
-                writeln!(&mut result, "  Phase 1 Actions (Full Lookahead):").unwrap();
-                let actions = &row.phase1_shifts_and_reduces;
+                writeln!(&mut result, "  Actions (without default reduce):").unwrap();
+                let actions = &row.shifts_and_reduces_without_default_reduce;
                 if actions.is_empty() {
                     writeln!(&mut result, "    (No lookahead actions)").unwrap();
                 } else {
@@ -432,8 +432,8 @@ impl GLRParser {
                     }
                 }
 
-                writeln!(&mut result, "  Phase 2 Actions (Full Lookahead):").unwrap();
-                let actions = &row.phase2_shifts_and_reduces;
+                writeln!(&mut result, "  Actions (full):").unwrap();
+                let actions = &row.shifts_and_reduces_full;
                 if actions.is_empty() {
                     writeln!(&mut result, "    (No lookahead actions)").unwrap();
                 } else {
@@ -481,15 +481,15 @@ impl GLRParser {
                     }
                 }
 
-                writeln!(&mut result, "  Phase 3 Default Action:").unwrap();
-                if let Some(reduce_action) = &row.phase3_default_reduce.reduce {
+                writeln!(&mut result, "  Default Action:").unwrap();
+                if let Some(reduce_action) = &row.default_reduce.reduce {
                     let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
                     let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
                     writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
                 } else {
                     writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
                 }
-                if row.phase3_default_reduce.clone_and_merge {
+                if row.default_reduce.clone_and_merge {
                     writeln!(&mut result, "    (State will be merged after shift)").unwrap();
                 } else {
                     writeln!(&mut result, "    (State will not be merged after shift)").unwrap();
@@ -643,21 +643,21 @@ impl Display for GLRParser {
                 }
             }
 
-            writeln!(f, "    Actions (Phase 1):")?;
-            format_actions(f, &row.phase1_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
+            writeln!(f, "    Actions (without default reduce):")?;
+            format_actions(f, &row.shifts_and_reduces_without_default_reduce, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
-            writeln!(f, "    Actions (Phase 2):")?;
-            format_actions(f, &row.phase2_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
+            writeln!(f, "    Actions (full):")?;
+            format_actions(f, &row.shifts_and_reduces_full, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
-            writeln!(f, "    Default Action (Phase 3):")?;
-            if let Some(reduce) = &row.phase3_default_reduce.reduce {
+            writeln!(f, "    Default Action:")?;
+            if let Some(reduce) = &row.default_reduce.reduce {
                 let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
                 let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
                 writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
             } else {
                 writeln!(f, "      - No default reduce")?;
             }
-            if row.phase3_default_reduce.clone_and_merge {
+            if row.default_reduce.clone_and_merge {
                 writeln!(f, "      - Clone and merge")?;
             } else {
                 writeln!(f, "      - No clone and merge")?;
@@ -788,7 +788,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    fn _do_phase1(&mut self, token_id: TerminalID, phase1_todo: &mut VecDeque<ParseState>, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut VecDeque<ParseState>, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
@@ -797,12 +797,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 phase1_todo,
                 ReduceQueue::Separate(phase2_todo),
                 shifted_states_todo,
-                |row| &row.phase1_shifts_and_reduces,
+                |row| &row.shifts_and_reduces_without_default_reduce,
             );
         });
     }
 
-    fn _do_phase2(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_queued_reductions(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
@@ -811,9 +811,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 phase2_todo,
                 ReduceQueue::SameAsWork,
                 shifted_states_todo,
-                |row| &row.phase2_shifts_and_reduces,
+                |row| &row.shifts_and_reduces_full,
             );
-            self.phase = ParserPhase::ReadyForPhase3;
+            self.phase = ParserPhase::ReadyForDefaultReductions;
         });
     }
 
@@ -864,14 +864,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    #[time_it("GLRParserState::do_phase1_and_2")]
-    pub fn do_phase1_and_2(&mut self, token_id: TerminalID) {
+    #[time_it("GLRParserState::process_token")]
+    pub fn process_token(&mut self, token_id: TerminalID) {
         // Reset acceptance flag for the new token
         self.accepted = false;
 
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
-            self.phase = ParserPhase::ReadyForPhase3; // Skip phase 1 and 2, go straight to phase 3
+            self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
             return;
         }
 
@@ -880,11 +880,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
-        if self.phase == ParserPhase::ReadyForPhase1 {
+        if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: VecDeque<ParseState> = VecDeque::new();
             phase1_todo.push_back(self.active_state.clone());
-            self._do_phase1(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo);
-        } else { // ParserPhase::ReadyForPhase3
+            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo);
+        } else { // ParserPhase::ReadyForDefaultReductions
             // If we are ready for phase 3, it means we have a set of shifted states.
             // Instead of performing default reductions (phase 3), we can process the next token.
             // The user suggests skipping phase 1 and going straight to phase 2.
@@ -893,7 +893,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // --- Phase 2 ---
-        self._do_phase2(token_id, &mut phase2_todo, &mut shifted_states_todo);
+        self._do_queued_reductions(token_id, &mut phase2_todo, &mut shifted_states_todo);
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
@@ -905,14 +905,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.log_gss("Phase1/2-end", token_id);
     }
 
-    #[time_it("GLRParserState::do_phase3")]
-    pub fn do_phase3(&mut self) {
+    #[time_it("GLRParserState::process_default_reductions")]
+    pub fn process_default_reductions(&mut self) {
         self.log_gss("Phase3-start", TerminalID(0)); // Log with dummy token ID
-        if self.phase == ParserPhase::ReadyForPhase1 {
+        if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
             return;
         }
-        assert_eq!(self.phase, ParserPhase::ReadyForPhase3);
+        assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
         // Key is (depth, state_id) to process shortest stacks first.
         let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
@@ -933,7 +933,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut next_active_state = ParseState::new();
 
         let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
-        crate::debug!(5, "GLRParserState::do_phase3: Stats: {:?}", stats);
+        crate::debug!(5, "GLRParserState::process_default_reductions: Stats: {:?}", stats);
 
         crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
@@ -941,7 +941,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             while let Some(((_depth, state_id), state)) = work_map.pop_last() {
                 let row = &self.parser.stage_7_table[&state_id];
 
-                if let Some(ref r) = row.phase3_default_reduce.reduce {
+                if let Some(ref r) = row.default_reduce.reduce {
                     crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                   self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                   r.len, state_id.0, state.stack.num_predecessors());
@@ -968,7 +968,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 }
 
-                if row.phase3_default_reduce.clone_and_merge {
+                if row.default_reduce.clone_and_merge {
                     next_active_state.merge(state);
                 }
             }
@@ -976,7 +976,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
         self.active_state = next_active_state;
-        self.phase = ParserPhase::ReadyForPhase1;
+        self.phase = ParserPhase::ReadyForToken;
         self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
     }
 
@@ -1000,8 +1000,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for peek in self.active_state.stack.peek_iter() {
             let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
             let shifts_and_reduces = match self.phase {
-                ParserPhase::ReadyForPhase1 => &row.phase1_shifts_and_reduces,
-                ParserPhase::ReadyForPhase3 => &row.phase2_shifts_and_reduces,
+                ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
+                ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
             };
             if let Some(action) = shifts_and_reduces.get(&token_id) {
                 crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
@@ -1023,8 +1023,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
-        self.do_phase1_and_2(token_id);
-        self.do_phase3();
+        self.process_token(token_id);
+        self.process_default_reductions();
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
@@ -1055,8 +1055,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn merge_with(&mut self, mut other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
         match (self.phase, other.phase) {
-            (ParserPhase::ReadyForPhase1, ParserPhase::ReadyForPhase3) => self.do_phase3(),
-            (ParserPhase::ReadyForPhase3, ParserPhase::ReadyForPhase1) => other.do_phase3(),
+            (ParserPhase::ReadyForToken, ParserPhase::ReadyForDefaultReductions) => self.process_default_reductions(),
+            (ParserPhase::ReadyForDefaultReductions, ParserPhase::ReadyForToken) => other.process_default_reductions(),
             _ => {},
         }
         self.active_state.merge(other.active_state);

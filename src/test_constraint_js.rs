@@ -976,7 +976,7 @@ fn test_js_parser_direct_feed_for_phase3_debug() -> Result<(), Box<dyn std::erro
     for (i, &terminal_id) in terminal_ids.iter().enumerate() {
         println!("\n--- Stepping with terminal {} ({:?}) ---", i, parser.terminal_map.get_by_right(&terminal_id).unwrap());
         glr_state.step(terminal_id);
-        glr_state.do_phase3();
+        glr_state.process_default_reductions();
         // Print profiler stats after each step
         print_summary_flat();
         print_summary();

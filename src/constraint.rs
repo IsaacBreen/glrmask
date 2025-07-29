@@ -1272,7 +1272,7 @@ impl<'a> GrammarConstraintState<'a> {
                             // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
                             crate::debug!(4, "Processing non-end precomputed node data");
                             crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
-                            glr_s.do_phase3();
+                            glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                             // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
@@ -1449,7 +1449,7 @@ impl<'a> GrammarConstraintState<'a> {
         self.state = new_overall_state.clone();
 
         for glr_parser_state in self.state.values_mut() {
-            glr_parser_state.do_phase3();
+            glr_parser_state.process_default_reductions();
         }
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.

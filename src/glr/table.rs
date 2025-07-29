@@ -155,8 +155,8 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     }
 }
 
-pub type Stage7Phase1ShiftsAndReduces = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
-pub type Stage7Phase2ShiftsAndReduces = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
+pub type ShiftsAndReducesWithoutDefaultReduce = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
+pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Reduce {
@@ -186,12 +186,12 @@ impl JSONConvertible for Reduce {
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Stage7Phase3DefaultReduce {
+pub struct DefaultReduce {
     pub clone_and_merge: bool, // Indicates that there are phase 1 actions to be performed here.
     pub reduce: Option<Reduce>,
 }
 
-impl JSONConvertible for Stage7Phase3DefaultReduce {
+impl JSONConvertible for DefaultReduce {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         obj.insert("clone_and_merge".to_string(), self.clone_and_merge.to_json());
@@ -200,20 +200,20 @@ impl JSONConvertible for Stage7Phase3DefaultReduce {
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => Ok(Stage7Phase3DefaultReduce {
-                clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for Stage7Phase3DefaultReduce".to_string())?)?,
-                reduce: Option::<Reduce>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for Stage7Phase3DefaultReduce".to_string())?)?,
+            JSONNode::Object(mut obj) => Ok(DefaultReduce {
+                clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for DefaultReduce".to_string())?)?,
+                reduce: Option::<Reduce>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?)?,
             }),
-            _ => Err("Expected JSONNode::Object for Stage7Phase3DefaultReduce".to_string()),
+            _ => Err("Expected JSONNode::Object for DefaultReduce".to_string()),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage7Row {
-    pub phase1_shifts_and_reduces: Stage7Phase1ShiftsAndReduces,
-    pub phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces,
-    pub phase3_default_reduce: Stage7Phase3DefaultReduce,
+    pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+    pub default_reduce: DefaultReduce,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
@@ -221,25 +221,24 @@ pub struct Stage7Row {
 impl JSONConvertible for Stage7Row {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("phase1_shifts_and_reduces".to_string(), self.phase1_shifts_and_reduces.to_json());
-        obj.insert("phase2_shifts_and_reduces".to_string(), self.phase2_shifts_and_reduces.to_json());
-        obj.insert("phase3_default_reduce".to_string(), self.phase3_default_reduce.to_json());
+        obj.insert("shifts_and_reduces_without_default_reduce".to_string(), self.shifts_and_reduces_without_default_reduce.to_json());
+        obj.insert("shifts_and_reduces_full".to_string(), self.shifts_and_reduces_full.to_json());
+        obj.insert("default_reduce".to_string(), self.default_reduce.to_json());
         obj.insert("gotos".to_string(), self.gotos.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => Ok(Stage7Row {
-                phase1_shifts_and_reduces: Stage7Phase1ShiftsAndReduces::from_json(obj.remove("phase1_shifts_and_reduces").ok_or_else(|| "Missing field phase1_shifts_and_reduces for Stage7Row".to_string())?)?,
-                phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces::from_json(obj.remove("phase2_shifts_and_reduces").ok_or_else(|| "Missing field phase2_shifts_and_reduces for Stage7Row".to_string())?)?,
-                phase3_default_reduce: Stage7Phase3DefaultReduce::from_json(obj.remove("phase3_default_reduce").ok_or_else(|| "Missing field phase3_default_reduce for Stage7Row".to_string())?)?,
+                shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce::from_json(obj.remove("shifts_and_reduces_without_default_reduce").ok_or_else(|| "Missing field shifts_and_reduces_without_default_reduce for Stage7Row".to_string())?)?,
+                shifts_and_reduces_full: ShiftsAndReducesFull::from_json(obj.remove("shifts_and_reduces_full").ok_or_else(|| "Missing field shifts_and_reduces_full for Stage7Row".to_string())?)?,
+                default_reduce: DefaultReduce::from_json(obj.remove("default_reduce").ok_or_else(|| "Missing field default_reduce for Stage7Row".to_string())?)?,
                 gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())?)?,
             }),
             _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
         }
     }
 }
-
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Goto {
@@ -542,7 +541,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let state_id = *item_set_map.get_by_left(&item_set).unwrap();
 
         // Phase 2 map contains all possible actions for a state.
-        let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
+        let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
 
         for (terminal, action) in &row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
@@ -577,12 +576,12 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                 reduces,
             };
             final_action.simplify();
-            phase2_shifts_and_reduces.insert(terminal_id, final_action);
+            shifts_and_reduces_full.insert(terminal_id, final_action);
         }
 
         // --- Promotion Logic ---
         let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
-        for action in phase2_shifts_and_reduces.values() {
+        for action in shifts_and_reduces_full.values() {
             let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
                 for (&len, nts) in reduces {
                     for (&nt_id, pids) in nts {
@@ -605,10 +604,10 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
 
-        let (phase1_shifts_and_reduces, phase3_default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
+        let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
             
-            let phase1 = phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
+            let shifts_and_reduces_without_default = shifts_and_reduces_full.iter().filter_map(|(&tid, action)| {
                 let mut new_action = action.clone();
                 let mut was_modified = false;
 
@@ -638,20 +637,20 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                     new_action.simplify();
                 }
                 Some((tid, new_action))
-            }).collect::<Stage7Phase1ShiftsAndReduces>();
+            }).collect::<ShiftsAndReducesWithoutDefaultReduce>();
 
-            let phase3 = Stage7Phase3DefaultReduce {
-                clone_and_merge: !phase1.is_empty(),
+            let default_reduce = DefaultReduce {
+                clone_and_merge: !shifts_and_reduces_without_default.is_empty(),
                 reduce: Some(Reduce { nonterminal_id, len, production_ids }),
             };
-            (phase1, phase3)
+            (shifts_and_reduces_without_default, default_reduce)
         } else {
-            let phase1 = phase2_shifts_and_reduces.clone();
-            let phase3 = Stage7Phase3DefaultReduce {
+            let shifts_and_reduces_without_default = shifts_and_reduces_full.clone();
+            let default_reduce = DefaultReduce {
                 clone_and_merge: true,
                 reduce: None,
             };
-            (phase1, phase3)
+            (shifts_and_reduces_without_default, default_reduce)
         };
 
         let mut gotos = BTreeMap::new();
@@ -665,9 +664,9 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         }
 
         stage_7_table.insert(state_id, Stage7Row {
-            phase1_shifts_and_reduces,
-            phase2_shifts_and_reduces,
-            phase3_default_reduce,
+            shifts_and_reduces_without_default_reduce,
+            shifts_and_reduces_full,
+            default_reduce,
             gotos,
         });
     }
@@ -764,9 +763,9 @@ fn merge_compatible_states(
         new_item_sets.entry(new_id).or_default().extend(state_to_items[&old_id].iter().cloned());
 
         let new_row = new_table.entry(new_id).or_insert_with(|| Stage7Row {
-            phase1_shifts_and_reduces: row.phase1_shifts_and_reduces.clone(),
-            phase2_shifts_and_reduces: row.phase2_shifts_and_reduces.clone(),
-            phase3_default_reduce: row.phase3_default_reduce.clone(),
+            shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce.clone(),
+            shifts_and_reduces_full: row.shifts_and_reduces_full.clone(),
+            default_reduce: row.default_reduce.clone(),
             gotos: BTreeMap::new(),
         });
 
@@ -786,8 +785,8 @@ fn merge_compatible_states(
     }
 
     for row in new_table.values_mut() {
-        row.phase1_shifts_and_reduces.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
-        row.phase2_shifts_and_reduces.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+        row.shifts_and_reduces_without_default_reduce.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+        row.shifts_and_reduces_full.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
         row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
     }
 

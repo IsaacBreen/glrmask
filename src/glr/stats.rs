@@ -102,7 +102,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         current_state_stats.num_gotos = row.gotos.len();
 
         // Stats are based on phase 2, which contains the full set of actions.
-        let actions = &row.phase2_shifts_and_reduces;
+        let actions = &row.shifts_and_reduces_full;
         current_state_stats.total_actions = actions.len();
 
         for (_, action) in actions {
@@ -132,7 +132,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         }
         
         // Also account for the default reduce action if it exists
-        if row.phase3_default_reduce.reduce.is_some() {
+        if row.default_reduce.reduce.is_some() {
             // This is an optimization, but we can count it as a reduce for stats.
             // The logic above already counts reduces from the full phase2 map,
             // so we don't double-count here. We could add a new stat for default reduces if needed.
