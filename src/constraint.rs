@@ -36,7 +36,7 @@ use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
-use crate::glr::items::{LRType, LR_TYPE};
+use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 
 pub type LLMTokenBV = HybridBitset;
@@ -1265,7 +1265,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         let mut do_phase3 = false;
                         do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
-                        do_phase3 |= !matches!(LR_TYPE, LRType::LR1);
+                        do_phase3 |= !matches!(LR_MODE, LRMode::LR1);
                         // do_phase3 |= true;
                         if do_phase3 {
                             // There will be a split.

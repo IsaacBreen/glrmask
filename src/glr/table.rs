@@ -1,4 +1,4 @@
-use super::items::{Item, LRType};
+use super::items::{Item, LRMode};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};

@@ -1,5 +1,5 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::items::{Item, LRType, LR_TYPE};
+use crate::glr::items::{Item, LRMode, LR_MODE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -214,7 +214,7 @@ pub fn compute_closure(
         }
     }
 
-    if LR_TYPE == LRType::LALR {
+    if LR_MODE == LRMode::LALR {
         let mut lalr_closure = BTreeSet::new();
         let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 

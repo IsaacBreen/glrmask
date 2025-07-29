@@ -18,7 +18,7 @@ use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
-use crate::glr::items::{Item, LRType, LR_TYPE};
+use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
@@ -926,7 +926,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
-        if LR_TYPE != LRType::LR1 {
+        if LR_MODE != LRMode::LR1 {
             return None;
         }
         if Some(token_id) == self.parser.ignore_terminal_id {

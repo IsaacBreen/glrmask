@@ -88,10 +88,10 @@ impl Item {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LRType {
+pub enum LRMode {
     LALR,
     LR1,
 }
 
-pub const LR_TYPE: LRType = LRType::LALR;
+pub const LR_MODE: LRMode = LRMode::LALR;
 // pub const LR_TYPE: LRType = LRType::LR1;
