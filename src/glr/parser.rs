@@ -530,6 +530,76 @@ impl GLRParser {
     }
 }
 
+fn format_actions(
+    f: &mut std::fmt::Formatter<'_>,
+    actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+    productions: &[Production],
+    indent: &str,
+) -> std::fmt::Result {
+    if actions.is_empty() {
+        return writeln!(f, "{} (none)", indent);
+    }
+
+    // Group terminals by action
+    let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
+    for (tid, action) in actions {
+        let terminal = terminal_map.get_by_right(tid).unwrap();
+        grouped_actions.entry(action).or_default().insert(terminal);
+    }
+
+    for (action, terminals) in grouped_actions {
+        // Format action
+        let action_str = match action {
+            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                format!("Shift {}", next_state_id.0)
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                let mut s = "Conflict:".to_string();
+                let inner_indent = format!("\n{}        ", indent); // indent + "        "
+                if let Some(shift_state) = shift {
+                    let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
+                }
+                for (_len, nts) in reduces {
+                    for (_nt_id, prod_ids) in nts {
+                        for prod_id_val in prod_ids {
+                            let prod = productions.get(prod_id_val.0).unwrap();
+                            let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
+                        }
+                    }
+                }
+                s
+            }
+        };
+
+        // Format terminals
+        let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
+        terminal_names.sort();
+
+        const MAX_TERMS_TO_SHOW: usize = 5;
+        let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
+            (&terminal_names[..MAX_TERMS_TO_SHOW], true)
+        } else {
+            (terminal_names.as_slice(), false)
+        };
+
+        let mut terms_str = terms_to_show.join(", ");
+        if truncated {
+            let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
+        }
+
+        writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+    }
+
+    Ok(())
+}
+
 impl Display for GLRParser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage_7_table = &self.stage_7_table;
@@ -585,82 +655,10 @@ impl Display for GLRParser {
             }
 
             writeln!(f, "    Actions (Phase 1):")?;
-            let actions = &row.phase1_shifts_and_reduces;
-            let max_term_len = if actions.is_empty() { 0 } else {
-                actions.keys()
-                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                    .max().unwrap_or(0)
-            };
-            for (&terminal_id, action) in actions {
-                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                let terminal_name = terminal.to_string();
-                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                        writeln!(f, " -> Shift {}", next_state_id.0)?;
-                    }
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                    }
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                        writeln!(f, " -> Conflict:")?;
-                        if let Some(shift_state) = shift {
-                            writeln!(f, "        - Shift {}", shift_state.0)?;
-                        }
-                        for (len, nts) in reduces {
-                            writeln!(f, "        - Reduce (len {}):", len)?;
-                            for (nt_id, prod_ids) in nts {
-                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                for prod_id_val in prod_ids {
-                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            format_actions(f, &row.phase1_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
             writeln!(f, "    Actions (Phase 2):")?;
-            let actions = &row.phase2_shifts_and_reduces;
-            let max_term_len = if actions.is_empty() { 0 } else {
-                actions.keys()
-                    .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string().len())
-                    .max().unwrap_or(0)
-            };
-            for (&terminal_id, action) in actions {
-                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                let terminal_name = terminal.to_string();
-                write!(f, "      - {:<width$}", terminal_name, width = max_term_len)?;
-                match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                        writeln!(f, " -> Shift {}", next_state_id.0)?;
-                    }
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                        writeln!(f, " -> Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                    }
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                        writeln!(f, " -> Conflict:")?;
-                        if let Some(shift_state) = shift {
-                            writeln!(f, "        - Shift {}", shift_state.0)?;
-                        }
-                        for (len, nts) in reduces {
-                            writeln!(f, "        - Reduce (len {}):", len)?;
-                            for (nt_id, prod_ids) in nts {
-                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                for prod_id_val in prod_ids {
-                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            format_actions(f, &row.phase2_shifts_and_reduces, terminal_map, non_terminal_map, &self.productions, "      ")?;
 
             writeln!(f, "    Default Action (Phase 3):")?;
             if let Some(reduce) = &row.phase3_default_reduce.reduce {
