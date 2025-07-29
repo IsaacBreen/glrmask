@@ -581,22 +581,12 @@ fn format_actions(
         // Format terminals
         let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
         terminal_names.sort();
+        let terms_str = terminal_names.join(", ");
 
-        const MAX_TERMS_TO_SHOW: usize = 5;
-        let (terms_to_show, truncated) = if terminal_names.len() > MAX_TERMS_TO_SHOW {
-            (&terminal_names[..MAX_TERMS_TO_SHOW], true)
-        } else {
-            (terminal_names.as_slice(), false)
-        };
-
-        let mut terms_str = terms_to_show.join(", ");
-        if truncated {
-            let _ = write!(&mut terms_str, ", ... ({} total)", terminal_names.len());
-        }
-
-        writeln!(f, "{}- On {{ {} }}: {}", indent, terms_str, action_str)?;
+        // Put action on its own line, then terminals on the next, to avoid extremely long lines.
+        writeln!(f, "{}- {}", indent, action_str)?;
+        writeln!(f, "{}  on {{ {} }}", indent, terms_str)?;
     }
-
     Ok(())
 }
 
