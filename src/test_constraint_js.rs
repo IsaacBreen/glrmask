@@ -280,7 +280,8 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         println!("\n--- Phase 2: Merging {} successful states ---", successful_first_step_states.len());
         assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state for config {}", i);
 
-        let mut merged_state = parser.init_glr_parser_null(None);
+        // Include the initial state
+        let mut merged_state = initial_state.clone();
         for state in successful_first_step_states {
             merged_state.merge_with(state);
         }
