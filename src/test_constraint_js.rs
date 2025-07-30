@@ -260,6 +260,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
         println!("\n--- Phase 1: Feeding initial tokens individually ---");
         for terminal in &first_tokens_to_test {
+            println!("\n--- Testing terminal '{}' ---", terminal);
             let terminal_id = *parser.terminal_map.get_by_left(terminal).unwrap();
 
             let mut state_clone = initial_state.clone();
@@ -306,7 +307,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         for second_token_terminal in &second_tokens_to_test {
             let second_token_id = *parser.terminal_map.get_by_left(second_token_terminal).unwrap();
 
-            println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+            println!("\n--- Testing second token: '{}' ---", second_token_terminal);
             let mut state_for_second_token = merged_state.clone();
 
             // 5a. Feed the second token to the cloned merged state and measure.
@@ -397,7 +398,7 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
         }
 
         // --- Step 2: Feed the first token ---
-        println!("\n--- Phase 1: Feeding first token: '{:?}' ---", test_terminal);
+        println!("\n--- Phase 1: Feeding first token: '{}' ---", test_terminal);
         let mut state_after_first_token = initial_state.clone();
         state_after_first_token.step(test_terminal_id);
 
@@ -423,13 +424,13 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
 
         // --- Step 4: Feed the second token to the merged state ---
         println!("\n--- Phase 3: Feeding second token to merged state ---");
-        println!("\n--- Testing second token: '{:?}' ---", test_terminal);
+        println!("\n--- Testing second token: '{}' ---", test_terminal);
         let mut state_for_second_token = merged_state.clone();
 
         state_for_second_token.step(test_terminal_id);
         // assert!(
         //     state_for_second_token.is_ok(),
-        //     "Merged state became invalid after second token '{:?}' for config {}.",
+        //     "Merged state became invalid after second token '{}' for config {}.",
         //     test_terminal,
         //     i
         // );
@@ -1087,7 +1088,7 @@ fn test_template_from_minimized_ebnf() -> Result<(), Box<dyn std::error::Error>>
     // 3. Convert terminal objects to TerminalIDs using the parser's map.
     let terminal_ids: Vec<TerminalID> = test_case_terminals
         .iter()
-        .map(|t| *parser.terminal_map.get_by_left(t).unwrap_or_else(|| panic!("Terminal '{:?}' not found in the compiled grammar's terminal map.", t)))
+        .map(|t| *parser.terminal_map.get_by_left(t).unwrap_or_else(|| panic!("Terminal '{}' not found in the compiled grammar's terminal map.", t)))
         .collect();
 
     // 4. Run the parser and assert success.
