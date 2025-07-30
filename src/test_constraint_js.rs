@@ -333,6 +333,118 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+#[test]
+fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::error::Error>> {
+    // This test is a simplified version of `test_js_parser_reduction_explosion_isolated`.
+    // It focuses on a single ambiguous token (`BOOLEAN_LITERAL`) to investigate reduction
+    // behavior when states are merged and processed further. It iterates through all 16
+    // configurations of enabling/disabling `process_default_reductions` at key points.
+
+    // Helper to measure reduction hits
+    fn measure<'a, F: FnOnce(&mut GLRParserState<'a>)>(label: &str, state: &mut GLRParserState<'a>, action: F) -> u64 {
+        let state_before = state.clone();
+        profiler::reset();
+        action(state);
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits
+            .get("GLRParserState::reduce_and_goto")
+            .copied()
+            .unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
+        if reduce_hits > 20 {
+            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
+        }
+        reduce_hits
+    }
+
+    // 1. Load and compile the JavaScript grammar.
+    println!("--- Setting up for JS GLR Parser Simplified Reduction Test ---");
+    let grammar_path = "src/js.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let parser = &compiled_grammar.glr_parser;
+    println!("Grammar compiled successfully.");
+
+    // 2. Define the single token to test.
+    let test_terminal = regex_name("BOOLEAN_LITERAL");
+    let test_terminal_id = *parser.terminal_map.get_by_left(&test_terminal).unwrap();
+
+    // 3. Iterate through all 16 configurations of process_default_reductions calls.
+    for i in 0..16 {
+        let config_pdr_initial = (i & 1) != 0;
+        let config_pdr_after_first_token = (i & 2) != 0;
+        let config_pdr_after_merge = (i & 4) != 0;
+        let config_pdr_after_second_token = (i & 8) != 0;
+
+        println!("\n\n======================================================================");
+        println!(
+            "Testing config {}/16: initial={}, after_first={}, after_merge={}, after_second={}",
+            i + 1,
+            config_pdr_initial,
+            config_pdr_after_first_token,
+            config_pdr_after_merge,
+            config_pdr_after_second_token
+        );
+        println!("======================================================================\n");
+
+        // --- Step 1: Initial state ---
+        let mut initial_state = parser.init_glr_parser(None);
+        if config_pdr_initial {
+            measure("Processed default reductions (initial)", &mut initial_state, |s| {
+                s.process_default_reductions()
+            });
+        }
+
+        // --- Step 2: Feed the first token ---
+        println!("\n--- Phase 1: Feeding first token: '{:?}' ---", test_terminal);
+        let mut state_after_first_token = initial_state.clone();
+        state_after_first_token.step(test_terminal_id);
+
+        if config_pdr_after_first_token {
+            measure("Processed default reductions (after first token)", &mut state_after_first_token, |s| {
+                s.process_default_reductions()
+            });
+        }
+        assert!(state_after_first_token.is_ok(), "State is not OK after first token for config {}", i);
+
+        // --- Step 3: Merge the initial state with the state after the first token ---
+        println!("\n--- Phase 2: Merging initial state with the post-token state ---");
+        let mut merged_state = initial_state.clone();
+        merged_state.merge_with(state_after_first_token);
+        merged_state.log_gss("Merged states", TerminalID(0));
+        println!("States merged successfully.");
+
+        if config_pdr_after_merge {
+            measure("Processed default reductions (after merge)", &mut merged_state, |s| {
+                s.process_default_reductions()
+            });
+        }
+
+        // --- Step 4: Feed the second token to the merged state ---
+        println!("\n--- Phase 3: Feeding second token to merged state ---");
+        println!("\n--- Testing second token: '{:?}' ---", test_terminal);
+        let mut state_for_second_token = merged_state.clone();
+
+        state_for_second_token.step(test_terminal_id);
+        assert!(
+            state_for_second_token.is_ok(),
+            "Merged state became invalid after second token '{:?}' for config {}.",
+            test_terminal,
+            i
+        );
+
+        if config_pdr_after_second_token {
+            measure("Processed default reductions (after second token)", &mut state_for_second_token, |s| {
+                s.process_default_reductions()
+            });
+        }
+    }
+    
+    println!("\nTest passed: All configurations ran without assertion failures.");
+    Ok(())
+}
+
 // --- Main Integration Tests ---
 
 #[test]
