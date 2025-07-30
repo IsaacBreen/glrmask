@@ -255,10 +255,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
         println!("\n--- Phase 1: Feeding initial tokens individually ---");
         for terminal in &first_tokens_to_test {
-            let Some(&terminal_id) = parser.terminal_map.get_by_left(terminal) else {
-                println!("  Skipping terminal not in map: {:?}", terminal);
-                continue;
-            };
+            let terminal_id = *parser.terminal_map.get_by_left(terminal).unwrap();
 
             let mut state_clone = initial_state.clone();
             
@@ -299,11 +296,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         println!("\n--- Phase 3: Feeding second tokens to merged state ---");
 
         for second_token_terminal in &second_tokens_to_test {
-            let Some(&second_token_id) = parser.terminal_map.get_by_left(second_token_terminal)
-            else {
-                println!("  Skipping second token not in map: {:?}", second_token_terminal);
-                continue;
-            };
+            let second_token_id = *parser.terminal_map.get_by_left(second_token_terminal).unwrap();
 
             println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
             let mut state_for_second_token = merged_state.clone();
