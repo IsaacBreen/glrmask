@@ -368,7 +368,7 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
     println!("Grammar compiled successfully.");
 
     // 2. Define the single token to test.
-    let test_terminal = regex_name("BOOLEAN_LITERAL");
+    let test_terminal = regex_name("BIGINT_LITERAL");
     let test_terminal_id = *parser.terminal_map.get_by_left(&test_terminal).unwrap();
 
     // 3. Iterate through all 16 configurations of process_default_reductions calls.
