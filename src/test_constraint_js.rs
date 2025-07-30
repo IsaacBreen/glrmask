@@ -225,7 +225,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
         let hits = profiler::get_all_hits();
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{:?}'", terminal), reduce_hits);
+        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", terminal), reduce_hits);
         // assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
         profiler::reset();
 
@@ -260,7 +260,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     merged_state.step(second_token_id);
     let hits = profiler::get_all_hits();
     let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-    println!("  - {:<50}: reduce hits = {}", format!("Fed token '{:?}'", second_token_terminal), reduce_hits);
+    println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
     assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
     // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
 
