@@ -446,6 +446,60 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+#[test]
+fn test_js_parser_reduction_explosion_minimal_repro() -> Result<(), Box<dyn std::error::Error>> {
+    // This test is a minimal reproduction of a reduction explosion observed in
+    // `test_js_parser_reduction_explosion_simplified`. The issue occurs when
+    // processing default reductions after feeding a single ambiguous token like
+    // `BIGINT_LITERAL`. The original DFS-like processing order (`pop_last`) of
+    // the worklist in `process_default_reductions` could lead to a large number
+    // of reductions. This test verifies that the behavior is controlled.
+
+    // Helper to measure reduction hits
+    fn measure<'a, F: FnOnce(&mut GLRParserState<'a>)>(label: &str, state: &mut GLRParserState<'a>, action: F) -> u64 {
+        profiler::reset();
+        action(state);
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits
+            .get("GLRParserState::reduce_and_goto")
+            .copied()
+            .unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
+        if reduce_hits > 60 { // The original failure was 52, allow a bit of slack.
+            state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
+        }
+        reduce_hits
+    }
+
+    // 1. Load and compile the JavaScript grammar.
+    println!("--- Setting up for JS GLR Parser Minimal Reduction Test ---");
+    let grammar_path = "src/js.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let parser = &compiled_grammar.glr_parser;
+    println!("Grammar compiled successfully.");
+
+    // 2. Define the single token to test.
+    let test_terminal = regex_name("BIGINT_LITERAL");
+    let test_terminal_id = *parser.terminal_map.get_by_left(&test_terminal).unwrap();
+
+    // --- Step 1: Initial state and feed token ---
+    let mut state = parser.init_glr_parser(None);
+    println!("\n--- Feeding token: '{}' ---", test_terminal);
+    state.step(test_terminal_id);
+    assert!(state.is_ok(), "State is not OK after token");
+
+    // --- Step 2: Process default reductions ---
+    println!("\n--- Processing default reductions ---");
+    measure("Processed default reductions", &mut state, |s| {
+        s.process_default_reductions()
+    });
+
+    println!("\nTest passed: Did not panic on excessive reductions.");
+    Ok(())
+}
+
 // --- Main Integration Tests ---
 
 #[test]
