@@ -162,8 +162,9 @@ fn print_token_context(
 fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::error::Error>> {
     // This test isolates the GLR parser to investigate situations where an *ambiguous first
     // token* is followed by a *second token* that triggers a large amount of work (many
-    // reductions).  The logic is unchanged – we merely refactor the code for readability.
-
+    // reductions). It now iterates through all configurations of enabling/disabling
+    // `process_default_reductions` at key points.
+    
     // ------------------------------------------------------------------------
     // Helper utilities
     // ------------------------------------------------------------------------
@@ -223,82 +224,110 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     let first_tokens_to_test = candidate_tokens();
     let second_tokens_to_test = candidate_tokens();
 
-    // 3. Initialize the parser and collect states after feeding each of the first tokens.
-    let mut initial_state = parser.init_glr_parser(None);
-    let mut successful_first_step_states = Vec::new();
+    // Iterate through all 16 configurations of process_default_reductions calls.
+    for i in 0..16 {
+        let config_pdr_initial = (i & 1) != 0;
+        let config_pdr_after_first_token = (i & 2) != 0;
+        let config_pdr_after_merge = (i & 4) != 0;
+        let config_pdr_after_second_token = (i & 8) != 0;
 
-    measure("Processed default reductions", || {
-        initial_state.process_default_reductions()
-    });
+        println!("\n\n======================================================================");
+        println!(
+            "Testing config {}/16: initial={}, after_first={}, after_merge={}, after_second={}",
+            i + 1,
+            config_pdr_initial,
+            config_pdr_after_first_token,
+            config_pdr_after_merge,
+            config_pdr_after_second_token
+        );
+        println!("======================================================================\n");
 
-    println!("\n--- Phase 1: Feeding initial tokens individually ---");
-    for terminal in &first_tokens_to_test {
-        let Some(&terminal_id) = parser.terminal_map.get_by_left(terminal) else {
-            println!("  Skipping terminal not in map: {:?}", terminal);
-            continue;
-        };
+        // 3. Initialize the parser and collect states after feeding each of the first tokens.
+        let mut initial_state = parser.init_glr_parser(None);
+        let mut successful_first_step_states = Vec::new();
 
-        let mut state_clone = initial_state.clone();
-        
-        measure(&format!("Fed token '{terminal:?}'"), || {
-            state_clone.step(terminal_id)
-        });
+        if config_pdr_initial {
+            measure("Processed default reductions (initial)", || {
+                initial_state.process_default_reductions()
+            });
+        }
 
-        measure("Processed default reductions", || {
-            state_clone.process_default_reductions()
-        });
+        println!("\n--- Phase 1: Feeding initial tokens individually ---");
+        for terminal in &first_tokens_to_test {
+            let Some(&terminal_id) = parser.terminal_map.get_by_left(terminal) else {
+                println!("  Skipping terminal not in map: {:?}", terminal);
+                continue;
+            };
 
-        if state_clone.is_ok() {
-            successful_first_step_states.push(state_clone);
-        } else {
-            println!("    -> State is not OK after this token.");
+            let mut state_clone = initial_state.clone();
+            
+            measure(&format!("Fed token '{terminal:?}'"), || {
+                state_clone.step(terminal_id)
+            });
+
+            if config_pdr_after_first_token {
+                measure("Processed default reductions (after first token)", || {
+                    state_clone.process_default_reductions()
+                });
+            }
+
+            if state_clone.is_ok() {
+                successful_first_step_states.push(state_clone);
+            } else {
+                println!("    -> State is not OK after this token.");
+            }
+        }
+
+        // 4. Merge all successful states into one.
+        println!("\n--- Phase 2: Merging {} successful states ---", successful_first_step_states.len());
+        assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state for config {}", i);
+
+        let mut merged_state = parser.init_glr_parser_null(None);
+        for state in successful_first_step_states {
+            merged_state.merge_with(state);
+        }
+        println!("States merged successfully.");
+
+        if config_pdr_after_merge {
+            measure("Processed default reductions (after merge)", || {
+                merged_state.process_default_reductions()
+            });
+        }
+
+        // 5. Feed various second tokens to the merged state and check reductions.
+        println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+        for second_token_terminal in &second_tokens_to_test {
+            let Some(&second_token_id) = parser.terminal_map.get_by_left(second_token_terminal)
+            else {
+                println!("  Skipping second token not in map: {:?}", second_token_terminal);
+                continue;
+            };
+
+            println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+            let mut state_for_second_token = merged_state.clone();
+
+            // 5a. Feed the second token to the cloned merged state and measure.
+            measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+                state_for_second_token.step(second_token_id)
+            });
+            assert!(
+                state_for_second_token.is_ok(),
+                "Merged state became invalid after second token '{}' for config {}.",
+                second_token_terminal,
+                i
+            );
+
+            // 5b. Process default reductions.
+            if config_pdr_after_second_token {
+                measure("Processed default reductions (after second token)", || {
+                    state_for_second_token.process_default_reductions()
+                });
+            }
         }
     }
-
-    // 4. Merge all successful states into one.
-    println!("\n--- Phase 2: Merging {} successful states ---", successful_first_step_states.len());
-    assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state.");
-
-    let mut merged_state = parser.init_glr_parser_null(None);
-    for state in successful_first_step_states {
-        merged_state.merge_with(state);
-    }
-    println!("States merged successfully.");
-
-    measure("Processed default reductions", || {
-        merged_state.process_default_reductions()
-    });
-
-    // 5. Feed various second tokens to the merged state and check reductions.
-    println!("\n--- Phase 3: Feeding second tokens to merged state ---");
-
-    for second_token_terminal in &second_tokens_to_test {
-        let Some(&second_token_id) = parser.terminal_map.get_by_left(second_token_terminal)
-        else {
-            println!("  Skipping second token not in map: {:?}", second_token_terminal);
-            continue;
-        };
-
-        println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
-        let mut state_for_second_token = merged_state.clone();
-
-        // 5a. Feed the second token to the cloned merged state and measure.
-        measure(&format!("Fed token '{second_token_terminal:?}'"), || {
-            state_for_second_token.step(second_token_id)
-        });
-        assert!(
-            state_for_second_token.is_ok(),
-            "Merged state became invalid after second token '{}'.",
-            second_token_terminal
-        );
-
-        // 5b. Process default reductions.
-        measure("Processed default reductions", || {
-            state_for_second_token.process_default_reductions()
-        });
-    }
     
-    println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+    println!("\nTest passed: All configurations ran without assertion failures.");
     Ok(())
 }
 
