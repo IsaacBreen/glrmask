@@ -198,7 +198,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     let second_token_id = *parser.terminal_map.get_by_left(&second_token_terminal).unwrap();
 
     // 3. Initialize the parser and collect states after feeding each of the first tokens.
-    let initial_state = parser.init_glr_parser(None);
+    let mut initial_state = parser.init_glr_parser(None);
     let mut successful_first_step_states = Vec::new();
 
     initial_state.process_default_reductions();
