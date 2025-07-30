@@ -1080,7 +1080,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     // #[time_it("GLRParserState::log_gss")]
-    pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
+    pub fn log_gss(&self, phase: &str, token: TerminalID) {
         if !GSS_LOGGING_ENABLED {
             return;
         }

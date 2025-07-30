@@ -172,17 +172,22 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     ///   1. Resets the profiler,
     ///   2. Executes `action`,
     ///   3. Prints the number of `GLRParserState::reduce_and_goto` hits,
-    ///   4. Returns that hit-count.
-    fn measure<F: FnOnce()>(label: &str, action: F) -> u64 {
+    ///   4. Asserts that the hit-count is not excessive, logging the state on failure.
+    ///   5. Returns that hit-count.
+    fn measure<'a, F: FnOnce(&mut GLRParserState<'a>)>(label: &str, state: &mut GLRParserState<'a>, action: F) -> u64 {
+        let state_before = state.clone();
         profiler::reset();
-        action();
+        action(state);
         let hits = profiler::get_all_hits();
         let reduce_hits = hits
             .get("GLRParserState::reduce_and_goto")
             .copied()
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
-        assert!(reduce_hits <= 20, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+        if reduce_hits > 20 {
+            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
+        }
         reduce_hits
     }
 
@@ -248,8 +253,8 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         let mut successful_first_step_states = Vec::new();
 
         if config_pdr_initial {
-            measure("Processed default reductions (initial)", || {
-                initial_state.process_default_reductions()
+            measure("Processed default reductions (initial)", &mut initial_state, |s| {
+                s.process_default_reductions()
             });
         }
 
@@ -259,13 +264,13 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
             let mut state_clone = initial_state.clone();
             
-            // measure(&format!("Fed token '{terminal:?}'"), || {
+            // measure(&format!("Fed token '{terminal:?}'"), &mut state_clone, |s| {
                 state_clone.step(terminal_id);
             // });
 
             if config_pdr_after_first_token {
-                measure("Processed default reductions (after first token)", || {
-                    state_clone.process_default_reductions()
+                measure("Processed default reductions (after first token)", &mut state_clone, |s| {
+                    s.process_default_reductions()
                 });
             }
 
@@ -289,8 +294,8 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         println!("States merged successfully.");
 
         if config_pdr_after_merge {
-            measure("Processed default reductions (after merge)", || {
-                merged_state.process_default_reductions()
+            measure("Processed default reductions (after merge)", &mut merged_state, |s| {
+                s.process_default_reductions()
             });
         }
 
@@ -304,7 +309,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             let mut state_for_second_token = merged_state.clone();
 
             // 5a. Feed the second token to the cloned merged state and measure.
-            // measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+            // measure(&format!("Fed token '{second_token_terminal:?}'"), &mut state_for_second_token, |s| {
                 state_for_second_token.step(second_token_id);
             // });
             assert!(
@@ -316,8 +321,8 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
             // 5b. Process default reductions.
             if config_pdr_after_second_token {
-                measure("Processed default reductions (after second token)", || {
-                    state_for_second_token.process_default_reductions()
+                measure("Processed default reductions (after second token)", &mut state_for_second_token, |s| {
+                    s.process_default_reductions()
                 });
             }
         }

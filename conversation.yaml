@@ -4636,7 +4636,7 @@ local_system:
 
           Ok(())
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -6988,5 +6988,142 @@ messages:
       in measure fails, log_gss is called on the state *prior* to the action. Important
       that it's *prior* to the action, not after it. We wanna see the state of the
       GLR parser *before* the action that caused failure.
+    metadata:
+  - assistant: |-
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Dealing with debugging complex stateful systems like a GLR parser can be tricky, and getting a snapshot of the state right before a failure is a great way to diagnose issues. Here are the necessary changes to log the GSS state before the assertion fails.
+
+      I'll modify the `measure` helper function in `test_js_parser_reduction_explosion_isolated` to accept the parser state. This allows it to clone the state before executing the action. If the action results in too many reductions, it will log the pre-action state before panicking.
+
+      Here are the diffs for the modified file:
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -1020,7 +1020,7 @@
+           }
+       
+           // #[time_it("GLRParserState::log_gss")]
+      -    pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
+      +    pub fn log_gss(&self, phase: &str, token: TerminalID) {
+               if !GSS_LOGGING_ENABLED {
+                   return;
+               }
+
+      ``````diff
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -193,22 +193,23 @@
+           ///   1. Resets the profiler,
+           ///   2. Executes `action`,
+           ///   3. Prints the number of `GLRParserState::reduce_and_goto` hits,
+      -    ///   4. Returns that hit-count.
+      -    fn measure<F: FnOnce()>(label: &str, action: F) -> u64 {
+      +    ///   4. Asserts that the hit-count is not excessive, logging the state on failure.
+      +    ///   5. Returns that hit-count.
+      +    fn measure<'a, F: FnOnce(&mut GLRParserState<'a>)>(label: &str, state: &mut GLRParserState<'a>, action: F) -> u64 {
+      +        let state_before = state.clone();
+               profiler::reset();
+      -        action();
+      +        action(state);
+               let hits = profiler::get_all_hits();
+               let reduce_hits = hits
+                   .get("GLRParserState::reduce_and_goto")
+                   .copied()
+                   .unwrap_or(0);
+               println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
+      -        assert!(reduce_hits <= 20, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +        if reduce_hits > 20 {
+      +            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+      +            panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
+      +        }
+               reduce_hits
+           }
+       
+           /// Returns the list of candidate tokens we want to try as “first” or “second” tokens.
+      @@ -255,9 +256,9 @@
+               let mut successful_first_step_states = Vec::new();
+       
+               if config_pdr_initial {
+      -            measure("Processed default reductions (initial)", || {
+      -                initial_state.process_default_reductions()
+      -            });
+      +            measure("Processed default reductions (initial)", &mut initial_state, |s| {
+      +                s.process_default_reductions()
+      +            });
+               }
+       
+               println!("\n--- Phase 1: Feeding initial tokens individually ---");
+      @@ -266,14 +267,14 @@
+       
+                   let mut state_clone = initial_state.clone();
+                   
+      -            // measure(&format!("Fed token '{terminal:?}'"), || {
+      +            // measure(&format!("Fed token '{terminal:?}'"), &mut state_clone, |s| {
+                       state_clone.step(terminal_id);
+                   // });
+       
+                   if config_pdr_after_first_token {
+      -                measure("Processed default reductions (after first token)", || {
+      -                    state_clone.process_default_reductions()
+      -                });
+      +                measure("Processed default reductions (after first token)", &mut state_clone, |s| {
+      +                    s.process_default_reductions()
+      +                });
+                   }
+       
+                   if state_clone.is_ok() {
+      @@ -294,9 +295,9 @@
+               println!("States merged successfully.");
+       
+               if config_pdr_after_merge {
+      -            measure("Processed default reductions (after merge)", || {
+      -                merged_state.process_default_reductions()
+      -            });
+      +            measure("Processed default reductions (after merge)", &mut merged_state, |s| {
+      +                s.process_default_reductions()
+      +            });
+               }
+       
+               // 5. Feed various second tokens to the merged state and check reductions.
+      @@ -308,8 +309,8 @@
+                   let mut state_for_second_token = merged_state.clone();
+       
+                   // 5a. Feed the second token to the cloned merged state and measure.
+      -            // measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+      +            // measure(&format!("Fed token '{second_token_terminal:?}'"), &mut state_for_second_token, |s| {
+                       state_for_second_token.step(second_token_id);
+                   // });
+                   assert!(
+      @@ -321,9 +322,9 @@
+       
+                   // 5b. Process default reductions.
+                   if config_pdr_after_second_token {
+      -                measure("Processed default reductions (after second token)", || {
+      -                    state_for_second_token.process_default_reductions()
+      -                });
+      +                measure("Processed default reductions (after second token)", &mut state_for_second_token, |s| {
+      +                    s.process_default_reductions()
+      +                });
+                   }
+               }
+           }
+
+      ```
+
+      These changes refactor the `measure` function to be state-aware, allowing it to provide valuable debugging information precisely when needed. Let me know if you have any other questions
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
     metadata:
 ...
