@@ -203,7 +203,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
     initial_state.process_default_reductions();
 
-    let hits = profiler::get_hits();
+    let hits = profiler::get_all_hits();
     dbg!(&hits);
     let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
     println!("  - Processed default reductions: reduce hits = {}", reduce_hits);
@@ -224,7 +224,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         
         state_clone.step(terminal_id);
 
-        let hits = profiler::get_hits();
+        let hits = profiler::get_all_hits();
         dbg!(&hits);
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
         println!("  - Fed token '{:?}': reduce hits = {}", terminal, reduce_hits);
@@ -233,7 +233,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
         state_clone.process_default_reductions();
 
-        let hits = profiler::get_hits();
+        let hits = profiler::get_all_hits();
         dbg!(&hits);
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
         println!("  - Processed default reductions: reduce hits = {}", reduce_hits);
@@ -261,7 +261,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     println!("\n--- Phase 3: Feeding second token 'IDENTIFIER' to merged state ---");
     profiler::reset();
     merged_state.step(second_token_id);
-    let hits = profiler::get_hits();
+    let hits = profiler::get_all_hits();
     dbg!(&hits);
     let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
     println!("  - Fed token 'IDENTIFIER': reduce hits = {}", reduce_hits);
@@ -270,7 +270,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
     // 6. Process default reductions.
     merged_state.process_default_reductions();
-    let hits = profiler::get_hits();
+    let hits = profiler::get_all_hits();
     dbg!(&hits);
     let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
     println!("  - Processed default reductions: reduce hits = {}", reduce_hits);
