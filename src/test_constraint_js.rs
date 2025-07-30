@@ -285,6 +285,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         for state in successful_first_step_states {
             merged_state.merge_with(state);
         }
+        merged_state.log_gss("Merged states", TerminalID(0));
         println!("States merged successfully.");
 
         if config_pdr_after_merge {
