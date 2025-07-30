@@ -222,21 +222,21 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
         let mut state_clone = initial_state.clone();
         
+        profiler::reset();
         state_clone.step(terminal_id);
 
         let hits = profiler::get_all_hits();
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", terminal), reduce_hits);
         // assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
-        profiler::reset();
 
+        profiler::reset();
         state_clone.process_default_reductions();
 
         let hits = profiler::get_all_hits();
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
         // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
-        profiler::reset();
 
         if state_clone.is_ok() {
             successful_first_step_states.push(state_clone);
@@ -263,10 +263,10 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
     println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
     assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
-    profiler::reset();
     // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
 
     // 6. Process default reductions.
+    profiler::reset();
     merged_state.process_default_reductions();
     let hits = profiler::get_all_hits();
     let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
