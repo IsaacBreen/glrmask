@@ -287,6 +287,10 @@ pub fn get_call_tree() -> ProfileNode {
     profiler().lock().unwrap().call_tree.clone()
 }
 
+pub fn get_all_hits() -> HashMap<String, u64> {
+    todo!()
+}
+
 // Internal functions for timing blocks
 fn time_block_start(name: String) {
     let mut data = profiler().lock().unwrap();
