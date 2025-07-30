@@ -262,9 +262,9 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
             let mut state_clone = initial_state.clone();
             
-            measure(&format!("Fed token '{terminal:?}'"), || {
-                state_clone.step(terminal_id)
-            });
+            // measure(&format!("Fed token '{terminal:?}'"), || {
+                state_clone.step(terminal_id);
+            // });
 
             if config_pdr_after_first_token {
                 measure("Processed default reductions (after first token)", || {
@@ -309,9 +309,9 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             let mut state_for_second_token = merged_state.clone();
 
             // 5a. Feed the second token to the cloned merged state and measure.
-            measure(&format!("Fed token '{second_token_terminal:?}'"), || {
-                state_for_second_token.step(second_token_id)
-            });
+            // measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+                state_for_second_token.step(second_token_id);
+            // });
             assert!(
                 state_for_second_token.is_ok(),
                 "Merged state became invalid after second token '{}' for config {}.",
