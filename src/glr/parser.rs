@@ -917,8 +917,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Key is (depth, state_id) to process shortest stacks first.
         let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
 
-        let get_depth = |peek: &GSSNode| peek.max_depth();
-        // let get_depth = |peek: &GSSNode| 0;
+        // let get_depth = |peek: &GSSNode| peek.max_depth();
+        let get_depth = |peek: &GSSNode| 0;
 
         // Peel off the top edges to populate the initial work map.
         for peek in self.active_state.stack.peek_iter() {
