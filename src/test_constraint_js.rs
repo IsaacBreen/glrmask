@@ -264,7 +264,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             let terminal_id = *parser.terminal_map.get_by_left(terminal).unwrap();
 
             let mut state_clone = initial_state.clone();
-            
+
             // measure(&format!("Fed token '{terminal:?}'"), &mut state_clone, |s| {
                 state_clone.step(terminal_id);
             // });
@@ -329,7 +329,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             }
         }
     }
-    
+
     println!("\nTest passed: All configurations ran without assertion failures.");
     Ok(())
 }
@@ -441,7 +441,7 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
             });
         }
     }
-    
+
     println!("\nTest passed: All configurations ran without assertion failures.");
     Ok(())
 }
