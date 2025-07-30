@@ -287,8 +287,23 @@ pub fn get_call_tree() -> ProfileNode {
     profiler().lock().unwrap().call_tree.clone()
 }
 
+fn collect_tree_hits_recursive(node: &ProfileNode, all_hits: &mut HashMap<String, u64>) {
+    for (name, child_node) in &node.children {
+        *all_hits.entry(name.clone()).or_insert(0) += child_node.hits;
+        if !child_node.children.is_empty() {
+            collect_tree_hits_recursive(child_node, all_hits);
+        }
+    }
+}
+
 pub fn get_all_hits() -> HashMap<String, u64> {
-    todo!()
+    let data = profiler().lock().unwrap();
+    // Start with hits from the `hit!` macro.
+    let mut all_hits = data.hits.clone();
+
+    // Recursively traverse the call tree and add hits from timed blocks.
+    collect_tree_hits_recursive(&data.call_tree, &mut all_hits);
+    all_hits
 }
 
 // Internal functions for timing blocks
