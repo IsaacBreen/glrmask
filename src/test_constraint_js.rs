@@ -213,11 +213,10 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
 
         let mut state_clone = initial_state.clone();
         
-        profiler::reset();
         state_clone.step(terminal_id);
         let hits = profiler::get_hits();
-        dbg!(&hits);
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        profiler::reset();
 
         println!("  - Fed token '{:?}': reduce hits = {}", terminal, reduce_hits);
         assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
