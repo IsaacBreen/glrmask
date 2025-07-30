@@ -958,7 +958,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
                         let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack_part.is_empty() {
-                            reduced_stack.merge(&new_stack_part);
+                            reduced_stack.merge_with_depth(1, &new_stack_part);
                         }
                     }
 
