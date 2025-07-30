@@ -1115,7 +1115,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
-        debug!(5, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
+        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
     }
 }
 
