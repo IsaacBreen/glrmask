@@ -467,6 +467,7 @@ fn test_js_parser_reduction_explosion_minimal_repro() -> Result<(), Box<dyn std:
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
         if reduce_hits > 20 {
             state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            profiler::print_summary();
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
         }
         reduce_hits
