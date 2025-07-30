@@ -331,7 +331,9 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
             let target_preds_vec = target_preds_by_depth.entry(dest_key).or_default();
 
             if merge_depth == 0 {
-                target_preds_vec.extend(source_preds_vec);
+                if *target_preds_vec != source_preds_vec {
+                    target_preds_vec.extend(source_preds_vec);
+                }
                 continue;
             }
 
