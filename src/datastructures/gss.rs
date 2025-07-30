@@ -1193,9 +1193,9 @@ fn format_acc(
         }
     };
 
-    let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset| -> String {
+    let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
         if allowed_terminals.is_empty() {
-            return "Terminals(All Disallowed)".to_string();
+            return format!("Disallowed {}(All)", label);
         }
         let mut parts = Vec::new();
         const MAX_RANGES_TO_SHOW: usize = 5;
@@ -1233,16 +1233,19 @@ fn format_acc(
             }
         }
         if parts.is_empty() {
-            "Terminals(None Disallowed)".to_string()
+            format!("Disallowed {}(None)", label)
         } else {
-            format!("Disallowed Terminals({})", parts.join("; "))
+            format!("Disallowed {}({})", label, parts.join("; "))
         }
     };
 
-    let union_llm_str = format_allowed_llm(&node.acc.llm_tokens_union, "LLM");
-    let disallowed_terminals_str = format_disallowed_terminals(&node.acc.terminals_intersection);
+    let union_llm_str = format_allowed_llm(&node.acc.llm_tokens_union, "LLM(U)");
+    let intersection_llm_str = format_allowed_llm(&node.acc.llm_tokens_intersection, "LLM(I)");
+    let union_terminals_str = format_disallowed_terminals(&node.acc.terminals_union, "Term(U)");
+    let intersection_terminals_str =
+        format_disallowed_terminals(&node.acc.terminals_intersection, "Term(I)");
 
-    format!("[{}, {}]", union_llm_str, disallowed_terminals_str)
+    format!("[{}, {}, {}, {}]", union_llm_str, intersection_llm_str, union_terminals_str, intersection_terminals_str)
 }
 
 
