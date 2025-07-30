@@ -216,6 +216,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         profiler::reset();
         state_clone.step(terminal_id);
         let hits = profiler::get_hits();
+        dbg!(&hits);
         let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
 
         println!("  - Fed token '{:?}': reduce hits = {}", terminal, reduce_hits);
