@@ -9,7 +9,7 @@
 // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
 use crate::constraint::GrammarConstraint;
-use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal, literal};
+use crate::glr::grammar::{literal, nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParserState;
 use crate::glr::stats::get_stats;
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use rand::prelude::IndexedRandom;
 use crate::constraint_extra::dump_precompute_trie_recursive;
-use crate::profiler::{print_summary, print_summary_flat, reset};
+use crate::profiler::{self, print_summary, print_summary_flat, reset};
 // --- Helper Functions ---
 
 /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.
@@ -156,6 +156,101 @@ fn print_token_context(
         }
     }
     println!("    ------------------------------------------");
+}
+
+#[test]
+fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::error::Error>> {
+    // This test isolates the GLR parser to investigate performance issues with a large number of
+    // reductions, particularly after an ambiguous first token is followed by a second token.
+
+    // 1. Load and compile the JavaScript grammar.
+    println!("--- Setting up for JS GLR Parser Reduction Explosion Test ---");
+    let grammar_path = "src/js.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let parser = &compiled_grammar.glr_parser;
+    println!("Grammar compiled successfully.");
+
+    // 2. Define the set of first tokens to test, based on those that can successfully start a parse.
+    let first_tokens_to_test: Vec<Terminal> = vec![
+        regex_name("BIGINT_LITERAL"),
+        regex_name("BOOLEAN_LITERAL"),
+        regex_name("ELISION"),
+        regex_name("IDENTIFIER"),
+        regex_name("IGNORE"),
+        regex_name("NUMERIC_LITERAL"),
+        regex_name("STRING_LITERAL"),
+        regex_name("TEMPLATE_CHAR"),
+        literal(b"`"),
+        regex_name("REGULAR_EXPRESSION_LITERAL"),
+        literal(b"{"),
+        literal(b"("),
+        literal(b"["),
+        literal(b"+"),
+        literal(b"-"),
+        literal(b"++"),
+        literal(b"--"),
+        literal(b"~"),
+        literal(b"!"),
+    ];
+
+    let second_token_terminal = regex_name("IDENTIFIER");
+    let second_token_id = *parser.terminal_map.get_by_left(&second_token_terminal).unwrap();
+
+    // 3. Initialize the parser and collect states after feeding each of the first tokens.
+    let initial_state = parser.init_glr_parser(None);
+    let mut successful_first_step_states = Vec::new();
+
+    println!("\n--- Phase 1: Feeding initial tokens individually ---");
+    for terminal in &first_tokens_to_test {
+        let terminal_id = match parser.terminal_map.get_by_left(terminal) {
+            Some(id) => *id,
+            None => {
+                println!("  Skipping terminal not in map: {:?}", terminal);
+                continue;
+            }
+        };
+
+        let mut state_clone = initial_state.clone();
+        
+        profiler::reset();
+        state_clone.step(terminal_id);
+        let hits = profiler::get_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+
+        println!("  - Fed token '{:?}': reduce hits = {}", terminal, reduce_hits);
+        assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
+
+        if state_clone.is_ok() {
+            successful_first_step_states.push(state_clone);
+        } else {
+            println!("    -> State is not OK after this token.");
+        }
+    }
+
+    // 4. Merge all successful states into one.
+    println!("\n--- Phase 2: Merging {} successful states ---", successful_first_step_states.len());
+    assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state.");
+
+    let mut merged_state = parser.init_glr_parser_null(None);
+    for state in successful_first_step_states {
+        merged_state.merge_with(state);
+    }
+    println!("States merged successfully.");
+
+    // 5. Feed the second token ('IDENTIFIER') to the merged state and check reductions.
+    println!("\n--- Phase 3: Feeding second token 'IDENTIFIER' to merged state ---");
+    profiler::reset();
+    merged_state.step(second_token_id);
+    let hits = profiler::get_hits();
+    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+
+    println!("  - Fed token 'IDENTIFIER': reduce hits = {}", reduce_hits);
+    assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
+    assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
+    
+    println!("\nTest passed: Reduction count remained within limits.");
+    Ok(())
 }
 
 // --- Main Integration Tests ---
