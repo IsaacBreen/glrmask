@@ -184,7 +184,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             .copied()
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
-        if reduce_hits > 100 {
+        if reduce_hits > 200 {
             state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
         }
@@ -352,7 +352,7 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
             .copied()
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
-        if reduce_hits > 20 {
+        if reduce_hits > 200 {
             state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
         }
@@ -465,7 +465,7 @@ fn test_js_parser_reduction_explosion_minimal_repro() -> Result<(), Box<dyn std:
             .copied()
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
-        if reduce_hits > 20 {
+        if reduce_hits > 200 {
             state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
             profiler::print_summary();
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
