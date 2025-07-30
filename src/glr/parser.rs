@@ -1031,7 +1031,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         self.process_token(token_id);
-        self.process_default_reductions();
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
