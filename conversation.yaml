@@ -201,8 +201,28 @@ local_system:
               literal(b"!"),
           ];
 
-          let second_token_terminal = regex_name("IDENTIFIER");
-          let second_token_id = *parser.terminal_map.get_by_left(&second_token_terminal).unwrap();
+          // Define the set of second tokens to test.
+          let second_tokens_to_test: Vec<Terminal> = vec![
+              regex_name("BIGINT_LITERAL"),
+              regex_name("BOOLEAN_LITERAL"),
+              regex_name("ELISION"),
+              regex_name("IDENTIFIER"),
+              regex_name("IGNORE"),
+              regex_name("NUMERIC_LITERAL"),
+              regex_name("STRING_LITERAL"),
+              regex_name("TEMPLATE_CHAR"),
+              literal(b"`"),
+              regex_name("REGULAR_EXPRESSION_LITERAL"),
+              literal(b"{"),
+              literal(b"("),
+              literal(b"["),
+              literal(b"+"),
+              literal(b"-"),
+              literal(b"++"),
+              literal(b"--"),
+              literal(b"~"),
+              literal(b"!"),
+          ];
 
           // 3. Initialize the parser and collect states after feeding each of the first tokens.
           let mut initial_state = parser.init_glr_parser(None);
@@ -262,25 +282,49 @@ local_system:
           }
           println!("States merged successfully.");
 
-          // 5. Feed the second token ('IDENTIFIER') to the merged state and check reductions.
-          println!("\n--- Phase 3: Feeding second token 'IDENTIFIER' to merged state ---");
-          profiler::reset();
-          merged_state.step(second_token_id);
-          let hits = profiler::get_all_hits();
-          let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-          println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
-          assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
-          // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
-
-          // 6. Process default reductions.
+          // Process default reductions.
           profiler::reset();
           merged_state.process_default_reductions();
           let hits = profiler::get_all_hits();
           let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
           println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
           // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+
+
+          // 5. Feed various second tokens to the merged state and check reductions.
+          println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+          for second_token_terminal in &second_tokens_to_test {
+              let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+                  Some(id) => *id,
+                  None => {
+                      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+                      continue;
+                  }
+              };
+
+              println!("\n--- Testing second token: '{}' ---", second_token_terminal);
+              let mut state_for_second_token = merged_state.clone();
+
+              // 5a. Feed the second token to the cloned merged state.
+              profiler::reset();
+              state_for_second_token.step(second_token_id);
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+              assert!(state_for_second_token.is_ok(), "Merged state became invalid after second token '{}'.", second_token_terminal);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+
+              // 5b. Process default reductions.
+              profiler::reset();
+              state_for_second_token.process_default_reductions();
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+          }
           
-          println!("\nTest passed: Reduction count remained within limits.");
+          println!("\nTest passed: Reduction count remained within limits for all second tokens.");
           Ok(())
       }
 
@@ -1313,8 +1357,28 @@ local_system:
               literal(b"!"),
           ];
 
-          let second_token_terminal = regex_name("IDENTIFIER");
-          let second_token_id = *parser.terminal_map.get_by_left(&second_token_terminal).unwrap();
+          // Define the set of second tokens to test.
+          let second_tokens_to_test: Vec<Terminal> = vec![
+              regex_name("BIGINT_LITERAL"),
+              regex_name("BOOLEAN_LITERAL"),
+              regex_name("ELISION"),
+              regex_name("IDENTIFIER"),
+              regex_name("IGNORE"),
+              regex_name("NUMERIC_LITERAL"),
+              regex_name("STRING_LITERAL"),
+              regex_name("TEMPLATE_CHAR"),
+              literal(b"`"),
+              regex_name("REGULAR_EXPRESSION_LITERAL"),
+              literal(b"{"),
+              literal(b"("),
+              literal(b"["),
+              literal(b"+"),
+              literal(b"-"),
+              literal(b"++"),
+              literal(b"--"),
+              literal(b"~"),
+              literal(b"!"),
+          ];
 
           // 3. Initialize the parser and collect states after feeding each of the first tokens.
           let mut initial_state = parser.init_glr_parser(None);
@@ -1374,25 +1438,49 @@ local_system:
           }
           println!("States merged successfully.");
 
-          // 5. Feed the second token ('IDENTIFIER') to the merged state and check reductions.
-          println!("\n--- Phase 3: Feeding second token 'IDENTIFIER' to merged state ---");
-          profiler::reset();
-          merged_state.step(second_token_id);
-          let hits = profiler::get_all_hits();
-          let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-          println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
-          assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
-          // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
-
-          // 6. Process default reductions.
+          // Process default reductions.
           profiler::reset();
           merged_state.process_default_reductions();
           let hits = profiler::get_all_hits();
           let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
           println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
           // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+
+
+          // 5. Feed various second tokens to the merged state and check reductions.
+          println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+          for second_token_terminal in &second_tokens_to_test {
+              let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+                  Some(id) => *id,
+                  None => {
+                      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+                      continue;
+                  }
+              };
+
+              println!("\n--- Testing second token: '{}' ---", second_token_terminal);
+              let mut state_for_second_token = merged_state.clone();
+
+              // 5a. Feed the second token to the cloned merged state.
+              profiler::reset();
+              state_for_second_token.step(second_token_id);
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+              assert!(state_for_second_token.is_ok(), "Merged state became invalid after second token '{}'.", second_token_terminal);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+
+              // 5b. Process default reductions.
+              profiler::reset();
+              state_for_second_token.process_default_reductions();
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+          }
           
-          println!("\nTest passed: Reduction count remained within limits.");
+          println!("\nTest passed: Reduction count remained within limits for all second tokens.");
           Ok(())
       }
 
@@ -2241,7 +2329,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gp
+    - o3
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -2448,8 +2536,28 @@ messages:
               literal(b"!"),
           ];
 
-          let second_token_terminal = regex_name("IDENTIFIER");
-          let second_token_id = *parser.terminal_map.get_by_left(&second_token_terminal).unwrap();
+          // Define the set of second tokens to test.
+          let second_tokens_to_test: Vec<Terminal> = vec![
+              regex_name("BIGINT_LITERAL"),
+              regex_name("BOOLEAN_LITERAL"),
+              regex_name("ELISION"),
+              regex_name("IDENTIFIER"),
+              regex_name("IGNORE"),
+              regex_name("NUMERIC_LITERAL"),
+              regex_name("STRING_LITERAL"),
+              regex_name("TEMPLATE_CHAR"),
+              literal(b"`"),
+              regex_name("REGULAR_EXPRESSION_LITERAL"),
+              literal(b"{"),
+              literal(b"("),
+              literal(b"["),
+              literal(b"+"),
+              literal(b"-"),
+              literal(b"++"),
+              literal(b"--"),
+              literal(b"~"),
+              literal(b"!"),
+          ];
 
           // 3. Initialize the parser and collect states after feeding each of the first tokens.
           let mut initial_state = parser.init_glr_parser(None);
@@ -2509,25 +2617,49 @@ messages:
           }
           println!("States merged successfully.");
 
-          // 5. Feed the second token ('IDENTIFIER') to the merged state and check reductions.
-          println!("\n--- Phase 3: Feeding second token 'IDENTIFIER' to merged state ---");
-          profiler::reset();
-          merged_state.step(second_token_id);
-          let hits = profiler::get_all_hits();
-          let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-          println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
-          assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
-          // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
-
-          // 6. Process default reductions.
+          // Process default reductions.
           profiler::reset();
           merged_state.process_default_reductions();
           let hits = profiler::get_all_hits();
           let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
           println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
           // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+
+
+          // 5. Feed various second tokens to the merged state and check reductions.
+          println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+          for second_token_terminal in &second_tokens_to_test {
+              let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+                  Some(id) => *id,
+                  None => {
+                      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+                      continue;
+                  }
+              };
+
+              println!("\n--- Testing second token: '{}' ---", second_token_terminal);
+              let mut state_for_second_token = merged_state.clone();
+
+              // 5a. Feed the second token to the cloned merged state.
+              profiler::reset();
+              state_for_second_token.step(second_token_id);
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+              assert!(state_for_second_token.is_ok(), "Merged state became invalid after second token '{}'.", second_token_terminal);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+
+              // 5b. Process default reductions.
+              profiler::reset();
+              state_for_second_token.process_default_reductions();
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+          }
           
-          println!("\nTest passed: Reduction count remained within limits.");
+          println!("\nTest passed: Reduction count remained within limits for all second tokens.");
           Ok(())
       }
 
@@ -3366,131 +3498,1160 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_js.rs
-  - user: |-
-      I want to modify test_js_parser_reduction_explosion_isolated to test multiple different second tokens. Each one separately, with a cloned version of the state output from the first part.
-      In fact, let's use all the same tokens as the first tokens. But define a separate list so I can edit it later if I want.
+  - user: Make test_js_parser_reduction_explosion_isolated more readable. Don't change
+      the actual behaviour.
     metadata:
   - assistant: |-
-      Of course! I'd be happy to help you modify the `test_js_parser_reduction_explosion_isolated` test to iterate through multiple second tokens. Using a separate list for the second tokens is a great idea for future flexibility.
-
-      Here are the changes for `src/test_constraint_js.rs`:
-
       ```diff
-      --- a/src/test_constraint_js.rs
-      +++ b/src/test_constraint_js.rs
-      @@ -190,11 +190,28 @@
-               literal(b"!"),
-           ];
+      diff --git a/src/test_constraint_js.rs b/src/test_constraint_js.rs
+      @@
+       #[test]
+       fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::error::Error>> {
+      -    // This test isolates the GLR parser to investigate performance issues with a large number of
+      -    // reductions, particularly after an ambiguous first token is followed by a second token.
+      +    // This test isolates the GLR parser to investigate situations where an *ambiguous first
+      +    // token* is followed by a *second token* that triggers a large amount of work (many
+      +    // reductions).  The logic is unchanged – we merely refactor the code for readability.
        
-      -    let second_token_terminal = regex_name("IDENTIFIER");
-      -    let second_token_id = *parser.terminal_map.get_by_left(&second_token_terminal).unwrap();
-      -
-      -    // 3. Initialize the parser and collect states after feeding each of the first tokens.
-      +    // Define the set of second tokens to test.
-      +    let second_tokens_to_test: Vec<Terminal> = vec![
-      +        regex_name("BIGINT_LITERAL"),
-      +        regex_name("BOOLEAN_LITERAL"),
-      +        regex_name("ELISION"),
-      +        regex_name("IDENTIFIER"),
-      +        regex_name("IGNORE"),
-      +        regex_name("NUMERIC_LITERAL"),
-      +        regex_name("STRING_LITERAL"),
-      +        regex_name("TEMPLATE_CHAR"),
-      +        literal(b"`"),
-      +        regex_name("REGULAR_EXPRESSION_LITERAL"),
-      +        literal(b"{"),
-      +        literal(b"("),
-      +        literal(b"["),
-      +        literal(b"+"),
-      +        literal(b"-"),
-      +        literal(b"++"),
-      +        literal(b"--"),
-      +        literal(b"~"),
-      +        literal(b"!"),
-      +    ];
+      -    // 1. Load and compile the JavaScript grammar.
+      +    // ------------------------------------------------------------------------
+      +    // Helper utilities
+      +    // ------------------------------------------------------------------------
+      +    /// Convenience wrapper that:
+      +    ///   1. Resets the profiler,
+      +    ///   2. Executes `action`,
+      +    ///   3. Prints the number of `GLRParserState::reduce_and_goto` hits,
+      +    ///   4. Returns that hit-count.
+      +    fn measure<F: FnOnce()>(label: &str, action: F) -> u64 {
+      +        profiler::reset();
+      +        action();
+      +        let hits = profiler::get_all_hits();
+      +        let reduce_hits = hits
+      +            .get("GLRParserState::reduce_and_goto")
+      +            .copied()
+      +            .unwrap_or(0);
+      +        println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
+      +        reduce_hits
+      +    }
       +
-      +    // 3. Initialize the parser and collect states after feeding each of the first tokens.
+      +    /// Returns the list of candidate tokens we want to try as “first” or “second” tokens.
+      +    fn candidate_tokens() -> Vec<Terminal> {
+      +        vec![
+      +            regex_name("BIGINT_LITERAL"),
+      +            regex_name("BOOLEAN_LITERAL"),
+      +            regex_name("ELISION"),
+      +            regex_name("IDENTIFIER"),
+      +            regex_name("IGNORE"),
+      +            regex_name("NUMERIC_LITERAL"),
+      +            regex_name("STRING_LITERAL"),
+      +            regex_name("TEMPLATE_CHAR"),
+      +            literal(b"`"),
+      +            regex_name("REGULAR_EXPRESSION_LITERAL"),
+      +            literal(b"{"),
+      +            literal(b"("),
+      +            literal(b"["),
+      +            literal(b"+"),
+      +            literal(b"-"),
+      +            literal(b"++"),
+      +            literal(b"--"),
+      +            literal(b"~"),
+      +            literal(b"!"),
+      +        ]
+      +    }
+      +
+      +    // ------------------------------------------------------------------------
+      +    // 1. Load and compile the JavaScript grammar.
+      +    // ------------------------------------------------------------------------
+           println!("--- Setting up for JS GLR Parser Reduction Explosion Test ---");
+           let grammar_path = "src/js.ebnf";
+           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           let parser = &compiled_grammar.glr_parser;
+           println!("Grammar compiled successfully.");
+       
+      -    // 2. Define the set of first tokens to test, based on those that can successfully start a parse.
+      -    let first_tokens_to_test: Vec<Terminal> = vec![
+      -        regex_name("BIGINT_LITERAL"),
+      -        regex_name("BOOLEAN_LITERAL"),
+      -        regex_name("ELISION"),
+      -        regex_name("IDENTIFIER"),
+      -        regex_name("IGNORE"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        regex_name("STRING_LITERAL"),
+      -        regex_name("TEMPLATE_CHAR"),
+      -        literal(b"`"),
+      -        regex_name("REGULAR_EXPRESSION_LITERAL"),
+      -        literal(b"{"),
+      -        literal(b"("),
+      -        literal(b"["),
+      -        literal(b"+"),
+      -        literal(b"-"),
+      -        literal(b"++"),
+      -        literal(b"--"),
+      -        literal(b"~"),
+      -        literal(b"!"),
+      -    ];
+      -
+      -    // Define the set of second tokens to test.
+      -    let second_tokens_to_test: Vec<Terminal> = vec![
+      -        regex_name("BIGINT_LITERAL"),
+      -        regex_name("BOOLEAN_LITERAL"),
+      -        regex_name("ELISION"),
+      -        regex_name("IDENTIFIER"),
+      -        regex_name("IGNORE"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        regex_name("STRING_LITERAL"),
+      -        regex_name("TEMPLATE_CHAR"),
+      -        literal(b"`"),
+      -        regex_name("REGULAR_EXPRESSION_LITERAL"),
+      -        literal(b"{"),
+      -        literal(b"("),
+      -        literal(b"["),
+      -        literal(b"+"),
+      -        literal(b"-"),
+      -        literal(b"++"),
+      -        literal(b"--"),
+      -        literal(b"~"),
+      -        literal(b"!"),
+      -    ];
+      +    // 2. Assemble the candidate token lists.
+      +    let first_tokens_to_test = candidate_tokens();
+      +    let second_tokens_to_test = candidate_tokens();
+       
+           // 3. Initialize the parser and collect states after feeding each of the first tokens.
            let mut initial_state = parser.init_glr_parser(None);
            let mut successful_first_step_states = Vec::new();
        
-      @@ -249,25 +266,36 @@
-           }
-           println!("States merged successfully.");
-       
-      -    // 5. Feed the second token ('IDENTIFIER') to the merged state and check reductions.
-      -    println!("\n--- Phase 3: Feeding second token 'IDENTIFIER' to merged state ---");
       -    profiler::reset();
-      -    merged_state.step(second_token_id);
+      -    initial_state.process_default_reductions();
+      -
       -    let hits = profiler::get_all_hits();
       -    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-      -    println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
-      -    assert!(merged_state.is_ok(), "Merged state became invalid after second token.");
-      -    // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token 'IDENTIFIER' after merging ambiguous first tokens.", reduce_hits);
+      -    println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -    // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      -    profiler::reset();
+      +    measure("Processed default reductions", || {
+      +        initial_state.process_default_reductions()
+      +    });
+       
+           println!("\n--- Phase 1: Feeding initial tokens individually ---");
+           for terminal in &first_tokens_to_test {
+      -        let terminal_id = match parser.terminal_map.get_by_left(terminal) {
+      -            Some(id) => *id,
+      -            None => {
+      -                println!("  Skipping terminal not in map: {:?}", terminal);
+      -                continue;
+      -            }
+      -        };
+      +        let Some(&terminal_id) = parser.terminal_map.get_by_left(terminal) else {
+      +            println!("  Skipping terminal not in map: {:?}", terminal);
+      +            continue;
+      +        };
+       
+               let mut state_clone = initial_state.clone();
+      -        
+      -        profiler::reset();
+      -        state_clone.step(terminal_id);
       -
-      -    // 6. Process default reductions.
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", terminal), reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
+      -
+      -        profiler::reset();
+      -        state_clone.process_default_reductions();
+      -
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +        measure(&format!("Fed token '{terminal:?}'"), || {
+      +            state_clone.step(terminal_id)
+      +        });
+      +
+      +        measure("Processed default reductions", || {
+      +            state_clone.process_default_reductions()
+      +        });
+       
+               if state_clone.is_ok() {
+                   successful_first_step_states.push(state_clone);
+               } else {
+                   println!("    -> State is not OK after this token.");
+      @@
+           let mut merged_state = parser.init_glr_parser_null(None);
+           for state in successful_first_step_states {
+               merged_state.merge_with(state);
+           }
+           println!("States merged successfully.");
+      -
+      -    // Process default reductions.
       -    profiler::reset();
       -    merged_state.process_default_reductions();
       -    let hits = profiler::get_all_hits();
       -    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
       -    println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
       -    // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
-      -    
-      -    println!("\nTest passed: Reduction count remained within limits.");
-      +    // 5. Feed various second tokens to the merged state and check reductions.
-      +    println!("\n--- Phase 3: Feeding second tokens to merged state ---");
-      +
-      +    for second_token_terminal in &second_tokens_to_test {
-      +        let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
-      +            Some(id) => *id,
-      +            None => {
-      +                println!("  Skipping second token not in map: {:?}", second_token_terminal);
-      +                continue;
-      +            }
+      +    measure("Processed default reductions", || {
+      +        merged_state.process_default_reductions()
+      +    });
+       
+           // 5. Feed various second tokens to the merged state and check reductions.
+           println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+       
+           for second_token_terminal in &second_tokens_to_test {
+      -        let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+      -            Some(id) => *id,
+      -            None => {
+      -                println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      -                continue;
+      -            }
+      -        };
+      +        let Some(&second_token_id) = parser.terminal_map.get_by_left(second_token_terminal)
+      +        else {
+      +            println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      +            continue;
       +        };
-      +
-      +        println!("\n--- Testing second token: '{}' ---", second_token_terminal);
-      +        let mut state_for_second_token = merged_state.clone();
-      +
-      +        // 5a. Feed the second token to the cloned merged state.
-      +        profiler::reset();
-      +        state_for_second_token.step(second_token_id);
-      +        let hits = profiler::get_all_hits();
-      +        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-      +        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
-      +        assert!(state_for_second_token.is_ok(), "Merged state became invalid after second token '{}'.", second_token_terminal);
-      +        // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
-      +
+       
+               println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+               let mut state_for_second_token = merged_state.clone();
+       
+      -        // 5a. Feed the second token to the cloned merged state.
+      -        profiler::reset();
+      -        state_for_second_token.step(second_token_id);
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      +        // 5a. Feed the second token to the cloned merged state and measure.
+      +        measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+      +            state_for_second_token.step(second_token_id)
+      +        });
+               assert!(
+                   state_for_second_token.is_ok(),
+                   "Merged state became invalid after second token '{}'.",
+                   second_token_terminal
+               );
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+       
+      -        // 5b. Process default reductions.
+      -        profiler::reset();
+      -        state_for_second_token.process_default_reductions();
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
       +        // 5b. Process default reductions.
-      +        profiler::reset();
-      +        state_for_second_token.process_default_reductions();
-      +        let hits = profiler::get_all_hits();
-      +        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
-      +        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
-      +        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
-      +    }
-      +    
-      +    println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+      +        measure("Processed default reductions", || {
+      +            state_for_second_token.process_default_reductions()
+      +        });
+           }
+           
+           println!("\nTest passed: Reduction count remained within limits for all second tokens.");
            Ok(())
        }
-       
-
       ```
-
-      I've updated the test to:
-      1.  Define a new `second_tokens_to_test` list, which you can easily modify.
-      2.  Loop through each of these second tokens after the initial ambiguous state has been created.
-      3.  Clone the merged state for each iteration, ensuring the tests are independent.
-      4.  Perform the `step`, `process_default_reductions`, and profiling checks inside the loop for each second token.
-
-      Let me know if you have any other questions
     metadata:
-  - user: |
-      Apply result (git-llm mode):
+  - user: |-
+      Git apply attempt failed (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/test_constraint_js.rs
       Applying patch to 'src/test_constraint_js.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_js.rs.
+      Error applying patch to src/test_constraint_js.rs:
+      Hunk #2 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          let mut merged_state = parser.init_glr_parser_null(None);
+          for state in successful_first_step_states {
+              merged_state.merge_with(state);
+          }
+          println!("States merged successfully.");
+
+          // Process default reductions.
+          profiler::reset();
+          merged_state.process_default_reductions();
+          let hits = profiler::get_all_hits();
+          let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+          println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+          // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+
+          // 5. Feed various second tokens to the merged state and check reductions.
+          println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+          for second_token_terminal in &second_tokens_to_test {
+              let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+                  Some(id) => *id,
+                  None => {
+                      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+                      continue;
+                  }
+              };
+
+              println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+              let mut state_for_second_token = merged_state.clone();
+
+              // 5a. Feed the second token to the cloned merged state.
+              profiler::reset();
+              state_for_second_token.step(second_token_id);
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+              assert!(
+                  state_for_second_token.is_ok(),
+                  "Merged state became invalid after second token '{}'.",
+                  second_token_terminal
+              );
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+
+              // 5b. Process default reductions.
+              profiler::reset();
+              state_for_second_token.process_default_reductions();
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+          }
+          
+          println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+          Ok(())
+
+      --- Expected Context (from patch, after normalization): ---
+      let mut merged_state = parser.init_glr_parser_null(None);
+      for state in successful_first_step_states {
+      merged_state.merge_with(state);
+      }
+      println!("States merged successfully.");
+
+
+      profiler::reset();
+      merged_state.process_default_reductions();
+      let hits = profiler::get_all_hits();
+      let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+
+
+
+      println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+      for second_token_terminal in &second_tokens_to_test {
+      let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+      Some(id) => *id,
+      None => {
+      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      continue;
+      }
+      };
+
+      println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+      let mut state_for_second_token = merged_state.clone();
+
+
+      profiler::reset();
+      state_for_second_token.step(second_token_id);
+      let hits = profiler::get_all_hits();
+      let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      assert!(
+      state_for_second_token.is_ok(),
+      "Merged state became invalid after second token '{}'.",
+      second_token_terminal
+      );
+
+
+
+      profiler::reset();
+      state_for_second_token.process_default_reductions();
+      let hits = profiler::get_all_hits();
+      let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+
+      }
+
+      println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+      Ok(())
+      }
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 258 with ratio 0.89 (48/54 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + println!("\n--- Phase 2: Merging {} successful states ---", successful_first_step_states.len());
+      + assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state.");
+      + 
+        let mut merged_state = parser.init_glr_parser_null(None);
+        for state in successful_first_step_states {
+        merged_state.merge_with(state);
+        }
+        println!("States merged successfully.");
+        
+        
+        profiler::reset();
+        merged_state.process_default_reductions();
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+        
+        
+        
+      + 
+        println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+        
+        for second_token_terminal in &second_tokens_to_test {
+        let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+        Some(id) => *id,
+        None => {
+        println!("  Skipping second token not in map: {:?}", second_token_terminal);
+        continue;
+        }
+        };
+        
+      - println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+      ?                                         --
+
+      + println!("\n--- Testing second token: '{}' ---", second_token_terminal);
+        let mut state_for_second_token = merged_state.clone();
+        
+        
+        profiler::reset();
+        state_for_second_token.step(second_token_id);
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      + assert!(state_for_second_token.is_ok(), "Merged state became invalid after second token '{}'.", second_token_terminal);
+      - assert!(
+      - state_for_second_token.is_ok(),
+      - "Merged state became invalid after second token '{}'.",
+      - second_token_terminal
+      - );
+        
+        
+        
+        profiler::reset();
+        state_for_second_token.process_default_reductions();
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+        
+        }
+        
+        println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+        Ok(())
+        }
+      Problematic diff content:
+      ---
+      diff --git a/src/test_constraint_js.rs b/src/test_constraint_js.rs
+      @@
+       #[test]
+       fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::error::Error>> {
+      -    // This test isolates the GLR parser to investigate performance issues with a large number of
+      -    // reductions, particularly after an ambiguous first token is followed by a second token.
+      +    // This test isolates the GLR parser to investigate situations where an *ambiguous first
+      +    // token* is followed by a *second token* that triggers a large amount of work (many
+      +    // reductions).  The logic is unchanged – we merely refactor the code for readability.
+       
+      -    // 1. Load and compile the JavaScript grammar.
+      +    // ------------------------------------------------------------------------
+      +    // Helper utilities
+      +    // ------------------------------------------------------------------------
+      +    /// Convenience wrapper that:
+      +    ///   1. Resets the profiler,
+      +    ///   2. Executes `action`,
+      +    ///   3. Prints the number of `GLRParserState::reduce_and_goto` hits,
+      +    ///   4. Returns that hit-count.
+      +    fn measure<F: FnOnce()>(label: &str, action: F) -> u64 {
+      +        profiler::reset();
+      +        action();
+      +        let hits = profiler::get_all_hits();
+      +        let reduce_hits = hits
+      +            .get("GLRParserState::reduce_and_goto")
+      +            .copied()
+      +            .unwrap_or(0);
+      +        println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
+      +        reduce_hits
+      +    }
+      +
+      +    /// Returns the list of candidate tokens we want to try as “first” or “second” tokens.
+      +    fn candidate_tokens() -> Vec<Terminal> {
+      +        vec![
+      +            regex_name("BIGINT_LITERAL"),
+      +            regex_name("BOOLEAN_LITERAL"),
+      +            regex_name("ELISION"),
+      +            regex_name("IDENTIFIER"),
+      +            regex_name("IGNORE"),
+      +            regex_name("NUMERIC_LITERAL"),
+      +            regex_name("STRING_LITERAL"),
+      +            regex_name("TEMPLATE_CHAR"),
+      +            literal(b"`"),
+      +            regex_name("REGULAR_EXPRESSION_LITERAL"),
+      +            literal(b"{"),
+      +            literal(b"("),
+      +            literal(b"["),
+      +            literal(b"+"),
+      +            literal(b"-"),
+      +            literal(b"++"),
+      +            literal(b"--"),
+      +            literal(b"~"),
+      +            literal(b"!"),
+      +        ]
+      +    }
+      +
+      +    // ------------------------------------------------------------------------
+      +    // 1. Load and compile the JavaScript grammar.
+      +    // ------------------------------------------------------------------------
+           println!("--- Setting up for JS GLR Parser Reduction Explosion Test ---");
+           let grammar_path = "src/js.ebnf";
+           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           let parser = &compiled_grammar.glr_parser;
+           println!("Grammar compiled successfully.");
+       
+      -    // 2. Define the set of first tokens to test, based on those that can successfully start a parse.
+      -    let first_tokens_to_test: Vec<Terminal> = vec![
+      -        regex_name("BIGINT_LITERAL"),
+      -        regex_name("BOOLEAN_LITERAL"),
+      -        regex_name("ELISION"),
+      -        regex_name("IDENTIFIER"),
+      -        regex_name("IGNORE"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        regex_name("STRING_LITERAL"),
+      -        regex_name("TEMPLATE_CHAR"),
+      -        literal(b"`"),
+      -        regex_name("REGULAR_EXPRESSION_LITERAL"),
+      -        literal(b"{"),
+      -        literal(b"("),
+      -        literal(b"["),
+      -        literal(b"+"),
+      -        literal(b"-"),
+      -        literal(b"++"),
+      -        literal(b"--"),
+      -        literal(b"~"),
+      -        literal(b"!"),
+      -    ];
+      -
+      -    // Define the set of second tokens to test.
+      -    let second_tokens_to_test: Vec<Terminal> = vec![
+      -        regex_name("BIGINT_LITERAL"),
+      -        regex_name("BOOLEAN_LITERAL"),
+      -        regex_name("ELISION"),
+      -        regex_name("IDENTIFIER"),
+      -        regex_name("IGNORE"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        regex_name("STRING_LITERAL"),
+      -        regex_name("TEMPLATE_CHAR"),
+      -        literal(b"`"),
+      -        regex_name("REGULAR_EXPRESSION_LITERAL"),
+      -        literal(b"{"),
+      -        literal(b"("),
+      -        literal(b"["),
+      -        literal(b"+"),
+      -        literal(b"-"),
+      -        literal(b"++"),
+      -        literal(b"--"),
+      -        literal(b"~"),
+      -        literal(b"!"),
+      -    ];
+      +    // 2. Assemble the candidate token lists.
+      +    let first_tokens_to_test = candidate_tokens();
+      +    let second_tokens_to_test = candidate_tokens();
+       
+           // 3. Initialize the parser and collect states after feeding each of the first tokens.
+           let mut initial_state = parser.init_glr_parser(None);
+           let mut successful_first_step_states = Vec::new();
+       
+      -    profiler::reset();
+      -    initial_state.process_default_reductions();
+      -
+      -    let hits = profiler::get_all_hits();
+      -    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -    println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -    // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      -    profiler::reset();
+      +    measure("Processed default reductions", || {
+      +        initial_state.process_default_reductions()
+      +    });
+       
+           println!("\n--- Phase 1: Feeding initial tokens individually ---");
+           for terminal in &first_tokens_to_test {
+      -        let terminal_id = match parser.terminal_map.get_by_left(terminal) {
+      -            Some(id) => *id,
+      -            None => {
+      -                println!("  Skipping terminal not in map: {:?}", terminal);
+      -                continue;
+      -            }
+      -        };
+      +        let Some(&terminal_id) = parser.terminal_map.get_by_left(terminal) else {
+      +            println!("  Skipping terminal not in map: {:?}", terminal);
+      +            continue;
+      +        };
+       
+               let mut state_clone = initial_state.clone();
+      -        
+      -        profiler::reset();
+      -        state_clone.step(terminal_id);
+      -
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", terminal), reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
+      -
+      -        profiler::reset();
+      -        state_clone.process_default_reductions();
+      -
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +        measure(&format!("Fed token '{terminal:?}'"), || {
+      +            state_clone.step(terminal_id)
+      +        });
+      +
+      +        measure("Processed default reductions", || {
+      +            state_clone.process_default_reductions()
+      +        });
+       
+               if state_clone.is_ok() {
+                   successful_first_step_states.push(state_clone);
+               } else {
+                   println!("    -> State is not OK after this token.");
+      @@
+           let mut merged_state = parser.init_glr_parser_null(None);
+           for state in successful_first_step_states {
+               merged_state.merge_with(state);
+           }
+           println!("States merged successfully.");
+      -
+      -    // Process default reductions.
+      -    profiler::reset();
+      -    merged_state.process_default_reductions();
+      -    let hits = profiler::get_all_hits();
+      -    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -    println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -    // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +    measure("Processed default reductions", || {
+      +        merged_state.process_default_reductions()
+      +    });
+       
+           // 5. Feed various second tokens to the merged state and check reductions.
+           println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+       
+           for second_token_terminal in &second_tokens_to_test {
+      -        let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+      -            Some(id) => *id,
+      -            None => {
+      -                println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      -                continue;
+      -            }
+      -        };
+      +        let Some(&second_token_id) = parser.terminal_map.get_by_left(second_token_terminal)
+      +        else {
+      +            println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      +            continue;
+      +        };
+       
+               println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+               let mut state_for_second_token = merged_state.clone();
+       
+      -        // 5a. Feed the second token to the cloned merged state.
+      -        profiler::reset();
+      -        state_for_second_token.step(second_token_id);
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      +        // 5a. Feed the second token to the cloned merged state and measure.
+      +        measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+      +            state_for_second_token.step(second_token_id)
+      +        });
+               assert!(
+                   state_for_second_token.is_ok(),
+                   "Merged state became invalid after second token '{}'.",
+                   second_token_terminal
+               );
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+       
+      -        // 5b. Process default reductions.
+      -        profiler::reset();
+      -        state_for_second_token.process_default_reductions();
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +        // 5b. Process default reductions.
+      +        measure("Processed default reductions", || {
+      +            state_for_second_token.process_default_reductions()
+      +        });
+           }
+           
+           println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+           Ok(())
+       }
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Error applying patch to src/test_constraint_js.rs:
+      Hunk #2 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          let mut merged_state = parser.init_glr_parser_null(None);
+          for state in successful_first_step_states {
+              merged_state.merge_with(state);
+          }
+          println!("States merged successfully.");
+
+          // Process default reductions.
+          profiler::reset();
+          merged_state.process_default_reductions();
+          let hits = profiler::get_all_hits();
+          let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+          println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+          // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+
+          // 5. Feed various second tokens to the merged state and check reductions.
+          println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+          for second_token_terminal in &second_tokens_to_test {
+              let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+                  Some(id) => *id,
+                  None => {
+                      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+                      continue;
+                  }
+              };
+
+              println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+              let mut state_for_second_token = merged_state.clone();
+
+              // 5a. Feed the second token to the cloned merged state.
+              profiler::reset();
+              state_for_second_token.step(second_token_id);
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+              assert!(
+                  state_for_second_token.is_ok(),
+                  "Merged state became invalid after second token '{}'.",
+                  second_token_terminal
+              );
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+
+              // 5b. Process default reductions.
+              profiler::reset();
+              state_for_second_token.process_default_reductions();
+              let hits = profiler::get_all_hits();
+              let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+              println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+              // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+          }
+          
+          println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+          Ok(())
+
+      --- Expected Context (from patch, after normalization): ---
+      let mut merged_state = parser.init_glr_parser_null(None);
+      for state in successful_first_step_states {
+      merged_state.merge_with(state);
+      }
+      println!("States merged successfully.");
+
+
+      profiler::reset();
+      merged_state.process_default_reductions();
+      let hits = profiler::get_all_hits();
+      let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+
+
+
+      println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+
+      for second_token_terminal in &second_tokens_to_test {
+      let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+      Some(id) => *id,
+      None => {
+      println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      continue;
+      }
+      };
+
+      println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+      let mut state_for_second_token = merged_state.clone();
+
+
+      profiler::reset();
+      state_for_second_token.step(second_token_id);
+      let hits = profiler::get_all_hits();
+      let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      assert!(
+      state_for_second_token.is_ok(),
+      "Merged state became invalid after second token '{}'.",
+      second_token_terminal
+      );
+
+
+
+      profiler::reset();
+      state_for_second_token.process_default_reductions();
+      let hits = profiler::get_all_hits();
+      let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+
+      }
+
+      println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+      Ok(())
+      }
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 258 with ratio 0.89 (48/54 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + println!("\n--- Phase 2: Merging {} successful states ---", successful_first_step_states.len());
+      + assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state.");
+      + 
+        let mut merged_state = parser.init_glr_parser_null(None);
+        for state in successful_first_step_states {
+        merged_state.merge_with(state);
+        }
+        println!("States merged successfully.");
+        
+        
+        profiler::reset();
+        merged_state.process_default_reductions();
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+        
+        
+        
+      + 
+        println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+        
+        for second_token_terminal in &second_tokens_to_test {
+        let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+        Some(id) => *id,
+        None => {
+        println!("  Skipping second token not in map: {:?}", second_token_terminal);
+        continue;
+        }
+        };
+        
+      - println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+      ?                                         --
+
+      + println!("\n--- Testing second token: '{}' ---", second_token_terminal);
+        let mut state_for_second_token = merged_state.clone();
+        
+        
+        profiler::reset();
+        state_for_second_token.step(second_token_id);
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      + assert!(state_for_second_token.is_ok(), "Merged state became invalid after second token '{}'.", second_token_terminal);
+      - assert!(
+      - state_for_second_token.is_ok(),
+      - "Merged state became invalid after second token '{}'.",
+      - second_token_terminal
+      - );
+        
+        
+        
+        profiler::reset();
+        state_for_second_token.process_default_reductions();
+        let hits = profiler::get_all_hits();
+        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+        
+        }
+        
+        println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+        Ok(())
+        }
+      Problematic diff content:
+      ---
+      diff --git a/src/test_constraint_js.rs b/src/test_constraint_js.rs
+      @@
+       #[test]
+       fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::error::Error>> {
+      -    // This test isolates the GLR parser to investigate performance issues with a large number of
+      -    // reductions, particularly after an ambiguous first token is followed by a second token.
+      +    // This test isolates the GLR parser to investigate situations where an *ambiguous first
+      +    // token* is followed by a *second token* that triggers a large amount of work (many
+      +    // reductions).  The logic is unchanged – we merely refactor the code for readability.
+       
+      -    // 1. Load and compile the JavaScript grammar.
+      +    // ------------------------------------------------------------------------
+      +    // Helper utilities
+      +    // ------------------------------------------------------------------------
+      +    /// Convenience wrapper that:
+      +    ///   1. Resets the profiler,
+      +    ///   2. Executes `action`,
+      +    ///   3. Prints the number of `GLRParserState::reduce_and_goto` hits,
+      +    ///   4. Returns that hit-count.
+      +    fn measure<F: FnOnce()>(label: &str, action: F) -> u64 {
+      +        profiler::reset();
+      +        action();
+      +        let hits = profiler::get_all_hits();
+      +        let reduce_hits = hits
+      +            .get("GLRParserState::reduce_and_goto")
+      +            .copied()
+      +            .unwrap_or(0);
+      +        println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
+      +        reduce_hits
+      +    }
+      +
+      +    /// Returns the list of candidate tokens we want to try as “first” or “second” tokens.
+      +    fn candidate_tokens() -> Vec<Terminal> {
+      +        vec![
+      +            regex_name("BIGINT_LITERAL"),
+      +            regex_name("BOOLEAN_LITERAL"),
+      +            regex_name("ELISION"),
+      +            regex_name("IDENTIFIER"),
+      +            regex_name("IGNORE"),
+      +            regex_name("NUMERIC_LITERAL"),
+      +            regex_name("STRING_LITERAL"),
+      +            regex_name("TEMPLATE_CHAR"),
+      +            literal(b"`"),
+      +            regex_name("REGULAR_EXPRESSION_LITERAL"),
+      +            literal(b"{"),
+      +            literal(b"("),
+      +            literal(b"["),
+      +            literal(b"+"),
+      +            literal(b"-"),
+      +            literal(b"++"),
+      +            literal(b"--"),
+      +            literal(b"~"),
+      +            literal(b"!"),
+      +        ]
+      +    }
+      +
+      +    // ------------------------------------------------------------------------
+      +    // 1. Load and compile the JavaScript grammar.
+      +    // ------------------------------------------------------------------------
+           println!("--- Setting up for JS GLR Parser Reduction Explosion Test ---");
+           let grammar_path = "src/js.ebnf";
+           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           let parser = &compiled_grammar.glr_parser;
+           println!("Grammar compiled successfully.");
+       
+      -    // 2. Define the set of first tokens to test, based on those that can successfully start a parse.
+      -    let first_tokens_to_test: Vec<Terminal> = vec![
+      -        regex_name("BIGINT_LITERAL"),
+      -        regex_name("BOOLEAN_LITERAL"),
+      -        regex_name("ELISION"),
+      -        regex_name("IDENTIFIER"),
+      -        regex_name("IGNORE"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        regex_name("STRING_LITERAL"),
+      -        regex_name("TEMPLATE_CHAR"),
+      -        literal(b"`"),
+      -        regex_name("REGULAR_EXPRESSION_LITERAL"),
+      -        literal(b"{"),
+      -        literal(b"("),
+      -        literal(b"["),
+      -        literal(b"+"),
+      -        literal(b"-"),
+      -        literal(b"++"),
+      -        literal(b"--"),
+      -        literal(b"~"),
+      -        literal(b"!"),
+      -    ];
+      -
+      -    // Define the set of second tokens to test.
+      -    let second_tokens_to_test: Vec<Terminal> = vec![
+      -        regex_name("BIGINT_LITERAL"),
+      -        regex_name("BOOLEAN_LITERAL"),
+      -        regex_name("ELISION"),
+      -        regex_name("IDENTIFIER"),
+      -        regex_name("IGNORE"),
+      -        regex_name("NUMERIC_LITERAL"),
+      -        regex_name("STRING_LITERAL"),
+      -        regex_name("TEMPLATE_CHAR"),
+      -        literal(b"`"),
+      -        regex_name("REGULAR_EXPRESSION_LITERAL"),
+      -        literal(b"{"),
+      -        literal(b"("),
+      -        literal(b"["),
+      -        literal(b"+"),
+      -        literal(b"-"),
+      -        literal(b"++"),
+      -        literal(b"--"),
+      -        literal(b"~"),
+      -        literal(b"!"),
+      -    ];
+      +    // 2. Assemble the candidate token lists.
+      +    let first_tokens_to_test = candidate_tokens();
+      +    let second_tokens_to_test = candidate_tokens();
+       
+           // 3. Initialize the parser and collect states after feeding each of the first tokens.
+           let mut initial_state = parser.init_glr_parser(None);
+           let mut successful_first_step_states = Vec::new();
+       
+      -    profiler::reset();
+      -    initial_state.process_default_reductions();
+      -
+      -    let hits = profiler::get_all_hits();
+      -    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -    println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -    // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      -    profiler::reset();
+      +    measure("Processed default reductions", || {
+      +        initial_state.process_default_reductions()
+      +    });
+       
+           println!("\n--- Phase 1: Feeding initial tokens individually ---");
+           for terminal in &first_tokens_to_test {
+      -        let terminal_id = match parser.terminal_map.get_by_left(terminal) {
+      -            Some(id) => *id,
+      -            None => {
+      -                println!("  Skipping terminal not in map: {:?}", terminal);
+      -                continue;
+      -            }
+      -        };
+      +        let Some(&terminal_id) = parser.terminal_map.get_by_left(terminal) else {
+      +            println!("  Skipping terminal not in map: {:?}", terminal);
+      +            continue;
+      +        };
+       
+               let mut state_clone = initial_state.clone();
+      -        
+      -        profiler::reset();
+      -        state_clone.step(terminal_id);
+      -
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", terminal), reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) on first token {:?}", reduce_hits, terminal);
+      -
+      -        profiler::reset();
+      -        state_clone.process_default_reductions();
+      -
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +        measure(&format!("Fed token '{terminal:?}'"), || {
+      +            state_clone.step(terminal_id)
+      +        });
+      +
+      +        measure("Processed default reductions", || {
+      +            state_clone.process_default_reductions()
+      +        });
+       
+               if state_clone.is_ok() {
+                   successful_first_step_states.push(state_clone);
+               } else {
+                   println!("    -> State is not OK after this token.");
+      @@
+           let mut merged_state = parser.init_glr_parser_null(None);
+           for state in successful_first_step_states {
+               merged_state.merge_with(state);
+           }
+           println!("States merged successfully.");
+      -
+      -    // Process default reductions.
+      -    profiler::reset();
+      -    merged_state.process_default_reductions();
+      -    let hits = profiler::get_all_hits();
+      -    let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -    println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -    // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +    measure("Processed default reductions", || {
+      +        merged_state.process_default_reductions()
+      +    });
+       
+           // 5. Feed various second tokens to the merged state and check reductions.
+           println!("\n--- Phase 3: Feeding second tokens to merged state ---");
+       
+           for second_token_terminal in &second_tokens_to_test {
+      -        let second_token_id = match parser.terminal_map.get_by_left(second_token_terminal) {
+      -            Some(id) => *id,
+      -            None => {
+      -                println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      -                continue;
+      -            }
+      -        };
+      +        let Some(&second_token_id) = parser.terminal_map.get_by_left(second_token_terminal)
+      +        else {
+      +            println!("  Skipping second token not in map: {:?}", second_token_terminal);
+      +            continue;
+      +        };
+       
+               println!("\n--- Testing second token: '{:?}' ---", second_token_terminal);
+               let mut state_for_second_token = merged_state.clone();
+       
+      -        // 5a. Feed the second token to the cloned merged state.
+      -        profiler::reset();
+      -        state_for_second_token.step(second_token_id);
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", format!("Fed token '{}'", second_token_terminal), reduce_hits);
+      +        // 5a. Feed the second token to the cloned merged state and measure.
+      +        measure(&format!("Fed token '{second_token_terminal:?}'"), || {
+      +            state_for_second_token.step(second_token_id)
+      +        });
+               assert!(
+                   state_for_second_token.is_ok(),
+                   "Merged state became invalid after second token '{}'.",
+                   second_token_terminal
+               );
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) on second token '{}' after merging ambiguous first tokens.", reduce_hits, second_token_terminal);
+       
+      -        // 5b. Process default reductions.
+      -        profiler::reset();
+      -        state_for_second_token.process_default_reductions();
+      -        let hits = profiler::get_all_hits();
+      -        let reduce_hits = hits.get("GLRParserState::reduce_and_goto").copied().unwrap_or(0);
+      -        println!("  - {:<50}: reduce hits = {}", "Processed default reductions", reduce_hits);
+      -        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+      +        // 5b. Process default reductions.
+      +        measure("Processed default reductions", || {
+      +            state_for_second_token.process_default_reductions()
+      +        });
+           }
+           
+           println!("\nTest passed: Reduction count remained within limits for all second tokens.");
+           Ok(())
+       }
+      ---
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/test_constraint_js.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/test_constraint_js.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/test_constraint_js.rs
     metadata:
 ...
