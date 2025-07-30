@@ -182,7 +182,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             .copied()
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
-        // assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
+        assert!(reduce_hits <= 20, "Too many reductions ({}) while processing default reductions.", reduce_hits);
         reduce_hits
     }
 
