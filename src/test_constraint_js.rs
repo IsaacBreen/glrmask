@@ -209,8 +209,6 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
     assert!(reduce_hits <= 50, "Too many reductions ({}) while processing default reductions.", reduce_hits);
     profiler::reset();
 
-
-
     println!("\n--- Phase 1: Feeding initial tokens individually ---");
     for terminal in &first_tokens_to_test {
         let terminal_id = match parser.terminal_map.get_by_left(terminal) {
