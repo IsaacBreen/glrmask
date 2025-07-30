@@ -281,7 +281,8 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         assert!(!successful_first_step_states.is_empty(), "No first tokens resulted in a valid parser state for config {}", i);
 
         // Include the initial state
-        let mut merged_state = initial_state.clone();
+        // let mut merged_state = initial_state.clone();
+        let mut merged_state = successful_first_step_states.pop().unwrap();
         for state in successful_first_step_states {
             merged_state.merge_with(state);
         }
