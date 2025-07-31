@@ -1,6 +1,6 @@
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Statistics for a single state in the parse table.

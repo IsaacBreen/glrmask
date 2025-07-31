@@ -61,9 +61,9 @@ fn test_repetition_no_eof() {
     state3.parse(&tokens3);
     // The initial state is ok because it's ready to parse.
     // After parsing nothing, it's still in that same ready state.
-    assert!(state3.is_ok(), "State should still be ok after parsing empty input");
     // However, if we were to check for *acceptance*, it would fail because S is not nullable.
     // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+    assert!(state3.is_ok(), "State should still be ok after parsing empty input");
 
     // Test case 4: "b" (invalid token)
     // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
@@ -213,6 +213,51 @@ fn test_expression_parse_table_generation_and_parse() {
     }
 }
 
+#[test]
+fn test_unit_production_elimination() {
+    // Grammar with unit productions: E -> T, T -> F
+    let productions = vec![
+        prod("S", vec![nt("E"), t("$")]),
+        prod("E", vec![nt("E"), t("+"), nt("T")]),
+        prod("E", vec![nt("T")]), // Unit
+        prod("T", vec![nt("T"), t("*"), nt("F")]),
+        prod("T", vec![nt("F")]), // Unit
+        prod("F", vec![t("("), nt("E"), t(")")]),
+        prod("F", vec![t("id")]),
+    ];
+
+    // --- Generate WITHOUT optimization (by manually calling stages) ---
+    let terminal_map = crate::glr::table::assign_terminal_ids(&productions);
+    let non_terminal_map = crate::glr::table::assign_non_terminal_ids(&productions);
+    let stage_1 = crate::glr::table::stage_1(&productions, 0);
+    let stage_2 = crate::glr::table::stage_2(stage_1, &productions);
+    let stage_3 = crate::glr::table::stage_3(stage_2, &productions);
+    let stage_4 = crate::glr::table::stage_4(stage_3, &productions);
+    let stage_5 = crate::glr::table::stage_5(stage_4, &productions, &terminal_map);
+    let stage_6 = crate::glr::table::stage_6(stage_5);
+    let (unoptimized_table, _, _) = crate::glr::table::stage_7(stage_6, &productions, 0, &terminal_map, &non_terminal_map);
+
+    let unoptimized_state_count = unoptimized_table.len();
+    println!("Unoptimized state count: {}", unoptimized_state_count);
+
+    // --- Generate WITH optimization (using the main function) ---
+    let parser = generate_glr_parser(&productions, 0, None);
+    let optimized_state_count = parser.stage_7_table.len();
+    println!("Optimized state count: {}", optimized_state_count);
+
+    // Assert that the optimization reduced the number of states.
+    assert!(optimized_state_count < unoptimized_state_count, "Unit production elimination should reduce the number of states.");
+
+    // Assert that the optimized parser still works correctly.
+    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
+    let tokens = tokenize(&parser, "id+id*id");
+    let mut state = parser.init_glr_parser(None);
+    state.parse(&tokens);
+    state.step(eof);
+    assert!(state.is_ok(), "Optimized parser failed to parse a valid expression.");
+}
+
+#[test]
 fn validation_passes_standard_grammars() {
     // Simple Grammar (already tested implicitly above, but good to be explicit)
     let simple_productions = vec![

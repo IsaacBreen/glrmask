@@ -236,7 +236,7 @@ pub fn compute_closure(
     closure
 }
 
-pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
+fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
     items.iter()
         .filter_map(|item| item.next())
         .map(|(_, next_item)| next_item)

@@ -293,7 +293,7 @@ impl GLRParser {
     pub fn init_glr_parser_with_acc(&self) -> GLRParserState { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc();
         let mut parser_state = GLRParserState {
-            parser: self,
+            parser: &self,
             active_state: initial_parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
@@ -302,7 +302,7 @@ impl GLRParser {
     }
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
         let mut parser_state = GLRParserState {
-            parser: self,
+            parser: &self,
             active_state: parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,

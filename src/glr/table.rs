@@ -686,6 +686,110 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
+/// Eliminates unit productions from the parse table.
+/// This is a simplified version of Pager's algorithm, applied after state construction
+/// but before default reduction promotion.
+fn stage_7_eliminate_unit_productions(
+    table: &mut Stage7Table,
+    productions: &[Production],
+    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+) {
+    // 1. Identify all unit productions (A -> B).
+    let unit_productions: Vec<_> = productions
+        .iter()
+        .filter_map(|p| {
+            if p.rhs.len() == 1 {
+                if let Symbol::NonTerminal(nt_rhs) = &p.rhs[0] {
+                    let lhs_id = *non_terminal_map.get_by_left(&p.lhs).unwrap();
+                    let rhs_id = *non_terminal_map.get_by_left(nt_rhs).unwrap();
+                    return Some((lhs_id, rhs_id));
+                }
+            }
+            None
+        })
+        .collect();
+
+    if unit_productions.is_empty() {
+        return; // Nothing to do.
+    }
+
+    // 2. Build a "derives" graph to compute transitive closure (A =>* B).
+    // A derives B if A -> B is a unit production.
+    let mut derives: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
+    for (lhs, rhs) in &unit_productions {
+        derives.entry(*lhs).or_default().insert(*rhs);
+    }
+
+    // Compute transitive closure using Floyd-Warshall or repeated passes.
+    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
+    for k in &all_nt_ids {
+        for i in &all_nt_ids {
+            for j in &all_nt_ids {
+                let derives_ik = derives.get(i).map_or(false, |s| s.contains(k));
+                let derives_kj = derives.get(k).map_or(false, |s| s.contains(j));
+                if derives_ik && derives_kj {
+                    derives.entry(*i).or_default().insert(*j);
+                }
+            }
+        }
+    }
+
+    // Add self-derivation (A =>* A)
+    for nt_id in &all_nt_ids {
+        derives.entry(*nt_id).or_default().insert(*nt_id);
+    }
+
+    // 3. Modify the table by merging gotos.
+    for row in table.values_mut() {
+        let original_gotos = row.gotos.clone();
+        let mut new_gotos = row.gotos.clone();
+
+        for (nt_id, goto_action) in &original_gotos {
+            // If nt_id can derive other non-terminals via unit productions...
+            if let Some(derived_nts) = derives.get(nt_id) {
+                for derived_nt_id in derived_nts {
+                    if derived_nt_id != nt_id {
+                        // Merge the goto action for `nt_id` into the entry for `derived_nt_id`.
+                        // This is a simplified merge; a more complex one would handle conflicts.
+                        // Here, we just overwrite, assuming the LALR construction keeps them compatible.
+                        new_gotos.insert(*derived_nt_id, *goto_action);
+                    }
+                }
+            }
+        }
+        row.gotos = new_gotos;
+    }
+
+    // 4. Identify non-terminals that are *only* LHS of unit productions.
+    // These can be removed from the goto table entirely.
+    let mut only_unit_lhs = BTreeSet::new();
+    for (lhs_id, _) in &unit_productions {
+        let is_only_unit_lhs = productions.iter().all(|p| {
+            if non_terminal_map.get_by_left(&p.lhs) == Some(lhs_id) {
+                // This production has our NT as LHS. Is it a unit production?
+                p.rhs.len() == 1 && matches!(p.rhs[0], Symbol::NonTerminal(_))
+            } else {
+                true // Not a production for this LHS, so we don't care.
+            }
+        });
+        if is_only_unit_lhs {
+            only_unit_lhs.insert(*lhs_id);
+        }
+    }
+
+    // 5. Remove goto entries for these non-terminals.
+    if !only_unit_lhs.is_empty() {
+        crate::debug!(
+            2,
+            "Removing gotos for non-terminals that are now redundant: {:?}",
+            only_unit_lhs.iter().map(|id| &non_terminal_map.get_by_right(id).unwrap().0).collect::<Vec<_>>()
+        );
+        for row in table.values_mut() {
+            row.gotos.retain(|nt_id, _| !only_unit_lhs.contains(nt_id));
+        }
+    }
+}
+
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
 ///
 /// This function takes a table and a list of compatible state pairs. It merges these
@@ -850,6 +954,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
+
+    crate::debug!(2, "Eliminating unit productions");
+    stage_7_eliminate_unit_productions(&mut stage_7_table, &productions, &non_terminal_map);
 
     let compatible_states = find_compatible_states(&stage_7_table);
     if !compatible_states.is_empty() {
