@@ -1,5 +1,5 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::glr::analyze::remove_productions_with_undefined_nonterminals;
 use crate::interface::display_productions;
 
@@ -20,7 +20,6 @@ pub fn remove_productions_with_uninteresting_terminals(
         .collect()
 }
 
-/// Finds all non-terminals that are part of any cycle in the grammar's dependency graph.
 /// Helper for `substitute_single_productions_and_report` to find all nodes in any cycle.
 fn find_cycles_dfs(
     u: &NonTerminal,
@@ -264,104 +263,5 @@ pub fn simplify_grammar_for_test_case(
         .expect("Start production was removed during simplification");
 
     (current_productions, final_start_id)
-}
-
-/// Eliminates "unit productions" (rules of the form A -> B) from a grammar.
-///
-/// This function replaces chains of unit productions with direct productions, effectively
-/// bypassing the intermediate non-terminals. For example, if the grammar contains:
-///   `expr -> term`
-///   `term -> factor`
-///   `factor -> ID`
-/// and `term` and `factor` are only used in these unit productions, this function
-/// would effectively allow `expr` to directly produce whatever `ID` produces,
-/// and the intermediate rules might be removed if they become unproductive.
-///
-/// # Arguments
-/// * `productions` - The list of productions to simplify.
-///
-/// # Returns
-/// A new `Vec<Production>` with unit productions eliminated.
-pub fn eliminate_unit_productions(productions: &[Production]) -> Vec<Production> {
-    // 1. Build a graph of unit productions: A -> B means an edge from A to B.
-    let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-    let mut non_unit_productions: Vec<Production> = Vec::new();
-    let all_nts: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
-
-    for nt in &all_nts {
-        unit_graph.entry(nt.clone()).or_default();
-    }
-
-    for p in productions {
-        if p.rhs.len() == 1 {
-            if let Symbol::NonTerminal(rhs_nt) = &p.rhs[0] {
-                // This is a unit production: p.lhs -> rhs_nt
-                unit_graph.entry(p.lhs.clone()).or_default().insert(rhs_nt.clone());
-                continue; // Don't add unit productions to the new list yet.
-            }
-        }
-        non_unit_productions.push(p.clone());
-    }
-
-    // 2. Compute the transitive closure of the unit production graph.
-    // This tells us all non-terminals `B` that `A` can derive through a chain of unit productions.
-    let mut closure: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-    for nt in &all_nts {
-        let mut reachable = BTreeSet::new();
-        let mut queue = VecDeque::new();
-
-        reachable.insert(nt.clone());
-        queue.push_back(nt.clone());
-
-        while let Some(current_nt) = queue.pop_front() {
-            if let Some(neighbors) = unit_graph.get(&current_nt) {
-                for neighbor in neighbors {
-                    if reachable.insert(neighbor.clone()) {
-                        queue.push_back(neighbor.clone());
-                    }
-                }
-            }
-        }
-        closure.insert(nt.clone(), reachable);
-    }
-
-    // 3. Create the new set of productions.
-    let mut new_productions = Vec::new();
-    let mut added_prods = BTreeSet::new();
-
-    // For each non-terminal `A`...
-    for a_nt in &all_nts {
-        // Find all non-terminals `B` that `A` can derive via unit productions (A =>* B).
-        if let Some(reachable_from_a) = closure.get(a_nt) {
-            for b_nt in reachable_from_a {
-                // Find all non-unit productions that start with `B` (B -> γ).
-                for p in &non_unit_productions {
-                    if &p.lhs == b_nt {
-                        // Add a new production `A -> γ`.
-                        let new_prod = Production {
-                            lhs: a_nt.clone(),
-                            rhs: p.rhs.clone(),
-                        };
-                        if added_prods.insert(new_prod.clone()) {
-                            new_productions.push(new_prod);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // It's possible that some original non-unit productions are no longer needed if their
-    // LHS was only part of a unit-production chain that has now been bypassed.
-    // However, for safety and simplicity, we can keep them and let a subsequent
-    // `eliminate_unreachable_productions` pass clean them up.
-    // Let's add them back if they haven't been effectively recreated.
-    for p in non_unit_productions {
-        if added_prods.insert(p.clone()) {
-            new_productions.push(p);
-        }
-    }
-
-    new_productions
 }
 

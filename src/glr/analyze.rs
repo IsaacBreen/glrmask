@@ -720,7 +720,7 @@ pub fn resolve_direct_right_recursion(
     productions.extend(new_productions);
 }
 
-/// Checks if two goto maps are compatible for LALR state merging.
+/// Checks if two goto maps are compatible.
 ///
 /// Two goto maps are compatible if, for all non-terminal IDs they have in common,
 /// the corresponding `Goto` actions are identical.
