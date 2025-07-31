@@ -828,7 +828,7 @@ fn eliminate_unit_productions(
         if &parent[i] == i {
             i.clone()
         } else {
-            let root = find_set(parent, &parent[i]);
+            let root = find_set(parent, &parent[i].clone());
             parent.insert(i.clone(), root.clone()); // Path compression
             root
         }
