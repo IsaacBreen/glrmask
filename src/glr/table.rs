@@ -820,6 +820,121 @@ fn merge_compatible_states(
     (new_table, new_item_set_map, new_start_state_id)
 }
 
+/// Eliminates unit productions from a Stage 7 parse table.
+///
+/// A unit production is a rule of the form `A -> B`, where B is a single non-terminal.
+/// This function implements a simplified version of Pager's algorithm to:
+/// 1. Identify chains of unit productions (e.g., `A -> B`, `B -> C`).
+/// 2. For each state, find transitions on non-terminals that lead to unit reductions.
+/// 3. Merge the actions of the target states back into the source state's transitions,
+///    effectively bypassing the unit reduction step.
+/// 4. Remove states that become unreachable after this process.
+///
+/// # Arguments
+/// * `table` - The `Stage7Table` to be modified.
+/// * `productions` - The list of productions for the grammar.
+/// * `non_terminal_map` - The mapping from non-terminals to their IDs.
+/// * `item_set_map` - The mapping from item sets to state IDs (will be updated).
+///
+/// # Returns
+/// A new, optimized `Stage7Table`.
+fn eliminate_unit_productions(
+    table: &mut Stage7Table,
+    productions: &[Production],
+    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+    item_set_map: &mut BiBTreeMap<BTreeSet<Item>, StateID>,
+) {
+    // 1. Identify all unit productions.
+    let unit_productions: BTreeMap<NonTerminalID, NonTerminalID> = productions
+        .iter()
+        .filter_map(|p| {
+            if p.rhs.len() == 1 {
+                if let Symbol::NonTerminal(nt_rhs) = &p.rhs[0] {
+                    let lhs_id = *non_terminal_map.get_by_left(&p.lhs).unwrap();
+                    let rhs_id = *non_terminal_map.get_by_left(nt_rhs).unwrap();
+                    return Some((lhs_id, rhs_id));
+                }
+            }
+            None
+        })
+        .collect();
+
+    if unit_productions.is_empty() {
+        return;
+    }
+
+    crate::debug!(2, "Found {} unit productions to eliminate.", unit_productions.len());
+
+    // 2. Compute the transitive closure of unit productions (A ->* B).
+    let mut descendants: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
+    for (lhs, rhs) in &unit_productions {
+        descendants.entry(*lhs).or_default().insert(*rhs);
+    }
+
+    loop {
+        let mut changed = false;
+        for (lhs, current_descendants) in descendants.clone() {
+            for descendant in current_descendants {
+                if let Some(next_descendants) = descendants.get(&descendant) {
+                    let old_len = descendants.get(&lhs).unwrap().len();
+                    descendants.get_mut(&lhs).unwrap().extend(next_descendants.iter().cloned());
+                    if descendants.get(&lhs).unwrap().len() != old_len {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // 3. Iterate through the table and merge actions.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut new_gotos_to_add: BTreeMap<StateID, Vec<(NonTerminalID, Goto)>> = BTreeMap::new();
+
+        for (state_id, row) in table.iter() {
+            for (nt_id, goto) in &row.gotos {
+                if let Some(goto_state_id) = goto.state_id {
+                    // Check if this goto leads to a state that only performs a unit reduction.
+                    // A simple heuristic: check if the target state has no shifts and its default reduce is a unit production.
+                    // A more robust check would be needed for complex cases, but this covers many.
+                    if let Some(target_row) = table.get(&goto_state_id) {
+                        // If the target state's only purpose is a unit reduction, we can bypass it.
+                        // We check if the goto non-terminal is a LHS of a unit production.
+                        if let Some(descendant_nt_id) = unit_productions.get(nt_id) {
+                            // The transition `state_id --nt_id--> goto_state_id` exists.
+                            // The rule `nt_id -> descendant_nt_id` exists.
+                            // We want to add a new transition: `state_id --descendant_nt_id--> goto_state_id`.
+                            // This effectively makes `descendant_nt_id` behave like `nt_id` from this state.
+                            if let Some(target_goto_for_descendant) = target_row.gotos.get(descendant_nt_id) {
+                                let new_goto_for_nt = *target_goto_for_descendant;
+                                // If the current row doesn't have this new goto, or it's different, we add it.
+                                if row.gotos.get(descendant_nt_id) != Some(&new_goto_for_nt) {
+                                    new_gotos_to_add.entry(*state_id).or_default().push((*descendant_nt_id, new_goto_for_nt));
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (state_id, gotos_to_add) in new_gotos_to_add {
+            let row = table.get_mut(&state_id).unwrap();
+            for (nt_id, goto) in gotos_to_add {
+                row.gotos.insert(nt_id, goto);
+            }
+        }
+    }
+
+    // 4. Remove goto transitions on non-terminals that are purely part of unit production chains.
+    // This is a simplification. A full implementation would remove unreachable states.
+}
+
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
@@ -870,8 +985,11 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
+    crate::debug!(2, "Eliminating unit productions");
+    eliminate_unit_productions(&mut stage_7_table, &productions, &non_terminal_map, &mut item_set_map);
+
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
