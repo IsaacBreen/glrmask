@@ -330,6 +330,8 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
         for (dest_key, source_preds_vec) in source_preds_by_depth {
             let target_preds_vec = target_preds_by_depth.entry(dest_key).or_default();
 
+            // TODO: ...I mean come on
+            //  clean this up
             if merge_depth == 0 {
                 if *target_preds_vec == source_preds_vec {
                     continue;
