@@ -6,7 +6,7 @@ use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
+use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal, compute_unit_production_derives, get_unit_production_nodes};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -43,6 +43,7 @@ struct Stage4Row {
     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
 }
 #[derive(Debug)]
+#[derive(Clone)]
 struct Stage5Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
@@ -798,6 +799,121 @@ fn merge_compatible_states(
     (new_table, new_item_set_map, new_start_state_id)
 }
 
+/// Implements Pager's algorithm for eliminating unit productions by merging states.
+/// This operates on the `Stage5Table`, where states are still represented by their
+/// `BTreeSet<Item>` kernels, before default reductions are computed.
+fn eliminate_unit_productions(
+    table: &Stage5Table,
+    productions: &[Production],
+) -> Stage5Table {
+    crate::debug!(2, "Eliminating unit productions...");
+    let derives = compute_unit_production_derives(productions);
+    let node_nts = get_unit_production_nodes(productions);
+
+    if node_nts.is_empty() {
+        crate::debug!(2, "No unit productions found to eliminate.");
+        return table.clone();
+    }
+
+    // 1. DSU Setup: Collect all states and initialize the DSU structure.
+    let mut all_states: BTreeSet<BTreeSet<Item>> = table.keys().cloned().collect();
+    for row in table.values() {
+        all_states.extend(row.shifts.values().cloned());
+        all_states.extend(row.gotos.values().cloned());
+    }
+
+    let mut parent: BTreeMap<BTreeSet<Item>, BTreeSet<Item>> = all_states.iter().map(|s| (s.clone(), s.clone())).collect();
+
+    fn find_set<'a>(parent: &'a mut BTreeMap<BTreeSet<Item>, BTreeSet<Item>>, i: &BTreeSet<Item>) -> BTreeSet<Item> {
+        if &parent[i] == i {
+            i.clone()
+        } else {
+            let root = find_set(parent, &parent[i]);
+            parent.insert(i.clone(), root.clone()); // Path compression
+            root
+        }
+    }
+
+    fn unite_sets(parent: &mut BTreeMap<BTreeSet<Item>, BTreeSet<Item>>, a: &BTreeSet<Item>, b: &BTreeSet<Item>) {
+        let root_a = find_set(parent, a);
+        let root_b = find_set(parent, b);
+        if root_a != root_b {
+            // Merge smaller into larger to keep item sets consistent for debugging.
+            if root_a.len() < root_b.len() {
+                parent.insert(root_a, root_b);
+            } else {
+                parent.insert(root_b, root_a);
+            }
+        }
+    }
+
+    // 2. Find merge pairs based on unit production derivations.
+    // Two states T1, T2 are merged if there exists a state S and non-terminals N1, N2
+    // such that goto(S, N1) = T1, goto(S, N2) = T2, and N1 =>* N2 (or vice-versa).
+    for row in table.values() {
+        let nts_in_goto: Vec<_> = row.gotos.keys().cloned().collect();
+        for i in 0..nts_in_goto.len() {
+            for j in (i + 1)..nts_in_goto.len() {
+                let nt1 = &nts_in_goto[i];
+                let nt2 = &nts_in_goto[j];
+
+                if derives.get(nt1).map_or(false, |d| d.contains(nt2)) || derives.get(nt2).map_or(false, |d| d.contains(nt1)) {
+                    let target1 = &row.gotos[nt1];
+                    let target2 = &row.gotos[nt2];
+                    unite_sets(&mut parent, target1, target2);
+                }
+            }
+        }
+    }
+
+    // 3. Create final mapping from old state to its representative.
+    let mut state_map: BTreeMap<BTreeSet<Item>, BTreeSet<Item>> = BTreeMap::new();
+    for old_state in &all_states {
+        state_map.insert(old_state.clone(), find_set(&mut parent, old_state));
+    }
+
+    // 4. Build the new merged table.
+    let mut merged_rows: BTreeMap<BTreeSet<Item>, Stage5Row> = BTreeMap::new();
+    for (old_state, old_row) in table {
+        let representative = state_map[old_state].clone();
+        let merged_row = merged_rows.entry(representative).or_insert_with(|| Stage5Row {
+            shifts: BTreeMap::new(),
+            gotos: BTreeMap::new(),
+            reduces: BTreeMap::new(),
+        });
+
+        // Merge shifts, remapping targets
+        for (terminal, target) in &old_row.shifts {
+            merged_row.shifts.insert(terminal.clone(), state_map[target].clone());
+        }
+        // Merge gotos, remapping targets
+        for (nt, target) in &old_row.gotos {
+            merged_row.gotos.insert(nt.clone(), state_map[target].clone());
+        }
+        // Merge reduces
+        for (terminal, pids) in &old_row.reduces {
+            merged_row.reduces.entry(terminal.clone()).or_default().extend(pids.iter().cloned());
+        }
+    }
+
+    // 5. Create the final table with merged item sets as keys.
+    let mut final_table: Stage5Table = BTreeMap::new();
+    let mut representative_to_full_item_set: BTreeMap<BTreeSet<Item>, BTreeSet<Item>> = BTreeMap::new();
+    for (old_state, representative) in &state_map {
+        representative_to_full_item_set.entry(representative.clone()).or_default().extend(old_state.iter().cloned());
+    }
+
+    for (representative, mut merged_row) in merged_rows {
+        let final_kernel = representative_to_full_item_set.remove(&representative).unwrap();
+        // 6. Remove gotos on "node" non-terminals, as per Pager's algorithm.
+        merged_row.gotos.retain(|nt, _| !node_nts.contains(nt));
+        final_table.insert(final_kernel, merged_row);
+    }
+
+    crate::debug!(2, "Unit production elimination complete. Original states: {}, New states: {}", table.len(), final_table.len());
+    final_table
+}
+
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
@@ -842,10 +958,14 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_4_table = stage_4(stage_3_table, &productions);
     crate::debug!(6, &stage_4_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
+    let mut stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
     crate::debug!(6, &stage_5_table);
+
+    // Eliminate unit productions before Stage 6.
+    stage_5_table = eliminate_unit_productions(&stage_5_table, &productions);
+
     crate::debug!(2, "Stage 6");
-    let stage_6_table = stage_6(stage_5_table);
+    let stage_6_table = stage_6(stage_5_table); // Use the modified table
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
