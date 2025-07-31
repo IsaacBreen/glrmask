@@ -18,7 +18,6 @@ use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
-use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
@@ -77,6 +76,7 @@ impl PartialOrd for ParseStateEdgeContent {
         }
     }
 }
+use crate::glr::items::{Item, LRMode, LR_MODE};
 impl Ord for ParseStateEdgeContent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.state_id.cmp(&other.state_id)
@@ -160,6 +160,7 @@ pub struct GLRParser {
     pub productions: Vec<Production>,
     pub start_production_id: usize,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    // TODO: This should be a BiBTreeMap<NonTerminal, NonTerminalID>
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
@@ -171,6 +172,7 @@ impl JSONConvertible for GLRParser {
         let mut obj = StdMap::new();
         obj.insert("stage_7_table".to_string(), self.table.to_json());
         obj.insert("productions".to_string(), self.productions.to_json());
+        obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
         obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
@@ -250,6 +252,7 @@ impl GLRParser {
         productions: Vec<Production>,
         start_production_id: usize,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
+        // TODO: This should be a BiBTreeMap<NonTerminal, NonTerminalID>
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
         start_state_id: StateID,

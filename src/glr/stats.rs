@@ -1,5 +1,4 @@
 use crate::glr::parser::GLRParser;
-use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -16,6 +15,7 @@ pub struct StateStats {
     pub num_splits: usize,
     /// Number of goto transitions on non-terminals.
     pub num_gotos: usize,
+    // TODO: This should be a BTreeMap<Stage7ShiftsAndReducesLookaheadValue, usize>
     /// Counts occurrences of each unique action type in the state.
     pub unique_actions: BTreeMap<Stage7ShiftsAndReducesLookaheadValue, usize>,
 }
@@ -151,3 +151,4 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         state_stats: all_state_stats,
     }
 }
+use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID};

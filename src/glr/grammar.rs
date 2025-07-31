@@ -105,7 +105,7 @@ impl Terminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
