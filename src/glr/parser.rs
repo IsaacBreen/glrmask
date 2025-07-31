@@ -18,6 +18,7 @@ use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
+use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
@@ -76,7 +77,6 @@ impl PartialOrd for ParseStateEdgeContent {
         }
     }
 }
-use crate::glr::items::{Item, LRMode, LR_MODE};
 impl Ord for ParseStateEdgeContent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.state_id.cmp(&other.state_id)
@@ -160,7 +160,6 @@ pub struct GLRParser {
     pub productions: Vec<Production>,
     pub start_production_id: usize,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
-    // TODO: This should be a BiBTreeMap<NonTerminal, NonTerminalID>
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
@@ -252,7 +251,6 @@ impl GLRParser {
         productions: Vec<Production>,
         start_production_id: usize,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
-        // TODO: This should be a BiBTreeMap<NonTerminal, NonTerminalID>
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
         start_state_id: StateID,

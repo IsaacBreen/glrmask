@@ -236,7 +236,6 @@ pub fn compute_closure(
     closure
 }
 
-#[allow(dead_code)]
 pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
     items.iter()
         .filter_map(|item| item.next())
@@ -244,7 +243,6 @@ pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
         .collect()
 }
 
-#[allow(dead_code)]
 pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
     let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
     for item in items {

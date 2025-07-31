@@ -1,4 +1,5 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::glr::analyze::remove_productions_with_undefined_nonterminals;
 use crate::interface::display_productions;
 
@@ -18,7 +19,6 @@ pub fn remove_productions_with_uninteresting_terminals(
         .cloned()
         .collect()
 }
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Helper for `substitute_single_productions_and_report` to find all nodes in any cycle.
 fn find_cycles_dfs(
