@@ -235,10 +235,10 @@ fn test_unit_production_elimination() {
     let stage_4 = crate::glr::table::stage_4(stage_3, &productions);
     let stage_5 = crate::glr::table::stage_5(stage_4, &productions, &terminal_map);
     let stage_6 = crate::glr::table::stage_6(stage_5);
-    let (unoptimized_table, _, _) = crate::glr::table::stage_7(stage_6, &productions, 0, &terminal_map, &non_terminal_map);
+    let (unoptimized_table, item_set_map, start_state_id) = crate::glr::table::stage_7(stage_6, &productions, 0, &terminal_map, &non_terminal_map);
 
     let unoptimized_state_count = unoptimized_table.len();
-    let unoptimized_parser = GLRParser { stage_7_table: unoptimized_table, productions: productions.clone(), start_production_id: 0, terminal_map: terminal_map.clone(), non_terminal_map: non_terminal_map.clone(), item_set_map: BiBTreeMap::new(), start_state_id: crate::glr::table::StateID(0), ignore_terminal_id: None };
+    let unoptimized_parser = GLRParser { stage_7_table: unoptimized_table, productions: productions.clone(), start_production_id: 0, terminal_map: terminal_map.clone(), non_terminal_map: non_terminal_map.clone(), item_set_map, start_state_id, ignore_terminal_id: None };
     println!("Unoptimized table:");
     println!("{}", unoptimized_parser);
 
