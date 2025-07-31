@@ -238,11 +238,17 @@ fn test_unit_production_elimination() {
     let (unoptimized_table, _, _) = crate::glr::table::stage_7(stage_6, &productions, 0, &terminal_map, &non_terminal_map);
 
     let unoptimized_state_count = unoptimized_table.len();
-    println!("Unoptimized state count: {}", unoptimized_state_count);
+    let unoptimized_parser = GLRParser { stage_7_table: unoptimized_table, productions: productions.clone(), start_production_id: 0, terminal_map: terminal_map.clone(), non_terminal_map: non_terminal_map.clone(), item_set_map: BiBTreeMap::new(), start_state_id: crate::glr::table::StateID(0), ignore_terminal_id: None };
+    println!("Unoptimized table:");
+    println!("{}", unoptimized_parser);
 
     // --- Generate WITH optimization (using the main function) ---
     let parser = generate_glr_parser(&productions, 0, None);
     let optimized_state_count = parser.stage_7_table.len();
+    println!("Optimized table:");
+    println!("{}", parser);
+
+    println!("Unoptimized state count: {}", unoptimized_state_count);
     println!("Optimized state count: {}", optimized_state_count);
 
     // Assert that the optimization reduced the number of states.
