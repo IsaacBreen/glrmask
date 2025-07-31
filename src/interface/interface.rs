@@ -1081,6 +1081,7 @@ impl CompiledGrammar {
             definition.start_production_id,
             terminal_map,
             definition.ignore_terminal_id,
+            true,
         );
 
         Self {
@@ -1422,7 +1423,7 @@ mod tests {
         // To make it a meaningful test of the new structure, we'd need a GrammarConstraint.
         // Let's construct a dummy GLRParser for this.
         let dummy_productions = vec![Prod { lhs: NT("S".to_string()), rhs: vec![] }];
-        let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0, None);
+        let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0, None, true);
 
         let constraint = GrammarConstraint::new(
             tokenizer,
