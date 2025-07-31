@@ -108,7 +108,7 @@ fn create_expression_parser() -> GLRParser {
         prod("F", vec![t("("), nt("E"), t(")")]),
         prod("F", vec![t("i")]),
     ];
-    generate_glr_parser(&productions, 0, None, true)
+    generate_glr_parser(&productions, 0, None, true) // Enable unit production elimination
 }
 
 fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
