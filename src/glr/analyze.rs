@@ -720,69 +720,6 @@ pub fn resolve_direct_right_recursion(
     productions.extend(new_productions);
 }
 
-/// A non-terminal is a "node" if it's the LHS of any unit production (`A -> B`).
-pub fn get_unit_production_nodes(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    productions.iter().filter_map(|p| {
-        if p.rhs.len() == 1 {
-            if let Symbol::NonTerminal(_) = &p.rhs[0] {
-                return Some(p.lhs.clone());
-            }
-        }
-        None
-    }).collect()
-}
-
-/// Computes the reflexive, transitive closure of unit productions (A =>* B).
-///
-/// Returns a map from a non-terminal to the set of non-terminals it can derive
-/// through zero or more unit productions.
-pub fn compute_unit_production_derives(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<NonTerminal>> {
-    let mut derives: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-    let all_nts: BTreeSet<_> = productions.iter().flat_map(|p| {
-        let mut nts = vec![p.lhs.clone()];
-        for s in &p.rhs {
-            if let Symbol::NonTerminal(nt) = s {
-                nts.push(nt.clone());
-            }
-        }
-        nts
-    }).collect();
-
-    // Initialize with direct derivations (A -> B) and reflexive (A -> A)
-    for nt in &all_nts {
-        derives.entry(nt.clone()).or_default().insert(nt.clone());
-    }
-    for p in productions {
-        if p.rhs.len() == 1 {
-            if let Symbol::NonTerminal(rhs_nt) = &p.rhs[0] {
-                derives.entry(p.lhs.clone()).or_default().insert(rhs_nt.clone());
-            }
-        }
-    }
-
-    // Use a worklist approach for transitive closure until a fixed point is reached.
-    loop {
-        let mut changed = false;
-        for nt_i in all_nts.iter() {
-            let mut new_derivations = BTreeSet::new();
-            for nt_j in derives[nt_i].iter() { // For each B in derives(A)
-                if let Some(derivations_of_j) = derives.get(nt_j) {
-                    new_derivations.extend(derivations_of_j.iter().cloned()); // Add derives(B)
-                }
-            }
-
-            let current_derivations = derives.get_mut(nt_i).unwrap();
-            let old_len = current_derivations.len();
-            current_derivations.extend(new_derivations);
-            if current_derivations.len() != old_len {
-                changed = true;
-            }
-        }
-        if !changed { break; }
-    }
-    derives
-}
-
 /// Checks if two goto maps are compatible.
 ///
 /// Two goto maps are compatible if, for all non-terminal IDs they have in common,

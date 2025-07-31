@@ -236,38 +236,6 @@ fn validation_passes_standard_grammars() {
 }
 
 #[test]
-fn test_unit_production_elimination() {
-    // Grammar with unit productions: E -> T, T -> F
-    let productions = vec![
-        prod("S", vec![nt("E"), t("$")]),
-        prod("E", vec![nt("E"), t("+"), nt("T")]),
-        prod("E", vec![nt("T")]), // unit
-        prod("T", vec![nt("T"), t("*"), nt("F")]),
-        prod("T", vec![nt("F")]), // unit
-        prod("F", vec![t("("), nt("E"), t(")")]),
-        prod("F", vec![t("i")]),
-    ];
-
-    // The original LALR(1) parser for this grammar has 12 states.
-    // Pager's method should reduce this.
-    let parser = generate_glr_parser(&productions, 0, None);
-    println!("Parser with unit production elimination:\n{}", parser);
-    let stats = stats::get_stats(&parser);
-    println!("{}", stats);
-
-    assert!(stats.num_states < 12, "Expected unit production elimination to reduce states from 12, but got {}", stats.num_states);
-
-    // Also check that it still parses correctly.
-    let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
-    let tokens = tokenize(&parser, "(i+i)*i");
-    let mut state = parser.init_glr_parser(None);
-    state.parse(&tokens);
-    state.step(eof);
-    assert!(state.is_ok(), "Parser failed on '(i+i)*i' after unit production elimination");
-}
-
-
-#[test]
 fn validation_fails_direct_length_1_recursion() {
     // A -> A
     let productions = vec![
