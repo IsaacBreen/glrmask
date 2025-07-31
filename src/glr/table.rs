@@ -866,7 +866,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Finalizing table");
     let mut final_table = finalize_table(stage_7_table);
