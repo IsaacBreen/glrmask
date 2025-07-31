@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7Row, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
@@ -156,7 +156,7 @@ pub enum ParserPhase {
 
 #[derive(Clone)]
 pub struct GLRParser {
-    pub stage_7_table: Stage7Table,
+    pub table: Table,
     pub productions: Vec<Production>,
     pub start_production_id: usize,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
@@ -169,7 +169,7 @@ pub struct GLRParser {
 impl JSONConvertible for GLRParser {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
+        obj.insert("stage_7_table".to_string(), self.table.to_json());
         obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
@@ -184,7 +184,7 @@ impl JSONConvertible for GLRParser {
         match node {
             JSONNode::Object(mut obj) => {
                 let stage_7_table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
-                                       .and_then(Stage7Table::from_json)?;
+                                       .and_then(Table::from_json)?;
                 let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                      .and_then(Vec::<Production>::from_json)?;
                 let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id".to_string())
@@ -201,7 +201,7 @@ impl JSONConvertible for GLRParser {
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
                 Ok(GLRParser {
-                    stage_7_table,
+                    table: stage_7_table,
                     productions,
                     start_production_id,
                     terminal_map,
@@ -219,7 +219,7 @@ impl JSONConvertible for GLRParser {
 impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GLRParser")
-            .field("stage_7_table", &self.stage_7_table)
+            .field("stage_7_table", &self.table)
             .field("productions", &self.productions)
             .field("terminal_map", &self.terminal_map)
             .field("non_terminal_map", &self.non_terminal_map)
@@ -232,7 +232,7 @@ impl Debug for GLRParser {
 
 impl PartialEq for GLRParser {
     fn eq(&self, other: &Self) -> bool {
-        self.stage_7_table == other.stage_7_table &&
+        self.table == other.table &&
         self.productions == other.productions &&
         self.terminal_map == other.terminal_map &&
         self.non_terminal_map == other.non_terminal_map &&
@@ -246,7 +246,7 @@ impl Eq for GLRParser {}
 
 impl GLRParser {
     pub fn new(
-        stage_7_table: Stage7Table,
+        stage_7_table: Table,
         productions: Vec<Production>,
         start_production_id: usize,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
@@ -266,7 +266,7 @@ impl GLRParser {
             .collect();
 
         Self {
-            stage_7_table,
+            table: stage_7_table,
             productions,
             start_production_id,
             terminal_map,
@@ -382,7 +382,7 @@ impl GLRParser {
             }
 
             // Get and print actions
-            if let Some(row) = self.stage_7_table.get(&state_id) {
+            if let Some(row) = self.table.get(&state_id) {
                 writeln!(&mut result, "  Actions (without default reduce):").unwrap();
                 let actions = &row.shifts_and_reduces_without_default_reduce;
                 if actions.is_empty() {
@@ -591,7 +591,7 @@ fn format_actions(
 
 impl Display for GLRParser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stage_7_table = &self.stage_7_table;
+        let stage_7_table = &self.table;
         let terminal_map = &self.terminal_map;
         let non_terminal_map = &self.non_terminal_map;
         let item_set_map = &self.item_set_map;
@@ -729,12 +729,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         shifted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
     ) where
-        F: Fn(&Stage7Row)
+        F: Fn(&Row)
             -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
         while let Some(state) = work_queue.pop_front() {
             for peek in state.stack.peek_iter() {
-                let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                let row = &self.parser.table[&peek.edge_value().state_id];
                 if let Some(action) = action_selector(row).get(&token_id) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
@@ -833,7 +833,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for popper_item in popped.iter() {
             for peek2 in popper_item.peek_iter() {
                 let state_id = peek2.edge_value().state_id;
-                let goto = self.parser.stage_7_table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
                     format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
                 );
 
@@ -939,7 +939,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
         // timeit!("GLRParserState::step::phase3", {
             while let Some(((_depth, state_id), state)) = work_map.pop_first() {
-                let row = &self.parser.stage_7_table[&state_id];
+                let row = &self.parser.table[&state_id];
 
                 if let Some(ref r) = row.default_reduce.reduce {
                     crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
@@ -1005,7 +1005,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.log_gss("has_action_for-start", token_id);
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
-            let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+            let row = &self.parser.table[&peek.edge_value().state_id];
             let shifts_and_reduces = match self.phase {
                 ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
                 ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,

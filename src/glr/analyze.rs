@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
 use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
+use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -754,12 +754,12 @@ fn are_gotos_compatible(
 ///    non-terminal key they have in common, the target `Goto` action is also identical.
 ///
 /// # Arguments
-/// * `table` - The `Stage7Table` to analyze.
+/// * `table` - The `Table` to analyze.
 ///
 /// # Returns
 /// A vector of tuples, where each tuple `(StateID, StateID)` represents a pair of
 /// compatible states.
-pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
+pub fn find_compatible_states(table: &Table) -> Vec<(StateID, StateID)> {
     let mut compatible_pairs = Vec::new();
     let states_and_rows: Vec<_> = table.iter().collect();
 

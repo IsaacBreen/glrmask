@@ -1133,7 +1133,7 @@ impl Display for CompiledGrammar {
         // }
 
         writeln!(f, "  Tokenizer (States: {}): {}", self.tokenizer.dfa.states.len(), &self.tokenizer.dfa)?;
-        writeln!(f, "  GLR Parser (States: {}): {}", self.glr_parser.stage_7_table.len(), &self.glr_parser)?;
+        writeln!(f, "  GLR Parser (States: {}): {}", self.glr_parser.table.len(), &self.glr_parser)?;
         Ok(())
     }
 }

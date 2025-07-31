@@ -97,7 +97,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
     let mut num_reduce_reduce_conflicts = 0;
     let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
 
-    for (state_id, row) in &parser.stage_7_table {
+    for (state_id, row) in &parser.table {
         let mut current_state_stats = StateStats::default();
         current_state_stats.num_gotos = row.gotos.len();
 

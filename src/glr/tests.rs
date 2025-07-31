@@ -1039,7 +1039,7 @@ fn test_explain_stack() {
     let start_state = parser.start_state_id;
     let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
     
-    let start_row = &parser.stage_7_table[&start_state];
+    let start_row = &parser.table[&start_state];
     let shift_action = &start_row.shifts_and_reduces_full[&b_token_id];
 
     let state_after_b = match shift_action {

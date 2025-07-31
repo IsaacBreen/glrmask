@@ -20,7 +20,8 @@ type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
 type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
 type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
 type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
-pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+type Stage7Table = BTreeMap<StateID, Stage7Row>;
+pub type Table = BTreeMap<StateID, Row>;
 
 
 type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
@@ -210,7 +211,15 @@ impl JSONConvertible for DefaultReduce {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stage7Row {
+struct Stage7Row {
+    pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+    pub default_reduce: DefaultReduce,
+    pub gotos: BTreeMap<NonTerminalID, Goto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
     pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
     pub shifts_and_reduces_full: ShiftsAndReducesFull,
     pub default_reduce: DefaultReduce,
@@ -218,7 +227,7 @@ pub struct Stage7Row {
 }
 
 // Manual impl for Stage7Row (could be derived)
-impl JSONConvertible for Stage7Row {
+impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         obj.insert("shifts_and_reduces_without_default_reduce".to_string(), self.shifts_and_reduces_without_default_reduce.to_json());
@@ -229,13 +238,13 @@ impl JSONConvertible for Stage7Row {
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => Ok(Stage7Row {
-                shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce::from_json(obj.remove("shifts_and_reduces_without_default_reduce").ok_or_else(|| "Missing field shifts_and_reduces_without_default_reduce for Stage7Row".to_string())?)?,
-                shifts_and_reduces_full: ShiftsAndReducesFull::from_json(obj.remove("shifts_and_reduces_full").ok_or_else(|| "Missing field shifts_and_reduces_full for Stage7Row".to_string())?)?,
-                default_reduce: DefaultReduce::from_json(obj.remove("default_reduce").ok_or_else(|| "Missing field default_reduce for Stage7Row".to_string())?)?,
-                gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())?)?,
+            JSONNode::Object(mut obj) => Ok(Row {
+                shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce::from_json(obj.remove("shifts_and_reduces_without_default_reduce").ok_or_else(|| "Missing field shifts_and_reduces_without_default_reduce for Row".to_string())?)?,
+                shifts_and_reduces_full: ShiftsAndReducesFull::from_json(obj.remove("shifts_and_reduces_full").ok_or_else(|| "Missing field shifts_and_reduces_full for Row".to_string())?)?,
+                default_reduce: DefaultReduce::from_json(obj.remove("default_reduce").ok_or_else(|| "Missing field default_reduce for Row".to_string())?)?,
+                gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Row".to_string())?)?,
             }),
-            _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
+            _ => Err("Expected JSONNode::Object for Row".to_string()),
         }
     }
 }
@@ -686,6 +695,15 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
+fn finalize_table(stage_7_table: Stage7Table) -> Table {
+    stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+        shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+        shifts_and_reduces_full: row.shifts_and_reduces_full,
+        default_reduce: row.default_reduce,
+        gotos: row.gotos,
+    })).collect()
+}
+
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
 ///
 /// This function takes a table and a list of compatible state pairs. It merges these
@@ -711,11 +729,11 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 /// * The new `BiBTreeMap` mapping merged item sets to the new `StateID`s.
 /// * The new start state ID.
 fn merge_compatible_states(
-    table: &Stage7Table,
+    table: &Table,
     item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
     start_state_id: StateID,
     compatible_pairs: &[(StateID, StateID)],
-) -> (Stage7Table, BiBTreeMap<BTreeSet<Item>, StateID>, StateID) {
+) -> (Table, BiBTreeMap<BTreeSet<Item>, StateID>, StateID) {
     if compatible_pairs.is_empty() {
         return (table.clone(), item_set_map.clone(), start_state_id);
     }
@@ -753,7 +771,7 @@ fn merge_compatible_states(
     }
 
     // 2. Create the new merged table.
-    let mut new_table: Stage7Table = BTreeMap::new();
+    let mut new_table: Table = BTreeMap::new();
     let mut new_item_sets: BTreeMap<StateID, BTreeSet<Item>> = BTreeMap::new();
 
     let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter().map(|(k, v)| (*v, k)).collect();
@@ -762,7 +780,7 @@ fn merge_compatible_states(
         let new_id = state_map[&old_id];
         new_item_sets.entry(new_id).or_default().extend(state_to_items[&old_id].iter().cloned());
 
-        let new_row = new_table.entry(new_id).or_insert_with(|| Stage7Row {
+        let new_row = new_table.entry(new_id).or_insert_with(|| Row {
             shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce.clone(),
             shifts_and_reduces_full: row.shifts_and_reduces_full.clone(),
             default_reduce: row.default_reduce.clone(),
@@ -850,17 +868,20 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
+    crate::debug!(2, "Finalizing table");
+    let mut final_table = finalize_table(stage_7_table);
+    crate::debug!(6, &final_table);
 
-    let compatible_states = find_compatible_states(&stage_7_table);
+    let compatible_states = find_compatible_states(&final_table);
     if !compatible_states.is_empty() {
-        (stage_7_table, item_set_map, start_state_id) = merge_compatible_states(&stage_7_table, &item_set_map, start_state_id, &compatible_states);
+        (final_table, item_set_map, start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_states);
     }
 
     crate::debug!(2, "Done generating GLR parser");
-    // crate::debug!(6, "Number of states: {}", stage_7_table.len());
-    // panic!("GLR parser generation complete. Number of states: {}", stage_7_table.len());
+    // crate::debug!(6, "Number of states: {}", final_table.len());
+    // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
 
-    GLRParser::new(stage_7_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
+    GLRParser::new(final_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
