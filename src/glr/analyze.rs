@@ -4,7 +4,6 @@ use kdam::{tqdm, BarExt};
 use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Stage7Table, StateID};
-use bimap::BiBTreeMap;
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -785,48 +784,4 @@ pub fn find_compatible_states(table: &Stage7Table) -> Vec<(StateID, StateID)> {
     }
 
     compatible_pairs
-}
-
-/// Computes the transitive closure of unit productions.
-///
-/// A unit production is a rule of the form `A -> B`, where A and B are non-terminals.
-/// This function returns a map where each key `A` maps to a set of non-terminals `{B, C, ...}`
-/// such that `A -> B`, `A -> C`, etc., can be derived through one or more unit production steps.
-///
-/// # Arguments
-/// * `productions` - The list of all grammar productions.
-/// * `non_terminal_map` - A bimap from `NonTerminal` to `NonTerminalID`.
-///
-/// # Returns
-/// A map from a `NonTerminalID` to a set of `NonTerminalID`s it can derive via unit productions.
-pub fn compute_unit_production_closure(
-    productions: &[Production],
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> {
-    let mut closure: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
-
-    // Initialize with direct unit productions
-    for prod in productions {
-        if prod.rhs.len() == 1 {
-            if let Symbol::NonTerminal(rhs_nt) = &prod.rhs[0] {
-                let lhs_id = *non_terminal_map.get_by_left(&prod.lhs).unwrap();
-                let rhs_id = *non_terminal_map.get_by_left(rhs_nt).unwrap();
-                closure.entry(lhs_id).or_default().insert(rhs_id);
-            }
-        }
-    }
-
-    // Compute transitive closure using the Floyd-Warshall algorithm idea
-    let nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
-    for &k in &nt_ids {
-        for &i in &nt_ids {
-            for &j in &nt_ids {
-                if closure.get(&i).map_or(false, |s| s.contains(&k)) && closure.get(&k).map_or(false, |s| s.contains(&j)) {
-                    closure.entry(i).or_default().insert(j);
-                }
-            }
-        }
-    }
-
-    closure
 }

@@ -4,7 +4,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ActionFn};
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
 pub use crate::types::{TerminalID};
@@ -49,7 +49,7 @@ struct Stage5Row {
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
 #[derive(Debug)]
-pub struct Stage6Row {
+struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
 }
@@ -93,6 +93,64 @@ impl Stage7ShiftsAndReducesLookaheadValue {
                     *self = Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids: pids };
                 }
             }
+        }
+    }
+}
+
+impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        match self {
+            Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
+                obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
+                obj.insert("state_id".to_string(), state_id.to_json());
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
+                obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
+                obj.insert("len".to_string(), len.to_json());
+                obj.insert("production_ids".to_string(), production_ids.to_json());
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
+                obj.insert("shift".to_string(), shift.to_json());
+                obj.insert("reduces".to_string(), reduces.to_json());
+            }
+        }
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string())
+                                   .and_then(String::from_json)?;
+                match variant.as_str() {
+                    "Shift" => {
+                        let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
+                                          .and_then(StateID::from_json)?;
+                        Ok(Stage7ShiftsAndReducesLookaheadValue::Shift(state_id))
+                    }
+                    "Reduce" => {
+                        let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
+                                                .and_then(NonTerminalID::from_json)?;
+                        let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
+                                     .and_then(usize::from_json)?;
+                        let production_ids = obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())
+                                                .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
+                        Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids })
+                    }
+                    "Split" => {
+                        let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
+                                       .and_then(Option::<StateID>::from_json)?;
+                        let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
+                                         .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
+                        Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
+                    }
+                    _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReducesLookaheadValue", variant)),
+                }
+            }
+            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
         }
     }
 }
@@ -468,98 +526,6 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-/// Stage 6.5: Eliminates unit productions from the parse table.
-///
-/// This optimization modifies the `gotos` and `reduces` to bypass states that only
-/// perform a unit reduction (`A -> B`). It works by merging the actions of the
-/// target state of a unit production's GOTO back into the original state.
-///
-/// For a production `X -> ... A ...`, when the parser reduces `...` to `A`, it would
-/// normally look up `GOTO(current_state, A)`. After this optimization, if `A -> B` is
-/// a unit production, the actions associated with `GOTO(current_state, B)` are also
-/// considered, effectively "looking through" the unit production chain.
-fn stage_6_5_eliminate_unit_productions(
-    stage_6_table: Stage6Table,
-    productions: &[Production],
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> Stage6Table {
-    crate::debug!(2, "Stage 6.5: Eliminating unit productions");
-
-    // 1. Identify all unit productions and compute their transitive closure.
-    // `unit_closure` maps `A` to `{B, C, ...}` if `A -> B`, `A -> C`, etc. are derivable.
-    let unit_closure = crate::glr::analyze::compute_unit_production_closure(productions, non_terminal_map);
-    let unit_productions: HashSet<ProductionID> = productions
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| {
-            if p.rhs.len() == 1 && matches!(p.rhs[0], Symbol::NonTerminal(_)) {
-                Some(ProductionID(i))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if unit_productions.is_empty() {
-        crate::debug!(2, "No unit productions found to eliminate.");
-        return stage_6_table;
-    }
-
-    let mut new_stage_6_table = BTreeMap::new();
-
-    for (item_set, mut row) in stage_6_table {
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let mut new_gotos = row.gotos.clone();
-            let mut new_shifts_and_reduces = row.shifts_and_reduces.clone();
-
-            // For each goto `A -> S_A` in the current state...
-            for (nt_a, goto_item_set_a) in &row.gotos {
-                let nt_a_id = *non_terminal_map.get_by_left(nt_a).unwrap();
-
-                // Find all non-terminals `B` such that `A` can derive `B` via unit productions.
-                if let Some(derived_nts_ids) = unit_closure.get(&nt_a_id) {
-                    for &nt_b_id in derived_nts_ids {
-                        let nt_b = non_terminal_map.get_by_right(&nt_b_id).unwrap();
-
-                        // If there's a goto `B -> S_B` in this state...
-                        if let Some(goto_item_set_b) = row.gotos.get(nt_b) {
-                            // Merge the item sets for `A` and `B`.
-                            let mut merged_item_set = goto_item_set_a.clone();
-                            merged_item_set.extend(goto_item_set_b.clone());
-
-                            if merged_item_set.len() > new_gotos[nt_a].len() {
-                                new_gotos.insert(nt_a.clone(), merged_item_set);
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Remove unit production reduces from the action map.
-            for (_terminal, action) in new_shifts_and_reduces.iter_mut() {
-                action.reduces.retain(|pid| !unit_productions.contains(pid));
-            }
-
-            row.gotos = new_gotos;
-            row.shifts_and_reduces = new_shifts_and_reduces;
-        }
-
-        // After stabilizing, remove the gotos for non-terminals that are purely on the RHS of unit productions
-        // if they are not also on the LHS of a non-unit production.
-        // This is a simplification; a more aggressive approach could remove more.
-        // For now, we keep all gotos and let Stage 7 handle the final table structure.
-        // The key change is that the `goto` sets are now expanded and `reduces` are cleaned.
-
-        new_stage_6_table.insert(item_set, row);
-    }
-
-    crate::debug!(2, "Unit production elimination complete.");
-    new_stage_6_table
-}
-
 fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
@@ -879,11 +845,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
-    let stage_6_result = stage_6(stage_5_table);
-    crate::debug!(6, &stage_6_result);
-    let stage_6_5_table = stage_6_5_eliminate_unit_productions(stage_6_result, &productions, &non_terminal_map);
-    crate::debug!(2, "Stage 6.5 - Eliminating Unit Productions (Done)");
-    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_5_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+    let stage_6_table = stage_6(stage_5_table);
+    crate::debug!(6, &stage_6_table);
+    crate::debug!(2, "Stage 7");
+    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
 
     let compatible_states = find_compatible_states(&stage_7_table);
