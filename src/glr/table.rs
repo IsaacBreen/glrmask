@@ -25,37 +25,37 @@ pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
 
 type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
 #[derive(Debug)]
-struct Stage2Row {
+pub(crate) struct Stage2Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeSet<Item>,
 }
 #[derive(Debug)]
-struct Stage3Row {
+pub(crate) struct Stage3Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
 }
 #[derive(Debug)]
-struct Stage4Row {
+pub(crate) struct Stage4Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
 }
 #[derive(Debug)]
-struct Stage5Row {
+pub(crate) struct Stage5Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
 #[derive(Debug)]
-struct Stage6Row {
+pub(crate) struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
 }
 
 #[derive(Debug)]
-struct Stage6ShiftsAndReduces {
+pub(crate) struct Stage6ShiftsAndReduces {
     shift: Option<BTreeSet<Item>>,
     reduces: BTreeSet<ProductionID>,
 }
