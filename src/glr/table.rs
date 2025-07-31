@@ -307,7 +307,7 @@ type Stage7Result = (
     StateID,
 );
 
-fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+pub(crate) fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
@@ -346,7 +346,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     transitions
 }
 
-fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+pub(crate) fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
     let mut stage_2_table = BTreeMap::new();
     for (item_set, transitions) in stage_1_table {
         let mut shifts = BTreeMap::new();
@@ -382,7 +382,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     stage_2_table
 }
 
-fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+pub(crate) fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
@@ -408,7 +408,7 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
     stage_3_table
 }
 
-fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+pub(crate) fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
     let production_ids: BTreeMap<Production, ProductionID> = productions
         .iter()
         .enumerate()
@@ -442,7 +442,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     stage_4_table
 }
 
-fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+pub(crate) fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
     // Stage 5 turns
     //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
     // into
@@ -491,7 +491,7 @@ fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map:
     stage_5_table
 }
 
-fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+pub(crate) fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     let mut stage_6_table = BTreeMap::new();
 
     for (item_set, row) in stage_5_table {
@@ -526,7 +526,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+pub(crate) fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 

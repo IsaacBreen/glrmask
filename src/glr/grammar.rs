@@ -144,7 +144,7 @@ impl JSONConvertible for Symbol {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
