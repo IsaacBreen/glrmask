@@ -2966,7 +2966,6 @@ local_system:
       type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
       type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
       type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      type Stage8Table = BTreeMap<StateID, Row>;
       pub type Table = BTreeMap<StateID, Row>;
 
 
@@ -3158,7 +3157,9 @@ local_system:
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       struct Stage7Row {
+          pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
           pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          pub default_reduce: DefaultReduce,
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
@@ -3170,7 +3171,7 @@ local_system:
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
-      // Manual impl for Row (could be derived)
+      // Manual impl for Stage7Row (could be derived)
       impl JSONConvertible for Row {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
@@ -3532,43 +3533,6 @@ local_system:
                   shifts_and_reduces_full.insert(terminal_id, final_action);
               }
 
-              let mut gotos = BTreeMap::new();
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
-                  let goto = Goto {
-                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
-                      accept: false,
-                  };
-                  gotos.insert(non_terminal_id, goto);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row {
-                  shifts_and_reduces_full,
-                  gotos,
-              });
-          }
-
-          let initial_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-              lookahead: None,
-          };
-          let initial_item_set = BTreeSet::from([initial_item]);
-          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-
-          // Goto for initial production
-          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-
-          (stage_7_table, item_set_map, start_state_id)
-      }
-
-      fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-          let mut stage_8_table = BTreeMap::new();
-
-          for (state_id, row) in stage_7_table {
-              let Stage7Row { shifts_and_reduces_full, gotos } = row;
-
               // --- Promotion Logic ---
               let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
               for action in shifts_and_reduces_full.values() {
@@ -3643,14 +3607,46 @@ local_system:
                   (shifts_and_reduces_without_default, default_reduce)
               };
 
-              stage_8_table.insert(state_id, Row {
+              let mut gotos = BTreeMap::new();
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row {
                   shifts_and_reduces_without_default_reduce,
                   shifts_and_reduces_full,
                   default_reduce,
                   gotos,
               });
           }
-          stage_8_table
+
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+              lookahead: None,
+          };
+          let initial_item_set = BTreeSet::from([initial_item]);
+          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+
+          // Goto for initial production
+          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      fn finalize_table(stage_7_table: Stage7Table) -> Table {
+          stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+              shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+              shifts_and_reduces_full: row.shifts_and_reduces_full,
+              default_reduce: row.default_reduce,
+              gotos: row.gotos,
+          })).collect()
       }
 
       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
@@ -3817,11 +3813,9 @@ local_system:
           crate::debug!(2, "Stage 7");
           let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
           crate::debug!(6, &stage_7_table);
-          crate::debug!(2, "Stage 8");
-          let stage_8_table = stage_8(stage_7_table);
-          crate::debug!(6, &stage_8_table);
           crate::debug!(2, "Finalizing table");
-          let mut final_table = stage_8_table;
+          let mut final_table = finalize_table(stage_7_table);
+          crate::debug!(6, &final_table);
 
           let compatible_states = find_compatible_states(&final_table);
           if !compatible_states.is_empty() {
@@ -7991,7 +7985,6 @@ local_system:
       type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
       type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
       type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      type Stage8Table = BTreeMap<StateID, Row>;
       pub type Table = BTreeMap<StateID, Row>;
 
 
@@ -8183,7 +8176,9 @@ local_system:
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       struct Stage7Row {
+          pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
           pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          pub default_reduce: DefaultReduce,
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
@@ -8195,7 +8190,7 @@ local_system:
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
-      // Manual impl for Row (could be derived)
+      // Manual impl for Stage7Row (could be derived)
       impl JSONConvertible for Row {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
@@ -8557,43 +8552,6 @@ local_system:
                   shifts_and_reduces_full.insert(terminal_id, final_action);
               }
 
-              let mut gotos = BTreeMap::new();
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
-                  let goto = Goto {
-                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
-                      accept: false,
-                  };
-                  gotos.insert(non_terminal_id, goto);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row {
-                  shifts_and_reduces_full,
-                  gotos,
-              });
-          }
-
-          let initial_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-              lookahead: None,
-          };
-          let initial_item_set = BTreeSet::from([initial_item]);
-          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-
-          // Goto for initial production
-          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-
-          (stage_7_table, item_set_map, start_state_id)
-      }
-
-      fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-          let mut stage_8_table = BTreeMap::new();
-
-          for (state_id, row) in stage_7_table {
-              let Stage7Row { shifts_and_reduces_full, gotos } = row;
-
               // --- Promotion Logic ---
               let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
               for action in shifts_and_reduces_full.values() {
@@ -8668,14 +8626,46 @@ local_system:
                   (shifts_and_reduces_without_default, default_reduce)
               };
 
-              stage_8_table.insert(state_id, Row {
+              let mut gotos = BTreeMap::new();
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row {
                   shifts_and_reduces_without_default_reduce,
                   shifts_and_reduces_full,
                   default_reduce,
                   gotos,
               });
           }
-          stage_8_table
+
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+              lookahead: None,
+          };
+          let initial_item_set = BTreeSet::from([initial_item]);
+          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+
+          // Goto for initial production
+          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      fn finalize_table(stage_7_table: Stage7Table) -> Table {
+          stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+              shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+              shifts_and_reduces_full: row.shifts_and_reduces_full,
+              default_reduce: row.default_reduce,
+              gotos: row.gotos,
+          })).collect()
       }
 
       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
@@ -8842,11 +8832,9 @@ local_system:
           crate::debug!(2, "Stage 7");
           let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
           crate::debug!(6, &stage_7_table);
-          crate::debug!(2, "Stage 8");
-          let stage_8_table = stage_8(stage_7_table);
-          crate::debug!(6, &stage_8_table);
           crate::debug!(2, "Finalizing table");
-          let mut final_table = stage_8_table;
+          let mut final_table = finalize_table(stage_7_table);
+          crate::debug!(6, &final_table);
 
           let compatible_states = find_compatible_states(&final_table);
           if !compatible_states.is_empty() {
@@ -13079,7 +13067,6 @@ messages:
       type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
       type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
       type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      type Stage8Table = BTreeMap<StateID, Row>;
       pub type Table = BTreeMap<StateID, Row>;
 
 
@@ -13271,7 +13258,9 @@ messages:
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       struct Stage7Row {
+          pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
           pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          pub default_reduce: DefaultReduce,
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
@@ -13283,7 +13272,7 @@ messages:
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
-      // Manual impl for Row (could be derived)
+      // Manual impl for Stage7Row (could be derived)
       impl JSONConvertible for Row {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
@@ -13645,43 +13634,6 @@ messages:
                   shifts_and_reduces_full.insert(terminal_id, final_action);
               }
 
-              let mut gotos = BTreeMap::new();
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
-                  let goto = Goto {
-                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
-                      accept: false,
-                  };
-                  gotos.insert(non_terminal_id, goto);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row {
-                  shifts_and_reduces_full,
-                  gotos,
-              });
-          }
-
-          let initial_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-              lookahead: None,
-          };
-          let initial_item_set = BTreeSet::from([initial_item]);
-          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-
-          // Goto for initial production
-          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-
-          (stage_7_table, item_set_map, start_state_id)
-      }
-
-      fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-          let mut stage_8_table = BTreeMap::new();
-
-          for (state_id, row) in stage_7_table {
-              let Stage7Row { shifts_and_reduces_full, gotos } = row;
-
               // --- Promotion Logic ---
               let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
               for action in shifts_and_reduces_full.values() {
@@ -13756,14 +13708,46 @@ messages:
                   (shifts_and_reduces_without_default, default_reduce)
               };
 
-              stage_8_table.insert(state_id, Row {
+              let mut gotos = BTreeMap::new();
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row {
                   shifts_and_reduces_without_default_reduce,
                   shifts_and_reduces_full,
                   default_reduce,
                   gotos,
               });
           }
-          stage_8_table
+
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+              lookahead: None,
+          };
+          let initial_item_set = BTreeSet::from([initial_item]);
+          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+
+          // Goto for initial production
+          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      fn finalize_table(stage_7_table: Stage7Table) -> Table {
+          stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+              shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+              shifts_and_reduces_full: row.shifts_and_reduces_full,
+              default_reduce: row.default_reduce,
+              gotos: row.gotos,
+          })).collect()
       }
 
       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
@@ -13930,11 +13914,9 @@ messages:
           crate::debug!(2, "Stage 7");
           let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
           crate::debug!(6, &stage_7_table);
-          crate::debug!(2, "Stage 8");
-          let stage_8_table = stage_8(stage_7_table);
-          crate::debug!(6, &stage_8_table);
           crate::debug!(2, "Finalizing table");
-          let mut final_table = stage_8_table;
+          let mut final_table = finalize_table(stage_7_table);
+          crate::debug!(6, &final_table);
 
           let compatible_states = find_compatible_states(&final_table);
           if !compatible_states.is_empty() {
@@ -15159,182 +15141,758 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: Implement elimination of unit productions for this code. Do it on the **stage
-      7** table, *before* stage 8 (where default reductions are introduced, which
-      makes things more complex).
+  - user: |-
+      Stage 7 is really two distinct parts: one that constructs `shifts_and_reduces_full` and `gotos`, and one that constructs `shifts_and_reduces_without_default_reduce` and `default_reduce`.
+      Split it up into stage 7 and a new stage 8.
+      ```rust
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      struct Stage7Row {
+          pub shifts_and_reduces: ShiftsAndReducesFull,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      struct Stage8Row {
+          pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+          pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          pub default_reduce: DefaultReduce,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+      ```
     metadata:
   - assistant: |-
-      Of course. Eliminating unit productions is a classic and powerful optimization for LR parsers. It reduces both the number of states and the number of reduction steps during parsing.
+      Hello! As a helpful AI assistant, I'd be happy to help you with your request. Refactoring the table generation process into more distinct stages is a great way to improve clarity and maintainability. Here are the diffs for the requested changes.
 
-      I'll implement this optimization by adding a new function `eliminate_unit_productions` that operates on the `Stage7Table`. This function will be called after `stage_7` and before `stage_8` in the main `generate_glr_parser_with_maps` function.
+      I've split the `stage_7` function into a new `stage_7` and `stage_8`. The new `stage_7` now focuses on creating the full action and goto maps, while `stage_8` handles the promotion of default reduces. This aligns with your suggestion and makes the pipeline cleaner.
 
-      Here are the diffs for the necessary changes.
-
-      ### `src/glr/table.rs`
-
-      I'll add the `eliminate_unit_productions` function here, as it's the most relevant place for table transformations. This function will implement a simplified version of Pager's algorithm.
+      Here are the changes for `src/glr/table.rs`:
 
       ```diff
       --- a/src/glr/table.rs
       +++ b/src/glr/table.rs
-      @@ -511,6 +511,121 @@
-           (new_table, new_item_set_map, new_start_state_id)
+      @@ -14,6 +14,7 @@
+       type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+       type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+       type Stage7Table = BTreeMap<StateID, Stage7Row>;
+      +type Stage8Table = BTreeMap<StateID, Row>;
+       pub type Table = BTreeMap<StateID, Row>;
+       
+       
+      @@ -211,13 +212,8 @@
        }
        
-      +/// Eliminates unit productions from a Stage 7 parse table.
-      +///
-      +/// A unit production is a rule of the form `A -> B`, where B is a single non-terminal.
-      +/// This function implements a simplified version of Pager's algorithm to:
-      +/// 1. Identify chains of unit productions (e.g., `A -> B`, `B -> C`).
-      +/// 2. For each state, find transitions on non-terminals that lead to unit reductions.
-      +/// 3. Merge the actions of the target states back into the source state's transitions,
-      +///    effectively bypassing the unit reduction step.
-      +/// 4. Remove states that become unreachable after this process.
-      +///
-      +/// # Arguments
-      +/// * `table` - The `Stage7Table` to be modified.
-      +/// * `productions` - The list of productions for the grammar.
-      +/// * `non_terminal_map` - The mapping from non-terminals to their IDs.
-      +/// * `item_set_map` - The mapping from item sets to state IDs (will be updated).
-      +///
-      +/// # Returns
-      +/// A new, optimized `Stage7Table`.
-      +fn eliminate_unit_productions(
-      +    table: &mut Stage7Table,
-      +    productions: &[Production],
-      +    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-      +    item_set_map: &mut BiBTreeMap<BTreeSet<Item>, StateID>,
-      +) {
-      +    // 1. Identify all unit productions.
-      +    let unit_productions: BTreeMap<NonTerminalID, NonTerminalID> = productions
-      +        .iter()
-      +        .filter_map(|p| {
-      +            if p.rhs.len() == 1 {
-      +                if let Symbol::NonTerminal(nt_rhs) = &p.rhs[0] {
-      +                    let lhs_id = *non_terminal_map.get_by_left(&p.lhs).unwrap();
-      +                    let rhs_id = *non_terminal_map.get_by_left(nt_rhs).unwrap();
-      +                    return Some((lhs_id, rhs_id));
-      +                }
-      +            }
-      +            None
-      +        })
-      +        .collect();
-      +
-      +    if unit_productions.is_empty() {
-      +        return;
-      +    }
-      +
-      +    crate::debug!(2, "Found {} unit productions to eliminate.", unit_productions.len());
-      +
-      +    // 2. Compute the transitive closure of unit productions (A ->* B).
-      +    let mut descendants: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
-      +    for (lhs, rhs) in &unit_productions {
-      +        descendants.entry(*lhs).or_default().insert(*rhs);
-      +    }
-      +
-      +    loop {
-      +        let mut changed = false;
-      +        for (lhs, current_descendants) in descendants.clone() {
-      +            for descendant in current_descendants {
-      +                if let Some(next_descendants) = descendants.get(&descendant) {
-      +                    let old_len = descendants.get(&lhs).unwrap().len();
-      +                    descendants.get_mut(&lhs).unwrap().extend(next_descendants.iter().cloned());
-      +                    if descendants.get(&lhs).unwrap().len() != old_len {
-      +                        changed = true;
-      +                    }
-      +                }
-      +            }
-      +        }
-      +        if !changed {
-      +            break;
-      +        }
-      +    }
-      +
-      +    // 3. Iterate through the table and merge actions.
-      +    let mut changed = true;
-      +    while changed {
-      +        changed = false;
-      +        let mut new_gotos_to_add: BTreeMap<StateID, Vec<(NonTerminalID, Goto)>> = BTreeMap::new();
-      +
-      +        for (state_id, row) in table.iter() {
-      +            for (nt_id, goto) in &row.gotos {
-      +                if let Some(goto_state_id) = goto.state_id {
-      +                    // Check if this goto leads to a state that only performs a unit reduction.
-      +                    // A simple heuristic: check if the target state has no shifts and its default reduce is a unit production.
-      +                    // A more robust check would be needed for complex cases, but this covers many.
-      +                    if let Some(target_row) = table.get(&goto_state_id) {
-      +                        // If the target state's only purpose is a unit reduction, we can bypass it.
-      +                        // We check if the goto non-terminal is a LHS of a unit production.
-      +                        if let Some(descendant_nt_id) = unit_productions.get(nt_id) {
-      +                            // The transition `state_id --nt_id--> goto_state_id` exists.
-      +                            // The rule `nt_id -> descendant_nt_id` exists.
-      +                            // We want to add a new transition: `state_id --descendant_nt_id--> goto_state_id`.
-      +                            // This effectively makes `descendant_nt_id` behave like `nt_id` from this state.
-      +                            if let Some(target_goto_for_descendant) = target_row.gotos.get(descendant_nt_id) {
-      +                                let new_goto_for_nt = *target_goto_for_descendant;
-      +                                // If the current row doesn't have this new goto, or it's different, we add it.
-      +                                if row.gotos.get(descendant_nt_id) != Some(&new_goto_for_nt) {
-      +                                    new_gotos_to_add.entry(*state_id).or_default().push((*descendant_nt_id, new_goto_for_nt));
-      +                                    changed = true;
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
+       #[derive(Debug, Clone, PartialEq, Eq)]
+      -struct Stage7Row {
+      -    pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+      -    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+      -    pub default_reduce: DefaultReduce,
+      +struct Stage7Row {
+      +    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+           pub gotos: BTreeMap<NonTerminalID, Goto>,
+       }
+       
+      @@ -230,7 +226,7 @@
+           pub gotos: BTreeMap<NonTerminalID, Goto>,
+       }
+       
+      -// Manual impl for Stage7Row (could be derived)
+      +// Manual impl for Row (could be derived)
+       impl JSONConvertible for Row {
+           fn to_json(&self) -> JSONNode {
+               let mut obj = StdMap::new();
+      @@ -320,12 +316,6 @@
+           BiBTreeMap<BTreeSet<Item>, StateID>,
+           StateID,
+       );
+      -type Stage8Result = (
+      -    Stage8Table,
+      -    BiBTreeMap<BTreeSet<Item>, StateID>,
+      -    StateID,
+      -);
+       
+       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+           let initial_item = Item {
+      @@ -503,7 +493,7 @@
+               let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
+       
+               for (terminal, action) in &row.shifts_and_reduces {
+      -            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+      +            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+       
+                   // 1. Get the potential shift action.
+                   let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+      @@ -532,6 +522,71 @@
+                   };
+                   final_action.simplify();
+                   shifts_and_reduces_full.insert(terminal_id, final_action);
       +        }
       +
-      +        for (state_id, gotos_to_add) in new_gotos_to_add {
-      +            let row = table.get_mut(&state_id).unwrap();
-      +            for (nt_id, goto) in gotos_to_add {
-      +                row.gotos.insert(nt_id, goto);
-      +            }
+      +        let mut gotos = BTreeMap::new();
+      +        for (nonterminal, next_item_set) in row.gotos {
+      +            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+      +            let goto = Goto {
+      +                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+      +                accept: false,
+      +            };
+      +            gotos.insert(non_terminal_id, goto);
       +        }
+      +
+      +        stage_7_table.insert(state_id, Stage7Row {
+      +            shifts_and_reduces_full,
+      +            gotos,
+      +        });
       +    }
       +
-      +    // 4. Remove goto transitions on non-terminals that are purely part of unit production chains.
-      +    // This is a simplification. A full implementation would remove unreachable states.
+      +    let initial_item = Item {
+      +        production: productions[start_production_id].clone(),
+      +        dot_position: 0,
+      +        lookahead: None,
+      +    };
+      +    let initial_item_set = BTreeSet::from([initial_item]);
+      +    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+      +
+      +    // Goto for initial production
+      +    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+      +    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+      +
+      +    (stage_7_table, item_set_map, start_state_id)
       +}
       +
-       pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
-           let original_productions = productions.to_vec();
-       
-      @@ -551,7 +666,11 @@
-           let stage_6_table = stage_6(stage_5_table);
-           crate::debug!(6, &stage_6_table);
-           crate::debug!(2, "Stage 7");
-      -    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
-      +    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
-           crate::debug!(6, &stage_7_table);
-      +    crate::debug!(2, "Eliminating unit productions");
-      +    eliminate_unit_productions(&mut stage_7_table, &productions, &non_terminal_map, &mut item_set_map);
+      +fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
+      +    let mut stage_8_table = BTreeMap::new();
       +
-           crate::debug!(2, "Stage 8");
-           let stage_8_table = stage_8(stage_7_table);
-           crate::debug!(6, &stage_8_table);
+      +    for (state_id, row) in stage_7_table {
+      +        let Stage7Row { shifts_and_reduces_full, gotos } = row;
+      +
+      +        // --- Promotion Logic ---
+      +        let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
+      +        for action in shifts_and_reduces_full.values() {
+      +            let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+      +                for (&len, nts) in reduces {
+      +                    for (&nt_id, pids) in nts {
+      +                        let entry = reduce_counts.entry((nt_id, len)).or_default();
+      +                        entry.0 += 1; // Count how many terminals trigger this kind of reduce
+      +                        entry.1.extend(pids.iter().cloned());
+      +                    }
+      +                }
+      +            };
+      +            match action {
+      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+      +                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
+      +                    entry.0 += 1;
+      +                    entry.1.extend(production_ids.iter().cloned());
+      +                },
+      +                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+      +                _ => {}
+      +            }
+               }
+       
+               // --- Promotion Logic ---
+      @@ -593,29 +648,13 @@
+                   (shifts_and_reduces_without_default, default_reduce)
+               };
+       
+      -        let mut gotos = BTreeMap::new();
+      -        for (nonterminal, next_item_set) in row.gotos {
+      -            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+      -            let goto = Goto {
+      -                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+      -                accept: false,
+      -            };
+      -            gotos.insert(non_terminal_id, goto);
+      -        }
+      -
+      -        stage_7_table.insert(state_id, Stage7Row {
+      +        stage_8_table.insert(state_id, Row {
+                   shifts_and_reduces_without_default_reduce,
+                   shifts_and_reduces_full,
+                   default_reduce,
+                   gotos,
+               });
+           }
+      -
+      -    let initial_item = Item {
+      -        production: productions[start_production_id].clone(),
+      -        dot_position: 0,
+      -        lookahead: None,
+      -    };
+      -    let initial_item_set = BTreeSet::from([initial_item]);
+      -    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+      -
+      -    // Goto for initial production
+      -    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+      -    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+      -
+      -    (stage_7_table, item_set_map, start_state_id)
+      +    stage_8_table
+       }
+       
+      -fn finalize_table(stage_7_table: Stage7Table) -> Table {
+      -    stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+      -        shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+      -        shifts_and_reduces_full: row.shifts_and_reduces_full,
+      -        default_reduce: row.default_reduce,
+      -        gotos: row.gotos,
+      -    })).collect()
+      -}
+      -
+       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+       ///
+       /// This function takes a table and a list of compatible state pairs. It merges these
+      @@ -760,9 +799,11 @@
+           crate::debug!(2, "Stage 7");
+           let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+      +    crate::debug!(2, "Stage 8");
+      +    let stage_8_table = stage_8(stage_7_table);
+      +    crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let mut final_table = finalize_table(stage_7_table);
+      -    crate::debug!(6, &final_table);
+      +    let mut final_table = stage_8_table;
+       
+           let compatible_states = find_compatible_states(&final_table);
+           if !compatible_states.is_empty() {
 
       ```
 
-      ### Explanation of Changes
-
-      1.  **`eliminate_unit_productions` Function (in `src/glr/table.rs`)**:
-          *   **Step 1: Identify Unit Productions**: It scans the grammar to find all productions of the form `A -> B` and stores them in a map from `LHS_ID -> RHS_ID`.
-          *   **Step 2: Compute Transitive Closure**: It calculates all possible derivation chains like `A ->* B`. This is crucial because a reduction might involve a chain like `E -> T -> F`. We need to know that `E` can ultimately become `F`.
-          *   **Step 3: Iterative Merging**: This is the core of the algorithm. It repeatedly scans the table. If it finds a GOTO transition `S --A--> T` where `A -> B` is a unit production, it looks at what `T` would do on `B`. It then adds a new GOTO transition `S --B--> ...` directly from state `S`, effectively bypassing the intermediate reduction. This process repeats until no more changes can be made.
-          *   **Step 4: Cleanup (Simplified)**: A full implementation would remove states that become unreachable and remove the GOTO columns for the now-eliminated non-terminals. For simplicity and to avoid complex state remapping in this patch, I've focused on the core logic of adding the bypass transitions. The subsequent `merge_compatible_states` can help clean up some redundancy.
-
-      2.  **Integration into `generate_glr_parser_with_maps`**:
-          *   I've inserted a call to `eliminate_unit_productions` right after `stage_7` is complete. This is the ideal point because the table has concrete state IDs, but before the complex `DefaultReduce` logic of `stage_8` is applied, which would make the transformation much harder.
-
-      This implementation provides the core benefit of unit production elimination by creating shortcuts in the GOTO table, which will lead to a smaller and faster parser.
+      No other files needed changes as the public interface of the `table` module remains the same. Let me know if you have any other questions
     metadata:
-  - user: |
-      Apply result (git-llm mode):
+  - user: |-
+      Git apply attempt failed (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/glr/table.rs
       Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
+      Error applying patch to src/glr/table.rs:
+      Hunk #4 (header: @@ -320,12 +316,6 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+      type Stage8Result = (
+          Stage8Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+      --- Expected Context (from patch, after normalization): ---
+      BiBTreeMap<BTreeSet<Item>, StateID>,
+      StateID,
+      );
+      type Stage8Result = (
+      Stage8Table,
+      BiBTreeMap<BTreeSet<Item>, StateID>,
+      StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+      let initial_item = Item {
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 309 with ratio 0.55 (6/11 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - BiBTreeMap<BTreeSet<Item>, StateID>,
+      - StateID,
+      - );
+      + type Stage4Result = Stage4Table;
+      + type Stage5Result = Stage5Table;
+      + type Stage6Result = Stage6Table;
+      - type Stage8Result = (
+      ?           ^
+
+      + type Stage7Result = (
+      ?           ^
+
+      - Stage8Table,
+      ?      ^
+
+      + Stage7Table,
+      ?      ^
+
+        BiBTreeMap<BTreeSet<Item>, StateID>,
+        StateID,
+        );
+        
+        fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+        let initial_item = Item {
+      Problematic diff content:
+      ---
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -14,6 +14,7 @@
+       type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+       type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+       type Stage7Table = BTreeMap<StateID, Stage7Row>;
+      +type Stage8Table = BTreeMap<StateID, Row>;
+       pub type Table = BTreeMap<StateID, Row>;
+       
+       
+      @@ -211,13 +212,8 @@
+       }
+       
+       #[derive(Debug, Clone, PartialEq, Eq)]
+      -struct Stage7Row {
+      -    pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+      -    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+      -    pub default_reduce: DefaultReduce,
+      +struct Stage7Row {
+      +    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+           pub gotos: BTreeMap<NonTerminalID, Goto>,
+       }
+       
+      @@ -230,7 +226,7 @@
+           pub gotos: BTreeMap<NonTerminalID, Goto>,
+       }
+       
+      -// Manual impl for Stage7Row (could be derived)
+      +// Manual impl for Row (could be derived)
+       impl JSONConvertible for Row {
+           fn to_json(&self) -> JSONNode {
+               let mut obj = StdMap::new();
+      @@ -320,12 +316,6 @@
+           BiBTreeMap<BTreeSet<Item>, StateID>,
+           StateID,
+       );
+      -type Stage8Result = (
+      -    Stage8Table,
+      -    BiBTreeMap<BTreeSet<Item>, StateID>,
+      -    StateID,
+      -);
+       
+       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+           let initial_item = Item {
+      @@ -503,7 +493,7 @@
+               let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
+       
+               for (terminal, action) in &row.shifts_and_reduces {
+      -            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+      +            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+       
+                   // 1. Get the potential shift action.
+                   let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+      @@ -532,6 +522,71 @@
+                   };
+                   final_action.simplify();
+                   shifts_and_reduces_full.insert(terminal_id, final_action);
+      +        }
+      +
+      +        let mut gotos = BTreeMap::new();
+      +        for (nonterminal, next_item_set) in row.gotos {
+      +            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+      +            let goto = Goto {
+      +                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+      +                accept: false,
+      +            };
+      +            gotos.insert(non_terminal_id, goto);
+      +        }
+      +
+      +        stage_7_table.insert(state_id, Stage7Row {
+      +            shifts_and_reduces_full,
+      +            gotos,
+      +        });
+      +    }
+      +
+      +    let initial_item = Item {
+      +        production: productions[start_production_id].clone(),
+      +        dot_position: 0,
+      +        lookahead: None,
+      +    };
+      +    let initial_item_set = BTreeSet::from([initial_item]);
+      +    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+      +
+      +    // Goto for initial production
+      +    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+      +    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+      +
+      +    (stage_7_table, item_set_map, start_state_id)
+      +}
+      +
+      +fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
+      +    let mut stage_8_table = BTreeMap::new();
+      +
+      +    for (state_id, row) in stage_7_table {
+      +        let Stage7Row { shifts_and_reduces_full, gotos } = row;
+      +
+      +        // --- Promotion Logic ---
+      +        let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
+      +        for action in shifts_and_reduces_full.values() {
+      +            let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+      +                for (&len, nts) in reduces {
+      +                    for (&nt_id, pids) in nts {
+      +                        let entry = reduce_counts.entry((nt_id, len)).or_default();
+      +                        entry.0 += 1; // Count how many terminals trigger this kind of reduce
+      +                        entry.1.extend(pids.iter().cloned());
+      +                    }
+      +                }
+      +            };
+      +            match action {
+      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+      +                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
+      +                    entry.0 += 1;
+      +                    entry.1.extend(production_ids.iter().cloned());
+      +                },
+      +                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+      +                _ => {}
+      +            }
+               }
+       
+               // --- Promotion Logic ---
+      @@ -593,29 +648,13 @@
+                   (shifts_and_reduces_without_default, default_reduce)
+               };
+       
+      -        let mut gotos = BTreeMap::new();
+      -        for (nonterminal, next_item_set) in row.gotos {
+      -            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+      -            let goto = Goto {
+      -                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+      -                accept: false,
+      -            };
+      -            gotos.insert(non_terminal_id, goto);
+      -        }
+      -
+      -        stage_7_table.insert(state_id, Stage7Row {
+      +        stage_8_table.insert(state_id, Row {
+                   shifts_and_reduces_without_default_reduce,
+                   shifts_and_reduces_full,
+                   default_reduce,
+                   gotos,
+               });
+           }
+      -
+      -    let initial_item = Item {
+      -        production: productions[start_production_id].clone(),
+      -        dot_position: 0,
+      -        lookahead: None,
+      -    };
+      -    let initial_item_set = BTreeSet::from([initial_item]);
+      -    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+      -
+      -    // Goto for initial production
+      -    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+      -    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+      -
+      -    (stage_7_table, item_set_map, start_state_id)
+      +    stage_8_table
+       }
+       
+      -fn finalize_table(stage_7_table: Stage7Table) -> Table {
+      -    stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+      -        shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+      -        shifts_and_reduces_full: row.shifts_and_reduces_full,
+      -        default_reduce: row.default_reduce,
+      -        gotos: row.gotos,
+      -    })).collect()
+      -}
+      -
+       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+       ///
+       /// This function takes a table and a list of compatible state pairs. It merges these
+      @@ -760,9 +799,11 @@
+           crate::debug!(2, "Stage 7");
+           let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+      +    crate::debug!(2, "Stage 8");
+      +    let stage_8_table = stage_8(stage_7_table);
+      +    crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let mut final_table = finalize_table(stage_7_table);
+      -    crate::debug!(6, &final_table);
+      +    let mut final_table = stage_8_table;
+       
+           let compatible_states = find_compatible_states(&final_table);
+           if !compatible_states.is_empty() {
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Error applying patch to src/glr/table.rs:
+      Hunk #4 (header: @@ -320,12 +316,6 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+      type Stage8Result = (
+          Stage8Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+      --- Expected Context (from patch, after normalization): ---
+      BiBTreeMap<BTreeSet<Item>, StateID>,
+      StateID,
+      );
+      type Stage8Result = (
+      Stage8Table,
+      BiBTreeMap<BTreeSet<Item>, StateID>,
+      StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+      let initial_item = Item {
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 309 with ratio 0.55 (6/11 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - BiBTreeMap<BTreeSet<Item>, StateID>,
+      - StateID,
+      - );
+      + type Stage4Result = Stage4Table;
+      + type Stage5Result = Stage5Table;
+      + type Stage6Result = Stage6Table;
+      - type Stage8Result = (
+      ?           ^
+
+      + type Stage7Result = (
+      ?           ^
+
+      - Stage8Table,
+      ?      ^
+
+      + Stage7Table,
+      ?      ^
+
+        BiBTreeMap<BTreeSet<Item>, StateID>,
+        StateID,
+        );
+        
+        fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+        let initial_item = Item {
+      Problematic diff content:
+      ---
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -14,6 +14,7 @@
+       type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+       type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+       type Stage7Table = BTreeMap<StateID, Stage7Row>;
+      +type Stage8Table = BTreeMap<StateID, Row>;
+       pub type Table = BTreeMap<StateID, Row>;
+       
+       
+      @@ -211,13 +212,8 @@
+       }
+       
+       #[derive(Debug, Clone, PartialEq, Eq)]
+      -struct Stage7Row {
+      -    pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+      -    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+      -    pub default_reduce: DefaultReduce,
+      +struct Stage7Row {
+      +    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+           pub gotos: BTreeMap<NonTerminalID, Goto>,
+       }
+       
+      @@ -230,7 +226,7 @@
+           pub gotos: BTreeMap<NonTerminalID, Goto>,
+       }
+       
+      -// Manual impl for Stage7Row (could be derived)
+      +// Manual impl for Row (could be derived)
+       impl JSONConvertible for Row {
+           fn to_json(&self) -> JSONNode {
+               let mut obj = StdMap::new();
+      @@ -320,12 +316,6 @@
+           BiBTreeMap<BTreeSet<Item>, StateID>,
+           StateID,
+       );
+      -type Stage8Result = (
+      -    Stage8Table,
+      -    BiBTreeMap<BTreeSet<Item>, StateID>,
+      -    StateID,
+      -);
+       
+       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+           let initial_item = Item {
+      @@ -503,7 +493,7 @@
+               let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
+       
+               for (terminal, action) in &row.shifts_and_reduces {
+      -            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+      +            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+       
+                   // 1. Get the potential shift action.
+                   let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+      @@ -532,6 +522,71 @@
+                   };
+                   final_action.simplify();
+                   shifts_and_reduces_full.insert(terminal_id, final_action);
+      +        }
+      +
+      +        let mut gotos = BTreeMap::new();
+      +        for (nonterminal, next_item_set) in row.gotos {
+      +            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+      +            let goto = Goto {
+      +                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+      +                accept: false,
+      +            };
+      +            gotos.insert(non_terminal_id, goto);
+      +        }
+      +
+      +        stage_7_table.insert(state_id, Stage7Row {
+      +            shifts_and_reduces_full,
+      +            gotos,
+      +        });
+      +    }
+      +
+      +    let initial_item = Item {
+      +        production: productions[start_production_id].clone(),
+      +        dot_position: 0,
+      +        lookahead: None,
+      +    };
+      +    let initial_item_set = BTreeSet::from([initial_item]);
+      +    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+      +
+      +    // Goto for initial production
+      +    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+      +    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+      +
+      +    (stage_7_table, item_set_map, start_state_id)
+      +}
+      +
+      +fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
+      +    let mut stage_8_table = BTreeMap::new();
+      +
+      +    for (state_id, row) in stage_7_table {
+      +        let Stage7Row { shifts_and_reduces_full, gotos } = row;
+      +
+      +        // --- Promotion Logic ---
+      +        let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
+      +        for action in shifts_and_reduces_full.values() {
+      +            let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+      +                for (&len, nts) in reduces {
+      +                    for (&nt_id, pids) in nts {
+      +                        let entry = reduce_counts.entry((nt_id, len)).or_default();
+      +                        entry.0 += 1; // Count how many terminals trigger this kind of reduce
+      +                        entry.1.extend(pids.iter().cloned());
+      +                    }
+      +                }
+      +            };
+      +            match action {
+      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+      +                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
+      +                    entry.0 += 1;
+      +                    entry.1.extend(production_ids.iter().cloned());
+      +                },
+      +                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+      +                _ => {}
+      +            }
+               }
+       
+               // --- Promotion Logic ---
+      @@ -593,29 +648,13 @@
+                   (shifts_and_reduces_without_default, default_reduce)
+               };
+       
+      -        let mut gotos = BTreeMap::new();
+      -        for (nonterminal, next_item_set) in row.gotos {
+      -            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+      -            let goto = Goto {
+      -                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+      -                accept: false,
+      -            };
+      -            gotos.insert(non_terminal_id, goto);
+      -        }
+      -
+      -        stage_7_table.insert(state_id, Stage7Row {
+      +        stage_8_table.insert(state_id, Row {
+                   shifts_and_reduces_without_default_reduce,
+                   shifts_and_reduces_full,
+                   default_reduce,
+                   gotos,
+               });
+           }
+      -
+      -    let initial_item = Item {
+      -        production: productions[start_production_id].clone(),
+      -        dot_position: 0,
+      -        lookahead: None,
+      -    };
+      -    let initial_item_set = BTreeSet::from([initial_item]);
+      -    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+      -
+      -    // Goto for initial production
+      -    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+      -    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+      -
+      -    (stage_7_table, item_set_map, start_state_id)
+      +    stage_8_table
+       }
+       
+      -fn finalize_table(stage_7_table: Stage7Table) -> Table {
+      -    stage_7_table.into_iter().map(|(state_id, row)| (state_id, Row {
+      -        shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce,
+      -        shifts_and_reduces_full: row.shifts_and_reduces_full,
+      -        default_reduce: row.default_reduce,
+      -        gotos: row.gotos,
+      -    })).collect()
+      -}
+      -
+       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+       ///
+       /// This function takes a table and a list of compatible state pairs. It merges these
+      @@ -760,9 +799,11 @@
+           crate::debug!(2, "Stage 7");
+           let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+      +    crate::debug!(2, "Stage 8");
+      +    let stage_8_table = stage_8(stage_7_table);
+      +    crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let mut final_table = finalize_table(stage_7_table);
+      -    crate::debug!(6, &final_table);
+      +    let mut final_table = stage_8_table;
+       
+           let compatible_states = find_compatible_states(&final_table);
+           if !compatible_states.is_empty() {
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/table.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/table.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/table.rs
     metadata:
 ...
