@@ -695,7 +695,7 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
                 clone_and_merge: true,
                 reduce: None,
             };
-            (shifts_and_reduces_without_reduce, default_reduce)
+            (shifts_and_reduces_without_default, default_reduce)
         };
 
         stage_8_table.insert(state_id, Row {
