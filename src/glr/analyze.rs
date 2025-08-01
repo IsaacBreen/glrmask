@@ -733,7 +733,6 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
         // A worklist of RHS variants to process.
         let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-        // A set to keep track of RHS variants we've already generated to avoid duplicates.
         let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
 
         // Start with the original RHS.
