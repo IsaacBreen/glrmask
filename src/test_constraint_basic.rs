@@ -59,7 +59,7 @@ fn test_trivial() {
     grammar_token_map.insert(regex_name("A"), TerminalID(0));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(1)); // The parser generator will look for "EOF"
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None, true);
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
     println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -129,7 +129,7 @@ fn test_constraint_simple() {
         prod("X", vec![t("AB")]),             // X -> ab
     ]; // This is fine, it's a comment
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None, true);
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
     println!("{}", &parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -246,7 +246,7 @@ fn test_constraint_expression() {
     grammar_token_map.insert(regex_name("I"), TerminalID(4));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(5));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None, true); // Start production is index 6
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
     println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -437,7 +437,6 @@ fn test_aborted_tokenizer_restart_equivalence() {
            // generate_glr_parser adds S' -> S EOF, so the first user prod is 0.
         grammar_token_map.clone(),
         None,
-        true,
     );
 
     // LLM Tokens
@@ -527,7 +526,6 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         0, // start_production_id
         grammar_token_map.clone(),
         None,
-        true,
     );
     println!("Parser: {}", parser);
 
@@ -621,7 +619,7 @@ fn test_a_plus_commit_equivalence() {
     grammar_token_map.insert(regex_name("A"), TerminalID(0));
 
     // 4. Create the Parser
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None, true);
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // 5. LLM vocabulary: "a" and "aaa"
     let mut llm_token_map = LLMTokenMap::new();
@@ -690,7 +688,7 @@ fn test_hideous_ambiguity() {
     token_name_map.insert(regex_name("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
 
     // 5. Create the Parser
-    let parser = generate_glr_parser(&productions, 0, None, true);
+    let parser = generate_glr_parser(&productions, 0, None);
     println!("{}", parser);
 
     // 6. Create the Constraint
@@ -755,7 +753,6 @@ fn test_simple_def_match_non_zero_llm_id() {
         0, // start_production_id
         grammar_token_map.clone(),
         None,
-        true,
     );
 
     // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
@@ -812,7 +809,7 @@ fn test_precompute_a_plus_tokenizer() {
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A_PLUS"), TerminalID(0));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None, true);
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
@@ -880,7 +877,7 @@ fn test_precompute_x_eq() {
     grammar_token_map.insert(regex_name("EQUALS"), TerminalID(2)); // '=' is group 2
     grammar_token_map.insert(regex_name("ANY"), TerminalID(3));    // Anything else is group 3
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None, true);
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();

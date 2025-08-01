@@ -148,7 +148,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         prod("A", vec![]),
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (name.clone(), TerminalID(*id))).collect();
-    let parser = generate_glr_parser(&productions, 0, None, true);
+    let parser = generate_glr_parser(&productions, 0, None);
 
     // Ensure that "def" is a valid initial LLM token
     let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap_or(0);
@@ -1468,7 +1468,6 @@ fn causes_specific_panic(
             current_non_terminal_map,
             BTreeMap::new(), // No actions
             None,
-        true,
         );
 
         let mut glr_state = parser.init_glr_parser(None);
@@ -1850,7 +1849,6 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
         non_terminal_map_for_minimized.clone(),
         BTreeMap::new(), // No actions
         None,
-        true,
     );
     println!("Parser: {}", parser);
 
