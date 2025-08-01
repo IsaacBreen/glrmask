@@ -705,80 +705,67 @@ pub fn resolve_direct_right_recursion(
     productions.extend(new_productions);
 }
 
-/// Recursively generates all variants of a production's RHS by expanding nullable non-terminals.
-fn generate_rhs_variants_recursive(
-    rhs_slice: &[Symbol],
-    nullability: &BTreeMap<NonTerminal, Nullability>,
-) -> Vec<Vec<Symbol>> {
-    // Base case: If there are no more symbols, we have one complete variant: an empty list.
-    if rhs_slice.is_empty() {
-        return vec![vec![]];
-    }
-
-    // Recursively get all variants for the rest of the symbols.
-    let variants_for_rest = generate_rhs_variants_recursive(&rhs_slice[1..], nullability);
-
-    let mut all_new_variants = Vec::new();
-    let current_sym = &rhs_slice[0];
-
-    // Determine the possibilities for the current symbol (keep, drop, or both).
-    let current_sym_options = match current_sym {
-        Symbol::Terminal(_) => vec![Some(current_sym.clone())], // Terminals must be kept.
-        Symbol::NonTerminal(nt) => match nullability.get(nt) {
-            Some(Nullability::Null) => vec![None], // `Null` non-terminals must be dropped.
-            Some(Nullability::Nullable) => vec![Some(current_sym.clone()), None], // `Nullable` are optional.
-            _ => vec![Some(current_sym.clone())], // `NotNull` must be kept.
-        },
-    };
-
-    // Combine each possibility for the current symbol with all variants of the rest.
-    for option in current_sym_options {
-        for rest_variant in &variants_for_rest {
-            let mut new_variant = Vec::new();
-            if let Some(sym_to_add) = &option {
-                new_variant.push(sym_to_add.clone());
-            }
-            new_variant.extend_from_slice(rest_variant);
-            all_new_variants.push(new_variant);
-        }
-    }
-    all_new_variants
-}
-
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     if productions.is_empty() {
         return Vec::new();
     }
 
     let nullability = compute_nonterminal_nullability(productions);
+    let mut seen = BTreeSet::<Production>::new();
+    let mut out = Vec::<Production>::new();
 
-    // 1. Expand all productions by generating variants for nullable symbols.
-    let expanded_productions = productions.iter().flat_map(|prod| {
-        generate_rhs_variants_recursive(&prod.rhs, &nullability)
-            .into_iter()
-            .map(move |rhs| Production { lhs: prod.lhs.clone(), rhs })
-    });
+    // The original implementation had a special (and likely buggy) pre-seeding
+    // of the output list to preserve the start production's ordering. We replicate it here.
+    let start_prod = productions[0].clone();
+    seen.insert(start_prod.clone());
+    out.push(start_prod);
 
-    // 2. Deduplicate productions, preserving a specific order for functional equivalence.
-    let mut all_prods_in_order = vec![productions[0].clone()];
-    all_prods_in_order.extend(expanded_productions);
+    for prod in productions {
+        // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+        let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+            let sym_options = match sym {
+                Symbol::Terminal(_) => vec![Some(sym.clone())],
+                Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                    Some(Nullability::Null) => vec![None], // Must be removed
+                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+                    _ => vec![Some(sym.clone())], // Must be kept
+                },
+            };
 
-    let mut unique_prods = Vec::new();
-    let mut seen = BTreeSet::new();
-    for prod in all_prods_in_order {
-        if seen.insert(prod.clone()) {
-            unique_prods.push(prod);
+            acc.into_iter().flat_map(|variant| {
+                sym_options.iter().map(move |opt| {
+                    let mut new_variant = variant.clone();
+                    if let Some(s) = opt {
+                        new_variant.push(s.clone());
+                    }
+                    new_variant
+                })
+            }).collect()
+        });
+
+        for rhs in rhs_variants {
+            let new_prod = Production { lhs: prod.lhs.clone(), rhs };
+            if seen.insert(new_prod.clone()) {
+                out.push(new_prod);
+            }
         }
     }
 
-    // 3. Apply a final filter for functional equivalence with the original's quirky behavior.
+    // The original implementation had a very specific filtering for epsilon productions.
+    // To maintain functional equivalence, this logic is preserved.
     let start_rhs_nts: BTreeSet<_> = productions[0]
         .rhs
         .iter()
-        .filter_map(|s| if let Symbol::NonTerminal(nt) = s { Some(nt.clone()) } else { None })
+        .filter_map(|s| {
+            if let Symbol::NonTerminal(nt) = s {
+                Some(nt.clone())
+            } else {
+                None
+            }
+        })
         .collect();
 
-    unique_prods.into_iter()
+    out.into_iter()
         .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
         .collect()
 }
