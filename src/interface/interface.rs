@@ -1081,7 +1081,7 @@ impl CompiledGrammar {
             definition.start_production_id,
             terminal_map,
             definition.ignore_terminal_id,
-            false,
+            true,
         );
 
         Self {
