@@ -868,7 +868,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut stage_6_table = stage_6(stage_5_table);
     if enable_unit_production_elimination {
         crate::debug!(2, "Eliminating unit productions");
-        crate::glr::simplify_1_reduction_chains::simplify_1_reduction_chains(&mut stage_6_table, &productions, start_production_id);
+        // Note: This modifies stage_6_table in place.
+        // It also might change which non-terminals are used, so we need to update the map.
+        crate::glr::simplify_1_reduction_chains::eliminate_unit_productions(&mut stage_6_table, &productions, &mut non_terminal_map);
     }
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
