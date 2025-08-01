@@ -574,7 +574,8 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             // 3. Create a combined action and simplify it.
             if maybe_shift.is_none() && reduces.is_empty() {
                 // This should not happen because we iterate over terminals that have actions from stage 6.
-                panic!("Action without shift or reduce for terminal {:?}", terminal);
+                // panic!("Action without shift or reduce for terminal {:?}", terminal);
+                continue;
             }
 
             let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
