@@ -769,7 +769,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     // as they have been inlined.
     final_productions
         .into_iter()
-        .filter(|p| !p.rhs.is_empty())
+        .filter(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)))
         .collect()
 }
 
