@@ -812,7 +812,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
     }
 
-    fn _do_queued_reductions(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
@@ -903,7 +903,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // --- Phase 2 ---
-        self._do_queued_reductions(token_id, &mut phase2_todo, &mut shifted_states_todo);
+        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo);
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
