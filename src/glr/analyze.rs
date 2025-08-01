@@ -2,7 +2,7 @@ use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
-use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
+use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -706,63 +706,84 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
+    // Nothing to do on an empty grammar.
+    if productions.is_empty() {
+        return Vec::new();
+    }
 
-    let mut final_productions = Vec::new();
-    final_productions.push(productions[0].clone());
+    // All nullable non-terminals (A ⇒* ε).
+    let nullable = compute_nullable_nonterminals(productions);
 
-    for original_prod in &productions[0..] {
-        // For each original production, we generate all possible new productions
-        // by removing any combination of nullable non-terminals from its RHS.
+    // ---------------------------------------------------------------------
+    // Helper: generate every RHS that can be obtained by optionally deleting
+    // nullable non-terminals – terminals and non-nullable NTs are kept.
+    // ---------------------------------------------------------------------
+    fn rhs_variants(
+        rhs: &[Symbol],
+        nullable: &BTreeSet<NonTerminal>,
+    ) -> Vec<Vec<Symbol>> {
+        let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+        for sym in rhs {
+            let mut next = Vec::new();
+            for prefix in &acc {
+                // Always keep the current symbol
+                let mut keep = prefix.clone();
+                keep.push(sym.clone());
+                next.push(keep);
 
-        // A worklist of RHS variants to process.
-        let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-        let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
-
-        // Start with the original RHS.
-        worklist.push_back(original_prod.rhs.clone());
-
-        'worklist: while let Some(current_rhs) = worklist.pop_front() {
-            // Iterate over the symbols of the current RHS variant.
-            for i in 0..current_rhs.len() {
-                if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-                    // If we find a nullable non-terminal...
-                    if nullable_nonterminals.contains(nt) {
-                        // ...create a new RHS variant with it removed.
-                        let mut new_rhs = current_rhs.clone();
-                        new_rhs.remove(i);
-
-                        generated_rhss.push(new_rhs.clone());
-                        worklist.push_back(new_rhs);
-                        if null_nonterminals.contains(nt) {
-                            continue 'worklist;
-                        }
-                    }
+                // Optionally drop it if it is a nullable NT
+                if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
+                    next.push(prefix.clone());
                 }
             }
-            generated_rhss.push(current_rhs.clone());
+            acc = next;
         }
+        acc
+    }
 
-        // Add all generated variants as new productions with the original LHS.
-        for rhs in generated_rhss.into_iter().rev() {
-            final_productions.push(Production {
-                lhs: original_prod.lhs.clone(),
+    // ---------------------------------------------------------------------
+    // Build the new production set.  We keep the original start production
+    // at the front to preserve ordering.  A `seen` set prevents duplicates.
+    // ---------------------------------------------------------------------
+    let mut result = Vec::with_capacity(productions.len() * 2);
+    let mut seen: BTreeSet<Production> = BTreeSet::new();
+
+    // Always keep the start production exactly as-is.
+    result.push(productions[0].clone());
+    seen.insert(productions[0].clone());
+
+    for prod in productions {
+        for rhs in rhs_variants(&prod.rhs, &nullable) {
+            let new_prod = Production {
+                lhs: prod.lhs.clone(),
                 rhs,
-            });
+            };
+            if seen.insert(new_prod.clone()) {
+                result.push(new_prod);
+            }
         }
     }
 
-    // Finally, remove all productions that are now null (e.g., A -> ε),
-    // as they have been inlined.
-    let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
-        Symbol::NonTerminal(nt) => Some(nt.clone()),
-        _ => None,
-    }).collect();
-    final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
-    // Remove duplicates
-    final_productions.dedup();
-    final_productions
+    // ---------------------------------------------------------------------
+    // Remove ε-productions unless their LHS appears in the RHS of the start
+    // production – those might still be required for the augmented start.
+    // ---------------------------------------------------------------------
+    let start_rhs_nts: BTreeSet<_> = productions[0]
+        .rhs
+        .iter()
+        .filter_map(|s| {
+            if let Symbol::NonTerminal(nt) = s {
+                Some(nt.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    result
+        .into_iter()
+        .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+        .collect()
 }
 
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
