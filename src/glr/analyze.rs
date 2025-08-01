@@ -706,63 +706,44 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    // Trivial case -------------------------------------------------------
     if productions.is_empty() {
         return Vec::new();
     }
 
-    // Pre-compute nullability of all non-terminals once.
     let nullability = compute_nonterminal_nullability(productions);
-
-    // Helper -------------------------------------------------------------
-    // For one symbol return the possible “kept” variants
-    //   • terminals / non-nullable NT  →  [ Some(sym) ]
-    //   •   Null       NT              →  [ None ]         (must disappear)
-    //   •   Nullable   NT              →  [ Some(sym), None ]
-    fn symbol_options(
-        sym: &Symbol,
-        nullability: &BTreeMap<NonTerminal, Nullability>,
-    ) -> Vec<Option<Symbol>> {
-        match sym {
-            Symbol::Terminal(_) => vec![Some(sym.clone())],
-            Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                Some(Nullability::Null) => vec![None],
-                Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-                _ => vec![Some(sym.clone())],
-            },
-        }
-    }
-
-    // Produce every RHS variant by Cartesian product over symbol options.
-    let mut rhs_variants = |rhs: &[Symbol]| -> Vec<Vec<Symbol>> {
-        let mut variants: Vec<Vec<Symbol>> = vec![Vec::new()];
-        for sym in rhs {
-            let mut next = Vec::<Vec<Symbol>>::new();
-            for v in variants.iter() {
-                for opt in symbol_options(sym, &nullability) {
-                    let mut new_v = v.clone();
-                    if let Some(s) = opt {
-                        new_v.push(s);
-                    }
-                    next.push(new_v);
-                }
-            }
-            variants = next;
-        }
-        variants
-    };
-
-    // Build final set ----------------------------------------------------
     let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
 
-    // Keep the start production verbatim to preserve ordering.
+    // The original implementation had a special (and likely buggy) pre-seeding
+    // of the output list to preserve the start production's ordering. We replicate it here.
     let start_prod = productions[0].clone();
     seen.insert(start_prod.clone());
     out.push(start_prod);
 
     for prod in productions {
-        for rhs in rhs_variants(&prod.rhs) {
+        // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+        let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+            let sym_options = match sym {
+                Symbol::Terminal(_) => vec![Some(sym.clone())],
+                Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                    Some(Nullability::Null) => vec![None], // Must be removed
+                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+                    _ => vec![Some(sym.clone())], // Must be kept
+                },
+            };
+
+            acc.into_iter().flat_map(|variant| {
+                sym_options.iter().map(move |opt| {
+                    let mut new_variant = variant.clone();
+                    if let Some(s) = opt {
+                        new_variant.push(s.clone());
+                    }
+                    new_variant
+                })
+            }).collect()
+        });
+
+        for rhs in rhs_variants {
             let new_prod = Production { lhs: prod.lhs.clone(), rhs };
             if seen.insert(new_prod.clone()) {
                 out.push(new_prod);
@@ -770,8 +751,8 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         }
     }
 
-    // Drop super-fluous ε-productions ------------------------------------
-    // Keep ε only if its LHS still appears on RHS of the start production
+    // The original implementation had a very specific filtering for epsilon productions.
+    // To maintain functional equivalence, this logic is preserved.
     let start_rhs_nts: BTreeSet<_> = productions[0]
         .rhs
         .iter()
