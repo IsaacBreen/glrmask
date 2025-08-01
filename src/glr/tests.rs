@@ -1137,12 +1137,16 @@ fn test_unit_production_elimination() {
 
     // Generate parser WITHOUT elimination
     let parser_no_elim = generate_glr_parser(&productions, 0, None, false);
-    let stats_no_elim = stats::get_stats(&parser_no_elim);
-    println!("Stats without elimination:\n{}", stats_no_elim);
 
     // Generate parser WITH elimination
     let parser_elim = generate_glr_parser(&productions, 0, None, true);
+
+    println!("Parser without elimination: {}", parser_no_elim);
+    println!("Parser with elimination: {}", parser_elim);
+
+    let stats_no_elim = stats::get_stats(&parser_no_elim);
     let stats_elim = stats::get_stats(&parser_elim);
+    println!("Stats without elimination:\n{}", stats_no_elim);
     println!("Stats with elimination:\n{}", stats_elim);
 
     // 1. Verify that state count is reduced.
