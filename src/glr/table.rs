@@ -4,7 +4,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
+use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal, inline_nullable_productions, inline_unit_productions};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -824,17 +824,24 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
     println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
-    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+    let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
     // Resolve right-recursion
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
-    let mut productions = productions.to_vec();
     println!("Before recursion resolution:\n{}", display_productions(&productions));
     // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
     crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
     println!("After direct right recursion:\n{}", display_productions(&productions));
+
+    println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+    productions = inline_nullable_productions(&productions);
+    println!("After inlining nullable productions:\n{}", display_productions(&productions));
+
+    println!("Before inlining unit productions:\n{}", display_productions(&productions));
+    productions = inline_unit_productions(&productions);
+    println!("After inlining unit productions:\n{}", display_productions(&productions));
 
     // After recursion resolution, new non-terminals may have been added.
     // We need to update the non_terminal_map.
