@@ -1,14 +1,14 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
+use crate::datastructures::gss::{Acc, GSSPopperItem, print_gss_forest};
+use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, Table, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fmt::{Debug, Display, Formatter, Write};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
@@ -19,7 +19,7 @@ use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+use crate::glr::table::{DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
 /// originate from a **reduce** should be put.
@@ -61,7 +61,7 @@ pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Syn
 
 
 #[derive(Debug, Clone)]
-pub struct ParseStateEdgeContent { 
+pub struct ParseStateEdgeContent {
     pub state_id: StateID,
 }
 impl PartialEq for ParseStateEdgeContent {
@@ -331,7 +331,7 @@ impl GLRParser {
 
     pub fn explain_stack(&self, stack: &[StateID]) -> String {
         let mut result = String::new();
-        writeln!(&mut result, "--- Explaining Parse Stack: {:?} ---", stack.iter().map(|s| s.0).collect::<Vec<_>>()).unwrap();
+        std::fmt::Write::write_fmt(&mut result, format_args!("--- Explaining Parse Stack: {:?} ---", stack.iter().map(|s| s.0).collect::<Vec<_>>())).unwrap();
 
         for &state_id in stack {
             writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
