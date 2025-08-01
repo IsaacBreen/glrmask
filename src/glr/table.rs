@@ -807,7 +807,7 @@ fn merge_compatible_states(
     for row in new_table.values_mut() {
         row.shifts_and_reduces_without_default_reduce.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
         row.shifts_and_reduces_full.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
-        row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = map[sid]; } });
+        row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
     }
 
     let new_item_set_map: BiBTreeMap<BTreeSet<Item>, StateID> = new_item_sets.into_iter().map(|(state_id, item_set)| (item_set, state_id)).collect();

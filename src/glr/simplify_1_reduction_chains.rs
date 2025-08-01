@@ -27,7 +27,7 @@ pub fn simplify_1_reduction_chains(
         .filter_map(|(i, p)| {
             if p.rhs.len() == 1 {
                 if let Symbol::NonTerminal(nt) = &p.rhs[0] {
-                    return Some((ProductionID(i), &p.lhs, nt));
+                    return Some((ProductionID(i), (&p.lhs, nt)));
                 }
             }
             None
