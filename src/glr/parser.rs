@@ -1099,8 +1099,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(4, "{} ({:?}) - token '{}' ({}) - nodes: {:?}",
-                      phase, self.phase, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+        crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
+                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {

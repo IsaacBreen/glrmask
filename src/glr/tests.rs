@@ -89,6 +89,7 @@ fn test_repetition_no_eof_2() {
     let tokens5 = vec![a_token_b, b_token];
     let mut state5 = parser_with_b.init_glr_parser(None);
     state5.parse(&tokens5);
+    state5.log_gss("State 5 after parsing 'ab'", TerminalID(0));
     assert!(!state5.is_ok(), "Parse should fail for 'ab'");
 }
 
