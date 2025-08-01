@@ -754,7 +754,11 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
     // Finally, remove all productions that are now null (e.g., A -> ε),
     // as they have been inlined.
-    final_productions.retain(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)));
+    let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
+        Symbol::NonTerminal(nt) => Some(nt.clone()),
+        _ => None,
+    }).collect();
+    final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
     // Remove duplicates
     final_productions.dedup();
     final_productions
