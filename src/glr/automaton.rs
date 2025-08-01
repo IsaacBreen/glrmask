@@ -14,6 +14,11 @@ pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerm
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
     for p in productions {
         prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+        for symbol in &p.rhs {
+            if let Symbol::NonTerminal(nt) = symbol {
+                prods_by_lhs.entry(nt.clone()).or_default().push(p);
+            }
+        }
     }
     let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
 
