@@ -706,94 +706,77 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    // Nothing to do on an empty grammar.
+    // Return empty on no productions
     if productions.is_empty() {
         return Vec::new();
     }
 
-    // Compute nullability for all non-terminals once.
-    let nullability_map = compute_nonterminal_nullability(productions);
+    // Compute nullability statuses (Null, Nullable, NotNull)
+    let null_map = compute_nonterminal_nullability(productions);
 
-    // Helper: generate RHS variants by optionally deleting nullable NTs.
-    fn rhs_variants(
+    // Generate all RHS variants by optionally dropping nullable non-terminals
+    fn variants(
         rhs: &[Symbol],
-        nullability_map: &BTreeMap<NonTerminal, Nullability>,
+        null_map: &BTreeMap<NonTerminal, Nullability>,
     ) -> Vec<Vec<Symbol>> {
-        let mut acc = vec![Vec::new()];
+        let mut res = vec![Vec::new()];
         for sym in rhs {
             let mut next = Vec::new();
             match sym {
-                Symbol::NonTerminal(nt) => {
-                    // Determine nullability
-                    let status = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
-                    let nullable = status != Nullability::NotNull;
-                    let null_only = status == Nullability::Null;
-                    for prefix in &acc {
-                        // Keep NT if it can produce terminals
-                        if !null_only {
-                            let mut kept = prefix.clone();
-                            kept.push(Symbol::NonTerminal(nt.clone()));
-                            next.push(kept);
-                        }
-                        // Drop NT if it is nullable
-                        if nullable {
-                            next.push(prefix.clone());
-                        }
-                    }
-                }
                 Symbol::Terminal(t) => {
-                    // Always keep terminals
-                    for prefix in &acc {
-                        let mut kept = prefix.clone();
-                        kept.push(Symbol::Terminal(t.clone()));
-                        next.push(kept);
+                    for v in &res {
+                        let mut w = v.clone();
+                        w.push(Symbol::Terminal(t.clone()));
+                        next.push(w);
+                    }
+                }
+                Symbol::NonTerminal(nt) => {
+                    let status = null_map.get(nt).copied().unwrap_or(Nullability::NotNull);
+                    let keep = status != Nullability::Null;        // can produce terminals
+                    let drop = status != Nullability::NotNull;     // can produce empty
+                    for v in &res {
+                        if keep {
+                            let mut w = v.clone();
+                            w.push(Symbol::NonTerminal(nt.clone()));
+                            next.push(w);
+                        }
+                        if drop {
+                            next.push(v.clone());
+                        }
                     }
                 }
             }
-            acc = next;
+            res = next;
         }
-        acc
+        res
     }
 
-    // ---------------------------------------------------------------------
-    // Build the new production set.  We keep the original start production
-    // at the front to preserve ordering.  A `seen` set prevents duplicates.
-    // ---------------------------------------------------------------------
-    let mut result = Vec::with_capacity(productions.len() * 2);
-    let mut seen: BTreeSet<Production> = BTreeSet::new();
+    let mut result = Vec::new();
+    let mut seen = BTreeSet::new();
 
-    // Always keep the start production exactly as-is.
-    result.push(productions[0].clone());
-    seen.insert(productions[0].clone());
+    // Always keep the start production unchanged
+    let start = &productions[0];
+    result.push(start.clone());
+    seen.insert(start.clone());
 
+    // Expand each production into its variants
     for prod in productions {
-        for rhs in rhs_variants(&prod.rhs, &nullability_map) {
-            let new_prod = Production {
-                lhs: prod.lhs.clone(),
-                rhs,
-            };
-            if seen.insert(new_prod.clone()) {
-                result.push(new_prod);
+        for rhs in variants(&prod.rhs, &null_map) {
+            let p = Production { lhs: prod.lhs.clone(), rhs };
+            if seen.insert(p.clone()) {
+                result.push(p);
             }
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Remove ε-productions unless their LHS appears in the RHS of the start
-    // production – those might still be required for the augmented start.
-    // ---------------------------------------------------------------------
-    let start_rhs_nts: BTreeSet<_> = productions[0]
+    // Determine LHS that need to keep epsilon (those in start RHS)
+    let start_rhs_nts: BTreeSet<NonTerminal> = start
         .rhs
         .iter()
-        .filter_map(|s| {
-            if let Symbol::NonTerminal(nt) = s {
-                Some(nt.clone())
-            } else {
-                None
-            }
-        })
+        .filter_map(|s| if let Symbol::NonTerminal(nt) = s { Some(nt.clone()) } else { None })
         .collect();
 
+    // Filter out pure ε-productions except those needed for start
     result
         .into_iter()
         .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
