@@ -704,6 +704,14 @@ pub struct GLRParserState<'a> { // No longer generic
     phase: ParserPhase,
 }
 
+impl Display for GLRParserState<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // Display the stack
+        self.log_gss("    ", TerminalID(0));
+        Ok(())
+    }
+}
+
 impl<'a> GLRParserState<'a> { // No longer generic
     fn push_state(
         &self,

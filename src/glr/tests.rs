@@ -24,7 +24,7 @@ fn create_simple_parser() -> GLRParser {
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
 
 #[test]
-fn test_repetition_no_eof() {
+fn test_repetition_no_eof_1() {
     // Grammar: S -> S 'a' | 'a'
     // This grammar defines a sequence of one or more 'a's.
     // We will parse inputs without a final EOF token and check the state.
@@ -64,7 +64,10 @@ fn test_repetition_no_eof() {
     assert!(state3.is_ok(), "State should still be ok after parsing empty input");
     // However, if we were to check for *acceptance*, it would fail because S is not nullable.
     // The `is_ok` check is about whether the parser can continue, not if it has accepted.
+}
 
+#[test]
+fn test_repetition_no_eof_2() {
     // Test case 4: "b" (invalid token)
     // We need to add 'b' to the grammar to get a token ID for it, but ensure it's not part of the main language.
     let productions_with_b = vec![
@@ -86,7 +89,7 @@ fn test_repetition_no_eof() {
     let tokens5 = vec![a_token_b, b_token];
     let mut state5 = parser_with_b.init_glr_parser(None);
     state5.parse(&tokens5);
-    assert!(!state5.is_ok(), "Parse should fail for 'ab'");
+    assert!(!state5.is_ok(), "Parse should fail for 'ab'. Instead, got {}", state5);
 }
 
 fn create_expression_parser() -> GLRParser {
