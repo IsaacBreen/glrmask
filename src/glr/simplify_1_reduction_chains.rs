@@ -104,7 +104,7 @@ pub fn eliminate_unit_productions(
 
         if changed {
             // Apply merges
-            for (from, to) in merges {
+            for (from, to) in &merges {
                 if let Some(from_row) = new_table.remove(&from) {
                     let to_row = new_table.get_mut(&to).unwrap();
                     // Merge `from_row` into `to_row`. For Stage6, this is complex.
