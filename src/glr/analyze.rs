@@ -931,11 +931,11 @@ pub fn eliminate_unit_productions(
 
     // --- Iterative Merging ---
     let mut current_table = stage_6_table.clone();
-    let mut memo: BTreeMap<BTreeSet<&BTreeSet<Item>>, BTreeSet<Item>> = BTreeMap::new();
 
     loop {
         let mut changed = false;
         let mut next_table = current_table.clone();
+        let mut memo: BTreeMap<BTreeSet<&BTreeSet<Item>>, BTreeSet<Item>> = BTreeMap::new();
         let states_to_process: Vec<_> = current_table.keys().collect();
 
         for s in states_to_process {
