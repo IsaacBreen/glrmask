@@ -714,8 +714,6 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
 
-    // The original implementation had a special (and likely buggy) pre-seeding
-    // of the output list to preserve the start production's ordering. We replicate it here.
     let start_prod = productions[0].clone();
     seen.insert(start_prod.clone());
     out.push(start_prod);
