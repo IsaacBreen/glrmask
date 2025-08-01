@@ -18,7 +18,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use bimap::BiBTreeMap;
       use kdam::{tqdm, BarExt};
-      use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_closure, Nullability};
+      use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -94,7 +94,7 @@ local_system:
 
       /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
       pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
               let mut nts = vec![p.lhs.clone()];
               for s in &p.rhs {
@@ -119,7 +119,7 @@ local_system:
                   .iter()
                   .filter(|symbol| match symbol {
                       Symbol::Terminal(_) => true,
-                      Symbol::NonTerminal(nt) => !nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                      Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
                   })
                   .collect();
 
@@ -160,7 +160,7 @@ local_system:
 
       /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
       pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let mut errors = Vec::new();
 
           for prod in productions {
@@ -175,7 +175,7 @@ local_system:
                           let prefix = &rhs[0..i];
                           if !prefix.is_empty() { // Only check if there's a prefix
                               let prefix_is_nullable = prefix.iter().all(|sym| match sym {
-                                  Symbol::NonTerminal(prefix_nt) => nullability_map.get(prefix_nt).map_or(false, |n| n.is_nullable()),
+                                  Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
                                   Symbol::Terminal(_) => false, // Terminals are not nullable
                               });
 
@@ -500,11 +500,11 @@ local_system:
       /// Returns the index and the symbol if found.
       fn find_last_non_nullable_symbol<'a>(
           rhs: &'a [Symbol],
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_set: &BTreeSet<NonTerminal>,
       ) -> Option<(usize, &'a Symbol)> {
           for (i, symbol) in rhs.iter().enumerate().rev() {
               let is_nullable = match symbol {
-                  Symbol::NonTerminal(nt) => nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                  Symbol::NonTerminal(nt) => nullable_set.contains(nt),
                   Symbol::Terminal(_) => false,
               };
               if !is_nullable {
@@ -516,8 +516,8 @@ local_system:
 
       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
           let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullability_map = compute_nonterminal_nullability(productions);
-          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -548,7 +548,7 @@ local_system:
                                           .extend(first_set_for_next_nt.iter().cloned());
                                   }
                                   // If the non-terminal is not nullable, we stop looking further.
-                                  if !nullability_map.get(next_nt).map_or(false, |n| n.is_nullable()) {
+                                  if !nullable_nonterminals.contains(next_nt) {
                                       all_following_are_nullable = false;
                                       break;
                                   }
@@ -722,7 +722,8 @@ local_system:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
 
           let mut final_productions = Vec::new();
           final_productions.push(productions[0].clone());
@@ -743,15 +744,14 @@ local_system:
                   for i in 0..current_rhs.len() {
                       if let Symbol::NonTerminal(nt) = &current_rhs[i] {
                           // If we find a nullable non-terminal...
-                          let nullability = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
-                          if nullability.is_nullable() {
+                          if nullable_nonterminals.contains(nt) {
                               // ...create a new RHS variant with it removed.
                               let mut new_rhs = current_rhs.clone();
                               new_rhs.remove(i);
 
                               generated_rhss.push(new_rhs.clone());
                               worklist.push_back(new_rhs);
-                              if nullability == Nullability::Null {
+                              if null_nonterminals.contains(nt) {
                                   continue 'worklist;
                               }
                           }
@@ -789,98 +789,85 @@ local_system:
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-      pub enum Nullability {
-          /// Can derive a terminal, but not epsilon.
-          NotNull,
-          /// Can derive epsilon, and can also derive a terminal.
-          Nullable,
-          /// Can only derive epsilon (or other Null non-terminals), never a terminal.
-          Null,
-      }
+      pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+          // A non-terminal is "null" if all of its productions lead only to other null non-terminals.
+          // This means it cannot derive any string containing a terminal.
 
-      impl Nullability {
-          pub fn is_nullable(&self) -> bool {
-              matches!(self, Nullability::Nullable | Nullability::Null)
-          }
-      }
-
-      pub fn compute_nonterminal_nullability(productions: &[Production]) -> BTreeMap<NonTerminal, Nullability> {
           if productions.is_empty() {
-              return BTreeMap::new();
+              return BTreeSet::new();
           }
 
-          // 1. Find all non-terminals that can derive epsilon.
-          let mut can_derive_epsilon = BTreeSet::new();
+          // 1. Collect all non-terminals and group productions by LHS.
+          let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+          for p in productions {
+              prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+          }
+          let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+
+          // 2. Start with the assumption that all non-terminals are null.
+          let mut null_nonterminals = all_nonterminals;
+
+          // 3. Iteratively remove non-terminals that are found to be not null.
           let mut changed = true;
           while changed {
               changed = false;
-              for p in productions {
-                  if p.rhs.is_empty() {
-                      if can_derive_epsilon.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
-                  } else if p.rhs.iter().all(|s| match s {
-                      Symbol::NonTerminal(nt) => can_derive_epsilon.contains(nt),
-                      Symbol::Terminal(_) => false,
-                  }) {
-                      if can_derive_epsilon.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
+
+              let mut nts_to_remove = BTreeSet::new();
+              for nt in &null_nonterminals {
+                  let prods_for_nt = prods_by_lhs.get(nt).unwrap();
+
+                  let is_nt_truly_null = prods_for_nt.iter().all(|prod| {
+                      prod.rhs.iter().all(|symbol| match symbol {
+                          Symbol::Terminal(_) => false,
+                          Symbol::NonTerminal(rhs_nt) => null_nonterminals.contains(rhs_nt),
+                      })
+                  });
+
+                  if !is_nt_truly_null {
+                      nts_to_remove.insert(nt.clone());
                   }
               }
-          }
 
-          // 2. Find all non-terminals that can derive a terminal string (are "productive").
-          let mut productive_nts = BTreeSet::new();
-          changed = true;
-          while changed {
-              changed = false;
-              for p in productions {
-                  if productive_nts.contains(&p.lhs) {
-                      continue;
-                  }
-                  if p.rhs.iter().any(|s| match s {
-                      Symbol::Terminal(_) => true,
-                      Symbol::NonTerminal(nt) => productive_nts.contains(nt),
-                  }) {
-                      if productive_nts.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
+              if !nts_to_remove.is_empty() {
+                  for nt in nts_to_remove {
+                      null_nonterminals.remove(&nt);
                   }
                   changed = true;
               }
           }
 
-          // 3. Collect all non-terminals and combine results.
-          let mut all_nonterminals = BTreeSet::new();
-          for p in productions {
-              all_nonterminals.insert(p.lhs.clone());
-              for s in &p.rhs {
-                  if let Symbol::NonTerminal(nt) = s {
-                      all_nonterminals.insert(nt.clone());
+          null_nonterminals
+      }
+
+      pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+          let mut nullable_nonterminals = BTreeSet::new();
+          let mut changed = true;
+
+          while changed {
+              changed = false;
+              for production in productions {
+                  // Rule 1: A -> ε makes A nullable
+                  if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
+                      nullable_nonterminals.insert(production.lhs.clone());
+                      changed = true;
+                  // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
+                  } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
+                            && production.rhs.iter().all(|symbol| {
+                                matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
+                            })
+                            && !nullable_nonterminals.contains(&production.lhs)
+                  {
+                      nullable_nonterminals.insert(production.lhs.clone());
+                      changed = true;
                   }
               }
           }
 
-          let mut nullability_map = BTreeMap::new();
-          for nt in all_nonterminals {
-              let is_nullable = can_derive_epsilon.contains(&nt);
-              let is_productive = productive_nts.contains(&nt);
-
-              let nullability = match (is_nullable, is_productive) {
-                  (true, true) => Nullability::Nullable,
-                  (true, false) => Nullability::Null,
-                  (false, _) => Nullability::NotNull, // A non-productive, non-nullable NT is useless, but we classify it as NotNull.
-              };
-              nullability_map.insert(nt, nullability);
-          }
-
-          nullability_map
+          nullable_nonterminals
       }
 
       pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
           // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
@@ -908,7 +895,7 @@ local_system:
                           let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
                           first_sets.get_mut(lhs).unwrap().extend(first_nt);
 
-                          if !nullability_map.get(nt).map_or(false, |n| n.is_nullable()) {
+                          if !nullable_nonterminals.contains(nt) {
                               break;
                           }
                       } else if let Symbol::Terminal(t) = symbol { // Added this case
@@ -929,7 +916,7 @@ local_system:
       pub fn compute_follow_sets_for_nonterminals(
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
@@ -973,7 +960,7 @@ local_system:
                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
                                       follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
 
-                                      if !nullability_map.get(nt_next).map_or(false, |n| n.is_nullable()) {
+                                      if !nullable_nonterminals.contains(nt_next) {
                                           suffix_is_nullable = false;
                                           break;
                                       }
@@ -1001,7 +988,7 @@ local_system:
           item: &Item,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeSet<Option<Terminal>> {
           if let Some((symbol, next_item)) = item.next() {
               match symbol {
@@ -1014,13 +1001,13 @@ local_system:
                           .map(Some)
                           .collect();
 
-                      if nullability_map.get(&nt).map_or(false, |n| n.is_nullable()) {
+                      if nullable_nonterminals.contains(&nt) {
                           // If the non-terminal is nullable, we also need to include the firsts for the next item
                           let next_firsts = compute_first_set_for_item(
                               &next_item,
                               productions,
                               first_sets,
-                              nullability_map,
+                              nullable_nonterminals,
                           );
                           first_set.extend(next_firsts);
                       }
@@ -1037,7 +1024,7 @@ local_system:
           items: &BTreeSet<Item>,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
           follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
 
       ) -> BTreeSet<Item> {
@@ -1048,7 +1035,7 @@ local_system:
           while let Some(item) = worklist.pop_front() {
               if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
                   for prod in productions.iter().filter(|p| p.lhs == nt) {
-                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullability_map);
+                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
                       for lookahead in lookaheads {
                           let new_item = Item {
                               production: prod.clone(),
@@ -2997,7 +2984,7 @@ local_system:
       }
     src/glr/table.rs: |
       use super::items::{Item, LRMode};
-      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nonterminal_nullability, split_on_dot};
+      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -3321,8 +3308,8 @@ local_system:
           let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
           let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullability_map = compute_nonterminal_nullability(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
           let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
 
@@ -3333,7 +3320,7 @@ local_system:
                   continue;
               }
 
-              let closure = compute_closure(&item_set, productions, &first_sets, &nullability_map, &follow_sets);
+              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
               let splits = split_on_dot(&closure);
               let mut row = BTreeMap::new();
 
@@ -3940,7 +3927,7 @@ local_system:
       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
-      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
       use crate::glr::stats;
       use bimap::BiBTreeMap;
       use std::collections::BTreeSet;
@@ -5155,7 +5142,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use bimap::BiBTreeMap;
       use kdam::{tqdm, BarExt};
-      use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_closure, Nullability};
+      use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -5231,7 +5218,7 @@ local_system:
 
       /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
       pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
               let mut nts = vec![p.lhs.clone()];
               for s in &p.rhs {
@@ -5256,7 +5243,7 @@ local_system:
                   .iter()
                   .filter(|symbol| match symbol {
                       Symbol::Terminal(_) => true,
-                      Symbol::NonTerminal(nt) => !nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                      Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
                   })
                   .collect();
 
@@ -5297,7 +5284,7 @@ local_system:
 
       /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
       pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let mut errors = Vec::new();
 
           for prod in productions {
@@ -5312,7 +5299,7 @@ local_system:
                           let prefix = &rhs[0..i];
                           if !prefix.is_empty() { // Only check if there's a prefix
                               let prefix_is_nullable = prefix.iter().all(|sym| match sym {
-                                  Symbol::NonTerminal(prefix_nt) => nullability_map.get(prefix_nt).map_or(false, |n| n.is_nullable()),
+                                  Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
                                   Symbol::Terminal(_) => false, // Terminals are not nullable
                               });
 
@@ -5637,11 +5624,11 @@ local_system:
       /// Returns the index and the symbol if found.
       fn find_last_non_nullable_symbol<'a>(
           rhs: &'a [Symbol],
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_set: &BTreeSet<NonTerminal>,
       ) -> Option<(usize, &'a Symbol)> {
           for (i, symbol) in rhs.iter().enumerate().rev() {
               let is_nullable = match symbol {
-                  Symbol::NonTerminal(nt) => nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                  Symbol::NonTerminal(nt) => nullable_set.contains(nt),
                   Symbol::Terminal(_) => false,
               };
               if !is_nullable {
@@ -5653,8 +5640,8 @@ local_system:
 
       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
           let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullability_map = compute_nonterminal_nullability(productions);
-          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -5685,7 +5672,7 @@ local_system:
                                           .extend(first_set_for_next_nt.iter().cloned());
                                   }
                                   // If the non-terminal is not nullable, we stop looking further.
-                                  if !nullability_map.get(next_nt).map_or(false, |n| n.is_nullable()) {
+                                  if !nullable_nonterminals.contains(next_nt) {
                                       all_following_are_nullable = false;
                                       break;
                                   }
@@ -5859,7 +5846,8 @@ local_system:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
 
           let mut final_productions = Vec::new();
           final_productions.push(productions[0].clone());
@@ -5880,15 +5868,14 @@ local_system:
                   for i in 0..current_rhs.len() {
                       if let Symbol::NonTerminal(nt) = &current_rhs[i] {
                           // If we find a nullable non-terminal...
-                          let nullability = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
-                          if nullability.is_nullable() {
+                          if nullable_nonterminals.contains(nt) {
                               // ...create a new RHS variant with it removed.
                               let mut new_rhs = current_rhs.clone();
                               new_rhs.remove(i);
 
                               generated_rhss.push(new_rhs.clone());
                               worklist.push_back(new_rhs);
-                              if nullability == Nullability::Null {
+                              if null_nonterminals.contains(nt) {
                                   continue 'worklist;
                               }
                           }
@@ -5926,98 +5913,85 @@ local_system:
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-      pub enum Nullability {
-          /// Can derive a terminal, but not epsilon.
-          NotNull,
-          /// Can derive epsilon, and can also derive a terminal.
-          Nullable,
-          /// Can only derive epsilon (or other Null non-terminals), never a terminal.
-          Null,
-      }
+      pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+          // A non-terminal is "null" if all of its productions lead only to other null non-terminals.
+          // This means it cannot derive any string containing a terminal.
 
-      impl Nullability {
-          pub fn is_nullable(&self) -> bool {
-              matches!(self, Nullability::Nullable | Nullability::Null)
-          }
-      }
-
-      pub fn compute_nonterminal_nullability(productions: &[Production]) -> BTreeMap<NonTerminal, Nullability> {
           if productions.is_empty() {
-              return BTreeMap::new();
+              return BTreeSet::new();
           }
 
-          // 1. Find all non-terminals that can derive epsilon.
-          let mut can_derive_epsilon = BTreeSet::new();
+          // 1. Collect all non-terminals and group productions by LHS.
+          let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+          for p in productions {
+              prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+          }
+          let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+
+          // 2. Start with the assumption that all non-terminals are null.
+          let mut null_nonterminals = all_nonterminals;
+
+          // 3. Iteratively remove non-terminals that are found to be not null.
           let mut changed = true;
           while changed {
               changed = false;
-              for p in productions {
-                  if p.rhs.is_empty() {
-                      if can_derive_epsilon.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
-                  } else if p.rhs.iter().all(|s| match s {
-                      Symbol::NonTerminal(nt) => can_derive_epsilon.contains(nt),
-                      Symbol::Terminal(_) => false,
-                  }) {
-                      if can_derive_epsilon.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
+
+              let mut nts_to_remove = BTreeSet::new();
+              for nt in &null_nonterminals {
+                  let prods_for_nt = prods_by_lhs.get(nt).unwrap();
+
+                  let is_nt_truly_null = prods_for_nt.iter().all(|prod| {
+                      prod.rhs.iter().all(|symbol| match symbol {
+                          Symbol::Terminal(_) => false,
+                          Symbol::NonTerminal(rhs_nt) => null_nonterminals.contains(rhs_nt),
+                      })
+                  });
+
+                  if !is_nt_truly_null {
+                      nts_to_remove.insert(nt.clone());
                   }
               }
-          }
 
-          // 2. Find all non-terminals that can derive a terminal string (are "productive").
-          let mut productive_nts = BTreeSet::new();
-          changed = true;
-          while changed {
-              changed = false;
-              for p in productions {
-                  if productive_nts.contains(&p.lhs) {
-                      continue;
-                  }
-                  if p.rhs.iter().any(|s| match s {
-                      Symbol::Terminal(_) => true,
-                      Symbol::NonTerminal(nt) => productive_nts.contains(nt),
-                  }) {
-                      if productive_nts.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
+              if !nts_to_remove.is_empty() {
+                  for nt in nts_to_remove {
+                      null_nonterminals.remove(&nt);
                   }
                   changed = true;
               }
           }
 
-          // 3. Collect all non-terminals and combine results.
-          let mut all_nonterminals = BTreeSet::new();
-          for p in productions {
-              all_nonterminals.insert(p.lhs.clone());
-              for s in &p.rhs {
-                  if let Symbol::NonTerminal(nt) = s {
-                      all_nonterminals.insert(nt.clone());
+          null_nonterminals
+      }
+
+      pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+          let mut nullable_nonterminals = BTreeSet::new();
+          let mut changed = true;
+
+          while changed {
+              changed = false;
+              for production in productions {
+                  // Rule 1: A -> ε makes A nullable
+                  if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
+                      nullable_nonterminals.insert(production.lhs.clone());
+                      changed = true;
+                  // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
+                  } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
+                            && production.rhs.iter().all(|symbol| {
+                                matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
+                            })
+                            && !nullable_nonterminals.contains(&production.lhs)
+                  {
+                      nullable_nonterminals.insert(production.lhs.clone());
+                      changed = true;
                   }
               }
           }
 
-          let mut nullability_map = BTreeMap::new();
-          for nt in all_nonterminals {
-              let is_nullable = can_derive_epsilon.contains(&nt);
-              let is_productive = productive_nts.contains(&nt);
-
-              let nullability = match (is_nullable, is_productive) {
-                  (true, true) => Nullability::Nullable,
-                  (true, false) => Nullability::Null,
-                  (false, _) => Nullability::NotNull, // A non-productive, non-nullable NT is useless, but we classify it as NotNull.
-              };
-              nullability_map.insert(nt, nullability);
-          }
-
-          nullability_map
+          nullable_nonterminals
       }
 
       pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
           // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
@@ -6045,7 +6019,7 @@ local_system:
                           let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
                           first_sets.get_mut(lhs).unwrap().extend(first_nt);
 
-                          if !nullability_map.get(nt).map_or(false, |n| n.is_nullable()) {
+                          if !nullable_nonterminals.contains(nt) {
                               break;
                           }
                       } else if let Symbol::Terminal(t) = symbol { // Added this case
@@ -6066,7 +6040,7 @@ local_system:
       pub fn compute_follow_sets_for_nonterminals(
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
@@ -6110,7 +6084,7 @@ local_system:
                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
                                       follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
 
-                                      if !nullability_map.get(nt_next).map_or(false, |n| n.is_nullable()) {
+                                      if !nullable_nonterminals.contains(nt_next) {
                                           suffix_is_nullable = false;
                                           break;
                                       }
@@ -6138,7 +6112,7 @@ local_system:
           item: &Item,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeSet<Option<Terminal>> {
           if let Some((symbol, next_item)) = item.next() {
               match symbol {
@@ -6151,13 +6125,13 @@ local_system:
                           .map(Some)
                           .collect();
 
-                      if nullability_map.get(&nt).map_or(false, |n| n.is_nullable()) {
+                      if nullable_nonterminals.contains(&nt) {
                           // If the non-terminal is nullable, we also need to include the firsts for the next item
                           let next_firsts = compute_first_set_for_item(
                               &next_item,
                               productions,
                               first_sets,
-                              nullability_map,
+                              nullable_nonterminals,
                           );
                           first_set.extend(next_firsts);
                       }
@@ -6174,7 +6148,7 @@ local_system:
           items: &BTreeSet<Item>,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
           follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
 
       ) -> BTreeSet<Item> {
@@ -6185,7 +6159,7 @@ local_system:
           while let Some(item) = worklist.pop_front() {
               if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
                   for prod in productions.iter().filter(|p| p.lhs == nt) {
-                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullability_map);
+                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
                       for lookahead in lookaheads {
                           let new_item = Item {
                               production: prod.clone(),
@@ -8134,7 +8108,7 @@ local_system:
       }
     src/glr/table.rs: |
       use super::items::{Item, LRMode};
-      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nonterminal_nullability, split_on_dot};
+      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -8458,8 +8432,8 @@ local_system:
           let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
           let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullability_map = compute_nonterminal_nullability(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
           let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
 
@@ -8470,7 +8444,7 @@ local_system:
                   continue;
               }
 
-              let closure = compute_closure(&item_set, productions, &first_sets, &nullability_map, &follow_sets);
+              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
               let splits = split_on_dot(&closure);
               let mut row = BTreeMap::new();
 
@@ -9077,7 +9051,7 @@ local_system:
       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
-      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
       use crate::glr::stats;
       use bimap::BiBTreeMap;
       use std::collections::BTreeSet;
@@ -10315,7 +10289,7 @@ messages:
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use bimap::BiBTreeMap;
       use kdam::{tqdm, BarExt};
-      use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_closure, Nullability};
+      use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -10391,7 +10365,7 @@ messages:
 
       /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
       pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
               let mut nts = vec![p.lhs.clone()];
               for s in &p.rhs {
@@ -10416,7 +10390,7 @@ messages:
                   .iter()
                   .filter(|symbol| match symbol {
                       Symbol::Terminal(_) => true,
-                      Symbol::NonTerminal(nt) => !nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                      Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
                   })
                   .collect();
 
@@ -10457,7 +10431,7 @@ messages:
 
       /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
       pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let mut errors = Vec::new();
 
           for prod in productions {
@@ -10472,7 +10446,7 @@ messages:
                           let prefix = &rhs[0..i];
                           if !prefix.is_empty() { // Only check if there's a prefix
                               let prefix_is_nullable = prefix.iter().all(|sym| match sym {
-                                  Symbol::NonTerminal(prefix_nt) => nullability_map.get(prefix_nt).map_or(false, |n| n.is_nullable()),
+                                  Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
                                   Symbol::Terminal(_) => false, // Terminals are not nullable
                               });
 
@@ -10797,11 +10771,11 @@ messages:
       /// Returns the index and the symbol if found.
       fn find_last_non_nullable_symbol<'a>(
           rhs: &'a [Symbol],
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_set: &BTreeSet<NonTerminal>,
       ) -> Option<(usize, &'a Symbol)> {
           for (i, symbol) in rhs.iter().enumerate().rev() {
               let is_nullable = match symbol {
-                  Symbol::NonTerminal(nt) => nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                  Symbol::NonTerminal(nt) => nullable_set.contains(nt),
                   Symbol::Terminal(_) => false,
               };
               if !is_nullable {
@@ -10813,8 +10787,8 @@ messages:
 
       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
           let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullability_map = compute_nonterminal_nullability(productions);
-          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -10845,7 +10819,7 @@ messages:
                                           .extend(first_set_for_next_nt.iter().cloned());
                                   }
                                   // If the non-terminal is not nullable, we stop looking further.
-                                  if !nullability_map.get(next_nt).map_or(false, |n| n.is_nullable()) {
+                                  if !nullable_nonterminals.contains(next_nt) {
                                       all_following_are_nullable = false;
                                       break;
                                   }
@@ -11019,7 +10993,8 @@ messages:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
 
           let mut final_productions = Vec::new();
           final_productions.push(productions[0].clone());
@@ -11040,15 +11015,14 @@ messages:
                   for i in 0..current_rhs.len() {
                       if let Symbol::NonTerminal(nt) = &current_rhs[i] {
                           // If we find a nullable non-terminal...
-                          let nullability = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
-                          if nullability.is_nullable() {
+                          if nullable_nonterminals.contains(nt) {
                               // ...create a new RHS variant with it removed.
                               let mut new_rhs = current_rhs.clone();
                               new_rhs.remove(i);
 
                               generated_rhss.push(new_rhs.clone());
                               worklist.push_back(new_rhs);
-                              if nullability == Nullability::Null {
+                              if null_nonterminals.contains(nt) {
                                   continue 'worklist;
                               }
                           }
@@ -11091,98 +11065,85 @@ messages:
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-      pub enum Nullability {
-          /// Can derive a terminal, but not epsilon.
-          NotNull,
-          /// Can derive epsilon, and can also derive a terminal.
-          Nullable,
-          /// Can only derive epsilon (or other Null non-terminals), never a terminal.
-          Null,
-      }
+      pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+          // A non-terminal is "null" if all of its productions lead only to other null non-terminals.
+          // This means it cannot derive any string containing a terminal.
 
-      impl Nullability {
-          pub fn is_nullable(&self) -> bool {
-              matches!(self, Nullability::Nullable | Nullability::Null)
-          }
-      }
-
-      pub fn compute_nonterminal_nullability(productions: &[Production]) -> BTreeMap<NonTerminal, Nullability> {
           if productions.is_empty() {
-              return BTreeMap::new();
+              return BTreeSet::new();
           }
 
-          // 1. Find all non-terminals that can derive epsilon.
-          let mut can_derive_epsilon = BTreeSet::new();
+          // 1. Collect all non-terminals and group productions by LHS.
+          let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+          for p in productions {
+              prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+          }
+          let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+
+          // 2. Start with the assumption that all non-terminals are null.
+          let mut null_nonterminals = all_nonterminals;
+
+          // 3. Iteratively remove non-terminals that are found to be not null.
           let mut changed = true;
           while changed {
               changed = false;
-              for p in productions {
-                  if p.rhs.is_empty() {
-                      if can_derive_epsilon.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
-                  } else if p.rhs.iter().all(|s| match s {
-                      Symbol::NonTerminal(nt) => can_derive_epsilon.contains(nt),
-                      Symbol::Terminal(_) => false,
-                  }) {
-                      if can_derive_epsilon.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
+
+              let mut nts_to_remove = BTreeSet::new();
+              for nt in &null_nonterminals {
+                  let prods_for_nt = prods_by_lhs.get(nt).unwrap();
+
+                  let is_nt_truly_null = prods_for_nt.iter().all(|prod| {
+                      prod.rhs.iter().all(|symbol| match symbol {
+                          Symbol::Terminal(_) => false,
+                          Symbol::NonTerminal(rhs_nt) => null_nonterminals.contains(rhs_nt),
+                      })
+                  });
+
+                  if !is_nt_truly_null {
+                      nts_to_remove.insert(nt.clone());
                   }
               }
-          }
 
-          // 2. Find all non-terminals that can derive a terminal string (are "productive").
-          let mut productive_nts = BTreeSet::new();
-          changed = true;
-          while changed {
-              changed = false;
-              for p in productions {
-                  if productive_nts.contains(&p.lhs) {
-                      continue;
-                  }
-                  if p.rhs.iter().any(|s| match s {
-                      Symbol::Terminal(_) => true,
-                      Symbol::NonTerminal(nt) => productive_nts.contains(nt),
-                  }) {
-                      if productive_nts.insert(p.lhs.clone()) {
-                          changed = true;
-                      }
+              if !nts_to_remove.is_empty() {
+                  for nt in nts_to_remove {
+                      null_nonterminals.remove(&nt);
                   }
                   changed = true;
               }
           }
 
-          // 3. Collect all non-terminals and combine results.
-          let mut all_nonterminals = BTreeSet::new();
-          for p in productions {
-              all_nonterminals.insert(p.lhs.clone());
-              for s in &p.rhs {
-                  if let Symbol::NonTerminal(nt) = s {
-                      all_nonterminals.insert(nt.clone());
+          null_nonterminals
+      }
+
+      pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+          let mut nullable_nonterminals = BTreeSet::new();
+          let mut changed = true;
+
+          while changed {
+              changed = false;
+              for production in productions {
+                  // Rule 1: A -> ε makes A nullable
+                  if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
+                      nullable_nonterminals.insert(production.lhs.clone());
+                      changed = true;
+                  // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
+                  } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
+                            && production.rhs.iter().all(|symbol| {
+                                matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
+                            })
+                            && !nullable_nonterminals.contains(&production.lhs)
+                  {
+                      nullable_nonterminals.insert(production.lhs.clone());
+                      changed = true;
                   }
               }
           }
 
-          let mut nullability_map = BTreeMap::new();
-          for nt in all_nonterminals {
-              let is_nullable = can_derive_epsilon.contains(&nt);
-              let is_productive = productive_nts.contains(&nt);
-
-              let nullability = match (is_nullable, is_productive) {
-                  (true, true) => Nullability::Nullable,
-                  (true, false) => Nullability::Null,
-                  (false, _) => Nullability::NotNull, // A non-productive, non-nullable NT is useless, but we classify it as NotNull.
-              };
-              nullability_map.insert(nt, nullability);
-          }
-
-          nullability_map
+          nullable_nonterminals
       }
 
       pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-          let nullability_map = compute_nonterminal_nullability(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
           // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
@@ -11210,7 +11171,7 @@ messages:
                           let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
                           first_sets.get_mut(lhs).unwrap().extend(first_nt);
 
-                          if !nullability_map.get(nt).map_or(false, |n| n.is_nullable()) {
+                          if !nullable_nonterminals.contains(nt) {
                               break;
                           }
                       } else if let Symbol::Terminal(t) = symbol { // Added this case
@@ -11231,7 +11192,7 @@ messages:
       pub fn compute_follow_sets_for_nonterminals(
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
@@ -11275,7 +11236,7 @@ messages:
                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
                                       follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
 
-                                      if !nullability_map.get(nt_next).map_or(false, |n| n.is_nullable()) {
+                                      if !nullable_nonterminals.contains(nt_next) {
                                           suffix_is_nullable = false;
                                           break;
                                       }
@@ -11303,7 +11264,7 @@ messages:
           item: &Item,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeSet<Option<Terminal>> {
           if let Some((symbol, next_item)) = item.next() {
               match symbol {
@@ -11316,13 +11277,13 @@ messages:
                           .map(Some)
                           .collect();
 
-                      if nullability_map.get(&nt).map_or(false, |n| n.is_nullable()) {
+                      if nullable_nonterminals.contains(&nt) {
                           // If the non-terminal is nullable, we also need to include the firsts for the next item
                           let next_firsts = compute_first_set_for_item(
                               &next_item,
                               productions,
                               first_sets,
-                              nullability_map,
+                              nullable_nonterminals,
                           );
                           first_set.extend(next_firsts);
                       }
@@ -11339,7 +11300,7 @@ messages:
           items: &BTreeSet<Item>,
           productions: &[Production],
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-          nullability_map: &BTreeMap<NonTerminal, Nullability>,
+          nullable_nonterminals: &BTreeSet<NonTerminal>,
           follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
 
       ) -> BTreeSet<Item> {
@@ -11350,7 +11311,7 @@ messages:
           while let Some(item) = worklist.pop_front() {
               if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
                   for prod in productions.iter().filter(|p| p.lhs == nt) {
-                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullability_map);
+                      let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
                       for lookahead in lookaheads {
                           let new_item = Item {
                               production: prod.clone(),
@@ -13334,7 +13295,7 @@ messages:
   - user: |-
       ```rust 'src/glr/table.rs'
       use super::items::{Item, LRMode};
-      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nonterminal_nullability, split_on_dot};
+      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -13658,8 +13619,8 @@ messages:
           let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
           let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullability_map = compute_nonterminal_nullability(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
           let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
 
@@ -13670,7 +13631,7 @@ messages:
                   continue;
               }
 
-              let closure = compute_closure(&item_set, productions, &first_sets, &nullability_map, &follow_sets);
+              let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
               let splits = split_on_dot(&closure);
               let mut row = BTreeMap::new();
 
@@ -14282,7 +14243,7 @@ messages:
       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
       use crate::glr::table::{generate_glr_parser, TerminalID};
-      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
       use crate::glr::stats;
       use bimap::BiBTreeMap;
       use std::collections::BTreeSet;
@@ -15496,153 +15457,640 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Simplify `inline_null_productions`. Make it readable/understandable and concise.
-      Ensure it's functionally equivalent.
+      Modify `compute_nullable_nonterminals` so it returns an enum `Nullability` that has three variants, and has an entry for every nonterminal, and rename it to `compute_nonterminal_nullability`.
+      Get rid of `compute_null_nonterminals`.
+      Update `inline_null_productions` and any other functions accordingly.
+      Ensure they're functionally equivalent.
     metadata:
   - assistant: |-
-      Hello! As a helpful AI assistant, I'd be happy to help you simplify your `inline_null_productions` function. The original implementation was a bit complex with its worklist-based approach. I've replaced it with a more direct and readable version that achieves the same goal.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Refactoring the nullability analysis to be more expressive is a great idea. Here are the git diff patches for the requested changes.
 
-      The new implementation iterates through each production and, for each one, identifies all nullable non-terminals on its right-hand side. It then systematically generates every possible new production by creating all subsets of these nullable non-terminals to remove. This is done efficiently using bit manipulation. The resulting productions are collected into a `BTreeSet` to automatically handle duplicates and maintain a deterministic order.
+      I've replaced `compute_nullable_nonterminals` and `compute_null_nonterminals` with a single function `compute_nonterminal_nullability` that returns a `Nullability` enum for each non-terminal. This new enum distinguishes between non-terminals that are not nullable, those that are nullable but also productive, and those that can only produce an empty string. All related functions have been updated to use this new, more precise information.
 
-      Finally, just like the original, it filters out any newly created empty productions (`A -> ε`), with an exception to keep them for the grammar's start symbol, which is crucial for grammars where the entire input can be optional.
-
-      Here are the diffs for the changes:
-
-      In `src/glr/analyze.rs`, I'll replace the old `inline_null_productions` function with the simplified version.
+      Here are the patches for each modified file:
 
       ```diff
       --- a/src/glr/analyze.rs
       +++ b/src/glr/analyze.rs
-      @@ -740,61 +740,49 @@
-           productions.extend(new_productions);
+      @@ -1,7 +1,7 @@
+       use std::cmp::PartialEq;
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
+       use bimap::BiBTreeMap;
+       use kdam::{tqdm, BarExt};
+      -use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
+      +use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_closure, Nullability};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
+       
+      @@ -74,7 +74,7 @@
+       
+       /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
+       pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
+      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nullability_map = compute_nonterminal_nullability(productions);
+           let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
+               let mut nts = vec![p.lhs.clone()];
+               for s in &p.rhs {
+      @@ -96,7 +96,7 @@
+                   .iter()
+                   .filter(|symbol| match symbol {
+                       Symbol::Terminal(_) => true,
+      -                Symbol::NonTerminal(nt) => !nullable_nonterminals.contains(nt),
+      +                Symbol::NonTerminal(nt) => !nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                   })
+                   .collect();
+       
+      @@ -134,7 +134,7 @@
+       
+       /// Checks for left-nullable left recursion (e.g., A ::= B A ..., where B is nullable).
+       pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec<String> {
+      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nullability_map = compute_nonterminal_nullability(productions);
+           let mut errors = Vec::new();
+       
+           for prod in productions {
+      @@ -148,7 +148,7 @@
+                           let prefix = &rhs[0..i];
+                           if !prefix.is_empty() { // Only check if there's a prefix
+                               let prefix_is_nullable = prefix.iter().all(|sym| match sym {
+      -                            Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
+      +                            Symbol::NonTerminal(prefix_nt) => nullability_map.get(prefix_nt).map_or(false, |n| n.is_nullable()),
+                                   Symbol::Terminal(_) => false, // Terminals are not nullable
+                               });
+       
+      @@ -411,13 +411,13 @@
+       /// Returns the index and the symbol if found.
+       fn find_last_non_nullable_symbol<'a>(
+           rhs: &'a [Symbol],
+      -    nullable_set: &BTreeSet<NonTerminal>,
+      +    nullability_map: &BTreeMap<NonTerminal, Nullability>,
+       ) -> Option<(usize, &'a Symbol)> {
+           for (i, symbol) in rhs.iter().enumerate().rev() {
+               let is_nullable = match symbol {
+      -            Symbol::NonTerminal(nt) => nullable_set.contains(nt),
+      +            Symbol::NonTerminal(nt) => nullability_map.get(nt).map_or(false, |n| n.is_nullable()),
+                   Symbol::Terminal(_) => false,
+               };
+               if !is_nullable {
+      @@ -429,8 +429,8 @@
+       
+       pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+           let first_sets = compute_first_sets_for_nonterminals(productions);
+      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      -    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +    let nullability_map = compute_nonterminal_nullability(productions);
+      +    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+       
+           let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
+       
+      @@ -458,7 +458,7 @@
+                                           .extend(first_set_for_next_nt.iter().cloned());
+                                   }
+                                   // If the non-terminal is not nullable, we stop looking further.
+      -                            if !nullable_nonterminals.contains(next_nt) {
+      +                            if !nullability_map.get(next_nt).map_or(false, |n| n.is_nullable()) {
+                                       all_following_are_nullable = false;
+                                       break;
+                                   }
+      @@ -602,8 +602,7 @@
        }
        
        pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-           let nullability_map = compute_nonterminal_nullability(productions);
+      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      -    let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
+      +    let nullability_map = compute_nonterminal_nullability(productions);
+       
+           let mut final_productions = Vec::new();
+           final_productions.push(productions[0].clone());
+      @@ -622,14 +621,15 @@
+                   for i in 0..current_rhs.len() {
+                       if let Symbol::NonTerminal(nt) = &current_rhs[i] {
+                           // If we find a nullable non-terminal...
+      -                    if nullable_nonterminals.contains(nt) {
+      +                    let nullability = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
+      +                    if nullability.is_nullable() {
+                               // ...create a new RHS variant with it removed.
+                               let mut new_rhs = current_rhs.clone();
+                               new_rhs.remove(i);
+       
+                               generated_rhss.push(new_rhs.clone());
+                               worklist.push_back(new_rhs);
+      -                        if null_nonterminals.contains(nt) {
+      +                        if nullability == Nullability::Null {
+                                   continue 'worklist;
+                               }
+                           }
+
+      ``````diff
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -1,78 +1,91 @@
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::items::{Item, LRMode, LR_MODE};
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
+       
+      -pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      -    // A non-terminal is "null" if all of its productions lead only to other null non-terminals.
+      -    // This means it cannot derive any string containing a terminal.
       -
-      -    let mut final_productions = Vec::new();
-      -    final_productions.push(productions[0].clone());
-      -
-      -    for original_prod in &productions[0..] {
-      -        // For each original production, we generate all possible new productions
-      -        // by removing any combination of nullable non-terminals from its RHS.
-      -
-      -        // A worklist of RHS variants to process.
-      -        let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-      -        let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
-      -
-      -        // Start with the original RHS.
-      -        worklist.push_back(original_prod.rhs.clone());
-      -
-      -        'worklist: while let Some(current_rhs) = worklist.pop_front() {
-      -            // Iterate over the symbols of the current RHS variant.
-      -            for i in 0..current_rhs.len() {
-      -                if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-      -                    // If we find a nullable non-terminal...
-      -                    let nullability = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
-      -                    if nullability.is_nullable() {
-      -                        // ...create a new RHS variant with it removed.
-      -                        let mut new_rhs = current_rhs.clone();
-      -                        new_rhs.remove(i);
-      -
-      -                        generated_rhss.push(new_rhs.clone());
-      -                        worklist.push_back(new_rhs);
-      -                        if nullability == Nullability::Null {
-      -                            continue 'worklist;
-      -                        }
-      -                    }
-      -                }
-      -            }
-      -            generated_rhss.push(current_rhs.clone());
-      -        }
-      -
-      -        // Add all generated variants as new productions with the original LHS.
-      -        for rhs in generated_rhss.into_iter().rev() {
-      -            final_productions.push(Production {
-      -                lhs: original_prod.lhs.clone(),
-      -                rhs,
-      -            });
-      -        }
+      +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+      +pub enum Nullability {
+      +    /// Can derive a terminal, but not epsilon.
+      +    NotNull,
+      +    /// Can derive epsilon, and can also derive a terminal.
+      +    Nullable,
+      +    /// Can only derive epsilon (or other Null non-terminals), never a terminal.
+      +    Null,
+      +}
+      +
+      +impl Nullability {
+      +    pub fn is_nullable(&self) -> bool {
+      +        matches!(self, Nullability::Nullable | Nullability::Null)
+      +    }
+      +}
+      +
+      +pub fn compute_nonterminal_nullability(productions: &[Production]) -> BTreeMap<NonTerminal, Nullability> {
+           if productions.is_empty() {
+      -        return BTreeSet::new();
       -    }
       -
-      -    // Finally, remove all productions that are now null (e.g., A -> ε),
-      -    // as they have been inlined.
-      -    let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
-      -        Symbol::NonTerminal(nt) => Some(nt.clone()),
-      -        _ => None,
-      -    }).collect();
-      -    final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
-      -    // Remove duplicates
-      -    final_productions.dedup();
-      -    final_productions
-      +    let mut new_productions = BTreeSet::new(); // Use a BTreeSet to handle duplicates and ordering.
+      -    // 1. Collect all non-terminals and group productions by LHS.
+      -    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+      -    for p in productions {
+      -        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+      -    }
+      -    let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+      -
+      -    // 2. Start with the assumption that all non-terminals are null.
+      -    let mut null_nonterminals = all_nonterminals;
+      -
+      -    // 3. Iteratively remove non-terminals that are found to be not null.
+      +        return BTreeMap::new();
+      +    }
       +
-      +    for prod in productions {
-      +        // Find indices of all nullable non-terminals in the RHS.
-      +        let nullable_indices: Vec<usize> = prod.rhs.iter().enumerate()
-      +            .filter_map(|(i, symbol)| {
-      +                if let Symbol::NonTerminal(nt) = symbol {
-      +                    if nullability_map.get(nt).map_or(false, |n| n.is_nullable()) {
-      +                        return Some(i);
-      +                    }
+      +    // 1. Find all non-terminals that can derive epsilon.
+      +    let mut can_derive_epsilon = BTreeSet::new();
+           let mut changed = true;
+           while changed {
+               changed = false;
+      -
+      -        let mut nts_to_remove = BTreeSet::new();
+      -        for nt in &null_nonterminals {
+      -            let prods_for_nt = prods_by_lhs.get(nt).unwrap();
+      -
+      -            let is_nt_truly_null = prods_for_nt.iter().all(|prod| {
+      -                prod.rhs.iter().all(|symbol| match symbol {
+      -                    Symbol::Terminal(_) => false,
+      -                    Symbol::NonTerminal(rhs_nt) => null_nonterminals.contains(rhs_nt),
+      -                })
+      -            });
+      -
+      -            if !is_nt_truly_null {
+      -                nts_to_remove.insert(nt.clone());
+      -            }
+      -        }
+      -
+      -        if !nts_to_remove.is_empty() {
+      -            for nt in nts_to_remove {
+      -                null_nonterminals.remove(&nt);
+      +        for p in productions {
+      +            if p.rhs.is_empty() {
+      +                if can_derive_epsilon.insert(p.lhs.clone()) {
+      +                    changed = true;
       +                }
-      +                None
-      +            })
-      +            .collect();
-      +
-      +        // Iterate through all 2^N subsets of nullable non-terminals to generate variants.
-      +        let num_subsets = 1 << nullable_indices.len();
-      +        for i in 0..num_subsets {
-      +            let mut indices_to_remove = BTreeSet::new();
-      +            for (k, &nullable_idx) in nullable_indices.iter().enumerate() {
-      +                // If the k-th bit is set, we remove the k-th nullable non-terminal.
-      +                if (i >> k) & 1 == 1 {
-      +                    indices_to_remove.insert(nullable_idx);
+      +            } else if p.rhs.iter().all(|s| match s {
+      +                Symbol::NonTerminal(nt) => can_derive_epsilon.contains(nt),
+      +                Symbol::Terminal(_) => false,
+      +            }) {
+      +                if can_derive_epsilon.insert(p.lhs.clone()) {
+      +                    changed = true;
       +                }
       +            }
-      +
-      +            let new_rhs: Vec<Symbol> = prod.rhs.iter().enumerate()
-      +                .filter(|(j, _)| !indices_to_remove.contains(j))
-      +                .map(|(_, symbol)| symbol.clone())
-      +                .collect();
-      +
-      +            new_productions.insert(Production {
-      +                lhs: prod.lhs.clone(),
-      +                rhs: new_rhs,
-      +            });
       +        }
       +    }
       +
-      +    // After inlining, remove all the now-unnecessary epsilon productions (A -> ε).
-      +    // An exception is made for the non-terminals in the RHS of the original start rule.
-      +    // If the grammar's true start symbol becomes nullable, we need to keep its epsilon rule.
-      +    // This assumes an augmented grammar like `S' -> S`.
-      +    let start_prod_nonterms: BTreeSet<_> = productions.get(0).map_or(BTreeSet::new(), |p| {
-      +        p.rhs.iter().filter_map(|s| match s {
-      +            Symbol::NonTerminal(nt) => Some(nt.clone()),
-      +            _ => None,
-      +        }).collect()
-      +    });
-      +
-      +    new_productions
-      +        .into_iter()
-      +        .filter(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs))
-      +        .collect()
-       }
+      +    // 2. Find all non-terminals that can derive a terminal string (are "productive").
+      +    let mut productive_nts = BTreeSet::new();
+      +    changed = true;
+      +    while changed {
+      +        changed = false;
+      +        for p in productions {
+      +            if productive_nts.contains(&p.lhs) {
+      +                continue;
+      +            }
+      +            if p.rhs.iter().any(|s| match s {
+      +                Symbol::Terminal(_) => true,
+      +                Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+      +            }) {
+      +                if productive_nts.insert(p.lhs.clone()) {
+      +                    changed = true;
+      +                }
+                   }
+                   changed = true;
+               }
+           }
        
-       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
+      -    null_nonterminals
+      -}
+      -
+      -pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      -    let mut nullable_nonterminals = BTreeSet::new();
+      -    let mut changed = true;
+      -
+      -    while changed {
+      -        changed = false;
+      -        for production in productions {
+      -            // Rule 1: A -> ε makes A nullable
+      -            if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
+      -                nullable_nonterminals.insert(production.lhs.clone());
+      -                changed = true;
+      -            // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
+      -            } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
+      -                      && production.rhs.iter().all(|symbol| {
+      -                          matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
+      -                      })
+      -                      && !nullable_nonterminals.contains(&production.lhs)
+      -            {
+      -                nullable_nonterminals.insert(production.lhs.clone());
+      -                changed = true;
+      -            }
+      -        }
+      -    }
+      -
+      -    nullable_nonterminals
+      -}
+      -
+      -pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    // 3. Collect all non-terminals and combine results.
+      +    let mut all_nonterminals = BTreeSet::new();
+      +    for p in productions {
+      +        all_nonterminals.insert(p.lhs.clone());
+      +        for s in &p.rhs {
+      +            if let Symbol::NonTerminal(nt) = s {
+      +                all_nonterminals.insert(nt.clone());
+      +            }
+      +        }
+      +    }
+      +
+      +    let mut nullability_map = BTreeMap::new();
+      +    for nt in all_nonterminals {
+      +        let is_nullable = can_derive_epsilon.contains(&nt);
+      +        let is_productive = productive_nts.contains(&nt);
+      +
+      +        let nullability = match (is_nullable, is_productive) {
+      +            (true, true) => Nullability::Nullable,
+      +            (true, false) => Nullability::Null,
+      +            (false, _) => Nullability::NotNull, // A non-productive, non-nullable NT is useless, but we classify it as NotNull.
+      +        };
+      +        nullability_map.insert(nt, nullability);
+      +    }
+      +
+      +    nullability_map
+      +}
+      +
+      +pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+      +    let nullability_map = compute_nonterminal_nullability(productions);
+           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
+       
+           // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
+      @@ -95,7 +108,7 @@
+                           let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
+                           first_sets.get_mut(lhs).unwrap().extend(first_nt);
+       
+      -                    if !nullable_nonterminals.contains(nt) {
+      +                    if !nullability_map.get(nt).map_or(false, |n| n.is_nullable()) {
+                               break;
+                           }
+                       } else if let Symbol::Terminal(t) = symbol { // Added this case
+      @@ -113,7 +126,7 @@
+       pub fn compute_follow_sets_for_nonterminals(
+           productions: &[Production],
+           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+      -    nullable_nonterminals: &BTreeSet<NonTerminal>,
+      +    nullability_map: &BTreeMap<NonTerminal, Nullability>,
+       ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+           let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
+       
+      @@ -153,7 +166,7 @@
+                                       let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
+                                       follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
+       
+      -                                if !nullable_nonterminals.contains(nt_next) {
+      +                                if !nullability_map.get(nt_next).map_or(false, |n| n.is_nullable()) {
+                                           suffix_is_nullable = false;
+                                           break;
+                                       }
+      @@ -178,7 +191,7 @@
+           item: &Item,
+           productions: &[Production],
+           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+      -    nullable_nonterminals: &BTreeSet<NonTerminal>,
+      +    nullability_map: &BTreeMap<NonTerminal, Nullability>,
+       ) -> BTreeSet<Option<Terminal>> {
+           if let Some((symbol, next_item)) = item.next() {
+               match symbol {
+      @@ -191,12 +204,12 @@
+                           .map(Some)
+                           .collect();
+       
+      -                if nullable_nonterminals.contains(&nt) {
+      +                if nullability_map.get(&nt).map_or(false, |n| n.is_nullable()) {
+                           // If the non-terminal is nullable, we also need to include the firsts for the next item
+                           let next_firsts = compute_first_set_for_item(
+                               &next_item,
+                               productions,
+                               first_sets,
+      -                        nullable_nonterminals,
+      +                        nullability_map,
+                           );
+                           first_set.extend(next_firsts);
+                       }
+      @@ -213,7 +226,7 @@
+           items: &BTreeSet<Item>,
+           productions: &[Production],
+           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+      -    nullable_nonterminals: &BTreeSet<NonTerminal>,
+      +    nullability_map: &BTreeMap<NonTerminal, Nullability>,
+           follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+       
+       ) -> BTreeSet<Item> {
+      @@ -223,7 +236,7 @@
+           while let Some(item) = worklist.pop_front() {
+               if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+                   for prod in productions.iter().filter(|p| p.lhs == nt) {
+      -                let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
+      +                let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullability_map);
+                       for lookahead in lookaheads {
+                           let new_item = Item {
+                               production: prod.clone(),
+
+      ``````diff
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -1,5 +1,5 @@
+       use super::items::{Item, LRMode};
+      -use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
+      +use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nonterminal_nullability, split_on_dot};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use bimap::BiBTreeMap;
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      @@ -318,8 +318,8 @@
+           };
+           let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
+       
+           let first_sets = compute_first_sets_for_nonterminals(productions);
+      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      -    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +    let nullability_map = compute_nonterminal_nullability(productions);
+      +    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+       
+           let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
+       
+      @@ -330,7 +330,7 @@
+                   continue;
+               }
+       
+      -        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
+      +        let closure = compute_closure(&item_set, productions, &first_sets, &nullability_map, &follow_sets);
+               let splits = split_on_dot(&closure);
+               let mut row = BTreeMap::new();
+       
+
+      ``````diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,5 +1,5 @@
+       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+      -use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion, inline_null_productions}; // Import the analyze module
+       use crate::glr::stats;
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
 
       ```
+      I noticed `inline_null_productions` was not imported in `tests.rs`, but it's not used, so I'll revert that change. The other changes seem correct.
 
-      This change should make the code easier to understand and maintain while preserving its functionality. Let me know if you have any other questions
+      ```diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,5 +1,5 @@
+       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+      -use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+       use crate::glr::stats;
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
+
+      ```
+      The rest of the files (`grammar.rs`, `items.rs`, `minimizer.rs`, `mod.rs`, `parser.rs`, `stats.rs`) do not need any changes. I have provided all the necessary diffs.
     metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 5 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/glr/analyze.rs
       Applying patch to 'src/glr/analyze.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/tests.rs.
+
+      --- Processing Diff Block 5 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Error applying patch to src/glr/tests.rs:
+      Hunk #1 (header: @@ -1,5 +1,5 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      use crate::glr::stats;
+      use bimap::BiBTreeMap;
+      use std::collections::BTreeSet;
+      --- Expected Context (from patch, after normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      use crate::glr::stats;
+      use bimap::BiBTreeMap;
+      use std::collections::BTreeSet;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+        use crate::glr::parser::{GLRParser, GLRParserState};
+        use crate::glr::table::{generate_glr_parser, TerminalID};
+      - use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      + use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion, inline_null_productions};
+      ?                                                                                                                                                              +++++++++++++++++++++++++
+
+        use crate::glr::stats;
+        use bimap::BiBTreeMap;
+        use std::collections::BTreeSet;
+      Problematic diff content:
+      ---
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,5 +1,5 @@
+       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+      -use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+       use crate::glr::stats;
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 5 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/tests.rs.
+
+      --- Processing Diff Block 5 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Error applying patch to src/glr/tests.rs:
+      Hunk #1 (header: @@ -1,5 +1,5 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      use crate::glr::stats;
+      use bimap::BiBTreeMap;
+      use std::collections::BTreeSet;
+      --- Expected Context (from patch, after normalization): ---
+      use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, GLRParserState};
+      use crate::glr::table::{generate_glr_parser, TerminalID};
+      use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      use crate::glr::stats;
+      use bimap::BiBTreeMap;
+      use std::collections::BTreeSet;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+        use crate::glr::parser::{GLRParser, GLRParserState};
+        use crate::glr::table::{generate_glr_parser, TerminalID};
+      - use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+      + use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion, inline_null_productions};
+      ?                                                                                                                                                              +++++++++++++++++++++++++
+
+        use crate::glr::stats;
+        use bimap::BiBTreeMap;
+        use std::collections::BTreeSet;
+      Problematic diff content:
+      ---
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,5 +1,5 @@
+       use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+       use crate::glr::table::{generate_glr_parser, TerminalID};
+      -use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion};
+       use crate::glr::stats;
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/analyze.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/automaton.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/table.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/tests.rs"
+        }
+      ]
+      Found 4 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/analyze.rs
+      Received code for required file: src/glr/automaton.rs
+      Received code for required file: src/glr/table.rs
+      Received code for required file: src/glr/tests.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/analyze.rs
+      Successfully replaced file: src/glr/table.rs
+      Successfully replaced file: src/glr/tests.rs
+      Successfully replaced file: src/glr/automaton.rs
     metadata:
 ...
