@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
-const ENABLE_UNIT_PRODUCTION_ELIMINATION: bool = true;
+const ENABLE_UNIT_PRODUCTION_ELIMINATION: bool = false;
 
 fn create_simple_parser() -> GLRParser {
     // This grammar is left-recursive but does NOT have length-1 cycles.
@@ -115,7 +115,7 @@ fn create_expression_parser() -> GLRParser {
         prod("F", vec![t("("), nt("E"), t(")")]),
         prod("F", vec![t("i")]),
     ];
-    generate_glr_parser(&productions, 0, None, true)
+    generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION)
 }
 
 fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
@@ -875,7 +875,7 @@ fn test_standard_expression_grammar_parse() {
     // Validate the grammar
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
 
-    let parser = generate_glr_parser(&productions, 0, None, true);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     println!("Parser: {}", parser); // Useful for debugging the generated table
 
     // Helper to tokenize space-separated terminal names
