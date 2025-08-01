@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
-const ENABLE_UNIT_PRODUCTION_ELIMINATION: bool = true;
+const ENABLE_UNIT_PRODUCTION_ELIMINATION: bool = false;
 
 fn create_simple_parser() -> GLRParser {
     // This grammar is left-recursive but does NOT have length-1 cycles.
