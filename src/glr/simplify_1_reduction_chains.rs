@@ -50,10 +50,10 @@ pub fn simplify_1_reduction_chains(
 
     // 2. Build a reverse goto map for efficient lookup of predecessor states.
     // Map: destination_state -> Vec<(source_state, non_terminal)>
-    let mut reverse_gotos: BTreeMap<&BTreeSet<Item>, Vec<(&BTreeSet<Item>, &NonTerminal)>> = BTreeMap::new();
+    let mut reverse_gotos: BTreeMap<BTreeSet<Item>, Vec<(BTreeSet<Item>, NonTerminal)>> = BTreeMap::new();
     for (state_i, row_i) in stage_6_table.iter() {
         for (nt_b, state_j) in &row_i.gotos {
-            reverse_gotos.entry(state_j).or_default().push((state_i, nt_b));
+            reverse_gotos.entry(state_j.clone()).or_default().push((state_i.clone(), nt_b.clone()));
         }
     }
 
@@ -81,10 +81,10 @@ pub fn simplify_1_reduction_chains(
                         // Find all predecessor states `i` such that goto(i, B) = j.
                         if let Some(predecessors) = reverse_gotos.get(state_j) {
                             for (state_i, symbol) in predecessors {
-                                if *symbol == nt_b {
+                                if symbol == nt_b {
                                     // Found a predecessor `i`.
                                     // Find k = goto(i, A).
-                                    let row_i = &table_clone[*state_i];
+                                    let row_i = &table_clone[state_i];
                                     if let Some(state_k) = row_i.gotos.get(nt_a) {
                                         // Found state k.
                                         // Get actions of k on lookahead t.
