@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::glr::grammar::{NonTerminal, Production, Symbol};
 use crate::glr::items::{LRMode, LR_MODE};
-use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, Table, StateID};
+use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, Table, StateID, Stage6Table};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, ShiftsAndReducesFull, TerminalID};
 use crate::glr::table::{ShiftsAndReducesWithoutDefaultReduce, DefaultReduce};
 

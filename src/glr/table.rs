@@ -9,7 +9,6 @@ use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_produc
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::glr::eliminate_reduction_chains::find_compatible_states;
 use crate::interface::display_productions;
 // Added for derive macro pattern
 
@@ -19,7 +18,7 @@ type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
 type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
 type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
 type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
-type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+pub(crate) type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
 type Stage7Table = BTreeMap<StateID, Stage7Row>;
 type Stage8Table = BTreeMap<StateID, Row>;
 pub type Table = BTreeMap<StateID, Row>;
