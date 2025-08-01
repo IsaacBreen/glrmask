@@ -722,63 +722,91 @@ local_system:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
+          // Nothing to do on an empty grammar.
+          if productions.is_empty() {
+              return Vec::new();
+          }
 
-          let mut final_productions = Vec::new();
-          final_productions.push(productions[0].clone());
+          // All nullable non-terminals (A ⇒* ε).
+          let nullable = compute_nullable_nonterminals(productions);
 
-          for original_prod in &productions[0..] {
-              // For each original production, we generate all possible new productions
-              // by removing any combination of nullable non-terminals from its RHS.
+          // All null non-terminals
+          let null = compute_null_nonterminals(productions);
+          dbg!(&null);
 
-              // A worklist of RHS variants to process.
-              let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-              let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
+          // ---------------------------------------------------------------------
+          // Helper: generate every RHS that can be obtained by optionally deleting
+          // nullable non-terminals – terminals and non-nullable NTs are kept.
+          // ---------------------------------------------------------------------
+          fn rhs_variants(
+              rhs: &[Symbol],
+              nullable: &BTreeSet<NonTerminal>,
+              null: &BTreeSet<NonTerminal>,
+          ) -> Vec<Vec<Symbol>> {
+              let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+              for sym in rhs {
+                  let mut next = Vec::new();
+                  for prefix in &acc {
+                      // Keep the current symbol if it can be non-null
+                      if !matches!(sym, Symbol::NonTerminal(nt) if null.contains(nt)) {
+                          let mut keep = prefix.clone();
+                          keep.push(sym.clone());
+                          next.push(keep);
+                      }
 
-              // Start with the original RHS.
-              worklist.push_back(original_prod.rhs.clone());
-
-              'worklist: while let Some(current_rhs) = worklist.pop_front() {
-                  // Iterate over the symbols of the current RHS variant.
-                  for i in 0..current_rhs.len() {
-                      if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-                          // If we find a nullable non-terminal...
-                          if nullable_nonterminals.contains(nt) {
-                              // ...create a new RHS variant with it removed.
-                              let mut new_rhs = current_rhs.clone();
-                              new_rhs.remove(i);
-
-                              generated_rhss.push(new_rhs.clone());
-                              worklist.push_back(new_rhs);
-                              if null_nonterminals.contains(nt) {
-                                  continue 'worklist;
-                              }
-                          }
+                      // Optionally drop it if it is a nullable NT
+                      if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
+                          next.push(prefix.clone());
                       }
                   }
-                  generated_rhss.push(current_rhs.clone());
+                  acc = next;
               }
+              acc
+          }
 
-              // Add all generated variants as new productions with the original LHS.
-              for rhs in generated_rhss.into_iter().rev() {
-                  final_productions.push(Production {
-                      lhs: original_prod.lhs.clone(),
+          // ---------------------------------------------------------------------
+          // Build the new production set.  We keep the original start production
+          // at the front to preserve ordering.  A `seen` set prevents duplicates.
+          // ---------------------------------------------------------------------
+          let mut result = Vec::with_capacity(productions.len() * 2);
+          let mut seen: BTreeSet<Production> = BTreeSet::new();
+
+          // Always keep the start production exactly as-is.
+          result.push(productions[0].clone());
+          seen.insert(productions[0].clone());
+
+          for prod in productions {
+              for rhs in rhs_variants(&prod.rhs, &nullable, &null) {
+                  let new_prod = Production {
+                      lhs: prod.lhs.clone(),
                       rhs,
-                  });
+                  };
+                  if seen.insert(new_prod.clone()) {
+                      result.push(new_prod);
+                  }
               }
           }
 
-          // Finally, remove all productions that are now null (e.g., A -> ε),
-          // as they have been inlined.
-          let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
-              Symbol::NonTerminal(nt) => Some(nt.clone()),
-              _ => None,
-          }).collect();
-          final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
-          // Remove duplicates
-          final_productions.dedup();
-          final_productions
+          // ---------------------------------------------------------------------
+          // Remove ε-productions unless their LHS appears in the RHS of the start
+          // production – those might still be required for the augmented start.
+          // ---------------------------------------------------------------------
+          let start_rhs_nts: BTreeSet<_> = productions[0]
+              .rhs
+              .iter()
+              .filter_map(|s| {
+                  if let Symbol::NonTerminal(nt) = s {
+                      Some(nt.clone())
+                  } else {
+                      None
+                  }
+              })
+              .collect();
+
+          result
+              .into_iter()
+              .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+              .collect()
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -5846,63 +5874,91 @@ local_system:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
+          // Nothing to do on an empty grammar.
+          if productions.is_empty() {
+              return Vec::new();
+          }
 
-          let mut final_productions = Vec::new();
-          final_productions.push(productions[0].clone());
+          // All nullable non-terminals (A ⇒* ε).
+          let nullable = compute_nullable_nonterminals(productions);
 
-          for original_prod in &productions[0..] {
-              // For each original production, we generate all possible new productions
-              // by removing any combination of nullable non-terminals from its RHS.
+          // All null non-terminals
+          let null = compute_null_nonterminals(productions);
+          dbg!(&null);
 
-              // A worklist of RHS variants to process.
-              let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-              let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
+          // ---------------------------------------------------------------------
+          // Helper: generate every RHS that can be obtained by optionally deleting
+          // nullable non-terminals – terminals and non-nullable NTs are kept.
+          // ---------------------------------------------------------------------
+          fn rhs_variants(
+              rhs: &[Symbol],
+              nullable: &BTreeSet<NonTerminal>,
+              null: &BTreeSet<NonTerminal>,
+          ) -> Vec<Vec<Symbol>> {
+              let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+              for sym in rhs {
+                  let mut next = Vec::new();
+                  for prefix in &acc {
+                      // Keep the current symbol if it can be non-null
+                      if !matches!(sym, Symbol::NonTerminal(nt) if null.contains(nt)) {
+                          let mut keep = prefix.clone();
+                          keep.push(sym.clone());
+                          next.push(keep);
+                      }
 
-              // Start with the original RHS.
-              worklist.push_back(original_prod.rhs.clone());
-
-              'worklist: while let Some(current_rhs) = worklist.pop_front() {
-                  // Iterate over the symbols of the current RHS variant.
-                  for i in 0..current_rhs.len() {
-                      if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-                          // If we find a nullable non-terminal...
-                          if nullable_nonterminals.contains(nt) {
-                              // ...create a new RHS variant with it removed.
-                              let mut new_rhs = current_rhs.clone();
-                              new_rhs.remove(i);
-
-                              generated_rhss.push(new_rhs.clone());
-                              worklist.push_back(new_rhs);
-                              if null_nonterminals.contains(nt) {
-                                  continue 'worklist;
-                              }
-                          }
+                      // Optionally drop it if it is a nullable NT
+                      if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
+                          next.push(prefix.clone());
                       }
                   }
-                  generated_rhss.push(current_rhs.clone());
+                  acc = next;
               }
+              acc
+          }
 
-              // Add all generated variants as new productions with the original LHS.
-              for rhs in generated_rhss.into_iter().rev() {
-                  final_productions.push(Production {
-                      lhs: original_prod.lhs.clone(),
+          // ---------------------------------------------------------------------
+          // Build the new production set.  We keep the original start production
+          // at the front to preserve ordering.  A `seen` set prevents duplicates.
+          // ---------------------------------------------------------------------
+          let mut result = Vec::with_capacity(productions.len() * 2);
+          let mut seen: BTreeSet<Production> = BTreeSet::new();
+
+          // Always keep the start production exactly as-is.
+          result.push(productions[0].clone());
+          seen.insert(productions[0].clone());
+
+          for prod in productions {
+              for rhs in rhs_variants(&prod.rhs, &nullable, &null) {
+                  let new_prod = Production {
+                      lhs: prod.lhs.clone(),
                       rhs,
-                  });
+                  };
+                  if seen.insert(new_prod.clone()) {
+                      result.push(new_prod);
+                  }
               }
           }
 
-          // Finally, remove all productions that are now null (e.g., A -> ε),
-          // as they have been inlined.
-          let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
-              Symbol::NonTerminal(nt) => Some(nt.clone()),
-              _ => None,
-          }).collect();
-          final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
-          // Remove duplicates
-          final_productions.dedup();
-          final_productions
+          // ---------------------------------------------------------------------
+          // Remove ε-productions unless their LHS appears in the RHS of the start
+          // production – those might still be required for the augmented start.
+          // ---------------------------------------------------------------------
+          let start_rhs_nts: BTreeSet<_> = productions[0]
+              .rhs
+              .iter()
+              .filter_map(|s| {
+                  if let Symbol::NonTerminal(nt) = s {
+                      Some(nt.clone())
+                  } else {
+                      None
+                  }
+              })
+              .collect();
+
+          result
+              .into_iter()
+              .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+              .collect()
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -10274,7 +10330,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - o3
+    - gp
   code_completion_model:
     - gp
   commit_message_model:
@@ -10993,63 +11049,91 @@ messages:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
+          // Nothing to do on an empty grammar.
+          if productions.is_empty() {
+              return Vec::new();
+          }
 
-          let mut final_productions = Vec::new();
-          final_productions.push(productions[0].clone());
+          // All nullable non-terminals (A ⇒* ε).
+          let nullable = compute_nullable_nonterminals(productions);
 
-          for original_prod in &productions[0..] {
-              // For each original production, we generate all possible new productions
-              // by removing any combination of nullable non-terminals from its RHS.
+          // All null non-terminals
+          let null = compute_null_nonterminals(productions);
+          dbg!(&null);
 
-              // A worklist of RHS variants to process.
-              let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-              let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
+          // ---------------------------------------------------------------------
+          // Helper: generate every RHS that can be obtained by optionally deleting
+          // nullable non-terminals – terminals and non-nullable NTs are kept.
+          // ---------------------------------------------------------------------
+          fn rhs_variants(
+              rhs: &[Symbol],
+              nullable: &BTreeSet<NonTerminal>,
+              null: &BTreeSet<NonTerminal>,
+          ) -> Vec<Vec<Symbol>> {
+              let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+              for sym in rhs {
+                  let mut next = Vec::new();
+                  for prefix in &acc {
+                      // Keep the current symbol if it can be non-null
+                      if !matches!(sym, Symbol::NonTerminal(nt) if null.contains(nt)) {
+                          let mut keep = prefix.clone();
+                          keep.push(sym.clone());
+                          next.push(keep);
+                      }
 
-              // Start with the original RHS.
-              worklist.push_back(original_prod.rhs.clone());
-
-              'worklist: while let Some(current_rhs) = worklist.pop_front() {
-                  // Iterate over the symbols of the current RHS variant.
-                  for i in 0..current_rhs.len() {
-                      if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-                          // If we find a nullable non-terminal...
-                          if nullable_nonterminals.contains(nt) {
-                              // ...create a new RHS variant with it removed.
-                              let mut new_rhs = current_rhs.clone();
-                              new_rhs.remove(i);
-
-                              generated_rhss.push(new_rhs.clone());
-                              worklist.push_back(new_rhs);
-                              if null_nonterminals.contains(nt) {
-                                  continue 'worklist;
-                              }
-                          }
+                      // Optionally drop it if it is a nullable NT
+                      if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
+                          next.push(prefix.clone());
                       }
                   }
-                  generated_rhss.push(current_rhs.clone());
+                  acc = next;
               }
+              acc
+          }
 
-              // Add all generated variants as new productions with the original LHS.
-              for rhs in generated_rhss.into_iter().rev() {
-                  final_productions.push(Production {
-                      lhs: original_prod.lhs.clone(),
+          // ---------------------------------------------------------------------
+          // Build the new production set.  We keep the original start production
+          // at the front to preserve ordering.  A `seen` set prevents duplicates.
+          // ---------------------------------------------------------------------
+          let mut result = Vec::with_capacity(productions.len() * 2);
+          let mut seen: BTreeSet<Production> = BTreeSet::new();
+
+          // Always keep the start production exactly as-is.
+          result.push(productions[0].clone());
+          seen.insert(productions[0].clone());
+
+          for prod in productions {
+              for rhs in rhs_variants(&prod.rhs, &nullable, &null) {
+                  let new_prod = Production {
+                      lhs: prod.lhs.clone(),
                       rhs,
-                  });
+                  };
+                  if seen.insert(new_prod.clone()) {
+                      result.push(new_prod);
+                  }
               }
           }
 
-          // Finally, remove all productions that are now null (e.g., A -> ε),
-          // as they have been inlined.
-          let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
-              Symbol::NonTerminal(nt) => Some(nt.clone()),
-              _ => None,
-          }).collect();
-          final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
-          // Remove duplicates
-          final_productions.dedup();
-          final_productions
+          // ---------------------------------------------------------------------
+          // Remove ε-productions unless their LHS appears in the RHS of the start
+          // production – those might still be required for the augmented start.
+          // ---------------------------------------------------------------------
+          let start_rhs_nts: BTreeSet<_> = productions[0]
+              .rhs
+              .iter()
+              .filter_map(|s| {
+                  if let Symbol::NonTerminal(nt) = s {
+                      Some(nt.clone())
+                  } else {
+                      None
+                  }
+              })
+              .collect();
+
+          result
+              .into_iter()
+              .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+              .collect()
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -15457,166 +15541,207 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Simplify `inline_null_productions`. Make it readable/understandable and concise.
-      Ensure it's functionally equivalent.
+      Create a new function that's similar to `compute_nullable_nonterminals` and ``compute_null_nonterminals`` except that it returns an enum `Nullability` that has three variants, and has an entry for every nonterminal, and name it to `compute_nonterminal_nullability`.
+      Modify `compute_nullable_nonterminals` and `compute_null_nonterminals` to *use* this function.
     metadata:
   - assistant: |-
+      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with nullability can be tricky, and creating a unified function is a great way to clarify the logic. Here are the suggested changes to refactor your nullability analysis.
+
+      I'll introduce a new `Nullability` enum and a function `compute_nonterminal_nullability` that determines if a non-terminal is `NotNull`, `Nullable`, or completely `Null`. Then, I'll refactor `compute_nullable_nonterminals` and `compute_null_nonterminals` to be simple wrappers around this new, more expressive function.
+
+      Here are the diffs for the modified files:
+
+      In `src/glr/automaton.rs`, I'll add the new enum and function, and refactor the existing nullability functions.
+
       ```diff
-      diff --git a/src/glr/analyze.rs b/src/glr/analyze.rs
-      @@
-      -use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
-      +use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure};
-      @@
-       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      -    let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -1,69 +1,101 @@
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::items::{Item, LRMode, LR_MODE};
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
+       
+      -pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      -    // A non-terminal is "null" if all of its productions lead only to other null non-terminals.
+      -    // This means it cannot derive any string containing a terminal.
       -
-      -    let mut final_productions = Vec::new();
-      -    final_productions.push(productions[0].clone());
+      +#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+      +pub enum Nullability {
+      +    /// Can only derive strings containing terminals; cannot derive ε.
+      +    NotNull,
+      +    /// Can derive ε, and can also derive strings containing terminals.
+      +    Nullable,
+      +    /// Can only derive ε (or other non-terminals that are themselves Null).
+      +    /// Cannot derive any string containing a terminal.
+      +    Null,
+      +}
+      +
+      +pub fn compute_nonterminal_nullability(productions: &[Production]) -> BTreeMap<NonTerminal, Nullability> {
+           if productions.is_empty() {
+      -        return BTreeSet::new();
+      -    }
       -
-      -    for original_prod in &productions[0..] {
-      -        // For each original production, we generate all possible new productions
-      -        // by removing any combination of nullable non-terminals from its RHS.
+      -    // 1. Collect all non-terminals and group productions by LHS.
+      -    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+      +        return BTreeMap::new();
+      +    }
+      +
+      +    // 1. Collect all non-terminals from the grammar.
+      +    let mut all_nonterminals = BTreeSet::new();
+           for p in productions {
+      -        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+      -    }
+      -    let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
       -
-      -        // A worklist of RHS variants to process.
-      -        let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-      -        let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
+      -    // 2. Start with the assumption that all non-terminals are null.
+      -    let mut null_nonterminals = all_nonterminals;
       -
-      -        // Start with the original RHS.
-      -        worklist.push_back(original_prod.rhs.clone());
+      -    // 3. Iteratively remove non-terminals that are found to be not null.
+      +        all_nonterminals.insert(p.lhs.clone());
+      +        for s in &p.rhs {
+      +            if let Symbol::NonTerminal(nt) = s {
+      +                all_nonterminals.insert(nt.clone());
+      +            }
+      +        }
+      +    }
+      +
+      +    // Pass 1: Determine which non-terminals can derive ε.
+      +    let mut can_derive_epsilon = BTreeSet::new();
+           let mut changed = true;
+           while changed {
+               changed = false;
       -
-      -        'worklist: while let Some(current_rhs) = worklist.pop_front() {
-      -            // Iterate over the symbols of the current RHS variant.
-      -            for i in 0..current_rhs.len() {
-      -                if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-      -                    // If we find a nullable non-terminal...
-      -                    if nullable_nonterminals.contains(nt) {
-      -                        // ...create a new RHS variant with it removed.
-      -                        let mut new_rhs = current_rhs.clone();
-      -                        new_rhs.remove(i);
+      -        let mut nts_to_remove = BTreeSet::new();
+      -        for nt in &null_nonterminals {
+      -            let prods_for_nt = prods_by_lhs.get(nt).unwrap();
       -
-      -                        generated_rhss.push(new_rhs.clone());
-      -                        worklist.push_back(new_rhs);
-      -                        if null_nonterminals.contains(nt) {
-      -                            continue 'worklist;
-      -                        }
-      -                    }
-      -                }
+      -            let is_nt_truly_null = prods_for_nt.iter().all(|prod| {
+      -                prod.rhs.iter().all(|symbol| match symbol {
+      -                    Symbol::Terminal(_) => false,
+      -                    Symbol::NonTerminal(rhs_nt) => null_nonterminals.contains(rhs_nt),
+      -                })
+      -            });
+      -
+      -            if !is_nt_truly_null {
+      -                nts_to_remove.insert(nt.clone());
       -            }
-      -            generated_rhss.push(current_rhs.clone());
       -        }
       -
-      -        // Add all generated variants as new productions with the original LHS.
-      -        for rhs in generated_rhss.into_iter().rev() {
-      -            final_productions.push(Production {
-      -                lhs: original_prod.lhs.clone(),
-      -                rhs,
-      -            });
+      -        if !nts_to_remove.is_empty() {
+      -            for nt in nts_to_remove {
+      -                null_nonterminals.remove(&nt);
+      -            }
+      -            changed = true;
       -        }
       -    }
       -
-      -    // Finally, remove all productions that are now null (e.g., A -> ε),
-      -    // as they have been inlined.
-      -    let start_prod_nonterms: BTreeSet<_> = productions[0].rhs.iter().filter_map(|s| match s {
-      -        Symbol::NonTerminal(nt) => Some(nt.clone()),
-      -        _ => None,
-      -    }).collect();
-      -    final_productions.retain(|p| !p.rhs.is_empty() || start_prod_nonterms.contains(&p.lhs));
-      -    // Remove duplicates
-      -    final_productions.dedup();
-      -    final_productions
-      +    // Nothing to do on an empty grammar.
-      +    if productions.is_empty() {
-      +        return Vec::new();
-      +    }
-      +
-      +    // All nullable non-terminals (A ⇒* ε).
-      +    let nullable = compute_nullable_nonterminals(productions);
-      +
-      +    // ---------------------------------------------------------------------
-      +    // Helper: generate every RHS that can be obtained by optionally deleting
-      +    // nullable non-terminals – terminals and non-nullable NTs are kept.
-      +    // ---------------------------------------------------------------------
-      +    fn rhs_variants(
-      +        rhs: &[Symbol],
-      +        nullable: &BTreeSet<NonTerminal>,
-      +    ) -> Vec<Vec<Symbol>> {
-      +        let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
-      +        for sym in rhs {
-      +            let mut next = Vec::new();
-      +            for prefix in &acc {
-      +                // Always keep the current symbol
-      +                let mut keep = prefix.clone();
-      +                keep.push(sym.clone());
-      +                next.push(keep);
-      +
-      +                // Optionally drop it if it is a nullable NT
-      +                if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
-      +                    next.push(prefix.clone());
+      -    null_nonterminals
+      -}
+      -
+      -pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      -    let mut nullable_nonterminals = BTreeSet::new();
+      -    let mut changed = true;
+      -
+      +        for p in productions {
+      +            if !can_derive_epsilon.contains(&p.lhs) {
+      +                let rhs_is_nullable = p.rhs.iter().all(|symbol| match symbol {
+      +                    Symbol::Terminal(_) => false,
+      +                    Symbol::NonTerminal(nt) => can_derive_epsilon.contains(nt),
+      +                });
+      +                if rhs_is_nullable {
+      +                    can_derive_epsilon.insert(p.lhs.clone());
+      +                    changed = true;
       +                }
       +            }
-      +            acc = next;
       +        }
-      +        acc
       +    }
       +
-      +    // ---------------------------------------------------------------------
-      +    // Build the new production set.  We keep the original start production
-      +    // at the front to preserve ordering.  A `seen` set prevents duplicates.
-      +    // ---------------------------------------------------------------------
-      +    let mut result = Vec::with_capacity(productions.len() * 2);
-      +    let mut seen: BTreeSet<Production> = BTreeSet::new();
-      +
-      +    // Always keep the start production exactly as-is.
-      +    result.push(productions[0].clone());
-      +    seen.insert(productions[0].clone());
-      +
-      +    for prod in productions {
-      +        for rhs in rhs_variants(&prod.rhs, &nullable) {
-      +            let new_prod = Production {
-      +                lhs: prod.lhs.clone(),
-      +                rhs,
-      +            };
-      +            if seen.insert(new_prod.clone()) {
-      +                result.push(new_prod);
+      +    // Pass 2: Determine which non-terminals are productive (can derive a terminal string).
+      +    let mut can_derive_terminal = BTreeSet::new();
+      +    changed = true;
+           while changed {
+               changed = false;
+      -        for production in productions {
+      -            // Rule 1: A -> ε makes A nullable
+      -            if production.rhs.is_empty() && !nullable_nonterminals.contains(&production.lhs) {
+      -                nullable_nonterminals.insert(production.lhs.clone());
+      -                changed = true;
+      -            // Rule 2: A -> X1 X2 ... Xn makes A nullable if all Xi are nullable non-terminals
+      -            } else if !production.rhs.is_empty() // Ensure RHS is not empty to avoid re-checking Rule 1
+      -                      && production.rhs.iter().all(|symbol| {
+      -                          matches!(symbol, Symbol::NonTerminal(nt) if nullable_nonterminals.contains(nt))
+      -                      })
+      -                      && !nullable_nonterminals.contains(&production.lhs)
+      -            {
+      -                nullable_nonterminals.insert(production.lhs.clone());
+      -                changed = true;
+      -            }
+      -        }
+      -    }
+      -
+      -    nullable_nonterminals
+      -}
+      -
+      +        for p in productions {
+      +            if !can_derive_terminal.contains(&p.lhs) {
+      +                let rhs_is_productive = p.rhs.iter().any(|symbol| match symbol {
+      +                    Symbol::Terminal(_) => true,
+      +                    Symbol::NonTerminal(nt) => can_derive_terminal.contains(nt),
+      +                });
+      +                if rhs_is_productive {
+      +                    can_derive_terminal.insert(p.lhs.clone());
+      +                    changed = true;
+      +                }
       +            }
       +        }
       +    }
       +
-      +    // ---------------------------------------------------------------------
-      +    // Remove ε-productions unless their LHS appears in the RHS of the start
-      +    // production – those might still be required for the augmented start.
-      +    // ---------------------------------------------------------------------
-      +    let start_rhs_nts: BTreeSet<_> = productions[0]
-      +        .rhs
-      +        .iter()
-      +        .filter_map(|s| {
-      +            if let Symbol::NonTerminal(nt) = s {
-      +                Some(nt.clone())
-      +            } else {
-      +                None
-      +            }
-      +        })
-      +        .collect();
+      +    // Combine results.
+      +    all_nonterminals.into_iter().map(|nt| {
+      +        let is_nullable = can_derive_epsilon.contains(&nt);
+      +        let is_productive = can_derive_terminal.contains(&nt);
       +
-      +    result
+      +        let status = match (is_nullable, is_productive) {
+      +            (true, false) => Nullability::Null,
+      +            (true, true) => Nullability::Nullable,
+      +            (false, true) => Nullability::NotNull,
+      +            // A non-productive non-terminal that cannot derive ε is just a dead end.
+      +            // It doesn't fit neatly, but NotNull is the safest classification.
+      +            (false, false) => Nullability::NotNull,
+      +        };
+      +        (nt, status)
+      +    }).collect()
+      +}
+      +
+      +pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      +    compute_nonterminal_nullability(productions)
       +        .into_iter()
-      +        .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+      +        .filter_map(|(nt, status)| (status == Nullability::Null).then_some(nt))
       +        .collect()
-       }
-       
-       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
-           todo!()
-       }
+      +}
+      +
+      +pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      +    compute_nonterminal_nullability(productions)
+      +        .into_iter()
+      +        .filter_map(|(nt, status)| (status == Nullability::Nullable || status == Nullability::Null).then_some(nt))
+      +        .collect()
+      +}
+      +
+       pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+           let nullable_nonterminals = compute_nullable_nonterminals(productions);
+           let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
+
       ```
+
+      These changes centralize the nullability logic, making the code easier to understand and maintain. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
     metadata:
 ...
