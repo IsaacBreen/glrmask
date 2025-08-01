@@ -786,3 +786,255 @@ pub fn find_compatible_states(table: &Table) -> Vec<(StateID, StateID)> {
 
     compatible_pairs
 }
+
+/// Helper struct for `eliminate_unit_productions` to manage pre-computed grammar info.
+struct UnitProductionInfo {
+    unit_prod_ids: BTreeSet<usize>,
+    nodes: BTreeSet<NonTerminal>,
+    leaves: BTreeSet<NonTerminal>,
+    derives_map: BTreeMap<NonTerminal, BTreeSet<NonTerminal>>, // Transitive closure A => B
+    nt_to_leaf_map: BTreeMap<NonTerminal, NonTerminal>, // Map from a node to an arbitrary leaf
+}
+
+/// Pre-computes information about unit productions (A -> B).
+fn compute_unit_production_info(productions: &[Production]) -> UnitProductionInfo {
+    let unit_prod_ids: BTreeSet<usize> = productions.iter().enumerate()
+        .filter(|(_, p)| p.rhs.len() == 1 && matches!(p.rhs[0], Symbol::NonTerminal(_)))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    let all_nts: BTreeSet<NonTerminal> = productions.iter().flat_map(|p| {
+        let mut nts = vec![p.lhs.clone()];
+        if let Some(Symbol::NonTerminal(nt)) = p.rhs.get(0) {
+            nts.push(nt.clone());
+        }
+        nts
+    }).collect();
+
+    for nt in &all_nts {
+        unit_graph.entry(nt.clone()).or_default();
+    }
+    for &i in &unit_prod_ids {
+        let p = &productions[i];
+        if let Symbol::NonTerminal(rhs_nt) = &p.rhs[0] {
+            unit_graph.get_mut(&p.lhs).unwrap().insert(rhs_nt.clone());
+        }
+    }
+
+    let nodes: BTreeSet<NonTerminal> = unit_graph.iter().filter(|(_, v)| !v.is_empty()).map(|(k, _)| k.clone()).collect();
+    let leaves: BTreeSet<NonTerminal> = unit_graph.values().flatten().filter(|nt| !nodes.contains(*nt)).cloned().collect();
+
+    // Compute transitive closure (derives_map) using Floyd-Warshall-like iteration
+    let mut derives_map = unit_graph.clone();
+    for k in &all_nts {
+        for i in &all_nts {
+            for j in &all_nts {
+                if derives_map[i].contains(k) && derives_map[k].contains(j) {
+                    derives_map.get_mut(i).unwrap().insert(j.clone());
+                }
+            }
+        }
+    }
+
+    // For each node, find an arbitrary leaf it can derive
+    let mut nt_to_leaf_map = BTreeMap::new();
+    for node in &nodes {
+        if let Some(derived_leaves) = derives_map.get(node).and_then(|derived| {
+            derived.iter().filter(|nt| leaves.contains(*nt)).next()
+        }) {
+            nt_to_leaf_map.insert(node.clone(), derived_leaves.clone());
+        }
+    }
+
+    UnitProductionInfo { unit_prod_ids, nodes, leaves, derives_map, nt_to_leaf_map }
+}
+
+use crate::glr::table::{Stage6Row, Stage6ShiftsAndReduces};
+use crate::glr::items::Item;
+
+type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+
+/// Checks if a state has a unit reduction action.
+fn has_unit_reduction(
+    state: &BTreeSet<Item>,
+    table: &Stage6Table,
+    unit_prod_ids: &BTreeSet<usize>,
+) -> bool {
+    if let Some(row) = table.get(state) {
+        row.shifts_and_reduces.values().any(|action|
+            !action.reduces.is_empty() && action.reduces.iter().any(|pid| unit_prod_ids.contains(&pid.0))
+        )
+    } else {
+        false
+    }
+}
+
+/// Merges multiple states into a single new state.
+fn combine_states<'a>(
+    states_to_combine: &BTreeSet<&'a BTreeSet<Item>>,
+    table: &Stage6Table,
+    memo: &mut BTreeMap<BTreeSet<&'a BTreeSet<Item>>, BTreeSet<Item>>,
+    new_table: &mut Stage6Table,
+) -> BTreeSet<Item> {
+    if let Some(combined) = memo.get(states_to_combine) {
+        return combined.clone();
+    }
+
+    let mut new_item_set = BTreeSet::new();
+    let mut new_row = Stage6Row::default();
+
+    for &state in states_to_combine {
+        new_item_set.extend(state.iter().cloned());
+        if let Some(row_to_merge) = table.get(state) {
+            // Merge gotos
+            for (nt, goto_target) in &row_to_merge.gotos {
+                if let Some(existing_target) = new_row.gotos.get(nt) {
+                    assert_eq!(existing_target, goto_target, "Unit production elimination created GOTO conflict");
+                } else {
+                    new_row.gotos.insert(nt.clone(), goto_target.clone());
+                }
+            }
+            // Merge shifts and reduces
+            for (term, action) in &row_to_merge.shifts_and_reduces {
+                let new_action = new_row.shifts_and_reduces.entry(term.clone()).or_default();
+                if let Some(shift_target) = &action.shift {
+                    if new_action.shift.is_some() && &new_action.shift != &action.shift {
+                        panic!("Unit production elimination created shift/shift conflict");
+                    }
+                    new_action.shift = Some(shift_target.clone());
+                }
+                new_action.reduces.extend(action.reduces.iter());
+            }
+        }
+    }
+
+    // Check if an equivalent state already exists in the new table
+    if let Some(existing_state) = new_table.iter().find(|(_, row)| **row == new_row).map(|(k, _)| k.clone()) {
+        memo.insert(states_to_combine.clone(), existing_state.clone());
+        return existing_state;
+    }
+
+    memo.insert(states_to_combine.clone(), new_item_set.clone());
+    new_table.insert(new_item_set.clone(), new_row);
+    new_item_set
+}
+
+/// Implements Pager's algorithm to eliminate unit productions from a Stage 6 parse table.
+pub fn eliminate_unit_productions(
+    stage_6_table: &mut Stage6Table,
+    productions: &mut Vec<Production>,
+    start_production_id: usize,
+) {
+    let initial_state_count = stage_6_table.len();
+    let info = compute_unit_production_info(productions);
+
+    // --- Iterative Merging ---
+    let mut current_table = stage_6_table.clone();
+    let mut memo: BTreeMap<BTreeSet<&BTreeSet<Item>>, BTreeSet<Item>> = BTreeMap::new();
+
+    loop {
+        let mut changed = false;
+        let mut next_table = current_table.clone();
+        let states_to_process: Vec<_> = current_table.keys().collect();
+
+        for s in states_to_process {
+            let s_row = current_table.get(s).unwrap();
+            let mut new_s_row = s_row.clone();
+
+            for leaf in &info.leaves {
+                if let Some(t_successor) = s_row.gotos.get(leaf) {
+                    if has_unit_reduction(t_successor, &current_table, &info.unit_prod_ids) {
+                        let mut states_to_combine: BTreeSet<&BTreeSet<Item>> = BTreeSet::new();
+                        // Find all ancestors of `leaf` that have a GOTO from `s`.
+                        for (nt, derived_nts) in &info.derives_map {
+                            if derived_nts.contains(leaf) {
+                                if let Some(ancestor_successor) = s_row.gotos.get(nt) {
+                                    states_to_combine.insert(ancestor_successor);
+                                }
+                            }
+                        }
+                        // Also include the leaf's own successor
+                        if let Some(leaf_successor) = s_row.gotos.get(leaf) {
+                            states_to_combine.insert(leaf_successor);
+                        }
+
+                        if !states_to_combine.is_empty() {
+                            let combined_state = combine_states(&states_to_combine, &current_table, &mut memo, &mut next_table);
+                            if new_s_row.gotos.insert(leaf.clone(), combined_state) != Some(t_successor.clone()) {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            next_table.insert(s.clone(), new_s_row);
+        }
+
+        if !changed {
+            break;
+        }
+        current_table = next_table;
+    }
+
+    // --- Final Cleanup Steps ---
+    // 3. Delete transitions on nodes.
+    for row in current_table.values_mut() {
+        row.gotos.retain(|nt, _| !info.nodes.contains(nt));
+    }
+
+    // 4. Delete unreachable states.
+    let start_item = Item { production: productions[start_production_id].clone(), dot_position: 0, lookahead: None };
+    let start_state_key = current_table.keys().find(|k| k.contains(&start_item)).expect("Start state not found").clone();
+
+    let mut reachable_states: BTreeSet<BTreeSet<Item>> = BTreeSet::new();
+    let mut worklist: VecDeque<BTreeSet<Item>> = VecDeque::from([start_state_key]);
+
+    while let Some(state) = worklist.pop_front() {
+        if reachable_states.contains(&state) { continue; }
+        if let Some(row) = current_table.get(&state) {
+            for action in row.shifts_and_reduces.values() {
+                if let Some(s) = &action.shift { worklist.push_back(s.clone()); }
+            }
+            for goto in row.gotos.values() {
+                worklist.push_back(goto.clone());
+            }
+        }
+        reachable_states.insert(state);
+    }
+    current_table.retain(|s, _| reachable_states.contains(s));
+
+    // 5. Modify productions list for final parser.
+    let mut new_productions = Vec::new();
+    let mut old_pid_to_new_pid: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut new_idx = 0;
+
+    for (old_idx, p) in productions.iter().enumerate() {
+        if !info.unit_prod_ids.contains(&old_idx) {
+            let mut new_p = p.clone();
+            if info.nodes.contains(&p.lhs) {
+                let leaf = info.nt_to_leaf_map.get(&p.lhs).expect("Node should derive a leaf");
+                new_p.lhs = leaf.clone();
+            }
+            new_productions.push(new_p);
+            old_pid_to_new_pid.insert(old_idx, new_idx);
+            new_idx += 1;
+        }
+    }
+
+    // Remap production IDs in the final table.
+    for row in current_table.values_mut() {
+        for action in row.shifts_and_reduces.values_mut() {
+            action.reduces = action.reduces.iter()
+                .filter_map(|old_pid| old_pid_to_new_pid.get(&old_pid.0))
+                .map(|&new_idx| crate::glr::table::ProductionID(new_idx))
+                .collect();
+        }
+    }
+
+    let final_state_count = current_table.len();
+    crate::debug!(2, "Unit production elimination complete. States reduced from {} to {}.", initial_state_count, final_state_count);
+
+    *stage_6_table = current_table;
+    *productions = new_productions;
+}

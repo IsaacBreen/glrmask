@@ -2,7 +2,7 @@ use super::items::{Item, LRMode};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
@@ -25,37 +25,37 @@ pub type Table = BTreeMap<StateID, Row>;
 
 
 type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage2Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeSet<Item>,
 }
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage3Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
 }
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage4Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
 }
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage5Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage6ShiftsAndReduces {
     shift: Option<BTreeSet<Item>>,
     reduces: BTreeSet<ProductionID>,
@@ -819,26 +819,6 @@ fn merge_compatible_states(
     (new_table, new_item_set_map, new_start_state_id)
 }
 
-/// Implements Pager's algorithm to eliminate unit productions from a Stage 7 parse table.
-///
-/// This function modifies the table in-place to reduce its size and speed up parsing by
-/// bypassing states that only perform unit reductions (e.g., `A -> B`).
-///
-/// # Arguments
-/// * `table` - The Stage 7 table to be modified.
-/// * `item_set_map` - The mapping from item sets to state IDs, which will also be updated.
-/// * `productions` - The list of productions.
-/// * `non_terminal_map` - The mapping from non-terminals to their IDs.
-///
-/// # Returns
-/// The number of states that were removed during the optimization.
-pub fn eliminate_unit_productions(
-    stage_6_table: &mut Stage6Table,
-    productions: &[Production],
-) -> usize {
-    todo!()
-}
-
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>, enable_unit_production_elimination: bool) -> GLRParser {
     let original_productions = productions.to_vec();
 
@@ -889,7 +869,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut stage_6_table = stage_6(stage_5_table);
     if enable_unit_production_elimination {
         crate::debug!(2, "Eliminating unit productions");
-        eliminate_unit_productions(&mut stage_6_table, &productions);
+        crate::glr::analyze::eliminate_unit_productions(&mut stage_6_table, &mut productions, start_production_id);
     }
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
