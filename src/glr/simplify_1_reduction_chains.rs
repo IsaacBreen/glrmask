@@ -41,7 +41,12 @@ pub fn simplify_1_reduction_chains(
     crate::debug!(3, "Found {} unit productions to analyze for elimination.", unit_productions.len());
 
     // Create a temporary mapping from state (item set) to a simple ID for logging.
-    let state_to_id: BTreeMap<_, _> = stage_6_table.keys().enumerate().map(|(i, s)| (s, i)).collect();
+    let state_to_id: BTreeMap<BTreeSet<Item>, usize> = stage_6_table
+        .keys()
+        .cloned()
+        .enumerate()
+        .map(|(i, s)| (s, i))
+        .collect();
 
     // 2. Build a reverse goto map for efficient lookup of predecessor states.
     // Map: destination_state -> Vec<(source_state, non_terminal)>
