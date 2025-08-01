@@ -711,35 +711,30 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         return Vec::new();
     }
 
-    // All nullable non-terminals (A ⇒* ε).
+    // All non-terminals that can derive ε.
     let nullable = compute_nullable_nonterminals(productions);
-
-    // All null non-terminals
-    let null = compute_null_nonterminals(productions);
-    dbg!(&null);
 
     // ---------------------------------------------------------------------
     // Helper: generate every RHS that can be obtained by optionally deleting
-    // nullable non-terminals – terminals and non-nullable NTs are kept.
+    // nullable non-terminals.
     // ---------------------------------------------------------------------
     fn rhs_variants(
         rhs: &[Symbol],
         nullable: &BTreeSet<NonTerminal>,
-        null: &BTreeSet<NonTerminal>,
     ) -> Vec<Vec<Symbol>> {
-        let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+        let mut acc: Vec<Vec<Symbol>> = vec![vec![]];
         for sym in rhs {
             let mut next = Vec::new();
-            for prefix in &acc {
-                // Keep the current symbol if it can be non-null
-                if !matches!(sym, Symbol::NonTerminal(nt) if null.contains(nt)) {
-                    let mut keep = prefix.clone();
-                    keep.push(sym.clone());
-                    next.push(keep);
-                }
+            let is_nullable = matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt));
 
-                // Optionally drop it if it is a nullable NT
-                if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
+            for prefix in &acc {
+                // Path where we keep the symbol. This is always an option.
+                let mut with_sym = prefix.clone();
+                with_sym.push(sym.clone());
+                next.push(with_sym);
+
+                // Path where we drop the symbol (only if nullable).
+                if is_nullable {
                     next.push(prefix.clone());
                 }
             }
@@ -760,7 +755,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     seen.insert(productions[0].clone());
 
     for prod in productions {
-        for rhs in rhs_variants(&prod.rhs, &nullable, &null) {
+        for rhs in rhs_variants(&prod.rhs, &nullable) {
             let new_prod = Production {
                 lhs: prod.lhs.clone(),
                 rhs,
