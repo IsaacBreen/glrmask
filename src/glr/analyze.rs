@@ -2,7 +2,7 @@ use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
-use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure};
+use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -714,6 +714,10 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     // All nullable non-terminals (A ⇒* ε).
     let nullable = compute_nullable_nonterminals(productions);
 
+    // All null non-terminals
+    let null = compute_null_nonterminals(productions);
+    dbg!(&null);
+
     // ---------------------------------------------------------------------
     // Helper: generate every RHS that can be obtained by optionally deleting
     // nullable non-terminals – terminals and non-nullable NTs are kept.
@@ -721,15 +725,18 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     fn rhs_variants(
         rhs: &[Symbol],
         nullable: &BTreeSet<NonTerminal>,
+        null: &BTreeSet<NonTerminal>,
     ) -> Vec<Vec<Symbol>> {
         let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
         for sym in rhs {
             let mut next = Vec::new();
             for prefix in &acc {
-                // Always keep the current symbol
-                let mut keep = prefix.clone();
-                keep.push(sym.clone());
-                next.push(keep);
+                // Keep the current symbol if it can be non-null
+                if !matches!(sym, Symbol::NonTerminal(nt) if null.contains(nt)) {
+                    let mut keep = prefix.clone();
+                    keep.push(sym.clone());
+                    next.push(keep);
+                }
 
                 // Optionally drop it if it is a nullable NT
                 if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
@@ -753,7 +760,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     seen.insert(productions[0].clone());
 
     for prod in productions {
-        for rhs in rhs_variants(&prod.rhs, &nullable) {
+        for rhs in rhs_variants(&prod.rhs, &nullable, &null) {
             let new_prod = Production {
                 lhs: prod.lhs.clone(),
                 rhs,
