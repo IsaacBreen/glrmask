@@ -92,7 +92,7 @@ pub fn eliminate_unit_productions(
                         // We need to merge this state with the state we would go to on descendant_nt.
                         if let Some(final_target_set) = row.gotos.get(descendant_nt) {
                             if goto_target_set != final_target_set {
-                                crate::debug!(4, "Merging state for reduction {nt} -> {descendant_nt}");
+                                crate::debug!(4, "Merging state for reduction {} -> {}", nt, descendant_nt);
                                 merges.insert(goto_target_set.clone(), final_target_set.clone());
                                 changed = true;
                             }
