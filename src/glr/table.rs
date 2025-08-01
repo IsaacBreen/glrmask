@@ -56,6 +56,7 @@ struct Stage6Row {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 struct Stage6ShiftsAndReduces {
     shift: Option<BTreeSet<Item>>,
     reduces: BTreeSet<ProductionID>,
