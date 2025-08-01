@@ -734,7 +734,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
                         generated_rhss.push(new_rhs.clone());
                         worklist.push_back(new_rhs);
-                        if nullable_nonterminals.contains(nt) {
+                        if null_nonterminals.contains(nt) {
                             continue 'worklist;
                         }
                     }
