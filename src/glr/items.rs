@@ -2,7 +2,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Display, Formatter};
 // Added for derive macro pattern
 
 
@@ -11,12 +11,6 @@ pub struct Item {
     pub production: Production,
     pub dot_position: usize,
     pub lookahead: Option<Terminal>,
-}
-
-impl Debug for Item {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{} -> ... dot {} ...]", self.production.lhs.0, self.dot_position)
-    }
 }
 
 // Manual impl for Item (could be derived)
