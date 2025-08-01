@@ -2,7 +2,7 @@ use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
-use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
+use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals, Nullability};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -711,11 +711,22 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         return Vec::new();
     }
 
-    // All nullable non-terminals (A ⇒* ε).
-    let nullable = compute_nullable_nonterminals(productions);
+    // Compute nullability for all non-terminals once.
+    let nullability_map = compute_nonterminal_nullability(productions);
 
-    // All null non-terminals
-    let null = compute_null_nonterminals(productions);
+    // All nullable non-terminals (A ⇒* ε). These can derive ε.
+    let nullable: BTreeSet<NonTerminal> = nullability_map
+        .iter()
+        .filter_map(|(nt, status)| {
+            (*status == Nullability::Nullable || *status == Nullability::Null).then(|| nt.clone())
+        })
+        .collect();
+
+    // All null non-terminals. These can *only* derive ε.
+    let null: BTreeSet<NonTerminal> = nullability_map
+        .iter()
+        .filter_map(|(nt, status)| (*status == Nullability::Null).then(|| nt.clone()))
+        .collect();
     dbg!(&null);
 
     // ---------------------------------------------------------------------
