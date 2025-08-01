@@ -15,13 +15,6 @@ impl JSONConvertible for NonTerminal {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Nullability {
-    Nullable,
-    NotNullable,
-    Pending,
-}
-
 impl Display for NonTerminal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
