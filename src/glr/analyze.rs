@@ -706,10 +706,23 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let mut nullable_nonterminals = compute_nullable_nonterminals(productions);
     if nullable_nonterminals.is_empty() {
         // No nullable non-terminals, so no changes needed.
         return productions.to_vec();
+    }
+
+    // Per user instruction: do not inline nullable non-terminals that appear in the start production.
+    // This prevents non-terminals in the augmented start rule (e.g. S' -> S) from being eliminated
+    // if they become nullable, which can be important for the parser generator.
+    if !productions.is_empty() {
+        let start_prod = &productions[0];
+        nullable_nonterminals.remove(&start_prod.lhs);
+        for symbol in &start_prod.rhs {
+            if let Symbol::NonTerminal(nt) = symbol {
+                nullable_nonterminals.remove(nt);
+            }
+        }
     }
 
     let mut final_productions = BTreeSet::new();
