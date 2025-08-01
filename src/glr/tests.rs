@@ -547,6 +547,7 @@ fn test_reduce_reduce_conflict() {
         prod("B", vec![t("x")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
+    println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
 
