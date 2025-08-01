@@ -714,43 +714,37 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     // Compute nullability for all non-terminals once.
     let nullability_map = compute_nonterminal_nullability(productions);
 
-    // All nullable non-terminals (A ⇒* ε). These can derive ε.
-    let nullable: BTreeSet<NonTerminal> = nullability_map
-        .iter()
-        .filter_map(|(nt, status)| {
-            (*status == Nullability::Nullable || *status == Nullability::Null).then(|| nt.clone())
-        })
-        .collect();
-
-    // All null non-terminals. These can *only* derive ε.
-    let null: BTreeSet<NonTerminal> = nullability_map
-        .iter()
-        .filter_map(|(nt, status)| (*status == Nullability::Null).then(|| nt.clone()))
-        .collect();
-    dbg!(&null);
-
     // ---------------------------------------------------------------------
     // Helper: generate every RHS that can be obtained by optionally deleting
     // nullable non-terminals – terminals and non-nullable NTs are kept.
     // ---------------------------------------------------------------------
     fn rhs_variants(
         rhs: &[Symbol],
-        nullable: &BTreeSet<NonTerminal>,
-        null: &BTreeSet<NonTerminal>,
+        nullability_map: &BTreeMap<NonTerminal, Nullability>,
     ) -> Vec<Vec<Symbol>> {
         let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
         for sym in rhs {
             let mut next = Vec::new();
             for prefix in &acc {
-                // Keep the current symbol if it can be non-null
-                if !matches!(sym, Symbol::NonTerminal(nt) if null.contains(nt)) {
+                let (is_null, is_nullable) = if let Symbol::NonTerminal(nt) = sym {
+                    match nullability_map.get(nt) {
+                        Some(&Nullability::Null) => (true, true),
+                        Some(&Nullability::Nullable) => (false, true),
+                        _ => (false, false), // NotNull or not in map
+                    }
+                } else {
+                    (false, false) // Terminals are not null or nullable
+                };
+
+                // Keep the current symbol if it's not a "null" non-terminal.
+                if !is_null {
                     let mut keep = prefix.clone();
                     keep.push(sym.clone());
                     next.push(keep);
                 }
 
-                // Optionally drop it if it is a nullable NT
-                if matches!(sym, Symbol::NonTerminal(nt) if nullable.contains(nt)) {
+                // Optionally drop the symbol if it's a nullable non-terminal.
+                if is_nullable {
                     next.push(prefix.clone());
                 }
             }
@@ -771,7 +765,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     seen.insert(productions[0].clone());
 
     for prod in productions {
-        for rhs in rhs_variants(&prod.rhs, &nullable, &null) {
+        for rhs in rhs_variants(&prod.rhs, &nullability_map) {
             let new_prod = Production {
                 lhs: prod.lhs.clone(),
                 rhs,
