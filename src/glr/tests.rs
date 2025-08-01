@@ -76,6 +76,7 @@ fn test_repetition_no_eof_2() {
         prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
     ];
     let parser_with_b = generate_glr_parser(&productions_with_b, 0, None, false);
+    println!("Parser: {}", parser_with_b);
     let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
     let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
 
