@@ -722,7 +722,62 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    todo!()
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    if nullable_nonterminals.is_empty() {
+        // No nullable non-terminals, so no changes needed.
+        return productions.to_vec();
+    }
+
+    let mut final_productions = BTreeSet::new();
+
+    for original_prod in productions {
+        // For each original production, we generate all possible new productions
+        // by removing any combination of nullable non-terminals from its RHS.
+
+        // A worklist of RHS variants to process.
+        let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
+        // A set to keep track of RHS variants we've already generated to avoid duplicates.
+        let mut generated_rhss: BTreeSet<Vec<Symbol>> = BTreeSet::new();
+
+        // Start with the original RHS.
+        worklist.push_back(original_prod.rhs.clone());
+        generated_rhss.insert(original_prod.rhs.clone());
+
+        while let Some(current_rhs) = worklist.pop_front() {
+            // Iterate over the symbols of the current RHS variant.
+            for i in 0..current_rhs.len() {
+                if let Symbol::NonTerminal(nt) = &current_rhs[i] {
+                    // If we find a nullable non-terminal...
+                    if nullable_nonterminals.contains(nt) {
+                        // ...create a new RHS variant with it removed.
+                        let mut new_rhs = current_rhs.clone();
+                        new_rhs.remove(i);
+
+                        // If this is a new variant we haven't seen before,
+                        // add it to our worklist to be processed further.
+                        if generated_rhss.insert(new_rhs.clone()) {
+                            worklist.push_back(new_rhs);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add all generated variants as new productions with the original LHS.
+        for rhs in generated_rhss {
+            final_productions.insert(Production {
+                lhs: original_prod.lhs.clone(),
+                rhs,
+            });
+        }
+    }
+
+    // Finally, remove all productions that are now null (e.g., A -> ε),
+    // as they have been inlined.
+    final_productions
+        .into_iter()
+        .filter(|p| !p.rhs.is_empty())
+        .collect()
 }
 
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
