@@ -706,6 +706,7 @@ pub struct GLRParserState<'a> { // No longer generic
 
 impl Display for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // TODO: this is bad. make this better
         // Display the stack
         self.log_gss("    ", TerminalID(0));
         Ok(())
