@@ -869,7 +869,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut stage_6_table = stage_6(stage_5_table);
     if enable_unit_production_elimination {
         crate::debug!(2, "Eliminating unit productions");
-        crate::glr::simplify_1_reduction_chains::simplify_1_reduction_chains(&mut stage_6_table, &productions, start_production_id);
+        crate::glr::simplify_1_reduction_chains::simplify_1_reduction_chains(&mut stage_6_table, &mut productions);
     }
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
