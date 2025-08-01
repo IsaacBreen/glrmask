@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
+const ENABLE_UNIT_PRODUCTION_ELIMINATION: bool = true;
+
 fn create_simple_parser() -> GLRParser {
     // This grammar is left-recursive but does NOT have length-1 cycles.
     let productions = vec![
@@ -16,7 +18,7 @@ fn create_simple_parser() -> GLRParser {
         prod("A", vec![t("b")]),
     ];
 
-    generate_glr_parser(&productions, 0, None, false)
+    generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION)
 }
 
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
@@ -36,7 +38,7 @@ fn test_repetition_no_eof_1() {
     // The start production is the first one, index 0.
     // The parser generation will use EOF as the lookahead for the augmented rule S' -> S,
     // but the grammar itself and the inputs we test will not use an EOF/dollar token.
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     println!("Parser: {}", parser);
 
     let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
@@ -75,7 +77,7 @@ fn test_repetition_no_eof_2() {
         prod("S", vec![t("a")]),
         prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
     ];
-    let parser_with_b = generate_glr_parser(&productions_with_b, 0, None, false);
+    let parser_with_b = generate_glr_parser(&productions_with_b, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     println!("Parser: {}", parser_with_b);
     let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
     let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
@@ -135,7 +137,7 @@ fn test_super_simple_grammar() {
         prod("S", vec![t("a"), t("$")]), // Start rule
     ];
 
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     println!("Parser: {}", parser);
     
     let a_token = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
@@ -468,7 +470,7 @@ fn test_ambiguous_dangling_else() {
         prod("Stmt", vec![t("other")]), // This is fine, it's a comment
         prod("Expr", vec![t("id")]),
     ];
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&regex_name("if")).unwrap(),
@@ -505,7 +507,7 @@ fn test_ambiguous_arithmetic() {
         prod("E", vec![nt("E"), t("*"), nt("E")]),
         prod("E", vec![t("id")]),
     ];
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
@@ -544,7 +546,7 @@ fn test_reduce_reduce_conflict() {
         prod("A", vec![t("x")]),
         prod("B", vec![t("x")]),
     ];
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
 
@@ -572,7 +574,7 @@ fn test_epsilon_rules_ambiguity() {
         prod("B", vec![t("x")]),
         prod("B", vec![]), // Epsilon
     ];
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![*parser.terminal_map.get_by_left(&regex_name("x")).unwrap()];
@@ -600,7 +602,7 @@ fn test_highly_ambiguous_potentially_slow() {
         prod("S", vec![nt("S"), nt("S")]),
         prod("S", vec![t("a")]),
     ];
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&regex_name("a")).unwrap(),
@@ -676,7 +678,7 @@ fn test_right_recursive_grammar_parse() {
     ];
 
     // The generation process automatically resolves the right recursion.
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
 
     let test_cases = [
@@ -721,7 +723,7 @@ fn test_hidden_right_recursion() {
     // Validation should pass as it's not length-1 recursion
     assert!(analyze::validate(&productions).is_ok());
 
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
 
     let test_cases = [
@@ -759,7 +761,7 @@ fn test_nullable_nonterminal_before_terminal() {
     // Validation should pass for this grammar
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let eof_token_id = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let c_token_id = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
     let d_token_id = *parser.terminal_map.get_by_left(&regex_name("d")).unwrap();
@@ -1082,7 +1084,7 @@ fn test_parser_stats_conflicts() {
         prod("A", vec![t("x")]),
         prod("B", vec![t("x")]),
     ];
-    let rr_parser = generate_glr_parser(&rr_productions, 0, None, false);
+    let rr_parser = generate_glr_parser(&rr_productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let rr_stats = stats::get_stats(&rr_parser);
 
     println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
@@ -1099,7 +1101,7 @@ fn test_parser_stats_conflicts() {
         prod("Stmt", vec![t("other")]),
         prod("Expr", vec![t("id")]),
     ];
-    let sr_parser = generate_glr_parser(&sr_productions, 0, None, false);
+    let sr_parser = generate_glr_parser(&sr_productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     let sr_stats = stats::get_stats(&sr_parser);
 
     println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
@@ -1131,7 +1133,7 @@ fn test_lr1_not_lalr1_grammar() {
     assert!(analyze::validate(&productions).is_ok());
 
     // Parser generation should succeed without conflicts for an LR(1) generator
-    let parser = generate_glr_parser(&productions, 0, None, false);
+    let parser = generate_glr_parser(&productions, 0, None, ENABLE_UNIT_PRODUCTION_ELIMINATION);
     println!("Parser: {}", parser); // Useful for debugging the generated table
 
     // Check stats to be sure there are no conflicts
