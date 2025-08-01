@@ -4,7 +4,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_nullable_productions, inline_unit_productions};
+use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -840,7 +840,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
 
     if true {
         println!("Before inlining nullable productions:\n{}", display_productions(&productions));
-        productions = inline_nullable_productions(&productions);
+        productions = inline_null_productions(&productions);
         println!("After inlining nullable productions:\n{}", display_productions(&productions));
     }
     if false {
