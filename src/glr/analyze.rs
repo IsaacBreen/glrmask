@@ -705,58 +705,62 @@ pub fn resolve_direct_right_recursion(
     productions.extend(new_productions);
 }
 
+/// Inlines productions that can derive epsilon (i.e., are nullable).
+///
+/// This transformation removes direct `A -> ε` rules from the grammar. For any rule
+/// that uses a nullable non-terminal on its RHS, new productions are generated that
+/// represent the versions of that rule where the nullable non-terminal is omitted.
+///
+/// For example, given:
+/// `X -> a Y b`
+/// `Y -> c | ε`
+///
+/// The function will produce:
+/// `X -> a Y b` (original)
+/// `X -> a b`   (Y is omitted)
+/// `Y -> c`     (non-epsilon rule for Y is kept)
+///
+/// The original `Y -> ε` rule is removed. This process is applied for all combinations
+/// of nullable non-terminals in a rule's RHS.
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let nonterminal_nullability = compute_nonterminal_nullability(productions);
+    let mut final_productions = BTreeSet::new();
 
-    let mut final_productions = Vec::new();
+    for prod in productions {
+        // Find the indices of all nullable non-terminals in the rule's RHS.
+        let nullable_indices: Vec<usize> = prod.rhs.iter().enumerate()
+            .filter_map(|(i, symbol)| match symbol {
+                Symbol::NonTerminal(nt) if nonterminal_nullability.get(nt) == Some(&Nullability::Nullable) => Some(i),
+                _ => None,
+            })
+            .collect();
 
-    for original_prod in productions {
-        // For each original production, we generate all possible new productions
-        // by removing any combination of nullable non-terminals from its RHS.
+        // Generate all 2^k combinations of omitting these nullable non-terminals.
+        let k = nullable_indices.len();
+        for i in 0..(1 << k) {
+            let indices_to_remove: BTreeSet<usize> = (0..k)
+                .filter(|j| (i >> j) & 1 == 1)
+                .map(|j| nullable_indices[j])
+                .collect();
 
-        // A worklist of RHS variants to process.
-        let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-        let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
+            let new_rhs: Vec<Symbol> = prod.rhs.iter().enumerate()
+                .filter_map(|(idx, symbol)| if indices_to_remove.contains(&idx) { None } else { Some(symbol.clone()) })
+                .collect();
 
-        // Start with the original RHS.
-        worklist.push_back(original_prod.rhs.clone());
-
-        while let Some(current_rhs) = worklist.pop_front() {
-            // Iterate over the symbols of the current RHS variant.
-            for i in 0..current_rhs.len() {
-                if let Symbol::NonTerminal(nt) = &current_rhs[i] {
-                    // If we find a nullable non-terminal...
-                    if nonterminal_nullability.get(nt) == Some(&Nullability::Nullable) {
-                        // ...create a new RHS variant with it removed.
-                        let mut new_rhs = current_rhs.clone();
-                        new_rhs.remove(i);
-
-                        generated_rhss.push(new_rhs.clone());
-                        worklist.push_back(new_rhs);
-                        if nonterminal_nullability.get(nt) == Some(&Nullability::Nullable) {
-                            break;
-                        }
-                    }
-                }
-            }
-            generated_rhss.push(current_rhs.clone());
-        }
-
-        // Add all generated variants as new productions with the original LHS.
-        for rhs in generated_rhss {
-            final_productions.push(Production {
-                lhs: original_prod.lhs.clone(),
-                rhs,
+            final_productions.insert(Production {
+                lhs: prod.lhs.clone(),
+                rhs: new_rhs,
             });
         }
     }
 
-    // Finally, remove all productions that are now null (e.g., A -> ε),
-    // as they have been inlined.
-    final_productions.retain(|p| !(p.rhs.is_empty() && nonterminal_nullability.get(&p.lhs) == Some(&Nullability::Nullable)));
-    // Remove duplicates
-    final_productions.dedup();
-    final_productions
+    // Remove epsilon-productions for non-terminals that were originally nullable.
+    // This completes the "inlining" process.
+    let mut result: Vec<Production> = final_productions.into_iter().collect();
+    result.retain(|p| {
+        !(p.rhs.is_empty() && nonterminal_nullability.get(&p.lhs) == Some(&Nullability::Nullable))
+    });
+    result
 }
 
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
