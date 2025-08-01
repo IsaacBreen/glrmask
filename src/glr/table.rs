@@ -1,5 +1,5 @@
 use super::items::{Item, LRMode};
-use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nonterminal_nullability, split_on_dot};
+use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -323,8 +323,8 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
     let first_sets = compute_first_sets_for_nonterminals(productions);
-    let nullability_map = compute_nonterminal_nullability(productions);
-    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullability_map);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
 
@@ -335,7 +335,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
             continue;
         }
 
-        let closure = compute_closure(&item_set, productions, &first_sets, &nullability_map, &follow_sets);
+        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
