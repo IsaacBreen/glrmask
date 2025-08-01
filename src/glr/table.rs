@@ -835,11 +835,12 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
     println!("After direct right recursion:\n{}", display_productions(&productions));
 
-    if false {
+    if true {
         println!("Before inlining nullable productions:\n{}", display_productions(&productions));
         productions = inline_nullable_productions(&productions);
         println!("After inlining nullable productions:\n{}", display_productions(&productions));
-
+    }
+    if false {
         println!("Before inlining unit productions:\n{}", display_productions(&productions));
         productions = inline_unit_productions(&productions);
         println!("After inlining unit productions:\n{}", display_productions(&productions));
