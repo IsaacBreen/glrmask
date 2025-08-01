@@ -725,7 +725,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         }
     }
 
-    let mut final_productions = BTreeSet::new();
+    let mut final_productions = Vec::new();
 
     for original_prod in productions {
         // For each original production, we generate all possible new productions
@@ -758,7 +758,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
         // Add all generated variants as new productions with the original LHS.
         for rhs in generated_rhss {
-            final_productions.insert(Production {
+            final_productions.push(Production {
                 lhs: original_prod.lhs.clone(),
                 rhs,
             });
@@ -767,10 +767,10 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
     // Finally, remove all productions that are now null (e.g., A -> ε),
     // as they have been inlined.
+    final_productions.retain(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)));
+    // Remove duplicates
+    final_productions.dedup();
     final_productions
-        .into_iter()
-        .filter(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)))
-        .collect()
 }
 
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
