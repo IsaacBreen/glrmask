@@ -706,24 +706,8 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    let mut nullable_nonterminals = compute_nullable_nonterminals(productions);
-    if nullable_nonterminals.is_empty() {
-        // No nullable non-terminals, so no changes needed.
-        return productions.to_vec();
-    }
-
-    // Per user instruction: do not inline nullable non-terminals that appear in the start production.
-    // This prevents non-terminals in the augmented start rule (e.g. S' -> S) from being eliminated
-    // if they become nullable, which can be important for the parser generator.
-    if !productions.is_empty() {
-        let start_prod = &productions[0];
-        nullable_nonterminals.remove(&start_prod.lhs);
-        for symbol in &start_prod.rhs {
-            if let Symbol::NonTerminal(nt) = symbol {
-                nullable_nonterminals.remove(nt);
-            }
-        }
-    }
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let null_nonterminals: BTreeSet<NonTerminal> = ...;
 
     let mut final_productions = Vec::new();
 
@@ -737,7 +721,6 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
         // Start with the original RHS.
         worklist.push_back(original_prod.rhs.clone());
-        generated_rhss.push(original_prod.rhs.clone());
 
         while let Some(current_rhs) = worklist.pop_front() {
             // Iterate over the symbols of the current RHS variant.
@@ -751,9 +734,13 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 
                         generated_rhss.push(new_rhs.clone());
                         worklist.push_back(new_rhs);
+                        if nullable_nonterminals.contains(nt) {
+                            break;
+                        }
                     }
                 }
             }
+            generated_rhss.push(current_rhs.clone());
         }
 
         // Add all generated variants as new productions with the original LHS.
