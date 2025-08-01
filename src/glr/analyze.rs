@@ -734,11 +734,11 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         // A worklist of RHS variants to process.
         let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
         // A set to keep track of RHS variants we've already generated to avoid duplicates.
-        let mut generated_rhss: BTreeSet<Vec<Symbol>> = BTreeSet::new();
+        let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
 
         // Start with the original RHS.
         worklist.push_back(original_prod.rhs.clone());
-        generated_rhss.insert(original_prod.rhs.clone());
+        generated_rhss.push(original_prod.rhs.clone());
 
         while let Some(current_rhs) = worklist.pop_front() {
             // Iterate over the symbols of the current RHS variant.
@@ -750,11 +750,8 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
                         let mut new_rhs = current_rhs.clone();
                         new_rhs.remove(i);
 
-                        // If this is a new variant we haven't seen before,
-                        // add it to our worklist to be processed further.
-                        if generated_rhss.insert(new_rhs.clone()) {
-                            worklist.push_back(new_rhs);
-                        }
+                        generated_rhss.push(new_rhs.clone());
+                        worklist.push_back(new_rhs);
                     }
                 }
             }
