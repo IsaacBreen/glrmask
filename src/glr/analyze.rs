@@ -722,7 +722,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         // Start with the original RHS.
         worklist.push_back(original_prod.rhs.clone());
 
-        while let Some(current_rhs) = worklist.pop_front() {
+        'worklist: while let Some(current_rhs) = worklist.pop_front() {
             // Iterate over the symbols of the current RHS variant.
             for i in 0..current_rhs.len() {
                 if let Symbol::NonTerminal(nt) = &current_rhs[i] {
@@ -735,7 +735,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
                         generated_rhss.push(new_rhs.clone());
                         worklist.push_back(new_rhs);
                         if nullable_nonterminals.contains(nt) {
-                            break;
+                            continue 'worklist;
                         }
                     }
                 }
