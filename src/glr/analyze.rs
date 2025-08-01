@@ -706,80 +706,72 @@ pub fn resolve_direct_right_recursion(
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-    // Nothing to do on an empty grammar.
+    // Trivial case -------------------------------------------------------
     if productions.is_empty() {
         return Vec::new();
     }
 
-    // Compute nullability for all non-terminals once.
-    let nullability_map = compute_nonterminal_nullability(productions);
+    // Pre-compute nullability of all non-terminals once.
+    let nullability = compute_nonterminal_nullability(productions);
 
-    // ---------------------------------------------------------------------
-    // Helper: generate every RHS that can be obtained by optionally deleting
-    // nullable non-terminals – terminals and non-nullable NTs are kept.
-    // ---------------------------------------------------------------------
-    fn rhs_variants(
-        rhs: &[Symbol],
-        nullability_map: &BTreeMap<NonTerminal, Nullability>,
-    ) -> Vec<Vec<Symbol>> {
-        let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
-        for sym in rhs {
-            let mut next = Vec::new();
-            for prefix in &acc {
-                let (is_null, is_nullable) = if let Symbol::NonTerminal(nt) = sym {
-                    match nullability_map.get(nt) {
-                        Some(&Nullability::Null) => (true, true),
-                        Some(&Nullability::Nullable) => (false, true),
-                        _ => (false, false), // NotNull or not in map
-                    }
-                } else {
-                    (false, false) // Terminals are not null or nullable
-                };
-
-                // Keep the current symbol if it's not a "null" non-terminal.
-                if !is_null {
-                    let mut keep = prefix.clone();
-                    keep.push(sym.clone());
-                    next.push(keep);
-                }
-
-                // Optionally drop the symbol if it's a nullable non-terminal.
-                if is_nullable {
-                    next.push(prefix.clone());
-                }
-            }
-            acc = next;
+    // Helper -------------------------------------------------------------
+    // For one symbol return the possible “kept” variants
+    //   • terminals / non-nullable NT  →  [ Some(sym) ]
+    //   •   Null       NT              →  [ None ]         (must disappear)
+    //   •   Nullable   NT              →  [ Some(sym), None ]
+    fn symbol_options(
+        sym: &Symbol,
+        nullability: &BTreeMap<NonTerminal, Nullability>,
+    ) -> Vec<Option<Symbol>> {
+        match sym {
+            Symbol::Terminal(_) => vec![Some(sym.clone())],
+            Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                Some(Nullability::Null) => vec![None],
+                Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
+                _ => vec![Some(sym.clone())],
+            },
         }
-        acc
     }
 
-    // ---------------------------------------------------------------------
-    // Build the new production set.  We keep the original start production
-    // at the front to preserve ordering.  A `seen` set prevents duplicates.
-    // ---------------------------------------------------------------------
-    let mut result = Vec::with_capacity(productions.len() * 2);
-    let mut seen: BTreeSet<Production> = BTreeSet::new();
+    // Produce every RHS variant by Cartesian product over symbol options.
+    let mut rhs_variants = |rhs: &[Symbol]| -> Vec<Vec<Symbol>> {
+        let mut variants: Vec<Vec<Symbol>> = vec![Vec::new()];
+        for sym in rhs {
+            let mut next = Vec::<Vec<Symbol>>::new();
+            for v in variants.iter() {
+                for opt in symbol_options(sym, &nullability) {
+                    let mut new_v = v.clone();
+                    if let Some(s) = opt {
+                        new_v.push(s);
+                    }
+                    next.push(new_v);
+                }
+            }
+            variants = next;
+        }
+        variants
+    };
 
-    // Always keep the start production exactly as-is.
-    result.push(productions[0].clone());
-    seen.insert(productions[0].clone());
+    // Build final set ----------------------------------------------------
+    let mut seen = BTreeSet::<Production>::new();
+    let mut out = Vec::<Production>::new();
+
+    // Keep the start production verbatim to preserve ordering.
+    let start_prod = productions[0].clone();
+    seen.insert(start_prod.clone());
+    out.push(start_prod);
 
     for prod in productions {
-        for rhs in rhs_variants(&prod.rhs, &nullability_map) {
-            let new_prod = Production {
-                lhs: prod.lhs.clone(),
-                rhs,
-            };
+        for rhs in rhs_variants(&prod.rhs) {
+            let new_prod = Production { lhs: prod.lhs.clone(), rhs };
             if seen.insert(new_prod.clone()) {
-                result.push(new_prod);
+                out.push(new_prod);
             }
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Remove ε-productions unless their LHS appears in the RHS of the start
-    // production – those might still be required for the augmented start.
-    // ---------------------------------------------------------------------
+    // Drop super-fluous ε-productions ------------------------------------
+    // Keep ε only if its LHS still appears on RHS of the start production
     let start_rhs_nts: BTreeSet<_> = productions[0]
         .rhs
         .iter()
@@ -792,8 +784,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         })
         .collect();
 
-    result
-        .into_iter()
+    out.into_iter()
         .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
         .collect()
 }
