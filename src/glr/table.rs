@@ -50,15 +50,15 @@ struct Stage5Row {
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Stage6Row {
-    shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
-    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+pub(crate) struct Stage6Row {
+    pub(crate) shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+    pub(crate) gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Stage6ShiftsAndReduces {
-    shift: Option<BTreeSet<Item>>,
-    reduces: BTreeSet<ProductionID>,
+pub(crate) struct Stage6ShiftsAndReduces {
+    pub(crate) shift: Option<BTreeSet<Item>>,
+    pub(crate) reduces: BTreeSet<ProductionID>,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
