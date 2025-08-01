@@ -2,36 +2,8 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// Computes the set of non-terminals that can derive the empty string (i.e., are nullable).
-/// A non-terminal is nullable if it has a production where the RHS is composed entirely of
-/// other nullable non-terminals. An empty RHS is inherently nullable.
-/// This is computed iteratively until a fixed point is reached.
 pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    let mut null_nonterminals = BTreeSet::new();
-    let mut changed = true;
-
-    while changed {
-        changed = false;
-        for production in productions {
-            if !null_nonterminals.contains(&production.lhs) {
-                // A production's RHS is nullable if all its symbols are nullable non-terminals.
-                // Terminals are never nullable.
-                let rhs_is_nullable = production.rhs.iter().all(|symbol| {
-                    match symbol {
-                        Symbol::NonTerminal(nt) => null_nonterminals.contains(nt),
-                        Symbol::Terminal(_) => false,
-                    }
-                });
-
-                if rhs_is_nullable {
-                    // If the RHS is nullable, then the LHS non-terminal is also nullable.
-                    null_nonterminals.insert(production.lhs.clone());
-                    changed = true;
-                }
-            }
-        }
-    }
-    null_nonterminals
+    todo!()
 }
 
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
