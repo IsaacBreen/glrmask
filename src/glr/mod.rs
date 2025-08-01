@@ -7,3 +7,4 @@ mod tests;
 pub mod analyze;
 pub mod automaton;
 pub mod minimizer;
+mod eliminate_reduction_chains;

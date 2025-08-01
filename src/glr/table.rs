@@ -5,10 +5,11 @@ use bimap::BiBTreeMap;
 use std::collections::{VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, drop_dead, find_compatible_states, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
+use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, validate_start_production_ends_with_terminal};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use crate::glr::eliminate_reduction_chains::find_compatible_states;
 use crate::interface::display_productions;
 // Added for derive macro pattern
 
@@ -869,7 +870,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut stage_6_table = stage_6(stage_5_table);
     if enable_unit_production_elimination {
         crate::debug!(2, "Eliminating unit productions");
-        crate::glr::analyze::eliminate_unit_productions(&mut stage_6_table, &mut productions, start_production_id);
+        crate::glr::eliminate_reduction_chains::simplify_1_reduction_chains(&mut stage_6_table, &mut productions, start_production_id);
     }
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
