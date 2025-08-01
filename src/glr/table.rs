@@ -819,7 +819,7 @@ fn merge_compatible_states(
     (new_table, new_item_set_map, new_start_state_id)
 }
 
-pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, crate::glr::parser::ActionFn>, ignore_terminal_id: Option<TerminalID>, enable_unit_production_elimination: bool) -> crate::glr::parser::GLRParser {
+pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, crate::glr::parser::ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let original_productions = productions.to_vec();
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -874,10 +874,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let mut stage_6_table = stage_6(stage_5_table);
-    if enable_unit_production_elimination {
-        crate::debug!(2, "Eliminating unit productions");
-        crate::glr::simplify_1_reduction_chains::simplify_1_reduction_chains(&mut stage_6_table, &mut productions);
-    }
+    crate::debug!(2, "Eliminating unit productions");
+    crate::glr::simplify_1_reduction_chains::simplify_1_reduction_chains(&mut stage_6_table, &mut productions);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
@@ -895,15 +893,15 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::glr::parser::GLRParser::new(final_table, productions, start_production_id, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
 }
 
-pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>, enable_unit_production_elimination: bool) -> crate::glr::parser::GLRParser {
+pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
     let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id, enable_unit_production_elimination)
+    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
 }
 
-pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>, enable_unit_production_elimination: bool) -> crate::glr::parser::GLRParser {
+pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id, enable_unit_production_elimination)
+    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
 }
 
 pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
