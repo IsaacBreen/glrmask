@@ -2,7 +2,7 @@ use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
-use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure};
+use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -707,7 +707,7 @@ pub fn resolve_direct_right_recursion(
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let null_nonterminals: BTreeSet<NonTerminal> = ...;
+    let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
 
     let mut final_productions = Vec::new();
 

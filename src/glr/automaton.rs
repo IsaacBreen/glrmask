@@ -2,6 +2,16 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Computes the set of non-terminals that have a direct production to epsilon (e.g., A -> ε).
+/// This is a subset of `compute_nullable_nonterminals`.
+pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+    productions
+        .iter()
+        .filter(|p| p.rhs.is_empty())
+        .map(|p| p.lhs.clone())
+        .collect()
+}
+
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
     let mut nullable_nonterminals = BTreeSet::new();
     let mut changed = true;

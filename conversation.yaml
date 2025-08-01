@@ -723,12 +723,9 @@ local_system:
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          if nullable_nonterminals.is_empty() {
-              // No nullable non-terminals, so no changes needed.
-              return productions.to_vec();
-          }
+          let null_nonterminals: BTreeSet<NonTerminal> = ...;
 
-          let mut final_productions = BTreeSet::new();
+          let mut final_productions = Vec::new();
 
           for original_prod in productions {
               // For each original production, we generate all possible new productions
@@ -736,12 +733,10 @@ local_system:
 
               // A worklist of RHS variants to process.
               let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-              // A set to keep track of RHS variants we've already generated to avoid duplicates.
-              let mut generated_rhss: BTreeSet<Vec<Symbol>> = BTreeSet::new();
+              let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
 
               // Start with the original RHS.
               worklist.push_back(original_prod.rhs.clone());
-              generated_rhss.insert(original_prod.rhs.clone());
 
               while let Some(current_rhs) = worklist.pop_front() {
                   // Iterate over the symbols of the current RHS variant.
@@ -753,19 +748,20 @@ local_system:
                               let mut new_rhs = current_rhs.clone();
                               new_rhs.remove(i);
 
-                              // If this is a new variant we haven't seen before,
-                              // add it to our worklist to be processed further.
-                              if generated_rhss.insert(new_rhs.clone()) {
-                                  worklist.push_back(new_rhs);
+                              generated_rhss.push(new_rhs.clone());
+                              worklist.push_back(new_rhs);
+                              if nullable_nonterminals.contains(nt) {
+                                  break;
                               }
                           }
                       }
                   }
+                  generated_rhss.push(current_rhs.clone());
               }
 
               // Add all generated variants as new productions with the original LHS.
               for rhs in generated_rhss {
-                  final_productions.insert(Production {
+                  final_productions.push(Production {
                       lhs: original_prod.lhs.clone(),
                       rhs,
                   });
@@ -774,10 +770,10 @@ local_system:
 
           // Finally, remove all productions that are now null (e.g., A -> ε),
           // as they have been inlined.
+          final_productions.retain(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)));
+          // Remove duplicates
+          final_productions.dedup();
           final_productions
-              .into_iter()
-              .filter(|p| !p.rhs.is_empty())
-              .collect()
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -1913,6 +1909,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: initial_parse_state,
+                  accepted: false,
                   phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
               };
               parser_state
@@ -1921,6 +1918,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: parse_state,
+                  accepted: false,
                   phase: ParserPhase::ReadyForDefaultReductions,
               };
               parser_state
@@ -2936,7 +2934,7 @@ local_system:
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_nullable_productions, inline_unit_productions};
+      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode};
       use std::collections::BTreeMap as StdMap;
@@ -3772,7 +3770,7 @@ local_system:
 
           if true {
               println!("Before inlining nullable productions:\n{}", display_productions(&productions));
-              productions = inline_nullable_productions(&productions);
+              productions = inline_null_productions(&productions);
               println!("After inlining nullable productions:\n{}", display_productions(&productions));
           }
           if false {
@@ -3948,7 +3946,7 @@ local_system:
               prod("S", vec![t("a")]),
               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
           ];
-          let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+          let parser_with_b = generate_glr_parser(&productions_with_b, None);
           println!("Parser: {}", parser_with_b);
           let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
           let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
@@ -5794,12 +5792,9 @@ local_system:
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          if nullable_nonterminals.is_empty() {
-              // No nullable non-terminals, so no changes needed.
-              return productions.to_vec();
-          }
+          let null_nonterminals: BTreeSet<NonTerminal> = ...;
 
-          let mut final_productions = BTreeSet::new();
+          let mut final_productions = Vec::new();
 
           for original_prod in productions {
               // For each original production, we generate all possible new productions
@@ -5807,12 +5802,10 @@ local_system:
 
               // A worklist of RHS variants to process.
               let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-              // A set to keep track of RHS variants we've already generated to avoid duplicates.
-              let mut generated_rhss: BTreeSet<Vec<Symbol>> = BTreeSet::new();
+              let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
 
               // Start with the original RHS.
               worklist.push_back(original_prod.rhs.clone());
-              generated_rhss.insert(original_prod.rhs.clone());
 
               while let Some(current_rhs) = worklist.pop_front() {
                   // Iterate over the symbols of the current RHS variant.
@@ -5824,19 +5817,20 @@ local_system:
                               let mut new_rhs = current_rhs.clone();
                               new_rhs.remove(i);
 
-                              // If this is a new variant we haven't seen before,
-                              // add it to our worklist to be processed further.
-                              if generated_rhss.insert(new_rhs.clone()) {
-                                  worklist.push_back(new_rhs);
+                              generated_rhss.push(new_rhs.clone());
+                              worklist.push_back(new_rhs);
+                              if nullable_nonterminals.contains(nt) {
+                                  break;
                               }
                           }
                       }
                   }
+                  generated_rhss.push(current_rhs.clone());
               }
 
               // Add all generated variants as new productions with the original LHS.
               for rhs in generated_rhss {
-                  final_productions.insert(Production {
+                  final_productions.push(Production {
                       lhs: original_prod.lhs.clone(),
                       rhs,
                   });
@@ -5845,10 +5839,10 @@ local_system:
 
           // Finally, remove all productions that are now null (e.g., A -> ε),
           // as they have been inlined.
+          final_productions.retain(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)));
+          // Remove duplicates
+          final_productions.dedup();
           final_productions
-              .into_iter()
-              .filter(|p| !p.rhs.is_empty())
-              .collect()
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -6984,6 +6978,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: initial_parse_state,
+                  accepted: false,
                   phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
               };
               parser_state
@@ -6992,6 +6987,7 @@ local_system:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: parse_state,
+                  accepted: false,
                   phase: ParserPhase::ReadyForDefaultReductions,
               };
               parser_state
@@ -8007,7 +8003,7 @@ local_system:
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_nullable_productions, inline_unit_productions};
+      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode};
       use std::collections::BTreeMap as StdMap;
@@ -8843,7 +8839,7 @@ local_system:
 
           if true {
               println!("Before inlining nullable productions:\n{}", display_productions(&productions));
-              productions = inline_nullable_productions(&productions);
+              productions = inline_null_productions(&productions);
               println!("After inlining nullable productions:\n{}", display_productions(&productions));
           }
           if false {
@@ -9019,7 +9015,7 @@ local_system:
               prod("S", vec![t("a")]),
               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
           ];
-          let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+          let parser_with_b = generate_glr_parser(&productions_with_b, None);
           println!("Parser: {}", parser_with_b);
           let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
           let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
@@ -10888,12 +10884,9 @@ messages:
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          if nullable_nonterminals.is_empty() {
-              // No nullable non-terminals, so no changes needed.
-              return productions.to_vec();
-          }
+          let null_nonterminals: BTreeSet<NonTerminal> = ...;
 
-          let mut final_productions = BTreeSet::new();
+          let mut final_productions = Vec::new();
 
           for original_prod in productions {
               // For each original production, we generate all possible new productions
@@ -10901,12 +10894,10 @@ messages:
 
               // A worklist of RHS variants to process.
               let mut worklist: VecDeque<Vec<Symbol>> = VecDeque::new();
-              // A set to keep track of RHS variants we've already generated to avoid duplicates.
-              let mut generated_rhss: BTreeSet<Vec<Symbol>> = BTreeSet::new();
+              let mut generated_rhss: Vec<Vec<Symbol>> = Vec::new();
 
               // Start with the original RHS.
               worklist.push_back(original_prod.rhs.clone());
-              generated_rhss.insert(original_prod.rhs.clone());
 
               while let Some(current_rhs) = worklist.pop_front() {
                   // Iterate over the symbols of the current RHS variant.
@@ -10918,19 +10909,20 @@ messages:
                               let mut new_rhs = current_rhs.clone();
                               new_rhs.remove(i);
 
-                              // If this is a new variant we haven't seen before,
-                              // add it to our worklist to be processed further.
-                              if generated_rhss.insert(new_rhs.clone()) {
-                                  worklist.push_back(new_rhs);
+                              generated_rhss.push(new_rhs.clone());
+                              worklist.push_back(new_rhs);
+                              if nullable_nonterminals.contains(nt) {
+                                  break;
                               }
                           }
                       }
                   }
+                  generated_rhss.push(current_rhs.clone());
               }
 
               // Add all generated variants as new productions with the original LHS.
               for rhs in generated_rhss {
-                  final_productions.insert(Production {
+                  final_productions.push(Production {
                       lhs: original_prod.lhs.clone(),
                       rhs,
                   });
@@ -10939,10 +10931,10 @@ messages:
 
           // Finally, remove all productions that are now null (e.g., A -> ε),
           // as they have been inlined.
+          final_productions.retain(|p| !(p.rhs.is_empty() && nullable_nonterminals.contains(&p.lhs)));
+          // Remove duplicates
+          final_productions.dedup();
           final_productions
-              .into_iter()
-              .filter(|p| !p.rhs.is_empty())
-              .collect()
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -12108,6 +12100,7 @@ messages:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: initial_parse_state,
+                  accepted: false,
                   phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
               };
               parser_state
@@ -12116,6 +12109,7 @@ messages:
               let mut parser_state = GLRParserState {
                   parser: self,
                   active_state: parse_state,
+                  accepted: false,
                   phase: ParserPhase::ReadyForDefaultReductions,
               };
               parser_state
@@ -13141,7 +13135,7 @@ messages:
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_nullable_productions, inline_unit_productions};
+      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
       pub use crate::types::{TerminalID};
       use crate::json_serialization::{JSONConvertible, JSONNode};
       use std::collections::BTreeMap as StdMap;
@@ -13977,7 +13971,7 @@ messages:
 
           if true {
               println!("Before inlining nullable productions:\n{}", display_productions(&productions));
-              productions = inline_nullable_productions(&productions);
+              productions = inline_null_productions(&productions);
               println!("After inlining nullable productions:\n{}", display_productions(&productions));
           }
           if false {
@@ -14158,7 +14152,7 @@ messages:
               prod("S", vec![t("a")]),
               prod("Other", vec![t("b")]), // Another rule to get 'b' into the terminal map
           ];
-          let parser_with_b = generate_glr_parser(&productions_with_b, 0, None);
+          let parser_with_b = generate_glr_parser(&productions_with_b, None);
           println!("Parser: {}", parser_with_b);
           let b_token = *parser_with_b.terminal_map.get_by_left(&regex_name("b")).unwrap();
           let a_token_b = *parser_with_b.terminal_map.get_by_left(&regex_name("a")).unwrap();
@@ -15298,59 +15292,78 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      We have to be careful in `inline_null_productions` with the initial production.
-      Remove from `nullable_nonterminals` any nonterminal that appears in the start production.
-      (The start production is the one at position 0.)
+      Implement compute_null_nonterminals.
+      The output should be a subset of compute_nullable_nonterminals.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary changes. Here are the diffs for the modified files.
+      Hello! As a helpful AI assistant, I'd be happy to help you with your request. Here are the `diff` patches for the requested changes.
 
-      Based on your instructions, I've modified `inline_null_productions` to prevent non-terminals appearing in the start production from being inlined. This is a safeguard to ensure the start symbol of an augmented grammar isn't removed if it becomes nullable.
+      I've implemented the `compute_null_nonterminals` function in `src/glr/automaton.rs`. This function identifies non-terminals that have a direct production to epsilon (e.g., `A -> ε`). As requested, its output is a subset of what `compute_nullable_nonterminals` would produce.
 
-      Here is the patch for `src/glr/analyze.rs`:
+      I then updated `src/glr/analyze.rs` to import and use this new function in `inline_null_productions`.
+
+      Here are the patches:
 
       ```diff
       --- a/src/glr/analyze.rs
       +++ b/src/glr/analyze.rs
-      @@ -810,12 +810,23 @@
-       }
+      @@ -1,7 +1,7 @@
+       use std::cmp::PartialEq;
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
+       use bimap::BiBTreeMap;
+       use kdam::{tqdm, BarExt};
+      -use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure};
+      +use crate::glr::automaton::{compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals, compute_closure, compute_null_nonterminals};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
+       
+      @@ -681,7 +681,7 @@
        
        pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-      -    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-      +    let mut nullable_nonterminals = compute_nullable_nonterminals(productions);
-           if nullable_nonterminals.is_empty() {
-               // No nullable non-terminals, so no changes needed.
-               return productions.to_vec();
-           }
+           let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      -    let null_nonterminals: BTreeSet<NonTerminal> = ...;
+      +    let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
        
-      +    // Per user instruction: do not inline nullable non-terminals that appear in the start production.
-      +    // This prevents non-terminals in the augmented start rule (e.g. S' -> S) from being eliminated
-      +    // if they become nullable, which can be important for the parser generator.
-      +    if !productions.is_empty() {
-      +        let start_prod = &productions[0];
-      +        nullable_nonterminals.remove(&start_prod.lhs);
-      +        for symbol in &start_prod.rhs {
-      +            if let Symbol::NonTerminal(nt) = symbol {
-      +                nullable_nonterminals.remove(nt);
-      +            }
-      +        }
-      +    }
+           let mut final_productions = Vec::new();
+       
+
+      ``````diff
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -1,6 +1,16 @@
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::items::{Item, LRMode, LR_MODE};
+       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       +
-           let mut final_productions = BTreeSet::new();
+      +/// Computes the set of non-terminals that have a direct production to epsilon (e.g., A -> ε).
+      +/// This is a subset of `compute_nullable_nonterminals`.
+      +pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      +    productions
+      +        .iter()
+      +        .filter(|p| p.rhs.is_empty())
+      +        .map(|p| p.lhs.clone())
+      +        .collect()
+      +}
        
-           for original_prod in productions {
+       pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+           let mut nullable_nonterminals = BTreeSet::new();
 
       ```
 
-      I've applied this change as requested. Let me know if you have any other questions
+      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/glr/analyze.rs
       Applying patch to 'src/glr/analyze.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
     metadata:
 ...
