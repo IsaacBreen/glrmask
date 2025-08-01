@@ -3,7 +3,53 @@ use crate::glr::items::{Item, LRMode, LR_MODE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    todo!()
+    // A non-terminal is "null" if all of its productions lead only to other null non-terminals.
+    // This means it cannot derive any string containing a terminal.
+
+    if productions.is_empty() {
+        return BTreeSet::new();
+    }
+
+    // 1. Collect all non-terminals and group productions by LHS.
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    }
+    let all_nonterminals: BTreeSet<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+
+    // 2. Start with the assumption that all non-terminals are null.
+    let mut null_nonterminals = all_nonterminals;
+
+    // 3. Iteratively remove non-terminals that are found to be not null.
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        let mut nts_to_remove = BTreeSet::new();
+        for nt in &null_nonterminals {
+            let prods_for_nt = prods_by_lhs.get(nt).unwrap();
+
+            let is_nt_truly_null = prods_for_nt.iter().all(|prod| {
+                prod.rhs.iter().all(|symbol| match symbol {
+                    Symbol::Terminal(_) => false,
+                    Symbol::NonTerminal(rhs_nt) => null_nonterminals.contains(rhs_nt),
+                })
+            });
+
+            if !is_nt_truly_null {
+                nts_to_remove.insert(nt.clone());
+            }
+        }
+
+        if !nts_to_remove.is_empty() {
+            for nt in nts_to_remove {
+                null_nonterminals.remove(&nt);
+            }
+            changed = true;
+        }
+    }
+
+    null_nonterminals
 }
 
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
