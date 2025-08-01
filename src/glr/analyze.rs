@@ -714,38 +714,40 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     // Compute nullability for all non-terminals once.
     let nullability_map = compute_nonterminal_nullability(productions);
 
-    // ---------------------------------------------------------------------
-    // Helper: generate every RHS that can be obtained by optionally deleting
-    // nullable non-terminals – terminals and non-nullable NTs are kept.
-    // ---------------------------------------------------------------------
+    // Helper: generate RHS variants by optionally deleting nullable NTs.
     fn rhs_variants(
         rhs: &[Symbol],
         nullability_map: &BTreeMap<NonTerminal, Nullability>,
     ) -> Vec<Vec<Symbol>> {
-        let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+        let mut acc = vec![Vec::new()];
         for sym in rhs {
             let mut next = Vec::new();
-            for prefix in &acc {
-                let (is_null, is_nullable) = if let Symbol::NonTerminal(nt) = sym {
-                    match nullability_map.get(nt) {
-                        Some(&Nullability::Null) => (true, true),
-                        Some(&Nullability::Nullable) => (false, true),
-                        _ => (false, false), // NotNull or not in map
+            match sym {
+                Symbol::NonTerminal(nt) => {
+                    // Determine nullability
+                    let status = nullability_map.get(nt).copied().unwrap_or(Nullability::NotNull);
+                    let nullable = status != Nullability::NotNull;
+                    let null_only = status == Nullability::Null;
+                    for prefix in &acc {
+                        // Keep NT if it can produce terminals
+                        if !null_only {
+                            let mut kept = prefix.clone();
+                            kept.push(Symbol::NonTerminal(nt.clone()));
+                            next.push(kept);
+                        }
+                        // Drop NT if it is nullable
+                        if nullable {
+                            next.push(prefix.clone());
+                        }
                     }
-                } else {
-                    (false, false) // Terminals are not null or nullable
-                };
-
-                // Keep the current symbol if it's not a "null" non-terminal.
-                if !is_null {
-                    let mut keep = prefix.clone();
-                    keep.push(sym.clone());
-                    next.push(keep);
                 }
-
-                // Optionally drop the symbol if it's a nullable non-terminal.
-                if is_nullable {
-                    next.push(prefix.clone());
+                Symbol::Terminal(t) => {
+                    // Always keep terminals
+                    for prefix in &acc {
+                        let mut kept = prefix.clone();
+                        kept.push(Symbol::Terminal(t.clone()));
+                        next.push(kept);
+                    }
                 }
             }
             acc = next;
