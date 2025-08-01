@@ -158,7 +158,6 @@ pub enum ParserPhase {
 pub struct GLRParser {
     pub table: Table,
     pub productions: Vec<Production>,
-    pub start_production_id: usize,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -171,7 +170,7 @@ impl JSONConvertible for GLRParser {
         let mut obj = StdMap::new();
         obj.insert("stage_7_table".to_string(), self.table.to_json());
         obj.insert("productions".to_string(), self.productions.to_json());
-        obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+        // obj.insert("start_production_id".to_string(), self.start_production_id.to_json()); // Implicitly 0
         obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
@@ -188,8 +187,8 @@ impl JSONConvertible for GLRParser {
                                        .and_then(Table::from_json)?;
                 let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                      .and_then(Vec::<Production>::from_json)?;
-                let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id".to_string())
-                                              .and_then(|n| usize::from_json(n))?;
+                // For backwards compatibility, we can read and ignore it.
+                let _start_production_id = obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
                 let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
                                       .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                 let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
@@ -204,7 +203,6 @@ impl JSONConvertible for GLRParser {
                 Ok(GLRParser {
                     table: stage_7_table,
                     productions,
-                    start_production_id,
                     terminal_map,
                     non_terminal_map,
                     item_set_map,
@@ -249,7 +247,6 @@ impl GLRParser {
     pub fn new(
         stage_7_table: Table,
         productions: Vec<Production>,
-        start_production_id: usize,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -269,7 +266,6 @@ impl GLRParser {
         Self {
             table: stage_7_table,
             productions,
-            start_production_id,
             terminal_map,
             non_terminal_map,
             item_set_map,
@@ -296,7 +292,6 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
-            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
         };
         parser_state
@@ -305,7 +300,6 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
-            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
         };
         parser_state

@@ -202,10 +202,12 @@ pub fn eliminate_unreachable_productions(
 /// Applies a series of simplification steps to a grammar to reduce it for a specific test case.
 pub fn simplify_grammar_for_test_case(
     productions: &[Production],
-    start_production_id: usize,
     interesting_terminals: &BTreeSet<Terminal>,
 ) -> (Vec<Production>, usize) {
-    let start_nt = &productions[start_production_id].lhs;
+    if productions.is_empty() {
+        return (vec![], 0);
+    }
+    let start_nt = &productions[0].lhs;
 
     // 1. Remove productions with terminals not in our test case.
     let mut current_productions = remove_productions_with_uninteresting_terminals(productions, interesting_terminals);

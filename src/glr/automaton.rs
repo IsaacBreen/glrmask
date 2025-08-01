@@ -78,7 +78,6 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
 
 pub fn compute_follow_sets_for_nonterminals(
     productions: &[Production],
-    start_production_id: usize,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
@@ -96,7 +95,7 @@ pub fn compute_follow_sets_for_nonterminals(
 
     // Rule 1: Place EOF (None) in FOLLOW(S) where S is the start symbol.
     if !productions.is_empty() {
-        let start_nt = &productions[start_production_id].lhs;
+        let start_nt = &productions[0].lhs;
         follow_sets.entry(start_nt.clone()).or_default().insert(None);
     }
 

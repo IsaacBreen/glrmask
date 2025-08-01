@@ -200,22 +200,6 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
     }
 }
 
-pub fn validate_start_production_ends_with_terminal(
-    productions: &[Production],
-    start_production_id: usize,
-) -> Result<(), String> {
-    if start_production_id >= productions.len() {
-        return Err(format!("Invalid start production ID: {}. Must be less than the number of productions: {}", start_production_id, productions.len()));
-    }
-
-    let start_prod = &productions[start_production_id];
-    if !start_prod.rhs.is_empty() && !matches!(start_prod.rhs.last(), Some(Symbol::Terminal(_))) {
-        return Err(format!("Start production [{}] does not end with a terminal symbol. Last symbol in RHS is: {:?}", start_prod, start_prod.rhs.last()));
-    }
-
-    Ok(())
-}
-
 /// Removes productions that use non-terminals on their RHS which are never defined on the LHS
 /// of any *remaining* production. This process is repeated until no more productions can be removed.
 ///
@@ -492,7 +476,7 @@ pub fn filter_productions_by_reachability(
     kept_productions
 }
 
-pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
+pub fn simplify_grammar(initial_productions: &[Production]) -> Vec<Production> {
     todo!()
 }
 
@@ -514,10 +498,10 @@ fn find_last_non_nullable_symbol<'a>(
     None
 }
 
-pub fn compute_terminal_follow_sets(productions: &[Production], start_production_id: usize) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, start_production_id, &first_sets, &nullable_nonterminals);
+    let nonterminal_follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
