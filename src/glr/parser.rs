@@ -292,6 +292,7 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
+            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
         };
         parser_state
@@ -300,6 +301,7 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
+            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
         };
         parser_state
