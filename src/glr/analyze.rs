@@ -710,8 +710,9 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let null_nonterminals: BTreeSet<NonTerminal> = compute_null_nonterminals(productions);
 
     let mut final_productions = Vec::new();
+    final_productions.push(productions[0].clone());
 
-    for original_prod in productions {
+    for original_prod in &productions[0..] {
         // For each original production, we generate all possible new productions
         // by removing any combination of nullable non-terminals from its RHS.
 
