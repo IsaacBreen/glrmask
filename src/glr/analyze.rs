@@ -744,7 +744,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         }
 
         // Add all generated variants as new productions with the original LHS.
-        for rhs in generated_rhss {
+        for rhs in generated_rhss.into_iter().rev() {
             final_productions.push(Production {
                 lhs: original_prod.lhs.clone(),
                 rhs,
