@@ -4,14 +4,8 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
-use crate::glr::analyze::{
-    create_unique_name_generator,
-    remove_productions_with_undefined_nonterminals,
-    simplify_grammar,
-    validate,
-    inline_unit_productions,
-    inline_null_productions,
-};
+use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
+pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use crate::interface::display_productions;
@@ -288,24 +282,6 @@ pub struct StateID(pub usize);
 impl JSONConvertible for StateID {
     fn to_json(&self) -> JSONNode { self.0.to_json() }
     fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
-}
-
-// ---------------------------------------------------------------------------
-// TerminalID
-//
-// Historically this crate re-exported `TerminalID` from `crate::types`, but
-// that module no longer exists.  We provide a local definition instead and
-// keep the public visibility so that existing `use` statements (e.g. in
-// parser.rs, tests, …) continue to work unchanged.
-// ---------------------------------------------------------------------------
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TerminalID(pub usize);
-
-impl JSONConvertible for TerminalID {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        usize::from_json(node).map(TerminalID)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
