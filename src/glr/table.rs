@@ -56,7 +56,6 @@ struct Stage6Row {
 }
 
 #[derive(Debug)]
-#[derive(Default)]
 struct Stage6ShiftsAndReduces {
     shift: Option<BTreeSet<Item>>,
     reduces: BTreeSet<ProductionID>,
@@ -534,14 +533,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(
-    stage_6_table: Stage6Table,
-    productions: &[Production],
-    start_production_id: usize,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-    node_to_leaf_map: &BTreeMap<NonTerminal, NonTerminal>,
-) -> Stage7Result {
+fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
@@ -571,12 +563,7 @@ fn stage_7(
             for &production_id in &action.reduces {
                 let production = &productions[production_id.0];
                 let len = production.rhs.len();
-                let mut nonterminal_for_goto = &production.lhs;
-                if let Some(leaf) = node_to_leaf_map.get(nonterminal_for_goto) {
-                    crate::debug!(3, "Remapping GOTO for node '{}' to leaf '{}'", nonterminal_for_goto.0, leaf.0);
-                    nonterminal_for_goto = leaf;
-                }
-                let nonterminal_id = *non_terminal_map.get_by_left(nonterminal_for_goto).unwrap();
+                let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
                 reduces
                     .entry(len)
                     .or_default()
@@ -844,177 +831,12 @@ fn merge_compatible_states(
 /// * `non_terminal_map` - The mapping from non-terminals to their IDs.
 ///
 /// # Returns
-/// A tuple containing:
-/// * The number of states removed.
-/// * A map from "node" non-terminals to a chosen "leaf" non-terminal they derive.
+/// The number of states that were removed during the optimization.
 pub fn eliminate_unit_productions(
     stage_6_table: &mut Stage6Table,
     productions: &[Production],
-    start_key: &BTreeSet<Item>,
-) -> (usize, BTreeMap<NonTerminal, NonTerminal>) {
-    // 1. Identify unit productions, nodes, leaves, and derivation chains.
-    let unit_productions: BTreeMap<NonTerminal, NonTerminal> = productions.iter()
-        .filter_map(|p| {
-            if p.rhs.len() == 1 {
-                if let Symbol::NonTerminal(nt_rhs) = &p.rhs[0] {
-                    return Some((p.lhs.clone(), nt_rhs.clone()));
-                }
-            }
-            None
-        })
-        .collect();
-
-    if unit_productions.is_empty() {
-        crate::debug!(2, "No unit productions found to eliminate.");
-        return (0, BTreeMap::new());
-    }
-
-    let all_nonterminals: BTreeSet<NonTerminal> = productions.iter()
-        .flat_map(|p| {
-            let mut nts = vec![p.lhs.clone()];
-            for s in &p.rhs {
-                if let Symbol::NonTerminal(nt) = s { nts.push(nt.clone()); }
-            }
-            nts
-        })
-        .collect();
-
-    let nodes: BTreeSet<NonTerminal> = unit_productions.keys().cloned().collect();
-    let leaves: BTreeSet<NonTerminal> = unit_productions.values().cloned()
-        .filter(|nt| !nodes.contains(nt))
-        .collect();
-
-    crate::debug!(2, "Unit production nodes: {:?}", nodes.iter().map(|n| &n.0).collect::<Vec<_>>());
-    crate::debug!(2, "Unit production leaves: {:?}", leaves.iter().map(|n| &n.0).collect::<Vec<_>>());
-
-    // Compute transitive closure: `A => B`
-    let mut derives: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-    for nt in &all_nonterminals {
-        derives.entry(nt.clone()).or_default().insert(nt.clone());
-    }
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (lhs, rhs) in &unit_productions {
-            let rhs_derives = derives[rhs].clone();
-            let lhs_derives = derives.get_mut(lhs).unwrap();
-            let old_len = lhs_derives.len();
-            lhs_derives.extend(rhs_derives);
-            if lhs_derives.len() != old_len {
-                changed = true;
-            }
-        }
-    }
-
-    let mut node_to_leaf_map: BTreeMap<NonTerminal, NonTerminal> = BTreeMap::new();
-    for node in &nodes {
-        if let Some(leaf) = derives[node].iter().find(|nt| leaves.contains(nt)) {
-            node_to_leaf_map.insert(node.clone(), leaf.clone());
-        }
-    }
-
-    // 2. Main merging loop. This simplified version performs a single pass.
-    let mut new_states_to_add: BTreeMap<BTreeSet<Item>, Stage6Row> = BTreeMap::new();
-    let mut modifications: BTreeMap<BTreeSet<Item>, BTreeMap<NonTerminal, BTreeSet<Item>>> = BTreeMap::new();
-
-    for s_key in stage_6_table.keys().cloned().collect::<Vec<_>>() {
-        let s_row = stage_6_table.get(&s_key).unwrap().clone(); // Clone to avoid borrow issues
-
-        for leaf in &leaves {
-            if let Some(s_leaf_key) = s_row.gotos.get(leaf) {
-                if let Some(s_leaf_row) = stage_6_table.get(s_leaf_key) {
-                    let is_unit_reduce_state = s_leaf_row.shifts_and_reduces.is_empty() &&
-                        !s_leaf_key.is_empty() &&
-                        s_leaf_key.iter().all(|item| item.dot_at_end() && unit_productions.contains_key(&item.production.lhs));
-
-                    if is_unit_reduce_state {
-                        let mut states_to_merge_keys = BTreeSet::new();
-                        let mut nts_to_redirect = BTreeSet::new();
-
-                        for nt in &all_nonterminals {
-                            if derives.get(nt).map_or(false, |d| d.contains(leaf)) {
-                                if let Some(s_nt_key) = s_row.gotos.get(nt) {
-                                    states_to_merge_keys.insert(s_nt_key.clone());
-                                    nts_to_redirect.insert(nt.clone());
-                                }
-                            }
-                        }
-
-                        if states_to_merge_keys.len() > 1 {
-                            let mut merged_row = Stage6Row { shifts_and_reduces: BTreeMap::new(), gotos: BTreeMap::new() };
-                            let mut merged_key = BTreeSet::new();
-
-                            for key in &states_to_merge_keys {
-                                merged_key.extend(key.iter().cloned());
-                                let row_to_merge = stage_6_table.get(key).unwrap();
-                                for (term, action) in &row_to_merge.shifts_and_reduces {
-                                    let entry = merged_row.shifts_and_reduces.entry(term.clone()).or_default();
-                                    if entry.shift.is_none() { entry.shift = action.shift.clone(); }
-                                    entry.reduces.extend(action.reduces.iter().cloned());
-                                }
-                                for (nt, goto_target) in &row_to_merge.gotos {
-                                    merged_row.gotos.insert(nt.clone(), goto_target.clone());
-                                }
-                            }
-
-                            let final_merged_key = if let Some(existing_key) = stage_6_table.keys().find(|&k| *k == merged_key).or_else(|| new_states_to_add.keys().find(|&k| *k == merged_key)) {
-                                existing_key.clone()
-                            } else {
-                                new_states_to_add.insert(merged_key.clone(), merged_row);
-                                merged_key
-                            };
-
-                            for nt in nts_to_redirect {
-                                modifications.entry(s_key.clone()).or_default().insert(nt, final_merged_key.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    stage_6_table.extend(new_states_to_add);
-    for (s_key, gotos_to_update) in modifications {
-        let row = stage_6_table.get_mut(&s_key).unwrap();
-        for (nt, new_target) in gotos_to_update {
-            row.gotos.insert(nt, new_target);
-        }
-    }
-
-    // 3. Cleanup
-    let original_state_count = stage_6_table.len();
-
-    // 3a. Remove transitions on "node" non-terminals.
-    for row in stage_6_table.values_mut() {
-        row.gotos.retain(|nt, _| !nodes.contains(nt));
-    }
-
-    // 3b. Remove unreachable states.
-    let mut reachable_keys = BTreeSet::new();
-    let mut worklist = VecDeque::from([start_key.clone()]);
-    reachable_keys.insert(worklist[0].clone());
-
-    while let Some(key) = worklist.pop_front() {
-        if let Some(row) = stage_6_table.get(&key) {
-            for action in row.shifts_and_reduces.values() {
-                if let Some(shift_target) = &action.shift {
-                    if reachable_keys.insert(shift_target.clone()) {
-                        worklist.push_back(shift_target.clone());
-                    }
-                }
-            }
-            for goto_target in row.gotos.values() {
-                if reachable_keys.insert(goto_target.clone()) {
-                    worklist.push_back(goto_target.clone());
-                }
-            }
-        }
-    }
-    stage_6_table.retain(|key, _| reachable_keys.contains(key));
-
-    let removed_count = original_state_count - stage_6_table.len();
-    (removed_count, node_to_leaf_map)
+) -> usize {
+    todo!()
 }
 
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>, enable_unit_production_elimination: bool) -> GLRParser {
@@ -1064,23 +886,14 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
-    let initial_item = Item { production: productions[start_production_id].clone(), dot_position: 0, lookahead: None };
-    let start_key_prototype = BTreeSet::from([initial_item]);
-    let start_key = stage_5_table.keys().find(|k| k.is_superset(&start_key_prototype)).expect("Start key not found in table").clone();
-
     let mut stage_6_table = stage_6(stage_5_table);
-    let mut node_to_leaf_map = BTreeMap::new();
     if enable_unit_production_elimination {
         crate::debug!(2, "Eliminating unit productions");
-        let (removed_count, map) = eliminate_unit_productions(&mut stage_6_table, &productions, &start_key);
-        node_to_leaf_map = map;
-        crate::debug!(2, "Removed {} states via unit production elimination.", removed_count);
+        eliminate_unit_productions(&mut stage_6_table, &productions);
     }
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(
-        stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map, &node_to_leaf_map
-    );
+    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);

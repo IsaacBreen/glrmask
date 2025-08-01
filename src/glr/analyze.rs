@@ -493,7 +493,7 @@ pub fn filter_productions_by_reachability(
 }
 
 pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
-    panic!("simplify_grammar is not yet implemented")
+    todo!()
 }
 
 /// Helper function to find the last symbol in a rule's RHS that is not a nullable non-terminal.
@@ -609,7 +609,7 @@ pub fn resolve_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    panic!("resolve_right_recursion is not yet implemented");
+    todo!("resolve_right_recursion");
 }
 
 pub fn resolve_direct_right_recursion(
