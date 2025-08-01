@@ -353,7 +353,7 @@ impl GrammarDefinition {
 impl GrammarDefinition {
     pub fn simplify(&mut self) {
         // Simplify the grammar definition
-        (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+        self.productions = simplify_grammar(&self.productions);
     }
 }
 
@@ -1078,7 +1078,6 @@ impl CompiledGrammar {
         }
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
-            definition.start_production_id,
             terminal_map,
             definition.ignore_terminal_id,
         );
@@ -1422,7 +1421,7 @@ mod tests {
         // To make it a meaningful test of the new structure, we'd need a GrammarConstraint.
         // Let's construct a dummy GLRParser for this.
         let dummy_productions = vec![Prod { lhs: NT("S".to_string()), rhs: vec![] }];
-        let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0, None);
+        let dummy_glr_parser = generate_glr_parser(&dummy_productions, None);
 
         let constraint = GrammarConstraint::new(
             tokenizer,
