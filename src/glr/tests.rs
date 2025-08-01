@@ -190,6 +190,7 @@ fn test_simple_parse_table_generation_and_parse() {
 fn test_expression_parse_table_generation_and_parse() {
     // This test now implicitly checks that the expression grammar passes validation.
     let parser = create_expression_parser();
+    println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     // dbg!(&parser); // Keep commented unless debugging needed
 
@@ -1112,6 +1113,65 @@ fn test_parser_stats_conflicts() {
     assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
 }
 // --- Notes on Limitations Not Easily Tested Here ---
+
+#[test]
+fn test_unit_production_elimination() {
+    // A reduction chain (or unit production chain) is a sequence of productions of the form
+    // A -> B, B -> C, ..., where the right-hand side consists of a single non-terminal.
+    // These chains can increase the number of states in the parse table and add parsing steps
+    // that don't consume input. Eliminating them is an optimization.
+    //
+    // This test uses a standard expression grammar with the chain E -> T -> F.
+    // It verifies two things:
+    // 1. The number of states is reduced when the optimization is enabled.
+    // 2. The optimized parser still correctly accepts and rejects the same inputs.
+    let productions = vec![
+        prod("S", vec![nt("E"), t("$")]), // Start rule
+        prod("E", vec![nt("E"), t("+"), nt("T")]),
+        prod("E", vec![nt("T")]), // Unit production
+        prod("T", vec![nt("T"), t("*"), nt("F")]),
+        prod("T", vec![nt("F")]), // Unit production
+        prod("F", vec![t("("), nt("E"), t(")")]),
+        prod("F", vec![t("i")]),
+    ];
+
+    // Generate parser WITHOUT elimination
+    let parser_no_elim = generate_glr_parser(&productions, 0, None, false);
+    let stats_no_elim = stats::get_stats(&parser_no_elim);
+    println!("Stats without elimination:\n{}", stats_no_elim);
+
+    // Generate parser WITH elimination
+    let parser_elim = generate_glr_parser(&productions, 0, None, true);
+    let stats_elim = stats::get_stats(&parser_elim);
+    println!("Stats with elimination:\n{}", stats_elim);
+
+    // 1. Verify that state count is reduced.
+    assert!(
+        stats_elim.num_states < stats_no_elim.num_states,
+        "Expected fewer states with unit production elimination (elim: {}, no_elim: {})",
+        stats_elim.num_states,
+        stats_no_elim.num_states
+    );
+
+    // 2. Verify that both parsers behave identically for a range of inputs.
+    let test_cases = [("i", true), ("i+i*i", true), ("(i+i)*i", true), ("i+", false), ("i++i", false), (")", false)];
+    let eof = *parser_no_elim.terminal_map.get_by_left(&regex_name("$")).unwrap();
+
+    for (input, expected_match) in test_cases {
+        // Both parsers should have the same tokenization, so we can use one.
+        let tokens = tokenize(&parser_no_elim, input);
+
+        let mut state_no_elim = parser_no_elim.init_glr_parser(None);
+        state_no_elim.parse(&tokens);
+        state_no_elim.step(eof);
+        assert_eq!(state_no_elim.is_ok(), expected_match, "Parser WITHOUT elimination failed for input: '{}'", input);
+
+        let mut state_elim = parser_elim.init_glr_parser(None);
+        state_elim.parse(&tokens);
+        state_elim.step(eof);
+        assert_eq!(state_elim.is_ok(), expected_match, "Parser WITH elimination failed for input: '{}'", input);
+    }
+}
 
 #[test]
 #[ignore]
