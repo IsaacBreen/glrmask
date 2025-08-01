@@ -105,7 +105,7 @@ impl Terminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
@@ -145,7 +145,7 @@ impl JSONConvertible for Symbol {
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[derive(Hash)] pub struct Production {
+pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
 }

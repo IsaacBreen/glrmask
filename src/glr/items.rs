@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 // Added for derive macro pattern
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
     pub production: Production,
     pub dot_position: usize,

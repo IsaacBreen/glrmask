@@ -61,7 +61,7 @@ pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Syn
 
 
 #[derive(Debug, Clone)]
-pub struct ParseStateEdgeContent {
+pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
 impl PartialEq for ParseStateEdgeContent {
