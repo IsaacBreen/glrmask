@@ -978,8 +978,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let mut current_nt = nt;
                                 // println!("loop start");
                                 let mut i = 0;
-                                i += 1;
                                 loop {
+                                    i += 1;
                                     // println!("loop current_nt: {:?}", current_nt);
                                     let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
                                         format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
@@ -1012,7 +1012,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 if i > 1 {
                                     println!("number of loops: {}", i);
-                                    panic!("number of loops: {}", i);
+                                    // panic!("number of loops: {}", i);
                                 }
 
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
