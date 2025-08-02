@@ -1045,7 +1045,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         1 << (32 - (goto_state_ids.len() as u32 - 1).leading_zeros())
                                     };
 
-                                    timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 4), number of goto_state_ids (rounded to nearest pow): {:5}, {:5}", i_rounded_to_nearest_pow, goto_state_ids_rounded_to_nearest_pow), {});
+                                    timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2), number of goto_state_ids (rounded to nearest pow): {:5}, {:5}", i_rounded_to_nearest_pow, goto_state_ids_rounded_to_nearest_pow), {});
                                 }
 
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
