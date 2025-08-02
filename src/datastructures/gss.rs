@@ -189,13 +189,17 @@ impl<'a> GSSPopperItem<'a> {
 
     /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
     /// resolved against the path's `Acc`.
-    pub fn resolved_node(&self) -> GSSNode {
-        GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.node.predecessors.clone())
+    pub fn resolved_node(&self) -> Arc<GSSNode> {
+        let resolved_acc = self.resolved_acc();
+        if *self.node.acc == resolved_acc {
+            return self.node.clone();
+        }
+        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.node.predecessors.clone()))
     }
 
     /// Pushes a new state onto the resolved node from this popper item.
     pub fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        self.resolved_node().push(edge_value)
+        self.resolved_node().as_ref().push(edge_value)
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
@@ -224,8 +228,12 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the path's `Acc`.
-    pub fn resolved_predecessor_node(&self) -> GSSNode {
-        GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.predecessor_node.predecessors.clone())
+    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+        let resolved_acc = self.resolved_acc();
+        if *self.predecessor_node.acc == resolved_acc {
+            return self.predecessor_node.clone();
+        }
+        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone()))
     }
 
     /// Pushes a new state onto the resolved predecessor.
@@ -545,9 +553,12 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the parent's `Acc`.
-    pub fn resolved_predecessor_node(&self) -> GSSNode {
+    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
-        GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone())
+        if *self.predecessor_node.acc == resolved_acc {
+            return self.predecessor_node.clone();
+        }
+        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone()))
     }
 
     /// Pushes a new state onto the resolved predecessor.

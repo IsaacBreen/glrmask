@@ -12,7 +12,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/datastructures/gss.rs: |
@@ -548,6 +548,8 @@ local_system:
 
       impl<'a> GSSPeek<'a> {
           pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+
+          pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
           /// Returns the combined `Acc` of the parent and the predecessor.
           pub fn resolved_acc(&self) -> Acc {
@@ -1236,7 +1238,7 @@ local_system:
       }
 
       /// Formats an accumulator for concise display in the GSS printout.
-      fn format_acc(
+      pub fn format_acc(
           node: &GSSNode,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -2525,7 +2527,11 @@ local_system:
                   .map(|s| s.as_str())
                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
                   .collect();
-              println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
+              println!("{}", self.parent.parser.gss_forest_to_dot(
+                  &roots_with_labels,
+                  Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                  Some(&self.parent.llm_vocab.llm_token_map),
+              ));
               println!("\n\n--- End GSS Graphviz ---");
 
               for (state_id, state) in self.state.iter() {
@@ -4675,6 +4681,7 @@ local_system:
       use std::any::Any;
       use std::cmp::Ordering;
       use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
+      use crate::tokenizer::LLMTokenID;
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -4682,7 +4689,7 @@ local_system:
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-      use std::fmt::{Debug, Display, Formatter, Write};
+      use std::fmt::{self, Debug, Display, Formatter, Write};
       use std::hash::{DefaultHasher, Hash, Hasher};
       use std::sync::Arc;
       use crate::debug;
@@ -4692,6 +4699,7 @@ local_system:
       use deterministic_hash::DeterministicHasher;
       use profiler_macro::{time_it, timeit};
       use crate::glr::automaton::compute_closure;
+      use std::collections::HashMap;
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
@@ -5766,97 +5774,92 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_to_dot(&self.active_state.stack)
+              self.parser.gss_to_dot(&self.active_state.stack, None, None)
           }
       }
 
       impl GLRParser {
           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
+          pub fn gss_forest_to_dot(
+              &self,
+              roots: &[(&str, &GSSNode)],
+              original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+              llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          ) -> String {
               let mut dot = String::new();
-              writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
+              writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
               writeln!(&mut dot, "  rankdir=LR;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
-              let mut defined_states = BTreeSet::new();
-              let mut edges = BTreeSet::new();
-              // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-              let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
+              let mut node_ids = HashMap::new();
+              let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
+              let mut traversal_queue = queue.clone();
 
-              let mut queue = VecDeque::new();
-              for (label, root) in roots {
-                  if !root.is_empty() {
-                      let root_arc = Arc::new((*root).clone());
-                      let root_states = root_connections.entry(label.to_string()).or_default();
-                      for (edge_val, _) in &root_arc.predecessors {
-                          root_states.insert(edge_val.state_id);
-                      }
-                      queue.push_back(root_arc);
+              // First, define all nodes
+              while let Some(node_arc) = traversal_queue.pop_front() {
+                  let node_ptr = Arc::as_ptr(&node_arc);
+                  if visited_nodes.contains(&node_ptr) {
+                      continue;
+                  }
+                  visited_nodes.insert(node_ptr);
+                  let next_id = node_ids.len();
+                  let node_id = *node_ids.entry(node_ptr).or_insert(next_id);
+
+                  let acc_str = crate::datastructures::gss::format_acc(
+                      &node_arc,
+                      &self.terminal_map,
+                      original_internal_bimap,
+                      llm_token_map,
+                  );
+                  let escaped_acc = acc_str
+                      .replace('\\', "\\\\")
+                      .replace('"', "\\\"")
+                      .replace('\n', "\\l")
+                      .replace('{', "\\{")
+                      .replace('}', "\\}")
+                      .replace('<', "\\<")
+                      .replace('>', "\\>");
+
+                  writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
+
+                  for peek in GSSNode::peek_iter(&node_arc) {
+                      traversal_queue.push_back(peek.predecessor_node().clone());
                   }
               }
 
+              // Define root labels and connect them
+              for (i, (label, root)) in roots.iter().enumerate() {
+                  let root_ptr = *root as *const GSSNode;
+                  if let Some(root_id) = node_ids.get(&root_ptr) {
+                      writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
+                      writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
+                      writeln!(&mut dot, "    style=filled;").unwrap();
+                      writeln!(&mut dot, "    color=lightgrey;").unwrap();
+                      writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
+                      let root_node_name = format!("Root_{}", i);
+                      writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
+                      writeln!(&mut dot, "  }}").unwrap();
+                      writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
+                  }
+              }
+
+              // Then, define all edges
+              visited_nodes.clear();
               while let Some(node_arc) = queue.pop_front() {
                   let node_ptr = Arc::as_ptr(&node_arc);
                   if !visited_nodes.insert(node_ptr) {
                       continue;
                   }
+                  let parent_id = node_ids[&node_ptr];
 
-                  for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                      let parent_state_id = edge_val.state_id;
-                      defined_states.insert(parent_state_id);
-
-                      for pred_vec in preds_by_depth.values() {
-                          for pred_arc in pred_vec {
-                              if pred_arc.predecessors.is_empty() {
-                                  edges.insert((Some(parent_state_id), None));
-                              } else {
-                                  for (pred_edge_val, _) in &pred_arc.predecessors {
-                                      let child_state_id = pred_edge_val.state_id;
-                                      edges.insert((Some(parent_state_id), Some(child_state_id)));
-                                  }
-                              }
-                              queue.push_back(pred_arc.clone());
-                          }
-                      }
-                  }
-              }
-
-              // Define root label nodes as separate nodes
-              writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-              writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-              writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-              for label in root_connections.keys() {
-                  writeln!(&mut dot, "    \"{}\";", label).unwrap();
-              }
-              writeln!(&mut dot, "  }}").unwrap();
-
-              // Define GSS state nodes
-              for state_id in &defined_states {
-                  let mut label = String::new();
-                  self.format_state_details(&mut label, *state_id, "").unwrap();
-                  let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-                  writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-              }
-
-              if edges.iter().any(|(_, to)| to.is_none()) {
-                  writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-              }
-
-              // Draw edges from root labels to GSS states
-              for (label, states) in &root_connections {
-                  for state_id in states {
-                      writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-                  }
-              }
-
-              // Draw edges between GSS states
-              for (from_opt, to_opt) in edges {
-                  match (from_opt, to_opt) {
-                      (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
-                      (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
-                      _ => {}
+                  for peek in GSSNode::peek_iter(&node_arc) {
+                      let pred_ptr = Arc::as_ptr(peek.predecessor_node());
+                      let pred_id = node_ids[&pred_ptr];
+                      let edge_label = format!("State {}", peek.edge_value().state_id.0);
+                      writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
+                      queue.push_back(peek.predecessor_node().clone());
                   }
               }
 
@@ -5866,8 +5869,13 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-              self.gss_forest_to_dot(&[("Root", root)])
+          pub fn gss_to_dot(
+              &self,
+              root: &GSSNode,
+              original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+              llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          ) -> String {
+              self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
           }
       }
 
@@ -8756,6 +8764,8 @@ local_system:
       impl<'a> GSSPeek<'a> {
           pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
+          pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+
           /// Returns the combined `Acc` of the parent and the predecessor.
           pub fn resolved_acc(&self) -> Acc {
               Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)
@@ -9443,7 +9453,7 @@ local_system:
       }
 
       /// Formats an accumulator for concise display in the GSS printout.
-      fn format_acc(
+      pub fn format_acc(
           node: &GSSNode,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -10732,7 +10742,11 @@ local_system:
                   .map(|s| s.as_str())
                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
                   .collect();
-              println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
+              println!("{}", self.parent.parser.gss_forest_to_dot(
+                  &roots_with_labels,
+                  Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                  Some(&self.parent.llm_vocab.llm_token_map),
+              ));
               println!("\n\n--- End GSS Graphviz ---");
 
               for (state_id, state) in self.state.iter() {
@@ -12882,6 +12896,7 @@ local_system:
       use std::any::Any;
       use std::cmp::Ordering;
       use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
+      use crate::tokenizer::LLMTokenID;
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -12889,7 +12904,7 @@ local_system:
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-      use std::fmt::{Debug, Display, Formatter, Write};
+      use std::fmt::{self, Debug, Display, Formatter, Write};
       use std::hash::{DefaultHasher, Hash, Hasher};
       use std::sync::Arc;
       use crate::debug;
@@ -12899,6 +12914,7 @@ local_system:
       use deterministic_hash::DeterministicHasher;
       use profiler_macro::{time_it, timeit};
       use crate::glr::automaton::compute_closure;
+      use std::collections::HashMap;
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
@@ -13973,97 +13989,92 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_to_dot(&self.active_state.stack)
+              self.parser.gss_to_dot(&self.active_state.stack, None, None)
           }
       }
 
       impl GLRParser {
           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
+          pub fn gss_forest_to_dot(
+              &self,
+              roots: &[(&str, &GSSNode)],
+              original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+              llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          ) -> String {
               let mut dot = String::new();
-              writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
+              writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
               writeln!(&mut dot, "  rankdir=LR;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
-              let mut defined_states = BTreeSet::new();
-              let mut edges = BTreeSet::new();
-              // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-              let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
+              let mut node_ids = HashMap::new();
+              let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
+              let mut traversal_queue = queue.clone();
 
-              let mut queue = VecDeque::new();
-              for (label, root) in roots {
-                  if !root.is_empty() {
-                      let root_arc = Arc::new((*root).clone());
-                      let root_states = root_connections.entry(label.to_string()).or_default();
-                      for (edge_val, _) in &root_arc.predecessors {
-                          root_states.insert(edge_val.state_id);
-                      }
-                      queue.push_back(root_arc);
+              // First, define all nodes
+              while let Some(node_arc) = traversal_queue.pop_front() {
+                  let node_ptr = Arc::as_ptr(&node_arc);
+                  if visited_nodes.contains(&node_ptr) {
+                      continue;
+                  }
+                  visited_nodes.insert(node_ptr);
+                  let next_id = node_ids.len();
+                  let node_id = *node_ids.entry(node_ptr).or_insert(next_id);
+
+                  let acc_str = crate::datastructures::gss::format_acc(
+                      &node_arc,
+                      &self.terminal_map,
+                      original_internal_bimap,
+                      llm_token_map,
+                  );
+                  let escaped_acc = acc_str
+                      .replace('\\', "\\\\")
+                      .replace('"', "\\\"")
+                      .replace('\n', "\\l")
+                      .replace('{', "\\{")
+                      .replace('}', "\\}")
+                      .replace('<', "\\<")
+                      .replace('>', "\\>");
+
+                  writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
+
+                  for peek in GSSNode::peek_iter(&node_arc) {
+                      traversal_queue.push_back(peek.predecessor_node().clone());
                   }
               }
 
+              // Define root labels and connect them
+              for (i, (label, root)) in roots.iter().enumerate() {
+                  let root_ptr = *root as *const GSSNode;
+                  if let Some(root_id) = node_ids.get(&root_ptr) {
+                      writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
+                      writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
+                      writeln!(&mut dot, "    style=filled;").unwrap();
+                      writeln!(&mut dot, "    color=lightgrey;").unwrap();
+                      writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
+                      let root_node_name = format!("Root_{}", i);
+                      writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
+                      writeln!(&mut dot, "  }}").unwrap();
+                      writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
+                  }
+              }
+
+              // Then, define all edges
+              visited_nodes.clear();
               while let Some(node_arc) = queue.pop_front() {
                   let node_ptr = Arc::as_ptr(&node_arc);
                   if !visited_nodes.insert(node_ptr) {
                       continue;
                   }
+                  let parent_id = node_ids[&node_ptr];
 
-                  for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                      let parent_state_id = edge_val.state_id;
-                      defined_states.insert(parent_state_id);
-
-                      for pred_vec in preds_by_depth.values() {
-                          for pred_arc in pred_vec {
-                              if pred_arc.predecessors.is_empty() {
-                                  edges.insert((Some(parent_state_id), None));
-                              } else {
-                                  for (pred_edge_val, _) in &pred_arc.predecessors {
-                                      let child_state_id = pred_edge_val.state_id;
-                                      edges.insert((Some(parent_state_id), Some(child_state_id)));
-                                  }
-                              }
-                              queue.push_back(pred_arc.clone());
-                          }
-                      }
-                  }
-              }
-
-              // Define root label nodes as separate nodes
-              writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-              writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-              writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-              for label in root_connections.keys() {
-                  writeln!(&mut dot, "    \"{}\";", label).unwrap();
-              }
-              writeln!(&mut dot, "  }}").unwrap();
-
-              // Define GSS state nodes
-              for state_id in &defined_states {
-                  let mut label = String::new();
-                  self.format_state_details(&mut label, *state_id, "").unwrap();
-                  let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-                  writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-              }
-
-              if edges.iter().any(|(_, to)| to.is_none()) {
-                  writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-              }
-
-              // Draw edges from root labels to GSS states
-              for (label, states) in &root_connections {
-                  for state_id in states {
-                      writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-                  }
-              }
-
-              // Draw edges between GSS states
-              for (from_opt, to_opt) in edges {
-                  match (from_opt, to_opt) {
-                      (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
-                      (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
-                      _ => {}
+                  for peek in GSSNode::peek_iter(&node_arc) {
+                      let pred_ptr = Arc::as_ptr(peek.predecessor_node());
+                      let pred_id = node_ids[&pred_ptr];
+                      let edge_label = format!("State {}", peek.edge_value().state_id.0);
+                      writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
+                      queue.push_back(peek.predecessor_node().clone());
                   }
               }
 
@@ -14073,8 +14084,13 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-              self.gss_forest_to_dot(&[("Root", root)])
+          pub fn gss_to_dot(
+              &self,
+              root: &GSSNode,
+              original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+              llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          ) -> String {
+              self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
           }
       }
 
@@ -16986,6 +17002,8 @@ messages:
       impl<'a> GSSPeek<'a> {
           pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
+          pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+
           /// Returns the combined `Acc` of the parent and the predecessor.
           pub fn resolved_acc(&self) -> Acc {
               Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)
@@ -17673,7 +17691,7 @@ messages:
       }
 
       /// Formats an accumulator for concise display in the GSS printout.
-      fn format_acc(
+      pub fn format_acc(
           node: &GSSNode,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -18967,7 +18985,11 @@ messages:
                   .map(|s| s.as_str())
                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
                   .collect();
-              println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
+              println!("{}", self.parent.parser.gss_forest_to_dot(
+                  &roots_with_labels,
+                  Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                  Some(&self.parent.llm_vocab.llm_token_map),
+              ));
               println!("\n\n--- End GSS Graphviz ---");
 
               for (state_id, state) in self.state.iter() {
@@ -21152,6 +21174,7 @@ messages:
       use std::any::Any;
       use std::cmp::Ordering;
       use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
+      use crate::tokenizer::LLMTokenID;
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -21159,7 +21182,7 @@ messages:
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-      use std::fmt::{Debug, Display, Formatter, Write};
+      use std::fmt::{self, Debug, Display, Formatter, Write};
       use std::hash::{DefaultHasher, Hash, Hasher};
       use std::sync::Arc;
       use crate::debug;
@@ -21169,6 +21192,7 @@ messages:
       use deterministic_hash::DeterministicHasher;
       use profiler_macro::{time_it, timeit};
       use crate::glr::automaton::compute_closure;
+      use std::collections::HashMap;
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
@@ -22243,97 +22267,92 @@ messages:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_to_dot(&self.active_state.stack)
+              self.parser.gss_to_dot(&self.active_state.stack, None, None)
           }
       }
 
       impl GLRParser {
           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
+          pub fn gss_forest_to_dot(
+              &self,
+              roots: &[(&str, &GSSNode)],
+              original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+              llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          ) -> String {
               let mut dot = String::new();
-              writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
+              writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
               writeln!(&mut dot, "  rankdir=LR;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
-              let mut defined_states = BTreeSet::new();
-              let mut edges = BTreeSet::new();
-              // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-              let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
+              let mut node_ids = HashMap::new();
+              let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
+              let mut traversal_queue = queue.clone();
 
-              let mut queue = VecDeque::new();
-              for (label, root) in roots {
-                  if !root.is_empty() {
-                      let root_arc = Arc::new((*root).clone());
-                      let root_states = root_connections.entry(label.to_string()).or_default();
-                      for (edge_val, _) in &root_arc.predecessors {
-                          root_states.insert(edge_val.state_id);
-                      }
-                      queue.push_back(root_arc);
+              // First, define all nodes
+              while let Some(node_arc) = traversal_queue.pop_front() {
+                  let node_ptr = Arc::as_ptr(&node_arc);
+                  if visited_nodes.contains(&node_ptr) {
+                      continue;
+                  }
+                  visited_nodes.insert(node_ptr);
+                  let next_id = node_ids.len();
+                  let node_id = *node_ids.entry(node_ptr).or_insert(next_id);
+
+                  let acc_str = crate::datastructures::gss::format_acc(
+                      &node_arc,
+                      &self.terminal_map,
+                      original_internal_bimap,
+                      llm_token_map,
+                  );
+                  let escaped_acc = acc_str
+                      .replace('\\', "\\\\")
+                      .replace('"', "\\\"")
+                      .replace('\n', "\\l")
+                      .replace('{', "\\{")
+                      .replace('}', "\\}")
+                      .replace('<', "\\<")
+                      .replace('>', "\\>");
+
+                  writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
+
+                  for peek in GSSNode::peek_iter(&node_arc) {
+                      traversal_queue.push_back(peek.predecessor_node().clone());
                   }
               }
 
+              // Define root labels and connect them
+              for (i, (label, root)) in roots.iter().enumerate() {
+                  let root_ptr = *root as *const GSSNode;
+                  if let Some(root_id) = node_ids.get(&root_ptr) {
+                      writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
+                      writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
+                      writeln!(&mut dot, "    style=filled;").unwrap();
+                      writeln!(&mut dot, "    color=lightgrey;").unwrap();
+                      writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
+                      let root_node_name = format!("Root_{}", i);
+                      writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
+                      writeln!(&mut dot, "  }}").unwrap();
+                      writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
+                  }
+              }
+
+              // Then, define all edges
+              visited_nodes.clear();
               while let Some(node_arc) = queue.pop_front() {
                   let node_ptr = Arc::as_ptr(&node_arc);
                   if !visited_nodes.insert(node_ptr) {
                       continue;
                   }
+                  let parent_id = node_ids[&node_ptr];
 
-                  for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                      let parent_state_id = edge_val.state_id;
-                      defined_states.insert(parent_state_id);
-
-                      for pred_vec in preds_by_depth.values() {
-                          for pred_arc in pred_vec {
-                              if pred_arc.predecessors.is_empty() {
-                                  edges.insert((Some(parent_state_id), None));
-                              } else {
-                                  for (pred_edge_val, _) in &pred_arc.predecessors {
-                                      let child_state_id = pred_edge_val.state_id;
-                                      edges.insert((Some(parent_state_id), Some(child_state_id)));
-                                  }
-                              }
-                              queue.push_back(pred_arc.clone());
-                          }
-                      }
-                  }
-              }
-
-              // Define root label nodes as separate nodes
-              writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-              writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-              writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-              for label in root_connections.keys() {
-                  writeln!(&mut dot, "    \"{}\";", label).unwrap();
-              }
-              writeln!(&mut dot, "  }}").unwrap();
-
-              // Define GSS state nodes
-              for state_id in &defined_states {
-                  let mut label = String::new();
-                  self.format_state_details(&mut label, *state_id, "").unwrap();
-                  let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-                  writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-              }
-
-              if edges.iter().any(|(_, to)| to.is_none()) {
-                  writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-              }
-
-              // Draw edges from root labels to GSS states
-              for (label, states) in &root_connections {
-                  for state_id in states {
-                      writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-                  }
-              }
-
-              // Draw edges between GSS states
-              for (from_opt, to_opt) in edges {
-                  match (from_opt, to_opt) {
-                      (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
-                      (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
-                      _ => {}
+                  for peek in GSSNode::peek_iter(&node_arc) {
+                      let pred_ptr = Arc::as_ptr(peek.predecessor_node());
+                      let pred_id = node_ids[&pred_ptr];
+                      let edge_label = format!("State {}", peek.edge_value().state_id.0);
+                      writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
+                      queue.push_back(peek.predecessor_node().clone());
                   }
               }
 
@@ -22343,8 +22362,13 @@ messages:
 
           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-              self.gss_forest_to_dot(&[("Root", root)])
+          pub fn gss_to_dot(
+              &self,
+              root: &GSSNode,
+              original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+              llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          ) -> String {
+              self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
           }
       }
 
@@ -24718,1133 +24742,85 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Right now the graphviz shows the edge structure but not the node structure.
-      Fix it.
-      Show in the nodes the Accs, for instance.
+      Modify these to return `Arc<GSSNode>`.
+      - `GSSPopperItem::resolved_node` 
+      - `GSSPopperItemPeek::resolved_predecessor_node`
+      - `GSSPeek::resolved_predecessor_node`
+      And, if the resolved acc is the same as the existing one, it should just return a copy of the Arc as-is.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Modifying the Graphviz output to show the GSS node structure with `Acc` details is a great idea for better debugging. Here are the necessary changes to achieve this.
+      Of course! Dealing with graph-structured stacks can be tricky, and optimizing node creation is a great way to improve performance. Here are the requested changes to return an `Arc<GSSNode>` and avoid creating new nodes when the accumulated constraints haven't changed.
 
-      I'll adjust `gss_forest_to_dot` to render the GSS nodes and their connections, and update the relevant calls to provide the necessary data for formatting the node labels.
-
-      Here are the diffs for the files that need to be modified:
-
-      In `src/datastructures/gss.rs`, I'll make `format_acc` public so it can be used by the parser module to generate the Graphviz labels.
+      Here is the git diff for the modifications:
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -1211,7 +1211,7 @@
-       }
+      @@ -201,13 +201,17 @@
        
-       /// Formats an accumulator for concise display in the GSS printout.
-      -fn format_acc(
-      +pub fn format_acc(
-           node: &GSSNode,
-           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-
-      ```
-
-      Next, in `src/glr/parser.rs`, I'll replace the implementation of `gss_forest_to_dot` to render the GSS node structure instead of the state machine. I'll also update the signatures and calls to `gss_to_dot` and `gss_forest_to_dot` to pass along the necessary vocabulary information for formatting the `Acc` details within the nodes.
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -1000,100 +1000,91 @@
-           }
-       
-           /// Generates a Graphviz DOT representation of the GSS state graph.
-           pub fn gss_to_dot(&self) -> String {
-      -        self.parser.gss_to_dot(&self.active_state.stack)
-      +        self.parser.gss_to_dot(&self.active_state.stack, None, None)
-           }
-       }
-       
-       impl GLRParser {
-           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
-           /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
-      +    pub fn gss_forest_to_dot(
-      +        &self,
-      +        roots: &[(&str, &GSSNode)],
-      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +    ) -> String {
-               let mut dot = String::new();
-      -        writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-      +        writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
-               writeln!(&mut dot, "  rankdir=LR;").unwrap();
-               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
-       
-               let mut visited_nodes = HashSet::new();
-      -        let mut defined_states = BTreeSet::new();
-      -        let mut edges = BTreeSet::new();
-      -        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-      -        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
-      -
-      -        let mut queue = VecDeque::new();
-      -        for (label, root) in roots {
-      -            if !root.is_empty() {
-      -                let root_arc = Arc::new((*root).clone());
-      -                let root_states = root_connections.entry(label.to_string()).or_default();
-      -                for (edge_val, _) in &root_arc.predecessors {
-      -                    root_states.insert(edge_val.state_id);
-      -                }
-      -                queue.push_back(root_arc);
-      -            }
-      -        }
-      -
-      -        while let Some(node_arc) = queue.pop_front() {
-      +        let mut node_ids = HashMap::new();
-      +        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
-      +        let mut traversal_queue = queue.clone();
-      +
-      +        // First, define all nodes
-      +        while let Some(node_arc) = traversal_queue.pop_front() {
-                   let node_ptr = Arc::as_ptr(&node_arc);
-      -            if !visited_nodes.insert(node_ptr) {
-      +            if visited_nodes.contains(&node_ptr) {
-                       continue;
-                   }
-      -
-      -            for (edge_val, preds_by_depth) in &node_arc.predecessors {
-      -                let parent_state_id = edge_val.state_id;
-      -                defined_states.insert(parent_state_id);
-      -
-      -                for pred_vec in preds_by_depth.values() {
-      -                    for pred_arc in pred_vec {
-      -                        if pred_arc.predecessors.is_empty() {
-      -                            edges.insert((Some(parent_state_id), None));
-      -                        } else {
-      -                            for (pred_edge_val, _) in &pred_arc.predecessors {
-      -                                let child_state_id = pred_edge_val.state_id;
-      -                                edges.insert((Some(parent_state_id), Some(child_state_id)));
-      -                            }
-      -                        }
-      -                        queue.push_back(pred_arc.clone());
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // Define root label nodes as separate nodes
-      -        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-      -        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-      -        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-      -        for label in root_connections.keys() {
-      -            writeln!(&mut dot, "    \"{}\";", label).unwrap();
-      -        }
-      -        writeln!(&mut dot, "  }}").unwrap();
-      -
-      -        // Define GSS state nodes
-      -        for state_id in &defined_states {
-      -            let mut label = String::new();
-      -            self.format_state_details(&mut label, *state_id, "").unwrap();
-      -            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-      -            writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-      -        }
-      -
-      -        if edges.iter().any(|(_, to)| to.is_none()) {
-      -            writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-      -        }
-      -
-      -        // Draw edges from root labels to GSS states
-      -        for (label, states) in &root_connections {
-      -            for state_id in states {
-      -                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-      -            }
-      -        }
-      -
-      -        // Draw edges between GSS states
-      -        for (from_opt, to_opt) in edges {
-      -            match (from_opt, to_opt) {
-      -                (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
-      -                (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
-      -                _ => {}
-      +            visited_nodes.insert(node_ptr);
-      +            let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
-      +
-      +            let acc_str = crate::datastructures::gss::format_acc(
-      +                &node_arc,
-      +                &self.terminal_map,
-      +                original_internal_bimap,
-      +                llm_token_map,
-      +            );
-      +            let escaped_acc = acc_str
-      +                .replace('\\', "\\\\")
-      +                .replace('"', "\\\"")
-      +                .replace('\n', "\\l")
-      +                .replace('{', "\\{")
-      +                .replace('}', "\\}")
-      +                .replace('<', "\\<")
-      +                .replace('>', "\\>");
-      +
-      +            writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
-      +
-      +            for peek in GSSNode::peek_iter(&node_arc) {
-      +                traversal_queue.push_back(peek.predecessor_node.clone());
-      +            }
+           /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
+           /// resolved against the path's `Acc`.
+      -    pub fn resolved_node(&self) -> GSSNode {
+      -        GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.node.predecessors.clone())
+      +    pub fn resolved_node(&self) -> Arc<GSSNode> {
+      +        let resolved_acc = self.resolved_acc();
+      +        if *self.node.acc == resolved_acc {
+      +            return self.node.clone();
       +        }
-      +
-      +        // Define root labels and connect them
-      +        for (i, (label, root)) in roots.iter().enumerate() {
-      +            let root_ptr = *root as *const GSSNode;
-      +            if let Some(root_id) = node_ids.get(&root_ptr) {
-      +                writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
-      +                writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
-      +                writeln!(&mut dot, "    style=filled;").unwrap();
-      +                writeln!(&mut dot, "    color=lightgrey;").unwrap();
-      +                writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
-      +                let root_node_name = format!("Root_{}", i);
-      +                writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
-      +                writeln!(&mut dot, "  }}").unwrap();
-      +                writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
-      +            }
+      +        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.node.predecessors.clone()))
+           }
+       
+           /// Pushes a new state onto the resolved node from this popper item.
+           pub fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+      -        self.resolved_node().push(edge_value)
+      +        self.resolved_node().as_ref().push(edge_value)
+           }
+       
+           pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+      @@ -234,8 +238,12 @@
+       
+           /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
+           /// resolved against the path's `Acc`.
+      -    pub fn resolved_predecessor_node(&self) -> GSSNode {
+      -        GSSNode::new_with_map(Arc::new(self.resolved_acc()), self.predecessor_node.predecessors.clone())
+      +    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+      +        let resolved_acc = self.resolved_acc();
+      +        if *self.predecessor_node.acc == resolved_acc {
+      +            return self.predecessor_node.clone();
       +        }
-      +
-      +        // Then, define all edges
-      +        visited_nodes.clear();
-      +        while let Some(node_arc) = queue.pop_front() {
-      +            let node_ptr = Arc::as_ptr(&node_arc);
-      +            if !visited_nodes.insert(node_ptr) {
-      +                continue;
-      +            }
-      +            let parent_id = node_ids[&node_ptr];
-      +
-      +            for peek in GSSNode::peek_iter(&node_arc) {
-      +                let pred_ptr = Arc::as_ptr(peek.predecessor_node);
-      +                let pred_id = node_ids[&pred_ptr];
-      +                let edge_label = format!("State {}", peek.edge_value().state_id.0);
-      +                writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
-      +                queue.push_back(peek.predecessor_node.clone());
-                   }
-               }
-       
-      @@ -1106,8 +1079,13 @@
-       
-           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
-           /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-      -        self.gss_forest_to_dot(&[("Root", root)])
-      +    pub fn gss_to_dot(
-      +        &self,
-      +        root: &GSSNode,
-      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +    ) -> String {
-      +        self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
+      +        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone()))
            }
-       }
        
-
-      ```
-
-      Finally, I'll update the call to `gss_forest_to_dot` in `src/constraint.rs` to pass the required vocabulary information.
-
-      ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1310,7 +1310,11 @@
-                   .map(|s| s.as_str())
-                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-                   .collect();
-      -        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
-      +        println!("{}", self.parent.parser.gss_forest_to_dot(
-      +            &roots_with_labels,
-      +            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-      +            Some(&self.parent.llm_vocab.llm_token_map),
-      +        ));
-               println!("\n\n--- End GSS Graphviz ---");
+           /// Pushes a new state onto the resolved predecessor.
+      @@ -599,9 +607,13 @@
        
-               for (state_id, state) in self.state.iter() {
-
-      ```
-
-      These changes should give you the detailed Graphviz output you're looking for. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-    metadata:
-  - user: |-
-      Diff of src/datastructures/gss.rs since previous turn:
-      ```diff
-      --- original version of src/datastructures/gss.rs+++ current version of src/datastructures/gss.rs@@ -1218,7 +1218,7 @@ }
-       
-       /// Formats an accumulator for concise display in the GSS printout.
-      -fn format_acc(
-      +pub fn format_acc(
-           node: &GSSNode,
-           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -1049,7 +1049,11 @@             .map(|s| s.as_str())
-                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-                   .collect();
-      -        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
-      +        println!("{}", self.parent.parser.gss_forest_to_dot(
-      +            &roots_with_labels,
-      +            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-      +            Some(&self.parent.llm_vocab.llm_token_map),
-      +        ));
-               println!("\n\n--- End GSS Graphviz ---");
-       
-               for (state_id, state) in self.state.iter() {
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -1092,97 +1092,91 @@ 
-           /// Generates a Graphviz DOT representation of the GSS state graph.
-           pub fn gss_to_dot(&self) -> String {
-      -        self.parser.gss_to_dot(&self.active_state.stack)
-      +        self.parser.gss_to_dot(&self.active_state.stack, None, None)
-           }
-       }
-       
-       impl GLRParser {
-           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
-           /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
-      +    pub fn gss_forest_to_dot(
-      +        &self,
-      +        roots: &[(&str, &GSSNode)],
-      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +    ) -> String {
-               let mut dot = String::new();
-      -        writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-      +        writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
-               writeln!(&mut dot, "  rankdir=LR;").unwrap();
-               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
-       
-               let mut visited_nodes = HashSet::new();
-      -        let mut defined_states = BTreeSet::new();
-      -        let mut edges = BTreeSet::new();
-      -        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-      -        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
-      -
-      -        let mut queue = VecDeque::new();
-      -        for (label, root) in roots {
-      -            if !root.is_empty() {
-      -                let root_arc = Arc::new((*root).clone());
-      -                let root_states = root_connections.entry(label.to_string()).or_default();
-      -                for (edge_val, _) in &root_arc.predecessors {
-      -                    root_states.insert(edge_val.state_id);
-      -                }
-      -                queue.push_back(root_arc);
-      -            }
-      -        }
-      -
-      +        let mut node_ids = HashMap::new();
-      +        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
-      +        let mut traversal_queue = queue.clone();
-      +
-      +        // First, define all nodes
-      +        while let Some(node_arc) = traversal_queue.pop_front() {
-      +            let node_ptr = Arc::as_ptr(&node_arc);
-      +            if visited_nodes.contains(&node_ptr) {
-      +                continue;
-      +            }
-      +            visited_nodes.insert(node_ptr);
-      +            let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
-      +
-      +            let acc_str = crate::datastructures::gss::format_acc(
-      +                &node_arc,
-      +                &self.terminal_map,
-      +                original_internal_bimap,
-      +                llm_token_map,
-      +            );
-      +            let escaped_acc = acc_str
-      +                .replace('\\', "\\\\")
-      +                .replace('"', "\\\"")
-      +                .replace('\n', "\\l")
-      +                .replace('{', "\\{")
-      +                .replace('}', "\\}")
-      +                .replace('<', "\\<")
-      +                .replace('>', "\\>");
-      +
-      +            writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
-      +
-      +            for peek in GSSNode::peek_iter(&node_arc) {
-      +                traversal_queue.push_back(peek.predecessor_node.clone());
-      +            }
+           /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
+           /// resolved against the parent's `Acc`.
+      -    pub fn resolved_predecessor_node(&self) -> GSSNode {
+      +    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+               let resolved_acc = self.resolved_acc();
+      -        GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone())
+      +        if *self.predecessor_node.acc == resolved_acc {
+      +            return self.predecessor_node.clone();
       +        }
-      +
-      +        // Define root labels and connect them
-      +        for (i, (label, root)) in roots.iter().enumerate() {
-      +            let root_ptr = *root as *const GSSNode;
-      +            if let Some(root_id) = node_ids.get(&root_ptr) {
-      +                writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
-      +                writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
-      +                writeln!(&mut dot, "    style=filled;").unwrap();
-      +                writeln!(&mut dot, "    color=lightgrey;").unwrap();
-      +                writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
-      +                let root_node_name = format!("Root_{}", i);
-      +                writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
-      +                writeln!(&mut dot, "  }}").unwrap();
-      +                writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
-      +            }
-      +        }
-      +
-      +        // Then, define all edges
-      +        visited_nodes.clear();
-               while let Some(node_arc) = queue.pop_front() {
-                   let node_ptr = Arc::as_ptr(&node_arc);
-                   if !visited_nodes.insert(node_ptr) {
-                       continue;
-                   }
-      -
-      -            for (edge_val, preds_by_depth) in &node_arc.predecessors {
-      -                let parent_state_id = edge_val.state_id;
-      -                defined_states.insert(parent_state_id);
-      -
-      -                for pred_vec in preds_by_depth.values() {
-      -                    for pred_arc in pred_vec {
-      -                        if pred_arc.predecessors.is_empty() {
-      -                            edges.insert((Some(parent_state_id), None));
-      -                        } else {
-      -                            for (pred_edge_val, _) in &pred_arc.predecessors {
-      -                                let child_state_id = pred_edge_val.state_id;
-      -                                edges.insert((Some(parent_state_id), Some(child_state_id)));
-      -                            }
-      -                        }
-      -                        queue.push_back(pred_arc.clone());
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // Define root label nodes as separate nodes
-      -        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-      -        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-      -        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-      -        for label in root_connections.keys() {
-      -            writeln!(&mut dot, "    \"{}\";", label).unwrap();
-      -        }
-      -        writeln!(&mut dot, "  }}").unwrap();
-      -
-      -        // Define GSS state nodes
-      -        for state_id in &defined_states {
-      -            let mut label = String::new();
-      -            self.format_state_details(&mut label, *state_id, "").unwrap();
-      -            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-      -            writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-      -        }
-      -
-      -        if edges.iter().any(|(_, to)| to.is_none()) {
-      -            writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-      -        }
-      -
-      -        // Draw edges from root labels to GSS states
-      -        for (label, states) in &root_connections {
-      -            for state_id in states {
-      -                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-      -            }
-      -        }
-      -
-      -        // Draw edges between GSS states
-      -        for (from_opt, to_opt) in edges {
-      -            match (from_opt, to_opt) {
-      -                (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
-      -                (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
-      -                _ => {}
-      +            let parent_id = node_ids[&node_ptr];
-      +
-      +            for peek in GSSNode::peek_iter(&node_arc) {
-      +                let pred_ptr = Arc::as_ptr(peek.predecessor_node);
-      +                let pred_id = node_ids[&pred_ptr];
-      +                let edge_label = format!("State {}", peek.edge_value().state_id.0);
-      +                writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
-      +                queue.push_back(peek.predecessor_node.clone());
-                   }
-               }
-       
-      @@ -1192,8 +1186,13 @@ 
-           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
-           /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-      -        self.gss_forest_to_dot(&[("Root", root)])
-      +    pub fn gss_to_dot(
-      +        &self,
-      +        root: &GSSNode,
-      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +    ) -> String {
-      +        self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
+      +        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone()))
            }
-       }
        
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture 2>&1 | tee .temp2; python analyze_timings.py .temp2
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0412]: cannot find type `LLMTokenID` in this scope
-          --> src/glr/parser.rs:1106:52
-           |
-      1106 |         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-           |                                                    ^^^^^^^^^^
-           |
-          ::: src/constraint.rs:42:1
-           |
-      42   | pub type LLMTokenBV = HybridBitset;
-           | ----------------------------------- similarly named type alias `LLMTokenBV` defined here
-           |
-      help: a type alias with a similar name exists
-           |
-      1106 -         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      1106 +         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenBV>>,
-           |
-      help: consider importing this struct
-           |
-      1    + use crate::tokenizer::LLMTokenID;
-           |
-
-      error[E0433]: failed to resolve: use of undeclared type `HashMap`
-          --> src/glr/parser.rs:1114:28
-           |
-      1114 |         let mut node_ids = HashMap::new();
-           |                            ^^^^^^^ use of undeclared type `HashMap`
-           |
-           = note: struct `crate::json_serialization::tests::HashMap` exists but is inaccessible
-      help: consider importing this struct
-           |
-      1    + use std::collections::HashMap;
-           |
-
-      error[E0412]: cannot find type `LLMTokenID` in this scope
-          --> src/glr/parser.rs:1193:52
-           |
-      1193 |         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-           |                                                    ^^^^^^^^^^
-           |
-          ::: src/constraint.rs:42:1
-           |
-      42   | pub type LLMTokenBV = HybridBitset;
-           | ----------------------------------- similarly named type alias `LLMTokenBV` defined here
-           |
-      help: a type alias with a similar name exists
-           |
-      1193 -         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      1193 +         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenBV>>,
-           |
-      help: consider importing this struct
-           |
-      1    + use crate::tokenizer::LLMTokenID;
-           |
-
-      error[E0277]: a value of type `VecDeque<std::sync::Arc<gss::GSSNode>>` cannot be built from an iterator over elements of type `std::sync::Arc<&gss::GSSNode>`
-          --> src/glr/parser.rs:1115:96
-           |
-      1115 |         let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
-           |                                                                                                ^^^^^^^ value of type `VecDeque<std::sync::Arc<gss::GSSNode>>` cannot be built from `std::iter::Iterator<Item=std::sync::Arc<&gss::GSSNode>>`
-           |
-           = help: the trait `FromIterator<std::sync::Arc<&gss::GSSNode>>` is not implemented for `VecDeque<std::sync::Arc<gss::GSSNode>>`
-                   but trait `FromIterator<std::sync::Arc<gss::GSSNode>>` is implemented for it
-           = help: for that trait implementation, expected `gss::GSSNode`, found `&gss::GSSNode`
-      note: the method call chain might not have had the expected associated types
-          --> src/glr/parser.rs:1115:62
-           |
-      1115 |         let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
-           |                                                 ----- ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Iterator::Item` changed to `Arc<&GSSNode>` here
-           |                                                 |     |
-           |                                                 |     `Iterator::Item` is `&(&str, &GSSNode)` here
-           |                                                 this expression has type `&[(&str, &GSSNode)]`
-      note: required by a bound in `collect`
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:1988:19
-           |
-      1988 |     fn collect<B: FromIterator<Self::Item>>(self) -> B
-           |                   ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Iterator::collect`
-
-      error[E0616]: field `predecessor_node` of struct `GSSPeek` is private
-          --> src/glr/parser.rs:1145:48
-           |
-      1145 |                 traversal_queue.push_back(peek.predecessor_node.clone());
-           |                                                ^^^^^^^^^^^^^^^^ private field
-
-      error[E0616]: field `predecessor_node` of struct `GSSPeek` is private
-          --> src/glr/parser.rs:1175:49
-           |
-      1175 |                 let pred_ptr = Arc::as_ptr(peek.predecessor_node);
-           |                                                 ^^^^^^^^^^^^^^^^ private field
-
-      error[E0616]: field `predecessor_node` of struct `GSSPeek` is private
-          --> src/glr/parser.rs:1179:38
-           |
-      1179 |                 queue.push_back(peek.predecessor_node.clone());
-           |                                      ^^^^^^^^^^^^^^^^ private field
-
-      Some errors have detailed explanations: E0277, E0412, E0433, E0616.
-      For more information about an error, try `rustc --explain E0277`.
-      error: could not compile `sep1` (lib test) due to 7 previous errors
-      /Users/isaacbreen/Projects2/grammars2024/analyze_timings.py:264: SyntaxWarning: invalid escape sequence '\/'
-        """
-      Error: Source code block not found in log file.
-      Please ensure the log contains a block like:
-      ---BEGIN-SOURCE-JSON---
-      "...source..."
-      ---END-SOURCE-JSON---
-    metadata:
-  - assistant: |-
-      Of course! Dealing with compilation errors can be tricky, but I'm here to help you sort them out. Based on the errors you've provided, it looks like there are a few issues with imports, private field access, and iterator collection logic.
-
-      Here are the patches to fix the compilation errors:
-
-      First, I'll add a public accessor for `predecessor_node` in `GSSPeek` to resolve the privacy error.
-
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -141,6 +141,8 @@
-       
-       impl<'a> GSSPeek<'a> {
-           pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
-      +
-      +    pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
-       
-           /// Returns the combined `Acc` of the parent and the predecessor.
-           pub fn resolved_acc(&self) -> Acc {
+           /// Pushes a new state onto the resolved predecessor.
 
       ```
 
-      Next, I'll fix the issues in `src/glr/parser.rs`. This includes adding necessary imports, correcting the `collect` call, and using the new `predecessor_node` accessor.
+      I've updated `GSSPopperItem::resolved_node`, `GSSPopperItemPeek::resolved_predecessor_node`, and `GSSPeek::resolved_predecessor_node` to return an `Arc<GSSNode>`. They now check if the resolved accumulator is the same as the existing one and, if so, return a clone of the existing `Arc` to avoid unnecessary allocations. I also updated `GSSPopperItem::push` to correctly handle the new return type.
 
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -1,6 +1,7 @@
-       use std::any::Any;
-       use std::cmp::Ordering;
-       use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
-      +use crate::tokenizer::LLMTokenID;
-       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-      @@ -8,7 +9,7 @@
-       
-       use bimap::BiBTreeMap;
-       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-      -use std::fmt::{Debug, Display, Formatter, Write};
-      +use std::fmt::{self, Debug, Display, Formatter, Write};
-       use std::hash::{DefaultHasher, Hash, Hasher};
-       use std::sync::Arc;
-       use crate::debug;
-      @@ -18,6 +19,7 @@
-       use deterministic_hash::DeterministicHasher;
-       use profiler_macro::{time_it, timeit};
-       use crate::glr::automaton::compute_closure;
-      +use std::collections::HashMap;
-       use crate::glr::items::{Item, LRMode, LR_MODE};
-       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
-       
-      @@ -1092,7 +1094,7 @@
-               &self,
-               roots: &[(&str, &GSSNode)],
-               original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      -        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-           ) -> String {
-               let mut dot = String::new();
-               writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
-      @@ -1100,8 +1102,8 @@
-               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
-       
-               let mut visited_nodes = HashSet::new();
-      -        let mut node_ids = HashMap::new();
-      -        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
-      +        let mut node_ids = HashMap::new();
-      +        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
-               let mut traversal_queue = queue.clone();
-       
-               // First, define all nodes
-      @@ -1133,7 +1135,7 @@
-                   writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
-       
-                   for peek in GSSNode::peek_iter(&node_arc) {
-      -                traversal_queue.push_back(peek.predecessor_node.clone());
-      +                traversal_queue.push_back(peek.predecessor_node().clone());
-                   }
-               }
-       
-      @@ -1160,11 +1162,11 @@
-                   let parent_id = node_ids[&node_ptr];
-       
-                   for peek in GSSNode::peek_iter(&node_arc) {
-      -                let pred_ptr = Arc::as_ptr(peek.predecessor_node);
-      +                let pred_ptr = Arc::as_ptr(peek.predecessor_node());
-                       let pred_id = node_ids[&pred_ptr];
-                       let edge_label = format!("State {}", peek.edge_value().state_id.0);
-                       writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
-      -                queue.push_back(peek.predecessor_node.clone());
-      +                queue.push_back(peek.predecessor_node().clone());
-                   }
-               }
-       
-      @@ -1177,7 +1179,7 @@
-               &self,
-               root: &GSSNode,
-               original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      -        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-           ) -> String {
-               self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
-           }
-
-      ```
-
-      These changes should resolve the compilation errors. Let me know if you encounter any more issues
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-    metadata:
-  - user: |-
-      Diff of src/datastructures/gss.rs since previous turn:
-      ```diff
-      --- original version of src/datastructures/gss.rs+++ current version of src/datastructures/gss.rs@@ -530,6 +530,8 @@ 
-       impl<'a> GSSPeek<'a> {
-           pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
-      +
-      +    pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
-       
-           /// Returns the combined `Acc` of the parent and the predecessor.
-           pub fn resolved_acc(&self) -> Acc {
-      @@ -1218,7 +1220,7 @@ }
-       
-       /// Formats an accumulator for concise display in the GSS printout.
-      -fn format_acc(
-      +pub fn format_acc(
-           node: &GSSNode,
-           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -1049,7 +1049,11 @@             .map(|s| s.as_str())
-                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-                   .collect();
-      -        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
-      +        println!("{}", self.parent.parser.gss_forest_to_dot(
-      +            &roots_with_labels,
-      +            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-      +            Some(&self.parent.llm_vocab.llm_token_map),
-      +        ));
-               println!("\n\n--- End GSS Graphviz ---");
-       
-               for (state_id, state) in self.state.iter() {
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -1,6 +1,7 @@ use std::any::Any;
-       use std::cmp::Ordering;
-       use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
-      +use crate::tokenizer::LLMTokenID;
-       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-      @@ -8,7 +9,7 @@ 
-       use bimap::BiBTreeMap;
-       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-      -use std::fmt::{Debug, Display, Formatter, Write};
-      +use std::fmt::{self, Debug, Display, Formatter, Write};
-       use std::hash::{DefaultHasher, Hash, Hasher};
-       use std::sync::Arc;
-       use crate::debug;
-      @@ -18,6 +19,7 @@ use deterministic_hash::DeterministicHasher;
-       use profiler_macro::{time_it, timeit};
-       use crate::glr::automaton::compute_closure;
-      +use std::collections::HashMap;
-       use crate::glr::items::{Item, LRMode, LR_MODE};
-       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
-       
-      @@ -1092,97 +1094,91 @@ 
-           /// Generates a Graphviz DOT representation of the GSS state graph.
-           pub fn gss_to_dot(&self) -> String {
-      -        self.parser.gss_to_dot(&self.active_state.stack)
-      +        self.parser.gss_to_dot(&self.active_state.stack, None, None)
-           }
-       }
-       
-       impl GLRParser {
-           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
-           /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
-      +    pub fn gss_forest_to_dot(
-      +        &self,
-      +        roots: &[(&str, &GSSNode)],
-      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +    ) -> String {
-               let mut dot = String::new();
-      -        writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-      +        writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
-               writeln!(&mut dot, "  rankdir=LR;").unwrap();
-               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
-       
-               let mut visited_nodes = HashSet::new();
-      -        let mut defined_states = BTreeSet::new();
-      -        let mut edges = BTreeSet::new();
-      -        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-      -        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
-      -
-      -        let mut queue = VecDeque::new();
-      -        for (label, root) in roots {
-      -            if !root.is_empty() {
-      -                let root_arc = Arc::new((*root).clone());
-      -                let root_states = root_connections.entry(label.to_string()).or_default();
-      -                for (edge_val, _) in &root_arc.predecessors {
-      -                    root_states.insert(edge_val.state_id);
-      -                }
-      -                queue.push_back(root_arc);
-      -            }
-      -        }
-      -
-      +        let mut node_ids = HashMap::new();
-      +        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
-      +        let mut traversal_queue = queue.clone();
-      +
-      +        // First, define all nodes
-      +        while let Some(node_arc) = traversal_queue.pop_front() {
-      +            let node_ptr = Arc::as_ptr(&node_arc);
-      +            if visited_nodes.contains(&node_ptr) {
-      +                continue;
-      +            }
-      +            visited_nodes.insert(node_ptr);
-      +            let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
-      +
-      +            let acc_str = crate::datastructures::gss::format_acc(
-      +                &node_arc,
-      +                &self.terminal_map,
-      +                original_internal_bimap,
-      +                llm_token_map,
-      +            );
-      +            let escaped_acc = acc_str
-      +                .replace('\\', "\\\\")
-      +                .replace('"', "\\\"")
-      +                .replace('\n', "\\l")
-      +                .replace('{', "\\{")
-      +                .replace('}', "\\}")
-      +                .replace('<', "\\<")
-      +                .replace('>', "\\>");
-      +
-      +            writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
-      +
-      +            for peek in GSSNode::peek_iter(&node_arc) {
-      +                traversal_queue.push_back(peek.predecessor_node().clone());
-      +            }
-      +        }
-      +
-      +        // Define root labels and connect them
-      +        for (i, (label, root)) in roots.iter().enumerate() {
-      +            let root_ptr = *root as *const GSSNode;
-      +            if let Some(root_id) = node_ids.get(&root_ptr) {
-      +                writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
-      +                writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
-      +                writeln!(&mut dot, "    style=filled;").unwrap();
-      +                writeln!(&mut dot, "    color=lightgrey;").unwrap();
-      +                writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
-      +                let root_node_name = format!("Root_{}", i);
-      +                writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
-      +                writeln!(&mut dot, "  }}").unwrap();
-      +                writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
-      +            }
-      +        }
-      +
-      +        // Then, define all edges
-      +        visited_nodes.clear();
-               while let Some(node_arc) = queue.pop_front() {
-                   let node_ptr = Arc::as_ptr(&node_arc);
-                   if !visited_nodes.insert(node_ptr) {
-                       continue;
-                   }
-      -
-      -            for (edge_val, preds_by_depth) in &node_arc.predecessors {
-      -                let parent_state_id = edge_val.state_id;
-      -                defined_states.insert(parent_state_id);
-      -
-      -                for pred_vec in preds_by_depth.values() {
-      -                    for pred_arc in pred_vec {
-      -                        if pred_arc.predecessors.is_empty() {
-      -                            edges.insert((Some(parent_state_id), None));
-      -                        } else {
-      -                            for (pred_edge_val, _) in &pred_arc.predecessors {
-      -                                let child_state_id = pred_edge_val.state_id;
-      -                                edges.insert((Some(parent_state_id), Some(child_state_id)));
-      -                            }
-      -                        }
-      -                        queue.push_back(pred_arc.clone());
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // Define root label nodes as separate nodes
-      -        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-      -        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-      -        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-      -        for label in root_connections.keys() {
-      -            writeln!(&mut dot, "    \"{}\";", label).unwrap();
-      -        }
-      -        writeln!(&mut dot, "  }}").unwrap();
-      -
-      -        // Define GSS state nodes
-      -        for state_id in &defined_states {
-      -            let mut label = String::new();
-      -            self.format_state_details(&mut label, *state_id, "").unwrap();
-      -            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-      -            writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-      -        }
-      -
-      -        if edges.iter().any(|(_, to)| to.is_none()) {
-      -            writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-      -        }
-      -
-      -        // Draw edges from root labels to GSS states
-      -        for (label, states) in &root_connections {
-      -            for state_id in states {
-      -                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-      -            }
-      -        }
-      -
-      -        // Draw edges between GSS states
-      -        for (from_opt, to_opt) in edges {
-      -            match (from_opt, to_opt) {
-      -                (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
-      -                (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
-      -                _ => {}
-      +            let parent_id = node_ids[&node_ptr];
-      +
-      +            for peek in GSSNode::peek_iter(&node_arc) {
-      +                let pred_ptr = Arc::as_ptr(peek.predecessor_node());
-      +                let pred_id = node_ids[&pred_ptr];
-      +                let edge_label = format!("State {}", peek.edge_value().state_id.0);
-      +                writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
-      +                queue.push_back(peek.predecessor_node().clone());
-                   }
-               }
-       
-      @@ -1192,8 +1188,13 @@ 
-           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
-           /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-      -        self.gss_forest_to_dot(&[("Root", root)])
-      +    pub fn gss_to_dot(
-      +        &self,
-      +        root: &GSSNode,
-      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-      +    ) -> String {
-      +        self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
-           }
-       }
-       
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture 2>&1 | tee .temp2; python analyze_timings.py .temp2
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0502]: cannot borrow `node_ids` as immutable because it is also borrowed as mutable
-          --> src/glr/parser.rs:1127:67
-           |
-      1127 |             let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
-           |                           --------                 -------------- ^^ -------- second borrow occurs due to use of `node_ids` in closure
-           |                           |                        |              |
-           |                           |                        |              immutable borrow occurs here
-           |                           |                        mutable borrow later used by call
-           |                           mutable borrow occurs here
-
-      For more information about this error, try `rustc --explain E0502`.
-      error: could not compile `sep1` (lib test) due to 1 previous error
-      /Users/isaacbreen/Projects2/grammars2024/analyze_timings.py:264: SyntaxWarning: invalid escape sequence '\/'
-        """
-      Error: Source code block not found in log file.
-      Please ensure the log contains a block like:
-      ---BEGIN-SOURCE-JSON---
-      "...source..."
-      ---END-SOURCE-JSON---
-    metadata:
-  - assistant: |-
-      You've run into a classic Rust borrow checker puzzle! The error `E0502` happens because you're trying to mutably borrow `node_ids` (with `.entry()`) and immutably borrow it at the same time (with `.len()` inside the closure).
-
-      I can fix that for you. The solution is to get the length of the map *before* calling `.entry()`, so the borrows don't overlap.
-
-      Here is the patch for `src/glr/parser.rs`:
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -1124,7 +1124,8 @@
-                       continue;
-                   }
-                   visited_nodes.insert(node_ptr);
-      -            let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
-      +            let next_id = node_ids.len();
-      +            let node_id = *node_ids.entry(node_ptr).or_insert(next_id);
-       
-                   let acc_str = crate::datastructures::gss::format_acc(
-                       &node_arc,
-
-      ```
-
-      This change resolves the borrowing conflict and should get your code compiling again. Let me know if you have any other questions
+      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
 ...
