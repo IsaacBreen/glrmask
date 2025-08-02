@@ -893,6 +893,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // }
                                 crate::debug!(4, "Pushing {} goto states to new GSS node", goto_state_ids.len());
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
+
+                                let stats = gather_gss_stats(&[&new_gss_node]);
+                                assert!(stats.unique_nodes <= 5, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes);
+
                                 out.push(new_gss_node);
                             }
                         }
@@ -909,11 +913,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Arc::new(out_node)
                         };
-
+                        let stats = gather_gss_stats(&[&new_stack_part]);
+                        assert!(stats.unique_nodes <= 5, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes);
 
                         // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack_part.is_empty() {
                             reduced_stack.merge_with_depth(1, &new_stack_part);
+
+                            let stats = gather_gss_stats(&[&reduced_stack]);
+                            assert!(stats.unique_nodes <= 5, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes);
                         }
                     }
 
@@ -926,6 +934,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             work_map.entry((new_depth, new_state_id))
                                 .and_modify(|s| s.merge(isolated.clone()))
                                 .or_insert(isolated);
+                        }
+
+                        for ((new_depth, new_state_id), new_stack) in work_map.iter() {
+                            let stats = gather_gss_stats(&[&new_stack.stack]);
+                            assert!(stats.unique_nodes <= 5, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes);
                         }
                     }
                     });
