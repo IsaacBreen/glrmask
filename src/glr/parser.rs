@@ -557,7 +557,7 @@ impl Display for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO: this is bad. make this better
         // Display the stack
-        self.log_gss("    ", TerminalID(0), false);
+        self.log_gss("    ", TerminalID(0), false, false);
         Ok(())
     }
 }
@@ -733,7 +733,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
 
-        self.log_gss("Phase1/2-start", token_id, false);
+        self.log_gss("Phase1/2-start", token_id, false, false);
 
         let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
@@ -760,12 +760,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
             next_active.merge(state);
         }
         self.active_state = next_active;
-        self.log_gss("Phase1/2-end", token_id, false);
+        self.log_gss("Phase1/2-end", token_id, false, false);
     }
 
     #[time_it("GLRParserState::process_default_reductions")]
     pub fn process_default_reductions(&mut self) {
-        self.log_gss("Phase3-start", TerminalID(0), false); // Log with dummy token ID
+        self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
             return;
@@ -930,7 +930,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
         self.active_state = next_active_state;
         self.phase = ParserPhase::ReadyForToken;
-        self.log_gss("Phase3-end", TerminalID(0), false); // Log with dummy token ID
+        self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
@@ -948,7 +948,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // self.active_state.hash(&mut hasher);
         // let self_hash = hasher.finish();
         // println!("GLRParserState::has_action_for: {:?}", self_hash);
-        self.log_gss("has_action_for-start", token_id, false);
+        self.log_gss("has_action_for-start", token_id, false, false);
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
             let row = &self.parser.table[&peek.edge_value().state_id];
@@ -1025,7 +1025,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     // #[time_it("GLRParserState::log_gss")]
-    pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool) {
+    pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         if !GSS_LOGGING_ENABLED {
             return;
         }
@@ -1073,6 +1073,86 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
+
+        if generate_dot {
+            let dot_string = self.gss_to_dot();
+            // Log the DOT string. It can be copied into a .dot file and rendered with Graphviz.
+            // e.g., `dot -Tpng -o gss.png gss.dot`
+            crate::debug!(1, "GSS DOT graph:\n{}", dot_string);
+        }
+    }
+
+    /// Generates a Graphviz DOT representation of the GSS state graph.
+    pub fn gss_to_dot(&self) -> String {
+        self.parser.gss_states_to_dot(&self.active_state.stack)
+    }
+}
+
+impl GLRParser {
+    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+    /// This visualizes the portion of the state machine explored by the parser.
+    pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
+        let mut dot = String::new();
+        writeln!(&mut dot, "digraph GSS_States {{").unwrap();
+        writeln!(&mut dot, "  rankdir=TB;").unwrap();
+        writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
+
+        let mut visited_nodes = HashSet::new();
+        let mut defined_states = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+
+        let mut queue = VecDeque::new();
+        if !root.is_empty() {
+            queue.push_back(Arc::new(root.clone()));
+        }
+
+        while let Some(node_arc) = queue.pop_front() {
+            let node_ptr = Arc::as_ptr(&node_arc);
+            if !visited_nodes.insert(node_ptr) {
+                continue;
+            }
+
+            for (edge_val, preds_by_depth) in &node_arc.predecessors {
+                let parent_state_id = edge_val.state_id;
+                defined_states.insert(parent_state_id);
+
+                for pred_vec in preds_by_depth.values() {
+                    for pred_arc in pred_vec {
+                        if pred_arc.predecessors.is_empty() {
+                            edges.insert((Some(parent_state_id), None));
+                        } else {
+                            for (pred_edge_val, _) in &pred_arc.predecessors {
+                                let child_state_id = pred_edge_val.state_id;
+                                edges.insert((Some(parent_state_id), Some(child_state_id)));
+                            }
+                        }
+                        queue.push_back(pred_arc.clone());
+                    }
+                }
+            }
+        }
+
+        for state_id in &defined_states {
+            let mut label = String::new();
+            self.format_state_details(&mut label, *state_id, "").unwrap();
+            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
+            writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
+        }
+
+        if edges.iter().any(|(_, to)| to.is_none()) {
+            writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
+        }
+
+        for (from_opt, to_opt) in edges {
+            match (from_opt, to_opt) {
+                (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
+                (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
+                _ => {}
+            }
+        }
+
+        writeln!(&mut dot, "}}").unwrap();
+        dot
     }
 }
 
