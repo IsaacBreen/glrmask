@@ -557,7 +557,7 @@ impl Display for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO: this is bad. make this better
         // Display the stack
-        self.log_gss("    ", TerminalID(0));
+        self.log_gss("    ", TerminalID(0), false);
         Ok(())
     }
 }
@@ -733,7 +733,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
 
-        self.log_gss("Phase1/2-start", token_id);
+        self.log_gss("Phase1/2-start", token_id, false);
 
         let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
@@ -760,12 +760,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
             next_active.merge(state);
         }
         self.active_state = next_active;
-        self.log_gss("Phase1/2-end", token_id);
+        self.log_gss("Phase1/2-end", token_id, false);
     }
 
     #[time_it("GLRParserState::process_default_reductions")]
     pub fn process_default_reductions(&mut self) {
-        self.log_gss("Phase3-start", TerminalID(0)); // Log with dummy token ID
+        self.log_gss("Phase3-start", TerminalID(0), false); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
             return;
@@ -930,7 +930,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
         self.active_state = next_active_state;
         self.phase = ParserPhase::ReadyForToken;
-        self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
+        self.log_gss("Phase3-end", TerminalID(0), false); // Log with dummy token ID
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
@@ -948,7 +948,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // self.active_state.hash(&mut hasher);
         // let self_hash = hasher.finish();
         // println!("GLRParserState::has_action_for: {:?}", self_hash);
-        self.log_gss("has_action_for-start", token_id);
+        self.log_gss("has_action_for-start", token_id, false);
         let mut llm_tokens = LLMTokenBV::zeros();
         for peek in self.active_state.stack.peek_iter() {
             let row = &self.parser.table[&peek.edge_value().state_id];
@@ -1025,7 +1025,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     // #[time_it("GLRParserState::log_gss")]
-    pub fn log_gss(&self, phase: &str, token: TerminalID) {
+    pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool) {
         if !GSS_LOGGING_ENABLED {
             return;
         }
@@ -1039,9 +1039,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
-            if print_full_forest {
-                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
+            let (gss_string, state_ids) = print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None);
+            let mut final_string = if print_full_forest {
+                format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
             } else {
                 match find_longest_path(&self.active_state.stack) {
                     Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
@@ -1054,6 +1054,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
                 }
             }
+
+            if explain_states && !state_ids.is_empty() {
+                final_string.push_str("\n\n--- GSS State Explanations ---\n");
+                for state_id in state_ids {
+                    let mut explanation = String::new();
+                    writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
+                    self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                    final_string.push_str(&explanation);
+                }
+            }
+            final_string
         };
 
         if stats.unique_nodes > PANIC_THRESHOLD {

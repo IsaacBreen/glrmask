@@ -14,6 +14,7 @@ use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::grammar::Terminal;
+use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use std::ops::{BitAnd, BitOr};
@@ -1100,7 +1101,7 @@ pub fn print_gss_forest(
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-) -> String {
+) -> (String, Vec<StateID>) {
     // if !GSS_LOGGING_ENABLED {
     //     return "".to_string();
     // }
@@ -1116,6 +1117,8 @@ pub fn print_gss_forest(
         terminal_map: &BiBTreeMap<Terminal, TerminalID>,
         original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+        state_ids_in_order: &mut Vec<StateID>,
+        seen_state_ids: &mut HashSet<StateID>,
     ) -> Result<(), std::fmt::Error> {
         let node_ptr = Arc::as_ptr(node_arc);
         if visited_nodes.contains(&node_ptr) {
@@ -1150,6 +1153,11 @@ pub fn print_gss_forest(
             let node_ids_len = node_ids.len();
             let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
+            // Collect state ID for explanation
+            if seen_state_ids.insert(edge_val.state_id) {
+                state_ids_in_order.push(edge_val.state_id);
+            }
+
             let acc_child = format_acc(pred_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
             writeln!(
                 output,
@@ -1160,7 +1168,7 @@ pub fn print_gss_forest(
 
             print_predecessors_recursive(
                 pred_arc, node_ids, visited_nodes, &new_prefix, node_count, max_nodes,
-                output, terminal_map, original_internal_bimap, llm_token_map,
+                output, terminal_map, original_internal_bimap, llm_token_map, state_ids_in_order, seen_state_ids,
             )?;
         }
         Ok(())
@@ -1170,8 +1178,10 @@ pub fn print_gss_forest(
     let mut visited_nodes = HashSet::new();
     let mut count = 0;
     let mut out_str = String::new();
+    let mut state_ids_in_order = Vec::new();
+    let mut seen_state_ids = HashSet::new();
 
-    if roots.is_empty() { return "GSS Forest: (No roots)".to_string(); }
+    if roots.is_empty() { return ("GSS Forest: (No roots)".to_string(), state_ids_in_order); }
     writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
 
     for (i, root_arc) in roots.iter().enumerate() {
@@ -1192,11 +1202,11 @@ pub fn print_gss_forest(
 
         let _ = print_predecessors_recursive(
             root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes,
-            &mut out_str, terminal_map, original_internal_bimap, llm_token_map,
+            &mut out_str, terminal_map, original_internal_bimap, llm_token_map, &mut state_ids_in_order, &mut seen_state_ids,
         );
     }
 
-    out_str
+    (out_str, state_ids_in_order)
 }
 
 /// Formats an accumulator for concise display in the GSS printout.
