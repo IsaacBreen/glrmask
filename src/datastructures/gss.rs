@@ -1163,6 +1163,7 @@ pub fn print_gss_forest(
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    verbose: bool,
 ) -> (String, Vec<StateID>) {
     // if !GSS_LOGGING_ENABLED {
     //     return "".to_string();
@@ -1181,6 +1182,7 @@ pub fn print_gss_forest(
         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
         state_ids_in_order: &mut Vec<StateID>,
         seen_state_ids: &mut HashSet<StateID>,
+        verbose: bool,
     ) -> Result<(), std::fmt::Error> {
         let node_ptr = Arc::as_ptr(node_arc);
         if visited_nodes.contains(&node_ptr) {
@@ -1221,16 +1223,25 @@ pub fn print_gss_forest(
             }
 
             let acc_child = format_acc(pred_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
-            writeln!(
-                output,
-                "{}{} Edge {:?} -> Node {} (depth {}) {}",
-                prefix, connector, edge_val.state_id, pred_id, pred_arc.max_depth, acc_child,
-            )?;
+            if verbose {
+                writeln!(
+                    output,
+                    "{}{} Edge {:?} -> Node {} (ptr: {:p}, hash: {:x}, depth: {}) {}",
+                    prefix, connector, edge_val.state_id, pred_id, pred_ptr, pred_arc.hash_key_cache, pred_arc.max_depth, acc_child,
+                )?;
+            } else {
+                writeln!(
+                    output,
+                    "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                    prefix, connector, edge_val.state_id, pred_id, pred_arc.max_depth, acc_child,
+                )?;
+            }
             *node_count += 1;
 
             print_predecessors_recursive(
                 pred_arc, node_ids, visited_nodes, &new_prefix, node_count, max_nodes,
                 output, terminal_map, original_internal_bimap, llm_token_map, state_ids_in_order, seen_state_ids,
+                verbose,
             )?;
         }
         Ok(())
@@ -1259,12 +1270,16 @@ pub fn print_gss_forest(
         let acc_str = format_acc(root_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
         let root_label = labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
 
-        writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
+        if verbose {
+            writeln!(&mut out_str, "{}: Node {} (ptr: {:p}, hash: {:x}, depth: {}) {}", root_label, root_id, root_ptr, root_arc.hash_key_cache, root_arc.max_depth, acc_str).unwrap();
+        } else {
+            writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
+        }
         count += 1;
 
         let _ = print_predecessors_recursive(
             root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes,
-            &mut out_str, terminal_map, original_internal_bimap, llm_token_map, &mut state_ids_in_order, &mut seen_state_ids,
+            &mut out_str, terminal_map, original_internal_bimap, llm_token_map, &mut state_ids_in_order, &mut seen_state_ids, verbose,
         );
     }
 

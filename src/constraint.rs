@@ -1015,6 +1015,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
                 &self.parent.parser.terminal_map,
                 Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 Some(&self.parent.llm_vocab.llm_token_map),
+                false,
             );
             write!(f, "{}", gss_str)?;
         }
@@ -1033,7 +1034,7 @@ impl<'a> GrammarConstraintState<'a> {
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        let (s, state_ids) = print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None);
+        let (s, state_ids) = print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None, false);
         println!("{}", s);
         println!("\n\n--- GSS State Explanations ---\n");
         for state_id in state_ids {
@@ -1348,6 +1349,7 @@ impl<'a> GrammarConstraintState<'a> {
             &self.parent.parser.terminal_map,
             Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
             Some(&self.parent.llm_vocab.llm_token_map),
+            false,
         ).0);
 
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
