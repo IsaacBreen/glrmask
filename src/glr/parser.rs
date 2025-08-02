@@ -15,6 +15,9 @@ use crate::debug;
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use std::fs::File;
+use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
@@ -39,6 +42,8 @@ impl<T> ExpectElse<T> for Option<T> {
         match self { Some(v) => v, None => panic!("{}", f()) }
     }
 }
+
+pub const GSS_GRAPHVIZ_ENABLED: bool = true;
 
 /// Helper enum that tells `process_action_queue` where the *new* states that
 /// originate from a **reduce** should be put.
@@ -563,6 +568,61 @@ impl Display for GLRParserState<'_> {
 }
 
 impl<'a> GLRParserState<'a> { // No longer generic
+    #[allow(dead_code)]
+    fn generate_gss_graphviz(&self, roots: &[Arc<GSSNode>]) -> String {
+        let mut dot = String::new();
+        writeln!(&mut dot, "digraph GSS {{").unwrap();
+        writeln!(&mut dot, "    rankdir=TB;");
+        writeln!(&mut dot, "    node [shape=box, fontname=\"Courier New, Courier, monospace\"];").unwrap();
+
+        let mut all_states = BTreeSet::new();
+        let mut all_links = BTreeSet::new(); // (from_state, to_state)
+        let mut visited_gss_nodes = BTreeSet::new();
+        let mut worklist: VecDeque<Arc<GSSNode>> = roots.iter().cloned().collect();
+
+        while let Some(gss_node) = worklist.pop_front() {
+            if !visited_gss_nodes.insert(gss_node.clone()) {
+                continue;
+            }
+
+            for edge in &gss_node.predecessors {
+                let top_state_id = edge.content.state_id;
+                all_states.insert(top_state_id);
+
+                let pred_gss_node = &edge.target;
+                for pred_edge in &pred_gss_node.predecessors {
+                    let next_state_id = pred_edge.content.state_id;
+                    all_links.insert((top_state_id, next_state_id));
+                }
+
+                if !pred_gss_node.is_empty() {
+                    worklist.push_back(pred_gss_node.clone());
+                }
+            }
+        }
+
+        // Define nodes
+        for state_id in all_states {
+            let mut label = String::new();
+            // The explanation header is "--- State X ---", which is redundant if the node is named SX.
+            // Let's just format the details.
+            self.parser.format_state_details(&mut label, state_id, "").unwrap();
+
+            // Escape for DOT label. `\l` is for left-justified newlines.
+            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
+
+            writeln!(&mut dot, "    S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
+        }
+
+        // Define edges
+        for (from, to) in all_links {
+            writeln!(&mut dot, "    S{} -> S{};", from.0, to.0).unwrap();
+        }
+
+        writeln!(&mut dot, "}}").unwrap();
+        dot
+    }
+
     fn get_gss_states_in_dfs_order(&self, roots: &[Arc<GSSNode>]) -> Vec<StateID> {
         let mut state_ids = Vec::new();
         let mut visited_states = BTreeSet::new();
@@ -1069,6 +1129,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
         crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+
+        if GSS_GRAPHVIZ_ENABLED && !roots.is_empty() && !roots[0].is_empty() {
+            let dot_string = self.generate_gss_graphviz(&roots);
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+            let filename = format!("gss_{}_{}.dot", timestamp, phase.replace('/', "-"));
+            if let Ok(mut file) = File::create(&filename) {
+                if let Err(e) = file.write_all(dot_string.as_bytes()) {
+                    crate::debug!(0, "Error writing GSS graphviz file: {}", e);
+                } else {
+                    crate::debug!(3, "Wrote GSS graphviz to {}", filename);
+                }
+            }
+        }
 
         let print_full_forest = stats.unique_nodes <= MAX;
 
