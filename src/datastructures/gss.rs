@@ -514,13 +514,13 @@ impl GSSNode {
 
         // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
         // let other_predecessors_flattened: Vec<_> = other.predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // println!("new_predecessors_flattened: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
-        // println!("other_predecessors_flattened: {:?}", print_gss_forest(&other_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
+        // println!("new_predecessors_flattened: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
+        // println!("other_predecessors_flattened: {:?}", print_gss_forest(&other_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
 
         merge_node_maps(&mut new_predecessors, other.predecessors.clone(), merge_depth);
 
         // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
+        // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
         
         let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
@@ -1155,15 +1155,31 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
     Some(path)
 }
 
+pub struct GSSPrintConfig<'a> {
+    pub labels: Option<&'a [String]>,
+    pub max_nodes: usize,
+    pub original_internal_bimap: Option<&'a BiBTreeMap<usize, usize>>,
+    pub llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    pub verbose: bool,
+}
+
+impl<'a> Default for GSSPrintConfig<'a> {
+    fn default() -> Self {
+        Self {
+            labels: None,
+            max_nodes: usize::MAX,
+            original_internal_bimap: None,
+            llm_token_map: None,
+            verbose: false,
+        }
+    }
+}
+
 /// Pretty-prints a GSS forest for debugging.
 pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
-    labels: Option<&[String]>,
-    max_nodes: usize,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-    verbose: bool,
+    config: &GSSPrintConfig,
 ) -> (String, Vec<StateID>) {
     // if !GSS_LOGGING_ENABLED {
     //     return "".to_string();
@@ -1175,14 +1191,11 @@ pub fn print_gss_forest(
         visited_nodes: &mut HashSet<*const GSSNode>,
         prefix: &str,
         node_count: &mut usize,
-        max_nodes: usize,
         output: &mut String,
         terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
         state_ids_in_order: &mut Vec<StateID>,
         seen_state_ids: &mut HashSet<StateID>,
-        verbose: bool,
+        config: &GSSPrintConfig,
     ) -> Result<(), std::fmt::Error> {
         let node_ptr = Arc::as_ptr(node_arc);
         if visited_nodes.contains(&node_ptr) {
@@ -1200,7 +1213,7 @@ pub fn print_gss_forest(
             .collect();
 
         for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
-            if *node_count >= max_nodes {
+            if *node_count >= config.max_nodes {
                 writeln!(output, "{}... (Truncated)", prefix)?;
                 return Ok(());
             }
@@ -1222,8 +1235,8 @@ pub fn print_gss_forest(
                 state_ids_in_order.push(edge_val.state_id);
             }
 
-            let acc_child = format_acc(pred_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
-            if verbose {
+            let acc_child = format_acc(pred_arc.as_ref(), terminal_map, config.original_internal_bimap, config.llm_token_map);
+            if config.verbose {
                 writeln!(
                     output,
                     "{}{} Edge {:?} -> Node {} (ptr: {:p}, hash: {:x}, depth: {}) {}",
@@ -1239,9 +1252,8 @@ pub fn print_gss_forest(
             *node_count += 1;
 
             print_predecessors_recursive(
-                pred_arc, node_ids, visited_nodes, &new_prefix, node_count, max_nodes,
-                output, terminal_map, original_internal_bimap, llm_token_map, state_ids_in_order, seen_state_ids,
-                verbose,
+                pred_arc, node_ids, visited_nodes, &new_prefix, node_count,
+                output, terminal_map, state_ids_in_order, seen_state_ids, config,
             )?;
         }
         Ok(())
@@ -1255,10 +1267,10 @@ pub fn print_gss_forest(
     let mut seen_state_ids = HashSet::new();
 
     if roots.is_empty() { return ("GSS Forest: (No roots)".to_string(), state_ids_in_order); }
-    writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
+    writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", config.max_nodes).unwrap();
 
     for (i, root_arc) in roots.iter().enumerate() {
-        if count >= max_nodes {
+        if count >= config.max_nodes {
             writeln!(&mut out_str, "... (Truncated)").unwrap();
             break;
         }
@@ -1267,10 +1279,10 @@ pub fn print_gss_forest(
         let node_ids_len = node_ids.len();
         let root_id = *node_ids.entry(root_ptr).or_insert(node_ids_len);
 
-        let acc_str = format_acc(root_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
-        let root_label = labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
+        let acc_str = format_acc(root_arc.as_ref(), terminal_map, config.original_internal_bimap, config.llm_token_map);
+        let root_label = config.labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
 
-        if verbose {
+        if config.verbose {
             writeln!(&mut out_str, "{}: Node {} (ptr: {:p}, hash: {:x}, depth: {}) {}", root_label, root_id, root_ptr, root_arc.hash_key_cache, root_arc.max_depth, acc_str).unwrap();
         } else {
             writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
@@ -1278,8 +1290,8 @@ pub fn print_gss_forest(
         count += 1;
 
         let _ = print_predecessors_recursive(
-            root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes,
-            &mut out_str, terminal_map, original_internal_bimap, llm_token_map, &mut state_ids_in_order, &mut seen_state_ids, verbose,
+            root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count,
+            &mut out_str, terminal_map, &mut state_ids_in_order, &mut seen_state_ids, config,
         );
     }
 

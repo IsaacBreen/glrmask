@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -948,10 +948,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
 
                 if row.default_reduce.clone_and_merge {
-                    println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], None, usize::MAX, &Default::default(), None, None, false).0);
-                    println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], None, usize::MAX, &Default::default(), None, None, false).0);
+                    println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig::default()).0);
+                    println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], &Default::default(), &GSSPrintConfig::default()).0);
                     next_active_state.merge(state);
-                    println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], None, usize::MAX, &Default::default(), None, None, false).0);
+                    println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig::default()).0);
                     let stats = gather_gss_stats(&[&next_active_state.stack]);
                     if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
                 }
@@ -1070,7 +1070,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
-            let (gss_string, state_ids) = print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None, false);
+            let config = GSSPrintConfig {
+                max_nodes: max_nodes_to_print,
+                ..Default::default()
+            };
+            let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
             let mut final_string = if print_full_forest {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
             } else {

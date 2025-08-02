@@ -19,7 +19,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1034,7 +1034,7 @@ impl<'a> GrammarConstraintState<'a> {
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        let (s, state_ids) = print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None, false);
+        let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
         println!("{}", s);
         println!("\n\n--- GSS State Explanations ---\n");
         for state_id in state_ids {
@@ -1343,14 +1343,14 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(3, "Final GSS states after get_mask:");
         let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
-        print!("{}", print_gss_forest(
-            &roots, Some(&labels),
-            300,
-            &self.parent.parser.terminal_map,
-            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-            Some(&self.parent.llm_vocab.llm_token_map),
-            false,
-        ).0);
+        let config = GSSPrintConfig {
+            labels: Some(&labels),
+            max_nodes: 300,
+            original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+            verbose: false,
+        };
+        print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
 
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
