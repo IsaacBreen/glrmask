@@ -998,6 +998,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 break;
                                             }
                                         }
+                                    } else {
+                                        break;
                                     }
                                 }
 
