@@ -749,8 +749,6 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         }
     }
 
-    // The original implementation had a very specific filtering for epsilon productions.
-    // To maintain functional equivalence, this logic is preserved.
     let start_rhs_nts: BTreeSet<_> = productions[0]
         .rhs
         .iter()
