@@ -68,6 +68,15 @@ impl fmt::Display for GLRStats {
                             format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            let has_shift = shift.is_some();
+                            let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                            let conflict_type = if has_shift && num_reduces > 0 {
+                                "S/R"
+                            } else if !has_shift && num_reduces > 1 {
+                                "R/R"
+                            } else {
+                                "Split"
+                            };
                             let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
                             let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
                                 let nt_count = nts.len();
@@ -76,9 +85,9 @@ impl fmt::Display for GLRStats {
                             }).collect();
 
                             if s_part.is_empty() {
-                                format!("Split[{}]", r_parts.join(", "))
+                                format!("{}[{}]", conflict_type, r_parts.join(", "))
                             } else {
-                                format!("Split[{}, {}]", s_part, r_parts.join(", "))
+                                format!("{}[{}, {}]", conflict_type, s_part, r_parts.join(", "))
                             }
                         }
                     };

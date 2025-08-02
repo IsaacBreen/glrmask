@@ -474,14 +474,13 @@ fn format_actions<W: std::fmt::Write>(
         return writeln!(f, "{} (none)", indent);
     }
 
-    // Group terminals by action
-    let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
-    for (tid, action) in actions {
-        let terminal = terminal_map.get_by_right(tid).unwrap();
-        grouped_actions.entry(action).or_default().insert(terminal);
-    }
+    // Sort by terminal name for deterministic output
+    let mut sorted_actions: Vec<_> = actions.iter().collect();
+    sorted_actions.sort_by_key(|(tid, _)| terminal_map.get_by_right(tid).unwrap());
 
-    for (action, terminals) in grouped_actions {
+    for (tid, action) in sorted_actions {
+        let terminal = terminal_map.get_by_right(tid).unwrap();
+
         // Format action
         let action_str = match action {
             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
@@ -493,7 +492,17 @@ fn format_actions<W: std::fmt::Write>(
                 format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
             }
             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                let mut s = "Conflict:".to_string();
+                let has_shift = shift.is_some();
+                let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                let conflict_type = if has_shift && num_reduces > 0 {
+                    "Shift-Reduce Conflict"
+                } else if !has_shift && num_reduces > 1 {
+                    "Reduce-Reduce Conflict"
+                } else {
+                    "Conflict" // Should be simplified away
+                };
+
+                let mut s = format!("{}:", conflict_type);
                 let inner_indent = format!("\n{}        ", indent); // indent + "        "
                 if let Some(shift_state) = shift {
                     let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
@@ -509,20 +518,7 @@ fn format_actions<W: std::fmt::Write>(
                 s
             }
         };
-
-        // Format terminals
-        let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-        terminal_names.sort();
-        const MAX_TERMINALS_TO_SHOW: usize = 5;
-        let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-            let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-            format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-        } else {
-            terminal_names.join(", ")
-        };
-
-        // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-        writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
+        writeln!(f, "{}- On {}: {}", indent, terminal, action_str)?;
     }
     Ok(())
 }
