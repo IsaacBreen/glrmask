@@ -501,54 +501,57 @@ impl GSSNode {
     // #[time_it]
     fn _merge(&mut self, other: &Self, merge_depth: usize) {
         if self == other { return; }
-
         if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
         if self.predecessors.is_empty() && self.acc.llm_tokens_union == HybridBitset::max_ones() {
             *self = other.clone();
             return;
         }
-
         let merged_acc = Arc::new(Acc::merge(&self.acc, &other.acc));
-        
-        let mut new_predecessors = self.predecessors.clone();
 
-        // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // let other_predecessors_flattened: Vec<_> = other.predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // println!("new_predecessors_flattened: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
-        // println!("other_predecessors_flattened: {:?}", print_gss_forest(&other_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
+        // 1. Combine predecessor maps from both nodes. `merge_node_maps` will recursively
+        // merge predecessors that share the same edge value.
+        let mut combined_predecessors = self.predecessors.clone();
+        merge_node_maps(&mut combined_predecessors, other.predecessors.clone(), merge_depth);
 
-        merge_node_maps(&mut new_predecessors, other.predecessors.clone(), merge_depth);
-
-        // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
-        
+        // 2. If merge_depth > 0, canonicalize all predecessors to enforce structural sharing.
+        // This is the key to preventing redundant nodes. It finds structurally identical
+        // predecessors (even if they are behind different edges) and makes them point
+        // to the same canonical Arc.
         let final_predecessors = if merge_depth > 0 {
-            // After merging, unify structurally identical predecessors to increase sharing.
-            // This is important for preventing the GSS from bloating with redundant nodes
-            // when merging branches that have common substructures.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
-            let mut unified_predecessors = BTreeMap::new();
+            let mut unified_predecessors = NodeMap::new();
 
-            for (edge_val, preds_by_depth) in new_predecessors {
-                let mut unified_preds_by_depth = BTreeMap::new();
+            for (edge_val, preds_by_depth) in combined_predecessors {
                 for (depth, pred_vec) in preds_by_depth {
-                    let mut unified_pred_vec = Vec::new();
                     for pred_arc in pred_vec {
                         // Find or create a canonical Arc for the node's value.
-                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
-                        unified_pred_vec.push(canonical_arc);
+                        let canonical_arc = canonical_map
+                            .entry((*pred_arc).clone())
+                            .or_insert_with(|| pred_arc.clone())
+                            .clone();
+
+                        unified_predecessors
+                            .entry(edge_val.clone())
+                            .or_default()
+                            .entry(depth)
+                            .or_default()
+                            .push(canonical_arc);
                     }
-                    // Remove duplicate Arcs.
-                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
-                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
-                    unified_preds_by_depth.insert(depth, unified_pred_vec);
                 }
-                unified_predecessors.insert(edge_val, unified_preds_by_depth);
+            }
+            // After canonicalization, some vectors might have duplicate Arcs if multiple
+            // original Arcs pointed to structurally identical nodes. We dedup them.
+            for preds_by_depth in unified_predecessors.values_mut() {
+                for pred_vec in preds_by_depth.values_mut() {
+                    pred_vec.sort_by_key(|a| Arc::as_ptr(a));
+                    pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                }
             }
             unified_predecessors
         } else {
-            new_predecessors
+            combined_predecessors
         };
+
         *self = GSSNode::new_with_map(merged_acc, final_predecessors);
     }
 
