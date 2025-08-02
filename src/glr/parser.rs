@@ -972,6 +972,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let mut out = Vec::new();
                         for popper_item in popped.iter() {
                             for peek2 in popper_item.peek_iter() {
+                                timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
                                 let mut goto_state_ids = BTreeSet::new();
                                 let state_id = peek2.edge_value().state_id;
                                 let mut current_nt = nt;
@@ -990,7 +991,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     }
 
                                     if let Some(goto_state_id) = goto.state_id {
-                                        timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
+                                        timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
                                         let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
                                         let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
                                         // let continue_fast_reduce = false;
