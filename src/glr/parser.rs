@@ -869,6 +869,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
+    #[time_it("GLRParserState::reduce_and_goto_len_1_fast")]
     pub fn reduce_and_goto_len_1_fast(
         &mut self,
         peek: &GSSNode,
