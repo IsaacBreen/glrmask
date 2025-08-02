@@ -1124,7 +1124,8 @@ impl GLRParser {
                 continue;
             }
             visited_nodes.insert(node_ptr);
-            let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
+            let next_id = node_ids.len();
+            let node_id = *node_ids.entry(node_ptr).or_insert(next_id);
 
             let acc_str = crate::datastructures::gss::format_acc(
                 &node_arc,
