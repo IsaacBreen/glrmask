@@ -511,7 +511,16 @@ impl GSSNode {
         let merged_acc = Arc::new(Acc::merge(&self.acc, &other.acc));
         
         let mut new_predecessors = self.predecessors.clone();
+
+        let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
+        let other_predecessors_flattened: Vec<_> = other.predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
+        println!("new_predecessors_flattened: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
+        println!("other_predecessors_flattened: {:?}", print_gss_forest(&other_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
+
         merge_node_maps(&mut new_predecessors, other.predecessors.clone(), merge_depth);
+
+        let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
+        println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
         
         *self = GSSNode::new_with_map(merged_acc, new_predecessors);
     }
