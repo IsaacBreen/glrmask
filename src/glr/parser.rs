@@ -958,7 +958,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // For each peek in the current state, reduce and goto.
                         // This is the core of phase 3: reducing all stacks with the same state_id.
                         // We will merge the results into a new stack part.
-                    });
                     let mut reduced_stack = GSSNode::new_fresh();
                     for peek in state.stack.peek_iter() {
                         // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
@@ -980,6 +979,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 .or_insert(isolated);
                         }
                     }
+                    });
                 }
 
                 if row.default_reduce.clone_and_merge {
