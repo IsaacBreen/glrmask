@@ -999,6 +999,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             if let Some(reduce) = reduce {
                                                 current_nt = reduce.nonterminal_id;
                                             } else {
+                                                assert!(*clone_and_merge);
                                                 break;
                                             }
                                         } else {
