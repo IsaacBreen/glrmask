@@ -2520,10 +2520,12 @@ local_system:
               }
 
               println!("\n\n--- GSS Graphviz ---");
-              for (state_id, parser) in self.state.iter() {
-                  println!("\n--- State {} ---", state_id.0);
-                  println!("{}", self.parent.parser.gss_states_to_dot(&parser.active_state.stack));
-              }
+              let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+              let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                  .map(|s| s.as_str())
+                  .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                  .collect();
+              println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
 
               for (state_id, state) in self.state.iter() {
                   crate::debug!(3, "State {}:", state_id.0);
@@ -5755,26 +5757,34 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_states_to_dot(&self.active_state.stack)
+              self.parser.gss_to_dot(&self.active_state.stack)
           }
       }
 
       impl GLRParser {
-          /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+          /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
+          pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
               let mut dot = String::new();
-              writeln!(&mut dot, "digraph GSS_States {{").unwrap();
+              writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
               writeln!(&mut dot, "  rankdir=TB;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
               let mut defined_states = BTreeSet::new();
               let mut edges = BTreeSet::new();
+              let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
 
               let mut queue = VecDeque::new();
-              if !root.is_empty() {
-                  queue.push_back(Arc::new(root.clone()));
+              for (label, root) in roots {
+                  if !root.is_empty() {
+                      let root_arc = Arc::new((*root).clone());
+                      // Label the root states
+                      for (edge_val, _) in &root_arc.predecessors {
+                          root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                      }
+                      queue.push_back(root_arc);
+                  }
               }
 
               while let Some(node_arc) = queue.pop_front() {
@@ -5805,6 +5815,12 @@ local_system:
 
               for state_id in &defined_states {
                   let mut label = String::new();
+                  if let Some(labels) = root_labels.get(state_id) {
+                      let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
+                      unique_labels.sort();
+                      unique_labels.dedup();
+                      writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
+                  }
                   self.format_state_details(&mut label, *state_id, "").unwrap();
                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -5824,6 +5840,12 @@ local_system:
 
               writeln!(&mut dot, "}}").unwrap();
               dot
+          }
+
+          /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+          /// This visualizes the portion of the state machine explored by the parser.
+          pub fn gss_to_dot(&self, root: &GSSNode) -> String {
+              self.gss_forest_to_dot(&[("Root", root)])
           }
       }
 
@@ -10674,10 +10696,12 @@ local_system:
               }
 
               println!("\n\n--- GSS Graphviz ---");
-              for (state_id, parser) in self.state.iter() {
-                  println!("\n--- State {} ---", state_id.0);
-                  println!("{}", self.parent.parser.gss_states_to_dot(&parser.active_state.stack));
-              }
+              let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+              let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                  .map(|s| s.as_str())
+                  .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                  .collect();
+              println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
 
               for (state_id, state) in self.state.iter() {
                   crate::debug!(3, "State {}:", state_id.0);
@@ -13909,26 +13933,34 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_states_to_dot(&self.active_state.stack)
+              self.parser.gss_to_dot(&self.active_state.stack)
           }
       }
 
       impl GLRParser {
-          /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+          /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
+          pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
               let mut dot = String::new();
-              writeln!(&mut dot, "digraph GSS_States {{").unwrap();
+              writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
               writeln!(&mut dot, "  rankdir=TB;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
               let mut defined_states = BTreeSet::new();
               let mut edges = BTreeSet::new();
+              let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
 
               let mut queue = VecDeque::new();
-              if !root.is_empty() {
-                  queue.push_back(Arc::new(root.clone()));
+              for (label, root) in roots {
+                  if !root.is_empty() {
+                      let root_arc = Arc::new((*root).clone());
+                      // Label the root states
+                      for (edge_val, _) in &root_arc.predecessors {
+                          root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                      }
+                      queue.push_back(root_arc);
+                  }
               }
 
               while let Some(node_arc) = queue.pop_front() {
@@ -13959,6 +13991,12 @@ local_system:
 
               for state_id in &defined_states {
                   let mut label = String::new();
+                  if let Some(labels) = root_labels.get(state_id) {
+                      let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
+                      unique_labels.sort();
+                      unique_labels.dedup();
+                      writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
+                  }
                   self.format_state_details(&mut label, *state_id, "").unwrap();
                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -13978,6 +14016,12 @@ local_system:
 
               writeln!(&mut dot, "}}").unwrap();
               dot
+          }
+
+          /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+          /// This visualizes the portion of the state machine explored by the parser.
+          pub fn gss_to_dot(&self, root: &GSSNode) -> String {
+              self.gss_forest_to_dot(&[("Root", root)])
           }
       }
 
@@ -18856,10 +18900,12 @@ messages:
               }
 
               println!("\n\n--- GSS Graphviz ---");
-              for (state_id, parser) in self.state.iter() {
-                  println!("\n--- State {} ---", state_id.0);
-                  println!("{}", self.parent.parser.gss_states_to_dot(&parser.active_state.stack));
-              }
+              let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+              let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                  .map(|s| s.as_str())
+                  .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                  .collect();
+              println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
 
               for (state_id, state) in self.state.iter() {
                   crate::debug!(3, "State {}:", state_id.0);
@@ -22126,26 +22172,34 @@ messages:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_states_to_dot(&self.active_state.stack)
+              self.parser.gss_to_dot(&self.active_state.stack)
           }
       }
 
       impl GLRParser {
-          /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+          /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
           /// This visualizes the portion of the state machine explored by the parser.
-          pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
+          pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
               let mut dot = String::new();
-              writeln!(&mut dot, "digraph GSS_States {{").unwrap();
+              writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
               writeln!(&mut dot, "  rankdir=TB;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
               let mut defined_states = BTreeSet::new();
               let mut edges = BTreeSet::new();
+              let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
 
               let mut queue = VecDeque::new();
-              if !root.is_empty() {
-                  queue.push_back(Arc::new(root.clone()));
+              for (label, root) in roots {
+                  if !root.is_empty() {
+                      let root_arc = Arc::new((*root).clone());
+                      // Label the root states
+                      for (edge_val, _) in &root_arc.predecessors {
+                          root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                      }
+                      queue.push_back(root_arc);
+                  }
               }
 
               while let Some(node_arc) = queue.pop_front() {
@@ -22176,6 +22230,12 @@ messages:
 
               for state_id in &defined_states {
                   let mut label = String::new();
+                  if let Some(labels) = root_labels.get(state_id) {
+                      let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
+                      unique_labels.sort();
+                      unique_labels.dedup();
+                      writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
+                  }
                   self.format_state_details(&mut label, *state_id, "").unwrap();
                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -22195,6 +22255,12 @@ messages:
 
               writeln!(&mut dot, "}}").unwrap();
               dot
+          }
+
+          /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+          /// This visualizes the portion of the state machine explored by the parser.
+          pub fn gss_to_dot(&self, root: &GSSNode) -> String {
+              self.gss_forest_to_dot(&[("Root", root)])
           }
       }
 
@@ -24559,154 +24625,92 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Make dot-file printing work on a GSS forest, so we can use it at the top of `get_mask` without doing separate calls for each state/parser, which is inefficient because a lot of them share nodes.
-      The state roots should be labelled in the graph visualisation.
+      Here's an example graphviz output:
+      ```
+      digraph GSS_States {
+        rankdir=TB;
+        node [shape=box, fontname="Courier New", style=rounded];
+        S0 [label="Items:\l  - [additive_expression -> multiplicative_expression •, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\l  - [additive_expression -> multiplicative_expression • additive_expression[0], {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\lActions (without default reduce):\l  - Shift 6 on { '+' }\l  - Shift 7 on { '-' }\lActions (full):\l  - Reduce additive_expression (len 1) via rules [374] on { '!', '!=', '!==', '#', '${', '%', '%=', '&&', '&', '&=', '(', ')', '*', '**', '**=', '*=', '++', '+=', ',', '--', '-=', '.', '...', '/', '/=', ':', ';', '<', '<<', '<<=', '<=', '=', '==', '===', '=>', '>', '>=', '>>', '>>=', '>>>', '>>>=', '?', '?.', '??', '[', ']', '^', '^=', '`', 'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '|=', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, IGNORE, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, TEMPLATE_CHAR }\l  - Conflict:\l            - Shift 6\l            - Reduce by rule #374 (additive_expression -> multiplicative_expression) on { '+' }\l  - Conflict:\l            - Shift 7\l            - Reduce by rule #374 (additive_expression -> multiplicative_expression) on { '-' }\lDefault Action:\l  - Default Reduce additive_expression (len 1) via rules [374]\l  - Clone and merge\lGotos:\l  - additive_expression[0] -> 1\l  - additive_expression[0][0] -> 4\l"];
+        S161 [label="Items:\l  - [arrow_parameters -> IDENTIFIER •, {'=>'}]\l  - [labeled_statement -> IDENTIFIER • ':' statement, {'!', '(', '+', '++', '-', '--', '[', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'if', 'import', 'let', 'new', 'return', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\l  - [primary_expression -> IDENTIFIER •, {'!', '!=', '!==', '#', '%', '%=', '&&', '&', '&=', '(', ')', '*', '**', '**=', '*=', '+', '++', '+=', ',', '-', '--', '-=', '.', '...', '/', '/=', ':', ';', '<', '<<', '<<=', '<=', '=', '==', '===', '>', '>=', '>>', '>>=', '>>>', '>>>=', '?', '?.', '??', '[', ']', '^', '^=', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '|=', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\lActions (without default reduce):\l  - Shift 628 on { ':' }\l  - Reduce arrow_parameters (len 1) via rules [317] on { '=>' }\lActions (full):\l  - Reduce primary_expression (len 1) via rules [442] on { '!', '!=', '!==', '#', '${', '%', '%=', '&&', '&', '&=', '(', ')', '*', '**', '**=', '*=', '+', '++', '+=', ',', '-', '--', '-=', '.', '...', '/', '/=', ';', '<', '<<', '<<=', '<=', '=', '==', '===', '>', '>=', '>>', '>>=', '>>>', '>>>=', '?', '?.', '??', '[', ']', '^', '^=', '`', 'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '|=', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, IGNORE, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, TEMPLATE_CHAR }\l  - Conflict:\l            - Reduce by rule #317 (arrow_parameters -> IDENTIFIER)\l            - Reduce by rule #442 (primary_expression -> IDENTIFIER) on { '=>' }\l  - Conflict:\l            - Shift 628\l            - Reduce by rule #442 (primary_expression -> IDENTIFIER) on { ':' }\lDefault Action:\l  - Default Reduce primary_expression (len 1) via rules [442]\l  - Clone and merge\lGotos:\l  (No goto actions)\l"];
+        S192 [label="Items:\l  - [assignment_expression_rr -> left_hand_side_expression • assignment_expression[0], {'!', '(', '+', '++', '-', '--', '[', '`', 'async', 'await', 'delete', 'function', 'new', 'super', 'this', 'typeof', 'void', 'yield', '{', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL}]\l  - [postfix_expression -> left_hand_side_expression •, {'!', '!=', '!==', '#', '%', '&&', '&', '(', ')', '*', '**', '+', '++', ',', '-', '--', '...', '/', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\l  - [postfix_expression -> left_hand_side_expression • postfix_expression[0], {'!', '!=', '!==', '#', '%', '&&', '&', '(', ')', '*', '**', '+', '++', ',', '-', '--', '...', '/', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\lActions (without default reduce):\l  - Shift 177 on { '%=' }\l  - Shift 178 on { '&=' }\l  - Shift 179 on { '**=' }\l  - Shift 180 on { '*=' }\l  - Shift 181 on { '+=' }\l  - Shift 182 on { '-=' }\l  - Shift 183 on { '/=' }\l  - Shift 184 on { '<<=' }\l  - Shift 185 on { '=' }\l  - Shift 186 on { '>>=' }\l  - Shift 187 on { '>>>=' }\l  - Shift 188 on { '^=' }\l  - Shift 189 on { '|=' }\l  - Shift 848 on { '++' }\l  - Shift 849 on { '--' }\lActions (full):\l  - Reduce postfix_expression (len 1) via rules [404] on { '!', '!=', '!==', '#', '${', '%', '&&', '&', '(', ')', '*', '**', '+', ',', '-', '.', '...', '/', ':', ';', '<', '<<', '<=', '==', '===', '=>', '>', '>=', '>>', '>>>', '?', '?.', '??', '[', ']', '^', '`', 'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, IGNORE, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, TEMPLATE_CHAR }\l  - Conflict:\l            - Shift 177\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '%=' }\l  - Conflict:\l            - Shift 178\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '&=' }\l  - Conflict:\l            - Shift 179\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '**=' }\l  - Conflict:\l            - Shift 180\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '*=' }\l  - Conflict:\l            - Shift 181\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '+=' }\l  - Conflict:\l            - Shift 182\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '-=' }\l  - Conflict:\l            - Shift 183\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '/=' }\l  - Conflict:\l            - Shift 184\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '<<=' }\l  - Conflict:\l            - Shift 185\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '=' }\l  - Conflict:\l            - Shift 186\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '>>=' }\l  - Conflict:\l            - Shift 187\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '>>>=' }\l  - Conflict:\l            - Shift 188\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '^=' }\l  - Conflict:\l            - Shift 189\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '|=' }\l  - Conflict:\l            - Shift 848\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '++' }\l  - Conflict:\l            - Shift 849\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '--' }\lDefault Action:\l  - Default Reduce postfix_expression (len 1) via rules [404]\l  - Clone and merge\lGotos:\l  - assignment_expression[0] -> 193\l  - postfix_expression[0] -> 846\l  - postfix_expression[0][0] -> 847\l"];
+        ...
+        START [shape=doublecircle, label="START"];
+        S0 -> S960;
+        S161 -> S960;
+        S192 -> S960;
+        S201 -> S960;
+        S207 -> S960;
+        S213 -> S960;
+        S250 -> S960;
+        S293 -> S960;
+        S299 -> S960;
+        S326 -> S960;
+        S336 -> S960;
+        S364 -> S960;
+        S640 -> S960;
+        S646 -> S960;
+        S741 -> S960;
+        S933 -> S960;
+        S951 -> S960;
+        S960 -> START;
+        S980 -> S960;
+      }
+      ```
+      Because the text quite long here, the nodes are barely visible. Fix it.
     metadata:
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your code. Dealing with complex data structures like GSS forests can be tricky, and visualizing them is a great way to debug. Here are the patches to enable DOT file generation for a GSS forest with labeled roots.
+      Hello! I see you're having trouble with long, unreadable labels in your Graphviz output. That's a common issue when dealing with complex grammars that have large lookahead sets.
 
-      I'll modify `gss_states_to_dot` to handle multiple roots with labels and update its call site in `get_mask`.
+      I've prepared a patch that truncates the lists of terminals and lookaheads in the `dot` file output to keep the graph nodes readable. Here are the changes:
 
-      Here are the required changes:
-
-      In `src/glr/parser.rs`, I'll replace `gss_states_to_dot` with `gss_forest_to_dot` which accepts multiple roots and labels, and I'll add a backward-compatible `gss_to_dot` for single-root visualization.
+      In `src/glr/parser.rs`, I'll update the `format_state_details` and `format_actions` functions to limit the number of items they print in lists.
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -999,52 +999,58 @@
-       
-           /// Generates a Graphviz DOT representation of the GSS state graph.
-           pub fn gss_to_dot(&self) -> String {
-      -        self.parser.gss_states_to_dot(&self.active_state.stack)
-      +        self.parser.gss_to_dot(&self.active_state.stack)
-           }
-       }
-       
-       impl GLRParser {
-      -    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
-      -    /// This visualizes the portion of the state machine explored by the parser.
-      -    pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
-      +    /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
-      +    /// This visualizes the portion of the state machine explored by the parser.
-      +    pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
-               let mut dot = String::new();
-      -        writeln!(&mut dot, "digraph GSS_States {{").unwrap();
-      +        writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-               writeln!(&mut dot, "  rankdir=TB;").unwrap();
-               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
-       
-               let mut visited_nodes = HashSet::new();
-               let mut defined_states = BTreeSet::new();
-               let mut edges = BTreeSet::new();
-      +        let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
-       
-               let mut queue = VecDeque::new();
-      -        if !root.is_empty() {
-      -            queue.push_back(Arc::new(root.clone()));
-      +        for (label, root) in roots {
-      +            if !root.is_empty() {
-      +                let root_arc = Arc::new((*root).clone());
-      +                // Label the root states
-      +                for (edge_val, _) in &root_arc.predecessors {
-      +                    root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
-      +                }
-      +                queue.push_back(root_arc);
-      +            }
-               }
-       
-               while let Some(node_arc) = queue.pop_front() {
-                   let node_ptr = Arc::as_ptr(&node_arc);
-                   if !visited_nodes.insert(node_ptr) {
-                       continue;
-                   }
-       
-                   for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                       let parent_state_id = edge_val.state_id;
-                       defined_states.insert(parent_state_id);
-       
-                       for pred_vec in preds_by_depth.values() {
-                           for pred_arc in pred_vec {
-                               if pred_arc.predecessors.is_empty() {
-                                   edges.insert((Some(parent_state_id), None));
-                               } else {
-                                   for (pred_edge_val, _) in &pred_arc.predecessors {
-                                       let child_state_id = pred_edge_val.state_id;
-                                       edges.insert((Some(parent_state_id), Some(child_state_id)));
-                                   }
-                               }
-                               queue.push_back(pred_arc.clone());
+      @@ -410,8 +410,14 @@
                            }
+                           write!(f, ", {{")?;
+                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                           lookahead_strs.sort();
+      -                    write!(f, "{}", lookahead_strs.join(", "))?;
+      +                    const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
+      +                    if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
+      +                        let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
+      +                        write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
+      +                    } else {
+      +                        write!(f, "{}", lookahead_strs.join(", "))?;
+      +                    }
+                           writeln!(f, "}}]")?;
                        }
                    }
-               }
+      @@ -491,7 +497,13 @@
+               // Format terminals
+               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
+               terminal_names.sort();
+      -        let terms_str = terminal_names.join(", ");
+      +        const MAX_TERMINALS_TO_SHOW: usize = 5;
+      +        let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
+      +            let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
+      +            format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
+      +        } else {
+      +            terminal_names.join(", ")
+      +        };
        
-               for state_id in &defined_states {
-                   let mut label = String::new();
-      +            if let Some(labels) = root_labels.get(state_id) {
-      +                let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
-      +                unique_labels.sort();
-      +                unique_labels.dedup();
-      +                writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
-      +            }
-                   self.format_state_details(&mut label, *state_id, "").unwrap();
-                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
-      @@ -1049,6 +1055,12 @@
-               writeln!(&mut dot, "}}").unwrap();
-               dot
-           }
-      +
-      +    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
-      +    /// This visualizes the portion of the state machine explored by the parser.
-      +    pub fn gss_to_dot(&self, root: &GSSNode) -> String {
-      +        self.gss_forest_to_dot(&[("Root", root)])
-      +    }
-       }
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
+               writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
 
       ```
 
-      Next, in `src/constraint.rs`, I'll update `get_mask` to call the new `gss_forest_to_dot` function, creating a single visualization for all active parser states.
-
-      ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1399,11 +1399,12 @@
-               }
-       
-               println!("\n\n--- GSS Graphviz ---");
-      -        for (state_id, parser) in self.state.iter() {
-      -            println!("\n--- State {} ---", state_id.0);
-      -            println!("{}", self.parent.parser.gss_states_to_dot(&parser.active_state.stack));
-      -        }
-      +        let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-      +        let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
-      +            .map(|s| s.as_str())
-      +            .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-      +            .collect();
-      +        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
-       
-               for (state_id, state) in self.state.iter() {
-                   crate::debug!(3, "State {}:", state_id.0);
-
-      ```
-
-      These changes should give you the desired visualization capabilities for your GSS forest. Let me know if you have any other questions
+      These changes will make your Graphviz output much more manageable by showing only the first few terminals in long lists and then indicating how many more there are. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
 ...

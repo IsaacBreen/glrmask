@@ -396,7 +396,13 @@ impl GLRParser {
                     write!(f, ", {{")?;
                     let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
                     lookahead_strs.sort();
-                    write!(f, "{}", lookahead_strs.join(", "))?;
+                    const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
+                    if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
+                        let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
+                        write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
+                    } else {
+                        write!(f, "{}", lookahead_strs.join(", "))?;
+                    }
                     writeln!(f, "}}]")?;
                 }
             }
@@ -507,7 +513,13 @@ fn format_actions<W: std::fmt::Write>(
         // Format terminals
         let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
         terminal_names.sort();
-        let terms_str = terminal_names.join(", ");
+        const MAX_TERMINALS_TO_SHOW: usize = 5;
+        let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
+            let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
+            format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
+        } else {
+            terminal_names.join(", ")
+        };
 
         // Put action on its own line, then terminals on the next, to avoid extremely long lines.
         writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
