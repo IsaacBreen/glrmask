@@ -531,6 +531,8 @@ impl GSSNode {
 impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
+    pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+
     /// Returns the combined `Acc` of the parent and the predecessor.
     pub fn resolved_acc(&self) -> Acc {
         Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)

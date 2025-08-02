@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
+use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -8,7 +9,7 @@ use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::fmt::{Debug, Display, Formatter, Write};
+use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
@@ -18,6 +19,7 @@ use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
+use std::collections::HashMap;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
@@ -1112,7 +1114,7 @@ impl GLRParser {
 
         let mut visited_nodes = HashSet::new();
         let mut node_ids = HashMap::new();
-        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
+        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
         let mut traversal_queue = queue.clone();
 
         // First, define all nodes
@@ -1142,7 +1144,7 @@ impl GLRParser {
             writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
 
             for peek in GSSNode::peek_iter(&node_arc) {
-                traversal_queue.push_back(peek.predecessor_node.clone());
+                traversal_queue.push_back(peek.predecessor_node().clone());
             }
         }
 
@@ -1172,11 +1174,11 @@ impl GLRParser {
             let parent_id = node_ids[&node_ptr];
 
             for peek in GSSNode::peek_iter(&node_arc) {
-                let pred_ptr = Arc::as_ptr(peek.predecessor_node);
+                let pred_ptr = Arc::as_ptr(peek.predecessor_node());
                 let pred_id = node_ids[&pred_ptr];
                 let edge_label = format!("State {}", peek.edge_value().state_id.0);
                 writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
-                queue.push_back(peek.predecessor_node.clone());
+                queue.push_back(peek.predecessor_node().clone());
             }
         }
 
