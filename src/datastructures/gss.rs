@@ -522,7 +522,34 @@ impl GSSNode {
         // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
         // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, None, usize::MAX, &Default::default(), None, None));
         
-        *self = GSSNode::new_with_map(merged_acc, new_predecessors);
+        let final_predecessors = if merge_depth > 0 {
+            // After merging, unify structurally identical predecessors to increase sharing.
+            // This is important for preventing the GSS from bloating with redundant nodes
+            // when merging branches that have common substructures.
+            let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+            let mut unified_predecessors = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in new_predecessors {
+                let mut unified_preds_by_depth = BTreeMap::new();
+                for (depth, pred_vec) in preds_by_depth {
+                    let mut unified_pred_vec = Vec::new();
+                    for pred_arc in pred_vec {
+                        // Find or create a canonical Arc for the node's value.
+                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+                        unified_pred_vec.push(canonical_arc);
+                    }
+                    // Remove duplicate Arcs.
+                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                    unified_preds_by_depth.insert(depth, unified_pred_vec);
+                }
+                unified_predecessors.insert(edge_val, unified_preds_by_depth);
+            }
+            unified_predecessors
+        } else {
+            new_predecessors
+        };
+        *self = GSSNode::new_with_map(merged_acc, final_predecessors);
     }
 
     pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
@@ -1480,5 +1507,62 @@ mod tests {
 
         let path1_again = sample_path(&[&root], 0).unwrap();
         assert_eq!(path1, path1_again);
+    }
+
+    #[test]
+    fn test_merge_maintains_structural_sharing() {
+        // This test reproduces a scenario where merging two GSSs with shared
+        // sub-structure leads to duplicated nodes instead of sharing them.
+
+        // 1. Create a common leaf node.
+        let leaf = Arc::new(GSSNode::new(empty_acc()));
+
+        // 2. Create two intermediate nodes. They are structurally identical
+        // (same acc, same single predecessor 'leaf' with the same edge),
+        // but they are different objects in memory.
+        let intermediate1 = Arc::new(GSSNode::new_with_single_predecessor(
+            leaf.clone(),
+            mock_edge(960),
+            empty_acc(),
+        ));
+        let intermediate2 = Arc::new(GSSNode::new_with_single_predecessor(
+            leaf.clone(),
+            mock_edge(960),
+            empty_acc(),
+        ));
+
+        // Sanity check: they are equal in value, but different pointers.
+        assert_eq!(*intermediate1, *intermediate2);
+        assert_ne!(Arc::as_ptr(&intermediate1), Arc::as_ptr(&intermediate2));
+
+        // 3. Create two GSS root nodes, each with one of the intermediate nodes as a predecessor.
+        // The edges leading to the intermediate nodes are different.
+        let mut gss1 = GSSNode::new_with_single_predecessor(
+            intermediate1,
+            mock_edge(161),
+            empty_acc(),
+        );
+        let gss2 = GSSNode::new_with_single_predecessor(
+            intermediate2,
+            mock_edge(0),
+            empty_acc(),
+        );
+
+        // 4. Merge gss2 into gss1.
+        gss1.merge_with_depth(1, &gss2);
+
+        // 5. Analyze the merged GSS.
+        let stats = gather_gss_stats(&[&gss1]);
+
+        // After the merge, the root `gss1` has two predecessors. Because `intermediate1` and
+        // `intermediate2` are structurally identical, a correct merge operation should unify
+        // them into a single shared node. This means the number of unique nodes should equal
+        // the number of structurally unique nodes.
+        assert_eq!(
+            stats.unique_nodes, stats.structurally_unique_nodes,
+            "Merge created redundant structures. Stats: {:?}",
+            stats
+        );
+        assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
     }
 }
