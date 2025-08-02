@@ -780,7 +780,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Peel off the top edges to populate the initial work map.
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let isolated_state = ParseState { stack: Arc::new(peek.isolated_parent()) };
+            let isolated_state = ParseState { stack: peek.isolated_parent() };
             let depth = get_depth(&isolated_state.stack);
             let state_id = peek.edge_value().state_id;
             work_map.entry((depth, state_id))
@@ -910,7 +910,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !reduced_stack.is_empty() {
                         // Deconstruct the result and put it back into the work map.
                         for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
-                            let isolated = ParseState { stack: Arc::new(new_peek.isolated_parent()) };
+                            let isolated = ParseState { stack: new_peek.isolated_parent() };
                             let new_depth = get_depth(&isolated.stack);
                             let new_state_id = new_peek.edge_value().state_id;
                             work_map.entry((new_depth, new_state_id))

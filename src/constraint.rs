@@ -1044,9 +1044,9 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         println!("\n\n--- GSS Graphviz ---");
-        for state_id in state_ids {
+        for (state_id, parser) in self.state.iter() {
             println!("\n--- State {} ---", state_id.0);
-            println!("{}", self.parent.parser.gss_states_to_dot(&self.state[&state_id].active_state.stack));
+            println!("{}", self.parent.parser.gss_states_to_dot(&parser.active_state.stack));
         }
 
         for (state_id, state) in self.state.iter() {
