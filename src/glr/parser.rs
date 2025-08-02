@@ -972,6 +972,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let mut out = Vec::new();
                         for popper_item in popped.iter() {
                             for peek2 in popper_item.peek_iter() {
+                                let mut goto_state_ids = BTreeSet::new();
                                 let state_id = peek2.edge_value().state_id;
                                 let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
                                     format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
@@ -983,6 +984,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
 
                                 if let Some(goto_state_id) = goto.state_id {
+                                    goto_state_ids.insert(goto_state_id);
+                                }
+
+                                for goto_state_id in goto_state_ids {
                                     crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                                     let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                                     out.push(new_gss_node);
