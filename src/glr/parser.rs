@@ -985,7 +985,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some(goto_state_id) = goto.state_id {
                                     crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                                     let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                        out.push(new_gss_node);
+                                    out.push(new_gss_node);
                                 }
                             }
                         }
