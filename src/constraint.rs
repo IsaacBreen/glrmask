@@ -1033,7 +1033,7 @@ impl<'a> GrammarConstraintState<'a> {
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None);
+        println!("{}", print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None));
 
         for (state_id, state) in self.state.iter() {
             crate::debug!(3, "State {}:", state_id.0);
