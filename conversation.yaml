@@ -20313,4 +20313,617 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+      --- original version of src/datastructures/gss.rs+++ current version of src/datastructures/gss.rs@@ -14,6 +14,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
+       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+       use crate::glr::grammar::Terminal;
+      +use crate::glr::table::StateID;
+       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+       use crate::types::TerminalID;
+       use std::ops::{BitAnd, BitOr};
+      @@ -1100,7 +1101,7 @@     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      -) -> String {
+      +) -> (String, Vec<StateID>) {
+           // if !GSS_LOGGING_ENABLED {
+           //     return "".to_string();
+           // }
+      @@ -1116,6 +1117,8 @@         terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+               original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+               llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      +        state_ids_in_order: &mut Vec<StateID>,
+      +        seen_state_ids: &mut HashSet<StateID>,
+           ) -> Result<(), std::fmt::Error> {
+               let node_ptr = Arc::as_ptr(node_arc);
+               if visited_nodes.contains(&node_ptr) {
+      @@ -1150,6 +1153,11 @@             let node_ids_len = node_ids.len();
+                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
+       
+      +            // Collect state ID for explanation
+      +            if seen_state_ids.insert(edge_val.state_id) {
+      +                state_ids_in_order.push(edge_val.state_id);
+      +            }
+      +
+                   let acc_child = format_acc(pred_arc.as_ref(), terminal_map, original_internal_bimap, llm_token_map);
+                   writeln!(
+                       output,
+      @@ -1160,7 +1168,7 @@ 
+                   print_predecessors_recursive(
+                       pred_arc, node_ids, visited_nodes, &new_prefix, node_count, max_nodes,
+      -                output, terminal_map, original_internal_bimap, llm_token_map,
+      +                output, terminal_map, original_internal_bimap, llm_token_map, state_ids_in_order, seen_state_ids,
+                   )?;
+               }
+               Ok(())
+      @@ -1170,8 +1178,10 @@     let mut visited_nodes = HashSet::new();
+           let mut count = 0;
+           let mut out_str = String::new();
+      -
+      -    if roots.is_empty() { return "GSS Forest: (No roots)".to_string(); }
+      +    let mut state_ids_in_order = Vec::new();
+      +    let mut seen_state_ids = HashSet::new();
+      +
+      +    if roots.is_empty() { return ("GSS Forest: (No roots)".to_string(), state_ids_in_order); }
+           writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
+       
+           for (i, root_arc) in roots.iter().enumerate() {
+      @@ -1192,11 +1202,11 @@ 
+               let _ = print_predecessors_recursive(
+                   root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes,
+      -            &mut out_str, terminal_map, original_internal_bimap, llm_token_map,
+      +            &mut out_str, terminal_map, original_internal_bimap, llm_token_map, &mut state_ids_in_order, &mut seen_state_ids,
+               );
+           }
+       
+      -    out_str
+      +    (out_str, state_ids_in_order)
+       }
+       
+       /// Formats an accumulator for concise display in the GSS printout.
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -557,7 +557,7 @@     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               // TODO: this is bad. make this better
+               // Display the stack
+      -        self.log_gss("    ", TerminalID(0));
+      +        self.log_gss("    ", TerminalID(0), false, false);
+               Ok(())
+           }
+       }
+      @@ -733,7 +733,7 @@             return;
+               }
+       
+      -        self.log_gss("Phase1/2-start", token_id);
+      +        self.log_gss("Phase1/2-start", token_id, false, false);
+       
+               let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
+               let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+      @@ -760,12 +760,12 @@             next_active.merge(state);
+               }
+               self.active_state = next_active;
+      -        self.log_gss("Phase1/2-end", token_id);
+      +        self.log_gss("Phase1/2-end", token_id, false, false);
+           }
+       
+           #[time_it("GLRParserState::process_default_reductions")]
+           pub fn process_default_reductions(&mut self) {
+      -        self.log_gss("Phase3-start", TerminalID(0)); // Log with dummy token ID
+      +        self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
+               if self.phase == ParserPhase::ReadyForToken {
+                   crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
+                   return;
+      @@ -930,7 +930,7 @@         crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
+               self.active_state = next_active_state;
+               self.phase = ParserPhase::ReadyForToken;
+      -        self.log_gss("Phase3-end", TerminalID(0)); // Log with dummy token ID
+      +        self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
+           }
+       
+           pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
+      @@ -948,7 +948,7 @@         // self.active_state.hash(&mut hasher);
+               // let self_hash = hasher.finish();
+               // println!("GLRParserState::has_action_for: {:?}", self_hash);
+      -        self.log_gss("has_action_for-start", token_id);
+      +        self.log_gss("has_action_for-start", token_id, false, false);
+               let mut llm_tokens = LLMTokenBV::zeros();
+               for peek in self.active_state.stack.peek_iter() {
+                   let row = &self.parser.table[&peek.edge_value().state_id];
+      @@ -1025,7 +1025,7 @@     }
+       
+           // #[time_it("GLRParserState::log_gss")]
+      -    pub fn log_gss(&self, phase: &str, token: TerminalID) {
+      +    pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+               if !GSS_LOGGING_ENABLED {
+                   return;
+               }
+      @@ -1039,9 +1039,9 @@                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+       
+               let make_msg = |print_full_forest, max_nodes_to_print| {
+      -            if print_full_forest {
+      -                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
+      -                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
+      +            let (gss_string, state_ids) = print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None);
+      +            let mut final_string = if print_full_forest {
+      +                format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
+                   } else {
+                       match find_longest_path(&self.active_state.stack) {
+                           Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+      @@ -1054,6 +1054,17 @@                     None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
+                       }
+                   }
+      +
+      +            if explain_states && !state_ids.is_empty() {
+      +                final_string.push_str("\n\n--- GSS State Explanations ---\n");
+      +                for state_id in state_ids {
+      +                    let mut explanation = String::new();
+      +                    writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
+      +                    self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+      +                    final_string.push_str(&explanation);
+      +                }
+      +            }
+      +            final_string
+               };
+       
+               if stats.unique_nodes > PANIC_THRESHOLD {
+      @@ -1062,6 +1073,86 @@         }
+       
+               debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
+      +
+      +        if generate_dot {
+      +            let dot_string = self.gss_to_dot();
+      +            // Log the DOT string. It can be copied into a .dot file and rendered with Graphviz.
+      +            // e.g., `dot -Tpng -o gss.png gss.dot`
+      +            crate::debug!(1, "GSS DOT graph:\n{}", dot_string);
+      +        }
+      +    }
+      +
+      +    /// Generates a Graphviz DOT representation of the GSS state graph.
+      +    pub fn gss_to_dot(&self) -> String {
+      +        self.parser.gss_states_to_dot(&self.active_state.stack)
+      +    }
+      +}
+      +
+      +impl GLRParser {
+      +    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+      +    /// This visualizes the portion of the state machine explored by the parser.
+      +    pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
+      +        let mut dot = String::new();
+      +        writeln!(&mut dot, "digraph GSS_States {{").unwrap();
+      +        writeln!(&mut dot, "  rankdir=TB;").unwrap();
+      +        writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
+      +
+      +        let mut visited_nodes = HashSet::new();
+      +        let mut defined_states = BTreeSet::new();
+      +        let mut edges = BTreeSet::new();
+      +
+      +        let mut queue = VecDeque::new();
+      +        if !root.is_empty() {
+      +            queue.push_back(Arc::new(root.clone()));
+      +        }
+      +
+      +        while let Some(node_arc) = queue.pop_front() {
+      +            let node_ptr = Arc::as_ptr(&node_arc);
+      +            if !visited_nodes.insert(node_ptr) {
+      +                continue;
+      +            }
+      +
+      +            for (edge_val, preds_by_depth) in &node_arc.predecessors {
+      +                let parent_state_id = edge_val.state_id;
+      +                defined_states.insert(parent_state_id);
+      +
+      +                for pred_vec in preds_by_depth.values() {
+      +                    for pred_arc in pred_vec {
+      +                        if pred_arc.predecessors.is_empty() {
+      +                            edges.insert((Some(parent_state_id), None));
+      +                        } else {
+      +                            for (pred_edge_val, _) in &pred_arc.predecessors {
+      +                                let child_state_id = pred_edge_val.state_id;
+      +                                edges.insert((Some(parent_state_id), Some(child_state_id)));
+      +                            }
+      +                        }
+      +                        queue.push_back(pred_arc.clone());
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        for state_id in &defined_states {
+      +            let mut label = String::new();
+      +            self.format_state_details(&mut label, *state_id, "").unwrap();
+      +            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
+      +            writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
+      +        }
+      +
+      +        if edges.iter().any(|(_, to)| to.is_none()) {
+      +            writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
+      +        }
+      +
+      +        for (from_opt, to_opt) in edges {
+      +            match (from_opt, to_opt) {
+      +                (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
+      +                (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
+      +                _ => {}
+      +            }
+      +        }
+      +
+      +        writeln!(&mut dot, "}}").unwrap();
+      +        dot
+           }
+       }
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture 2>&1 | tee .temp2; python analyze_timings.py .temp2
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error: expected `;`, found keyword `if`
+          --> src/glr/parser.rs:1056:14
+           |
+      1056 |             }
+           |              ^ help: add `;` here
+      1057 |
+      1058 |             if explain_states && !state_ids.is_empty() {
+           |             -- unexpected token
+
+      error[E0433]: failed to resolve: use of undeclared type `HashSet`
+          --> src/glr/parser.rs:1100:33
+           |
+      1100 |         let mut visited_nodes = HashSet::new();
+           |                                 ^^^^^^^ use of undeclared type `HashSet`
+           |
+           = note: struct `crate::json_serialization::tests::HashSet` exists but is inaccessible
+      help: a trait with a similar name exists
+           |
+      1100 -         let mut visited_nodes = HashSet::new();
+      1100 +         let mut visited_nodes = Hasher::new();
+           |
+      help: consider importing this struct
+           |
+      1    + use std::collections::HashSet;
+           |
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/glr/tests.rs:93:12
+           |
+      93   |     state5.log_gss("State 5 after parsing 'ab'", TerminalID(0));
+           |            ^^^^^^^--------------------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      93   |     state5.log_gss("State 5 after parsing 'ab'", TerminalID(0), /* bool */, /* bool */);
+           |                                                               ++++++++++++++++++++++++
+
+      error[E0277]: `(std::string::String, Vec<StateID>)` doesn't implement `std::fmt::Display`
+          --> src/constraint.rs:1019:29
+           |
+      1019 |             write!(f, "{}", gss_str)?;
+           |                             ^^^^^^^ `(std::string::String, Vec<StateID>)` cannot be formatted with the default formatter
+           |
+           = help: the trait `std::fmt::Display` is not implemented for `(std::string::String, Vec<StateID>)`
+           = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+           = note: this error originates in the macro `$crate::format_args` which comes from the expansion of the macro `write` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: `(std::string::String, Vec<StateID>)` doesn't implement `std::fmt::Display`
+          --> src/constraint.rs:1036:24
+           |
+      1036 |         println!("{}", print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None));
+           |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(std::string::String, Vec<StateID>)` cannot be formatted with the default formatter
+           |
+           = help: the trait `std::fmt::Display` is not implemented for `(std::string::String, Vec<StateID>)`
+           = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+           = note: this error originates in the macro `$crate::format_args_nl` which comes from the expansion of the macro `println` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/constraint.rs:1207:31
+           |
+      1207 |                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
+           |                               ^^^^^^^------------------------------------------------------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      1207 |                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), /* bool */, /* bool */);
+           |                                                                                                                    ++++++++++++++++++++++++
+
+      error[E0277]: `(std::string::String, Vec<StateID>)` doesn't implement `std::fmt::Display`
+          --> src/constraint.rs:1324:22
+           |
+      1324 |           print!("{}", print_gss_forest(
+           |  ______________________^
+      1325 | |             &roots, Some(&labels),
+      1326 | |             300,
+      1327 | |             &self.parent.parser.terminal_map,
+      1328 | |             Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+      1329 | |             Some(&self.parent.llm_vocab.llm_token_map),
+      1330 | |         ));
+           | |_________^ `(std::string::String, Vec<StateID>)` cannot be formatted with the default formatter
+           |
+           = help: the trait `std::fmt::Display` is not implemented for `(std::string::String, Vec<StateID>)`
+           = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+           = note: this error originates in the macro `$crate::format_args` which comes from the expansion of the macro `print` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_basic.rs:471:19
+           |
+      471  |         glr_state.log_gss(&format!("Scenario 1, after '#', GSS for tokenizer state {}", tid.0), TerminalID(0));
+           |                   ^^^^^^^------------------------------------------------------------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      471  |         glr_state.log_gss(&format!("Scenario 1, after '#', GSS for tokenizer state {}", tid.0), TerminalID(0), /* bool */, /* bool */);
+           |                                                                                                              ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_basic.rs:478:19
+           |
+      478  |         glr_state.log_gss(&format!("Scenario 1, after 'a', GSS for tokenizer state {}", tid.0), TerminalID(0));
+           |                   ^^^^^^^------------------------------------------------------------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      478  |         glr_state.log_gss(&format!("Scenario 1, after 'a', GSS for tokenizer state {}", tid.0), TerminalID(0), /* bool */, /* bool */);
+           |                                                                                                              ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_basic.rs:487:19
+           |
+      487  |         glr_state.log_gss(&format!("Scenario 2, after '#a', GSS for tokenizer state {}", tid.0), TerminalID(0));
+           |                   ^^^^^^^-------------------------------------------------------------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      487  |         glr_state.log_gss(&format!("Scenario 2, after '#a', GSS for tokenizer state {}", tid.0), TerminalID(0), /* bool */, /* bool */);
+           |                                                                                                               ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_js.rs:296:22
+           |
+      296  |         merged_state.log_gss("Merged states", TerminalID(0));
+           |                      ^^^^^^^-------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      296  |         merged_state.log_gss("Merged states", TerminalID(0), /* bool */, /* bool */);
+           |                                                            ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_js.rs:188:26
+           |
+      188  |             state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+           |                          ^^^^^^^------------------------------------------------------------------------------------------ two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      188  |             state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0), /* bool */, /* bool */);
+           |                                                                                                                          ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_js.rs:418:22
+           |
+      418  |         merged_state.log_gss("Merged states", TerminalID(0));
+           |                      ^^^^^^^-------------------------------- two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      418  |         merged_state.log_gss("Merged states", TerminalID(0), /* bool */, /* bool */);
+           |                                                            ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_js.rs:357:26
+           |
+      357  |             state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+           |                          ^^^^^^^------------------------------------------------------------------------------------------ two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      357  |             state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0), /* bool */, /* bool */);
+           |                                                                                                                          ++++++++++++++++++++++++
+
+      error[E0061]: this method takes 4 arguments but 2 arguments were supplied
+          --> src/test_constraint_js.rs:471:19
+           |
+      471  |             state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+           |                   ^^^^^^^------------------------------------------------------------------------------------------ two arguments of type `bool` and `bool` are missing
+           |
+      note: method defined here
+          --> src/glr/parser.rs:1028:12
+           |
+      1028 |     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
+           |            ^^^^^^^                                        --------------------  ------------------
+      help: provide the arguments
+           |
+      471  |             state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0), /* bool */, /* bool */);
+           |                                                                                                                   ++++++++++++++++++++++++
+
+      Some errors have detailed explanations: E0061, E0277, E0433.
+      For more information about an error, try `rustc --explain E0061`.
+      error: could not compile `sep1` (lib test) due to 15 previous errors
+      /Users/isaacbreen/Projects2/grammars2024/analyze_timings.py:264: SyntaxWarning: invalid escape sequence '\/'
+        """
+      Error: Source code block not found in log file.
+      Please ensure the log contains a block like:
+      ---BEGIN-SOURCE-JSON---
+      "...source..."
+      ---END-SOURCE-JSON---
+    metadata:
+  - assistant: |-
+      I see the compilation errors. It looks like my previous changes introduced a few issues: a missing semicolon, a missing import, and a changed function signature that needs to be updated at the call sites. Additionally, changing the return type of `print_gss_forest` caused some display formatting errors in other files.
+
+      I'll fix the files you've provided. Here are the patches:
+
+      ### `src/glr/parser.rs`
+
+      I'll add the missing `use std::collections::HashSet;`, and fix a syntax error in the `log_gss` function.
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -4,7 +4,7 @@
+       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
+       use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
+       
+       use bimap::BiBTreeMap;
+      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+       use std::fmt::{Debug, Display, Formatter, Write};
+       use std::hash::{DefaultHasher, Hash, Hasher};
+       use std::sync::Arc;
+      @@ -1054,7 +1054,7 @@
+                                               .join(" → ")),
+                       None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
+                   }
+      -        }
+      +        };
+       
+               if explain_states && !state_ids.is_empty() {
+                   final_string.push_str("\n\n--- GSS State Explanations ---\n");
+
+      ```
+
+      ### `src/glr/tests.rs`
+
+      I'll update the call to `log_gss` to match the new signature, providing default values for the new arguments.
+
+      ```diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -90,7 +90,7 @@
+           let tokens5 = vec![a_token_b, b_token];
+           let mut state5 = parser_with_b.init_glr_parser(None);
+           state5.parse(&tokens5);
+      -    state5.log_gss("State 5 after parsing 'ab'", TerminalID(0));
+      +    state5.log_gss("State 5 after parsing 'ab'", TerminalID(0), false, false);
+           assert!(state5.is_ok(), "Parse should fail for 'ab'");
+       }
+       
+
+      ```
+
+      These changes should resolve the errors in the files I have access to. The remaining errors in `constraint.rs`, `test_constraint_basic.rs`, and `test_constraint_js.rs` are due to the same two reasons:
+
+      1.  Calls to `log_gss` need to be updated with the two new boolean arguments (e.g., `log_gss(..., false, false)`).
+      2.  Calls to `print_gss_forest` are now trying to print a tuple. You should append `.0` to the call to get the string part for printing, for example: `println!("{}", print_gss_forest(...).0);`.
+
+      Applying these patterns to the other files should clear up the rest of the compilation errors. Let me know if you have any more questions
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/tests.rs.
+    metadata:
 ...

@@ -7,7 +7,7 @@ use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndR
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -1050,13 +1050,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                        p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                             .map(|id| id.to_string())
                                             .collect::<Vec<_>>()
-                                            .join(" → ")),
-                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                }
+                                        .join(" → ")),
+                None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
             }
+        };
 
-            if explain_states && !state_ids.is_empty() {
-                final_string.push_str("\n\n--- GSS State Explanations ---\n");
+        if explain_states && !state_ids.is_empty() {
+            final_string.push_str("\n\n--- GSS State Explanations ---\n");
                 for state_id in state_ids {
                     let mut explanation = String::new();
                     writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
