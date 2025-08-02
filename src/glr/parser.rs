@@ -807,6 +807,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
         // timeit!("GLRParserState::step::phase3", {
             while let Some(((_depth, state_id), state)) = work_map.pop_first() {
+                let stats = gather_gss_stats(&[&state.stack]);
+                if stats.unique_nodes > 5 { crate::debug!(3, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes); }
+
                 let row = &self.parser.table[&state_id];
 
                 if let Some(ref r) = row.default_reduce.reduce {
@@ -946,6 +949,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 if row.default_reduce.clone_and_merge {
                     next_active_state.merge(state);
+                    let stats = gather_gss_stats(&[&next_active_state.stack]);
+                    if stats.unique_nodes > 5 { crate::debug!(3, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes); }
                 }
             }
         });
