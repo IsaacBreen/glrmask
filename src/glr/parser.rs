@@ -961,7 +961,50 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     for peek in state.stack.peek_iter() {
                         // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
                         //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
-                        let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+
+
+                        let len = r.len;
+                        let nt = r.nonterminal_id;
+                        let popped = timeit!(peek.popn(len));
+                        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+
+                        let mut out = Vec::new();
+                        for popper_item in popped.iter() {
+                            for peek2 in popper_item.peek_iter() {
+                                let state_id = peek2.edge_value().state_id;
+                                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+                                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+                                );
+
+                                if goto.accept {
+                                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
+                                    self.accepted = true;
+                                }
+
+                                if let Some(goto_state_id) = goto.state_id {
+                                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
+                                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                        out.push(new_gss_node);
+                                }
+                            }
+                        }
+
+                        let new_stack_part = if out.is_empty() {
+                            Arc::new(GSSNode::new_fresh())
+                        } else if out.len() == 1 {
+                            Arc::new(out.into_iter().next().unwrap())
+                        } else {
+                            let mut out_iter = out.into_iter();
+                            let mut out_node = out_iter.next().unwrap();
+                            for next_node in out_iter {
+                                out_node.merge_with_depth(2, &next_node);
+                            }
+                            Arc::new(out_node)
+                        };
+
+
+                        // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack_part.is_empty() {
                             reduced_stack.merge_with_depth(1, &new_stack_part);
                         }
