@@ -258,7 +258,8 @@ REGULAR_EXPRESSION_LITERAL ::= '/' REGEX_BODY '/' REGEX_FLAGS? ;
 REGEX_BODY ::= ( [^/\n\r\\] | '\\' . )+ ; // Any char except /, newline, or backslash, or any escaped char.
 REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 
-template_literal ::= '`' ( TEMPLATE_CHAR | template_substitution )* '`' ;
+template_literal ::= '`' ( TEMPLATE_CHARS | template_substitution )* '`' ;
+TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
 TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
 template_substitution ::= '${' expression '}' ;
 
