@@ -1045,7 +1045,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
+        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
@@ -1082,7 +1082,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
-        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
+        debug!(3, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
