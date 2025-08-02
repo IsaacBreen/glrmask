@@ -839,9 +839,11 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     println!("After direct right recursion:\n{}", display_productions(&productions));
 
     if true {
-        println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+        // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+        println!("Before inlining nullable productions: Number of productions: {}", productions.len());
         productions = inline_null_productions(&productions);
-        println!("After inlining nullable productions:\n{}", display_productions(&productions));
+        // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+        println!("After inlining nullable productions: Number of productions: {}", productions.len());
     }
     if false {
         println!("Before inlining unit productions:\n{}", display_productions(&productions));
