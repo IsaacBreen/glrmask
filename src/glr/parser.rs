@@ -1012,7 +1012,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         break;
                                     }
                                 }
-                                println!("number of loops: {}", i);
+                                if i > 1 {
+                                    println!("number of loops: {}", i);
+                                }
 
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
                                 out.push(new_gss_node);
