@@ -1002,16 +1002,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 current_nt = reduce.nonterminal_id;
                                             } else {
                                                 assert!(*clone_and_merge);
-                                                println!("break reason: reduce is None");
+                                                // println!("break reason: reduce is None");
                                                 break;
                                             }
                                         } else {
                                             goto_state_ids.insert(goto_state_id);
-                                            println!("break reason: continue_fast_reduce is false");
+                                            // println!("break reason: continue_fast_reduce is false");
                                             break;
                                         }
                                     } else {
-                                        println!("break reason: goto.state_id is None");
+                                        // println!("break reason: goto.state_id is None");
                                         break;
                                     }
                                 }
