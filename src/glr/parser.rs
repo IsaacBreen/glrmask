@@ -1106,7 +1106,7 @@ impl GLRParser {
     pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
         let mut dot = String::new();
         writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-        writeln!(&mut dot, "  rankdir=TB;").unwrap();
+        writeln!(&mut dot, "  rankdir=LR;").unwrap();
         writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
         let mut visited_nodes = HashSet::new();
