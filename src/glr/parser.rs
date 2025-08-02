@@ -976,6 +976,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let state_id = peek2.edge_value().state_id;
                                 let mut current_nt = nt;
                                 // println!("loop start");
+                                let mut i = 0;
+                                i += 1;
                                 loop {
                                     // println!("loop current_nt: {:?}", current_nt);
                                     let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
@@ -1010,6 +1012,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         break;
                                     }
                                 }
+                                println!("number of loops: {}", i);
 
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
                                 out.push(new_gss_node);
