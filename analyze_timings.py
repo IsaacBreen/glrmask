@@ -134,13 +134,6 @@ def main():
         }
         token_info['log'] = token_log
         
-        # Extract Graphviz DOT source
-        graphviz_dot = None
-        m_graphviz = re.search(r"--- Begin GSS Graphviz ---\n(.*?)\n--- End GSS Graphviz ---", token_log, re.DOTALL)
-        if m_graphviz:
-            graphviz_dot = m_graphviz.group(1).strip()
-        token_info['graphviz_dot'] = graphviz_dot
-
         if 'start_byte' in token_info:
             tokens_data.append(token_info)
 
@@ -168,7 +161,6 @@ def main():
 <head>
     <meta charset="UTF-8">
     <title>Performance Visualization</title>
-    <script src="https://cdn.jsdelivr.net/npm/@hpcc-js/wasm@2/dist/index.min.js" type="application/javascript/esm"></script>
     <style>
         body {{ font-family: sans-serif; display: flex; height: 100vh; margin: 0; }}
         #code-container {{ flex: {code_pane_flex_ratio}; overflow: auto; padding: 1em; border-right: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; line-height: 1.4; }}
@@ -178,7 +170,6 @@ def main():
         .token.locked {{ outline: 2px solid blue; }}
         #details-container h3 {{ margin-top: 0; }}
         #details-content pre {{ background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre; overflow-x: auto; }}
-        #graph-container svg {{ max-width: 100%; height: auto; }}
     </style>
 </head>
 <body>
@@ -193,8 +184,7 @@ def main():
         </div>
     </div>
 
-    <script type="module">
-        const hpccWasm = window["@hpcc-js/wasm"];
+    <script>
         const initialDetailsHtml = document.getElementById('details-content').innerHTML;
         let lockedToken = null;
 
@@ -237,24 +227,9 @@ def main():
                 <p><strong>Bytes:</strong> [${{info.start_byte}}, ${{info.end_byte}})</p>
                 <h4>Timings</h4>
                 ${{timingsHtml}}
-                <h4>GSS Graph</h4>
-                <div id="graph-container">Rendering graph...</div>
                 <h4>Full Log</h4>
                 <pre>${{html.escape(info.log)}}</pre>
             `;
-
-            const graphContainer = document.getElementById('graph-container');
-            if (info.graphviz_dot) {{
-                hpccWasm.graphviz.layout(info.graphviz_dot, "svg", "dot")
-                    .then(svg => {{
-                        graphContainer.innerHTML = svg;
-                    }})
-                    .catch(err => {{
-                        graphContainer.innerHTML = `<pre>Error rendering graph:\\n${{html.escape(err.toString())}}</pre>`;
-                    }});
-            }} else {{
-                graphContainer.innerHTML = '<p>No graph available for this step.</p>';
-            }}
         }}
         
         function clearDetails() {{
