@@ -1218,7 +1218,7 @@ pub fn print_gss_forest(
 }
 
 /// Formats an accumulator for concise display in the GSS printout.
-fn format_acc(
+pub fn format_acc(
     node: &GSSNode,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,

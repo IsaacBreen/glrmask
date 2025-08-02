@@ -5148,14 +5148,13 @@ local_system:
               return writeln!(f, "{} (none)", indent);
           }
 
-          // Group terminals by action
-          let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
-          for (tid, action) in actions {
-              let terminal = terminal_map.get_by_right(tid).unwrap();
-              grouped_actions.entry(action).or_default().insert(terminal);
-          }
+          // Sort by terminal name for deterministic output
+          let mut sorted_actions: Vec<_> = actions.iter().collect();
+          sorted_actions.sort_by_key(|(tid, _)| terminal_map.get_by_right(tid).unwrap());
 
-          for (action, terminals) in grouped_actions {
+          for (tid, action) in sorted_actions {
+              let terminal = terminal_map.get_by_right(tid).unwrap();
+
               // Format action
               let action_str = match action {
                   Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
@@ -5167,7 +5166,17 @@ local_system:
                       format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
                   }
                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                      let mut s = "Conflict:".to_string();
+                      let has_shift = shift.is_some();
+                      let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                      let conflict_type = if has_shift && num_reduces > 0 {
+                          "Shift-Reduce Conflict"
+                      } else if !has_shift && num_reduces > 1 {
+                          "Reduce-Reduce Conflict"
+                      } else {
+                          "Conflict" // Should be simplified away
+                      };
+
+                      let mut s = format!("{}:", conflict_type);
                       let inner_indent = format!("\n{}        ", indent); // indent + "        "
                       if let Some(shift_state) = shift {
                           let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
@@ -5183,20 +5192,7 @@ local_system:
                       s
                   }
               };
-
-              // Format terminals
-              let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-              terminal_names.sort();
-              const MAX_TERMINALS_TO_SHOW: usize = 5;
-              let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-                  let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-                  format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-              } else {
-                  terminal_names.join(", ")
-              };
-
-              // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-              writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
+              writeln!(f, "{}- On {}: {}", indent, terminal, action_str)?;
           }
           Ok(())
       }
@@ -5977,6 +5973,15 @@ local_system:
                                   format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
                               }
                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                  let has_shift = shift.is_some();
+                                  let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                                  let conflict_type = if has_shift && num_reduces > 0 {
+                                      "S/R"
+                                  } else if !has_shift && num_reduces > 1 {
+                                      "R/R"
+                                  } else {
+                                      "Split"
+                                  };
                                   let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
                                   let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
                                       let nt_count = nts.len();
@@ -5985,9 +5990,9 @@ local_system:
                                   }).collect();
 
                                   if s_part.is_empty() {
-                                      format!("Split[{}]", r_parts.join(", "))
+                                      format!("{}[{}]", conflict_type, r_parts.join(", "))
                                   } else {
-                                      format!("Split[{}, {}]", s_part, r_parts.join(", "))
+                                      format!("{}[{}, {}]", conflict_type, s_part, r_parts.join(", "))
                                   }
                               }
                           };
@@ -13350,14 +13355,13 @@ local_system:
               return writeln!(f, "{} (none)", indent);
           }
 
-          // Group terminals by action
-          let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
-          for (tid, action) in actions {
-              let terminal = terminal_map.get_by_right(tid).unwrap();
-              grouped_actions.entry(action).or_default().insert(terminal);
-          }
+          // Sort by terminal name for deterministic output
+          let mut sorted_actions: Vec<_> = actions.iter().collect();
+          sorted_actions.sort_by_key(|(tid, _)| terminal_map.get_by_right(tid).unwrap());
 
-          for (action, terminals) in grouped_actions {
+          for (tid, action) in sorted_actions {
+              let terminal = terminal_map.get_by_right(tid).unwrap();
+
               // Format action
               let action_str = match action {
                   Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
@@ -13369,7 +13373,17 @@ local_system:
                       format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
                   }
                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                      let mut s = "Conflict:".to_string();
+                      let has_shift = shift.is_some();
+                      let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                      let conflict_type = if has_shift && num_reduces > 0 {
+                          "Shift-Reduce Conflict"
+                      } else if !has_shift && num_reduces > 1 {
+                          "Reduce-Reduce Conflict"
+                      } else {
+                          "Conflict" // Should be simplified away
+                      };
+
+                      let mut s = format!("{}:", conflict_type);
                       let inner_indent = format!("\n{}        ", indent); // indent + "        "
                       if let Some(shift_state) = shift {
                           let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
@@ -13385,20 +13399,7 @@ local_system:
                       s
                   }
               };
-
-              // Format terminals
-              let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-              terminal_names.sort();
-              const MAX_TERMINALS_TO_SHOW: usize = 5;
-              let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-                  let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-                  format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-              } else {
-                  terminal_names.join(", ")
-              };
-
-              // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-              writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
+              writeln!(f, "{}- On {}: {}", indent, terminal, action_str)?;
           }
           Ok(())
       }
@@ -14179,6 +14180,15 @@ local_system:
                                   format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
                               }
                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                  let has_shift = shift.is_some();
+                                  let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                                  let conflict_type = if has_shift && num_reduces > 0 {
+                                      "S/R"
+                                  } else if !has_shift && num_reduces > 1 {
+                                      "R/R"
+                                  } else {
+                                      "Split"
+                                  };
                                   let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
                                   let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
                                       let nt_count = nts.len();
@@ -14187,9 +14197,9 @@ local_system:
                                   }).collect();
 
                                   if s_part.is_empty() {
-                                      format!("Split[{}]", r_parts.join(", "))
+                                      format!("{}[{}]", conflict_type, r_parts.join(", "))
                                   } else {
-                                      format!("Split[{}, {}]", s_part, r_parts.join(", "))
+                                      format!("{}[{}, {}]", conflict_type, s_part, r_parts.join(", "))
                                   }
                               }
                           };
@@ -21615,14 +21625,13 @@ messages:
               return writeln!(f, "{} (none)", indent);
           }
 
-          // Group terminals by action
-          let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
-          for (tid, action) in actions {
-              let terminal = terminal_map.get_by_right(tid).unwrap();
-              grouped_actions.entry(action).or_default().insert(terminal);
-          }
+          // Sort by terminal name for deterministic output
+          let mut sorted_actions: Vec<_> = actions.iter().collect();
+          sorted_actions.sort_by_key(|(tid, _)| terminal_map.get_by_right(tid).unwrap());
 
-          for (action, terminals) in grouped_actions {
+          for (tid, action) in sorted_actions {
+              let terminal = terminal_map.get_by_right(tid).unwrap();
+
               // Format action
               let action_str = match action {
                   Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
@@ -21634,7 +21643,17 @@ messages:
                       format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
                   }
                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                      let mut s = "Conflict:".to_string();
+                      let has_shift = shift.is_some();
+                      let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                      let conflict_type = if has_shift && num_reduces > 0 {
+                          "Shift-Reduce Conflict"
+                      } else if !has_shift && num_reduces > 1 {
+                          "Reduce-Reduce Conflict"
+                      } else {
+                          "Conflict" // Should be simplified away
+                      };
+
+                      let mut s = format!("{}:", conflict_type);
                       let inner_indent = format!("\n{}        ", indent); // indent + "        "
                       if let Some(shift_state) = shift {
                           let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
@@ -21650,20 +21669,7 @@ messages:
                       s
                   }
               };
-
-              // Format terminals
-              let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-              terminal_names.sort();
-              const MAX_TERMINALS_TO_SHOW: usize = 5;
-              let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-                  let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-                  format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-              } else {
-                  terminal_names.join(", ")
-              };
-
-              // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-              writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
+              writeln!(f, "{}- On {}: {}", indent, terminal, action_str)?;
           }
           Ok(())
       }
@@ -22449,6 +22455,15 @@ messages:
                                   format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
                               }
                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                  let has_shift = shift.is_some();
+                                  let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                                  let conflict_type = if has_shift && num_reduces > 0 {
+                                      "S/R"
+                                  } else if !has_shift && num_reduces > 1 {
+                                      "R/R"
+                                  } else {
+                                      "Split"
+                                  };
                                   let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
                                   let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
                                       let nt_count = nts.len();
@@ -22457,9 +22472,9 @@ messages:
                                   }).collect();
 
                                   if s_part.is_empty() {
-                                      format!("Split[{}]", r_parts.join(", "))
+                                      format!("{}[{}]", conflict_type, r_parts.join(", "))
                                   } else {
-                                      format!("Split[{}, {}]", s_part, r_parts.join(", "))
+                                      format!("{}[{}, {}]", conflict_type, s_part, r_parts.join(", "))
                                   }
                               }
                           };
@@ -24703,149 +24718,268 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      The way a conflict is represented in string doesn't really make sense.
-      The conflict should have a lookahead just like a reduce or a shift does.
-      Right now it's attached to the reduce inside the conflict.
+      Right now the graphviz shows the edge structure but not the node structure.
       Fix it.
-      The lookahead should be *on the conflict*.
+      Show in the nodes the Accs, for instance.
     metadata:
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your code. Dealing with how conflicts are represented can definitely improve clarity. Here are the suggested changes to make the conflict representation more intuitive.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Modifying the Graphviz output to show the GSS node structure with `Acc` details is a great idea for better debugging. Here are the necessary changes to achieve this.
 
-      I've adjusted the formatting in two places to make the conflict reporting clearer. The main change is in `src/glr/parser.rs` to display actions on a per-lookahead basis, which seems to be the core of your request. I've also improved the conflict naming (e.g., "Shift-Reduce Conflict") for better readability. A similar improvement has been applied to `src/glr/stats.rs`.
+      I'll adjust `gss_forest_to_dot` to render the GSS nodes and their connections, and update the relevant calls to provide the necessary data for formatting the node labels.
 
-      Here are the diffs for the files:
+      Here are the diffs for the files that need to be modified:
+
+      In `src/datastructures/gss.rs`, I'll make `format_acc` public so it can be used by the parser module to generate the Graphviz labels.
+
+      ```diff
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -1211,7 +1211,7 @@
+       }
+       
+       /// Formats an accumulator for concise display in the GSS printout.
+      -fn format_acc(
+      +pub fn format_acc(
+           node: &GSSNode,
+           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+
+      ```
+
+      Next, in `src/glr/parser.rs`, I'll replace the implementation of `gss_forest_to_dot` to render the GSS node structure instead of the state machine. I'll also update the signatures and calls to `gss_to_dot` and `gss_forest_to_dot` to pass along the necessary vocabulary information for formatting the `Acc` details within the nodes.
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -400,51 +400,48 @@
-       ) -> std::fmt::Result {
-           if actions.is_empty() {
-               return writeln!(f, "{} (none)", indent);
+      @@ -1000,100 +1000,91 @@
            }
        
-      -    // Group terminals by action
-      -    let mut grouped_actions: BTreeMap<&Stage7ShiftsAndReducesLookaheadValue, BTreeSet<&Terminal>> = BTreeMap::new();
-      -    for (tid, action) in actions {
-      -        let terminal = terminal_map.get_by_right(tid).unwrap();
-      -        grouped_actions.entry(action).or_default().insert(terminal);
-      -    }
-      -
-      -    for (action, terminals) in grouped_actions {
-      +    // Sort by terminal name for deterministic output
-      +    let mut sorted_actions: Vec<_> = actions.iter().collect();
-      +    sorted_actions.sort_by_key(|(tid, _)| terminal_map.get_by_right(tid).unwrap());
-      +
-      +    for (tid, action) in sorted_actions {
-      +        let terminal = terminal_map.get_by_right(tid).unwrap();
-      +
-               // Format action
-               let action_str = match action {
-                   Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                       format!("Shift {}", next_state_id.0)
-                   }
-                   Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                       let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                       let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                       format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
-                   }
-                   Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      -                let mut s = "Conflict:".to_string();
-      +                let has_shift = shift.is_some();
-      +                let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
-      +                let conflict_type = if has_shift && num_reduces > 0 {
-      +                    "Shift-Reduce Conflict"
-      +                } else if !has_shift && num_reduces > 1 {
-      +                    "Reduce-Reduce Conflict"
-      +                } else {
-      +                    "Conflict" // Should be simplified away
-      +                };
-      +
-      +                let mut s = format!("{}:", conflict_type);
-                       let inner_indent = format!("\n{}        ", indent); // indent + "        "
-                       if let Some(shift_state) = shift {
-                           let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
-                       }
-                       for (_len, nts) in reduces {
-                           for (_nt_id, prod_ids) in nts {
-                               for prod_id_val in prod_ids {
-                                   let prod = productions.get(prod_id_val.0).unwrap();
-                                   let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
-                               }
-                           }
-                       }
-                       s
-                   }
-               };
-      -
-      -        // Format terminals
-      -        let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-      -        terminal_names.sort();
-      -        const MAX_TERMINALS_TO_SHOW: usize = 5;
-      -        let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-      -            let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-      -            format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-      -        } else {
-      -            terminal_names.join(", ")
-      -        };
-      -
-      -        // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-      -        writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
-      +        writeln!(f, "{}- On {}: {}", indent, terminal, action_str)?;
+           /// Generates a Graphviz DOT representation of the GSS state graph.
+           pub fn gss_to_dot(&self) -> String {
+      -        self.parser.gss_to_dot(&self.active_state.stack)
+      +        self.parser.gss_to_dot(&self.active_state.stack, None, None)
            }
-           Ok(())
        }
-
-      ``````diff
-      --- a/src/glr/stats.rs
-      +++ b/src/glr/stats.rs
-      @@ -50,18 +50,26 @@
-                                   format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
-                               }
-                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      +                            let has_shift = shift.is_some();
-      +                            let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
-      +                            let conflict_type = if has_shift && num_reduces > 0 {
-      +                                "S/R"
-      +                            } else if !has_shift && num_reduces > 1 {
-      +                                "R/R"
-      +                            } else {
-      +                                "Split"
-      +                            };
-                                   let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
-                                   let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
-                                       let nt_count = nts.len();
-                                       let p_count: usize = nts.values().map(|pids| pids.len()).sum();
-                                       format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
-                                   }).collect();
        
-                                   if s_part.is_empty() {
-      -                                format!("Split[{}]", r_parts.join(", "))
-      +                                format!("{}[{}]", conflict_type, r_parts.join(", "))
-                                   } else {
-      -                                format!("Split[{}, {}]", s_part, r_parts.join(", "))
-      +                                format!("{}[{}, {}]", conflict_type, s_part, r_parts.join(", "))
-                                   }
-                               }
-                           };
+       impl GLRParser {
+           /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
+           /// This visualizes the portion of the state machine explored by the parser.
+      -    pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
+      +    pub fn gss_forest_to_dot(
+      +        &self,
+      +        roots: &[(&str, &GSSNode)],
+      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      +    ) -> String {
+               let mut dot = String::new();
+      -        writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
+      +        writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
+               writeln!(&mut dot, "  rankdir=LR;").unwrap();
+               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
+       
+               let mut visited_nodes = HashSet::new();
+      -        let mut defined_states = BTreeSet::new();
+      -        let mut edges = BTreeSet::new();
+      -        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
+      -        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
+      -
+      -        let mut queue = VecDeque::new();
+      -        for (label, root) in roots {
+      -            if !root.is_empty() {
+      -                let root_arc = Arc::new((*root).clone());
+      -                let root_states = root_connections.entry(label.to_string()).or_default();
+      -                for (edge_val, _) in &root_arc.predecessors {
+      -                    root_states.insert(edge_val.state_id);
+      -                }
+      -                queue.push_back(root_arc);
+      -            }
+      -        }
+      -
+      -        while let Some(node_arc) = queue.pop_front() {
+      +        let mut node_ids = HashMap::new();
+      +        let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new(n.clone())).collect();
+      +        let mut traversal_queue = queue.clone();
+      +
+      +        // First, define all nodes
+      +        while let Some(node_arc) = traversal_queue.pop_front() {
+                   let node_ptr = Arc::as_ptr(&node_arc);
+      -            if !visited_nodes.insert(node_ptr) {
+      +            if visited_nodes.contains(&node_ptr) {
+                       continue;
+                   }
+      -
+      -            for (edge_val, preds_by_depth) in &node_arc.predecessors {
+      -                let parent_state_id = edge_val.state_id;
+      -                defined_states.insert(parent_state_id);
+      -
+      -                for pred_vec in preds_by_depth.values() {
+      -                    for pred_arc in pred_vec {
+      -                        if pred_arc.predecessors.is_empty() {
+      -                            edges.insert((Some(parent_state_id), None));
+      -                        } else {
+      -                            for (pred_edge_val, _) in &pred_arc.predecessors {
+      -                                let child_state_id = pred_edge_val.state_id;
+      -                                edges.insert((Some(parent_state_id), Some(child_state_id)));
+      -                            }
+      -                        }
+      -                        queue.push_back(pred_arc.clone());
+      -                    }
+      -                }
+      -            }
+      -        }
+      -
+      -        // Define root label nodes as separate nodes
+      -        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
+      -        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
+      -        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
+      -        for label in root_connections.keys() {
+      -            writeln!(&mut dot, "    \"{}\";", label).unwrap();
+      -        }
+      -        writeln!(&mut dot, "  }}").unwrap();
+      -
+      -        // Define GSS state nodes
+      -        for state_id in &defined_states {
+      -            let mut label = String::new();
+      -            self.format_state_details(&mut label, *state_id, "").unwrap();
+      -            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
+      -            writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
+      -        }
+      -
+      -        if edges.iter().any(|(_, to)| to.is_none()) {
+      -            writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
+      -        }
+      -
+      -        // Draw edges from root labels to GSS states
+      -        for (label, states) in &root_connections {
+      -            for state_id in states {
+      -                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
+      -            }
+      -        }
+      -
+      -        // Draw edges between GSS states
+      -        for (from_opt, to_opt) in edges {
+      -            match (from_opt, to_opt) {
+      -                (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
+      -                (Some(from), None) => writeln!(&mut dot, "  S{} -> START;", from.0).unwrap(),
+      -                _ => {}
+      +            visited_nodes.insert(node_ptr);
+      +            let node_id = node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
+      +
+      +            let acc_str = crate::datastructures::gss::format_acc(
+      +                &node_arc,
+      +                &self.terminal_map,
+      +                original_internal_bimap,
+      +                llm_token_map,
+      +            );
+      +            let escaped_acc = acc_str
+      +                .replace('\\', "\\\\")
+      +                .replace('"', "\\\"")
+      +                .replace('\n', "\\l")
+      +                .replace('{', "\\{")
+      +                .replace('}', "\\}")
+      +                .replace('<', "\\<")
+      +                .replace('>', "\\>");
+      +
+      +            writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", node_id, node_id, node_arc.max_depth(), escaped_acc).unwrap();
+      +
+      +            for peek in GSSNode::peek_iter(&node_arc) {
+      +                traversal_queue.push_back(peek.predecessor_node.clone());
+      +            }
+      +        }
+      +
+      +        // Define root labels and connect them
+      +        for (i, (label, root)) in roots.iter().enumerate() {
+      +            let root_ptr = *root as *const GSSNode;
+      +            if let Some(root_id) = node_ids.get(&root_ptr) {
+      +                writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
+      +                writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
+      +                writeln!(&mut dot, "    style=filled;").unwrap();
+      +                writeln!(&mut dot, "    color=lightgrey;").unwrap();
+      +                writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
+      +                let root_node_name = format!("Root_{}", i);
+      +                writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
+      +                writeln!(&mut dot, "  }}").unwrap();
+      +                writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
+      +            }
+      +        }
+      +
+      +        // Then, define all edges
+      +        visited_nodes.clear();
+      +        while let Some(node_arc) = queue.pop_front() {
+      +            let node_ptr = Arc::as_ptr(&node_arc);
+      +            if !visited_nodes.insert(node_ptr) {
+      +                continue;
+      +            }
+      +            let parent_id = node_ids[&node_ptr];
+      +
+      +            for peek in GSSNode::peek_iter(&node_arc) {
+      +                let pred_ptr = Arc::as_ptr(peek.predecessor_node);
+      +                let pred_id = node_ids[&pred_ptr];
+      +                let edge_label = format!("State {}", peek.edge_value().state_id.0);
+      +                writeln!(&mut dot, "  N{} -> N{} [label=\"{}\"];", parent_id, pred_id, edge_label).unwrap();
+      +                queue.push_back(peek.predecessor_node.clone());
+                   }
+               }
+       
+      @@ -1106,8 +1079,13 @@
+       
+           /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+           /// This visualizes the portion of the state machine explored by the parser.
+      -    pub fn gss_to_dot(&self, root: &GSSNode) -> String {
+      -        self.gss_forest_to_dot(&[("Root", root)])
+      +    pub fn gss_to_dot(
+      +        &self,
+      +        root: &GSSNode,
+      +        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+      +        llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      +    ) -> String {
+      +        self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
+           }
+       }
+       
 
       ```
 
-      These changes should make the output of your parser table and stats much more readable when conflicts are present. Let me know if you have any other questions
+      Finally, I'll update the call to `gss_forest_to_dot` in `src/constraint.rs` to pass the required vocabulary information.
+
+      ```diff
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1310,7 +1310,11 @@
+                   .map(|s| s.as_str())
+                   .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                   .collect();
+      -        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
+      +        println!("{}", self.parent.parser.gss_forest_to_dot(
+      +            &roots_with_labels,
+      +            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+      +            Some(&self.parent.llm_vocab.llm_token_map),
+      +        ));
+               println!("\n\n--- End GSS Graphviz ---");
+       
+               for (state_id, state) in self.state.iter() {
+
+      ```
+
+      These changes should give you the detailed Graphviz output you're looking for. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
 
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/stats.rs
-      Applying patch to 'src/glr/stats.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/stats.rs.
+      --- Processing Diff Block 3 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
 ...

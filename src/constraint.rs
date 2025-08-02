@@ -1049,7 +1049,11 @@ impl<'a> GrammarConstraintState<'a> {
             .map(|s| s.as_str())
             .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
             .collect();
-        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
+        println!("{}", self.parent.parser.gss_forest_to_dot(
+            &roots_with_labels,
+            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+            Some(&self.parent.llm_vocab.llm_token_map),
+        ));
         println!("\n\n--- End GSS Graphviz ---");
 
         for (state_id, state) in self.state.iter() {
