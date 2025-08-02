@@ -111,7 +111,7 @@ pub struct GSSNode {
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
-    parent_acc: &'a Arc<Acc>,
+    parent_arc: &'a Arc<GSSNode>,
     edge_value: &'a ParseStateEdgeContent,
     predecessor_node: &'a Arc<GSSNode>,
 }
@@ -135,7 +135,7 @@ pub struct GSSPopperItem<'a> {
 #[derive(Clone, Copy)]
 pub struct GSSPopperItemPeek<'a> {
     path_acc: &'a Arc<Acc>,
-    parent_acc: &'a Arc<Acc>,
+    parent_arc: &'a Arc<GSSNode>,
     edge_value: &'a ParseStateEdgeContent,
     predecessor_node: &'a Arc<GSSNode>,
 }
@@ -204,7 +204,7 @@ impl<'a> GSSPopperItem<'a> {
                 pred_vec.iter().map(move |pred_arc| {
                     GSSPopperItemPeek {
                         path_acc: &self.path_acc,
-                        parent_acc: &self.node.acc,
+                        parent_arc: self.node,
                         edge_value: edge_val,
                         predecessor_node: pred_arc,
                     }
@@ -219,7 +219,7 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Returns the combined `Acc` of the path and the predecessor node.
     pub fn resolved_acc(&self) -> Acc {
-        Acc::narrow(&Acc::narrow(self.path_acc, self.parent_acc), &self.predecessor_node.acc)
+        Acc::narrow(&Acc::narrow(self.path_acc, &self.parent_arc.acc), &self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -235,22 +235,27 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        self.isolated_parent().push(edge_value)
+        self.isolated_parent().as_ref().push(edge_value)
     }
     pub fn popn(&self, len: usize) -> GSSPopper {
-        let isolated_parent = Arc::new(self.isolated_parent());
+        let isolated_parent = self.isolated_parent();
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
         popper.popn(len);
         popper
     }
 
-    pub fn isolated_parent(&self) -> GSSNode {
-        let acc = Acc::narrow(&Acc::narrow(self.path_acc, self.parent_acc), &self.predecessor_node.acc);
-        GSSNode::new_with_single_predecessor(
+    pub fn isolated_parent(&self) -> Arc<GSSNode> {
+        let new_acc = Acc::narrow(&Acc::narrow(self.path_acc, &self.parent_arc.acc), &self.predecessor_node.acc);
+
+        if self.parent_arc.num_predecessors() == 1 && *self.parent_arc.acc == new_acc {
+            return self.parent_arc.clone();
+        }
+
+        Arc::new(GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
-            acc.clone()
-        )
+            new_acc
+        ))
     }
 }
 
@@ -509,11 +514,11 @@ impl GSSNode {
     }
     
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
-    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
-        self.predecessors.iter().flat_map(move |(edge_val, preds_by_depth)| {
+    pub fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+        parent_arc.predecessors.iter().flat_map(move |(edge_val, preds_by_depth)| {
             preds_by_depth.values().flat_map(move |pred_vec| {
                 pred_vec.iter().map(move |pred_arc| GSSPeek {
-                    parent_acc: &self.acc,
+                    parent_arc,
                     edge_value: edge_val,
                     predecessor_node: pred_arc,
                 })
@@ -528,12 +533,12 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns the combined `Acc` of the parent and the predecessor.
     pub fn resolved_acc(&self) -> Acc {
-        Acc::narrow(self.parent_acc, &self.predecessor_node.acc)
+        Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)
     }
 
     /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
     pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
-        &self.parent_acc.llm_tokens_union & &self.predecessor_node.acc.llm_tokens_union
+        &self.parent_arc.acc.llm_tokens_union & &self.predecessor_node.acc.llm_tokens_union
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
@@ -550,10 +555,10 @@ impl<'a> GSSPeek<'a> {
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        self.isolated_parent().push(edge_value)
+        self.isolated_parent().as_ref().push(edge_value)
     }
     pub fn popn(&self, len: usize) -> GSSPopper {
-        let isolated_parent = Arc::new(self.isolated_parent());
+        let isolated_parent = self.isolated_parent();
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
         popper.popn(len);
         popper
@@ -561,13 +566,18 @@ impl<'a> GSSPeek<'a> {
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     /// The new node has the parent's `Acc` and a single predecessor (the one from this peek).
-    pub fn isolated_parent(&self) -> GSSNode {
-        let acc = Acc::narrow(self.parent_acc, &self.predecessor_node.acc);
-        GSSNode::new_with_single_predecessor(
+    pub fn isolated_parent(&self) -> Arc<GSSNode> {
+        let new_acc = Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc);
+
+        if self.parent_arc.num_predecessors() == 1 && *self.parent_arc.acc == new_acc {
+            return self.parent_arc.clone();
+        }
+
+        Arc::new(GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
-            acc.clone()
-        )
+            new_acc
+        ))
     }
 }
 
@@ -1066,17 +1076,16 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
 
     let mut rng = StdRng::seed_from_u64(seed);
     let root_index = rng.gen_range(0..roots.len());
-    let mut current_node = roots[root_index];
+    let mut current_node_arc = Arc::new(roots[root_index].clone());
 
     let mut path = Vec::new();
-    let mut temp_arc_storage: Arc<GSSNode>;
 
     loop {
-        if current_node.is_empty() {
+        if current_node_arc.is_empty() {
             break;
         }
 
-        let predecessors: Vec<_> = current_node.peek_iter().collect();
+        let predecessors: Vec<_> = GSSNode::peek_iter(&current_node_arc).collect();
         if predecessors.is_empty() {
             break;
         }
@@ -1086,8 +1095,7 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
 
         path.push(chosen_peek.edge_value().clone());
 
-        temp_arc_storage = chosen_peek.predecessor_node.clone();
-        current_node = &temp_arc_storage;
+        current_node_arc = chosen_peek.predecessor_node.clone();
     }
 
     Some(path)

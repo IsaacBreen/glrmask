@@ -592,7 +592,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
         while let Some(state) = work_queue.pop_front() {
-            for peek in state.stack.peek_iter() {
+            for peek in GSSNode::peek_iter(&state.stack) {
                 let row = &self.parser.table[&peek.edge_value().state_id];
                 if let Some(action) = action_selector(row).get(&token_id) {
                     match action {
@@ -779,7 +779,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let get_depth = |peek: &GSSNode| 0;
 
         // Peel off the top edges to populate the initial work map.
-        for peek in self.active_state.stack.peek_iter() {
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
             let isolated_state = ParseState { stack: Arc::new(peek.isolated_parent()) };
             let depth = get_depth(&isolated_state.stack);
             let state_id = peek.edge_value().state_id;
@@ -811,7 +811,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // This is the core of phase 3: reducing all stacks with the same state_id.
                         // We will merge the results into a new stack part.
                     let mut reduced_stack = GSSNode::new_fresh();
-                    for peek in state.stack.peek_iter() {
+                    for peek in GSSNode::peek_iter(&state.stack) {
                         // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
                         //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
 
@@ -909,7 +909,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     if !reduced_stack.is_empty() {
                         // Deconstruct the result and put it back into the work map.
-                        for new_peek in Arc::new(reduced_stack).peek_iter() {
+                        for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
                             let isolated = ParseState { stack: Arc::new(new_peek.isolated_parent()) };
                             let new_depth = get_depth(&isolated.stack);
                             let new_state_id = new_peek.edge_value().state_id;
@@ -950,7 +950,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // println!("GLRParserState::has_action_for: {:?}", self_hash);
         self.log_gss("has_action_for-start", token_id, false, false);
         let mut llm_tokens = LLMTokenBV::zeros();
-        for peek in self.active_state.stack.peek_iter() {
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
             let row = &self.parser.table[&peek.edge_value().state_id];
             let shifts_and_reduces = match self.phase {
                 ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
