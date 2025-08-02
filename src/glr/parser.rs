@@ -976,12 +976,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let state_id = peek2.edge_value().state_id;
                                 let mut current_nt = nt;
                                 loop {
-                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
+                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
                                     );
 
                                     if goto.accept {
-                                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
+                                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
                                         self.accepted = true;
                                     }
 
@@ -1001,7 +1001,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
 
                                 for goto_state_id in goto_state_ids {
-                                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
                                     let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                                     out.push(new_gss_node);
                                 }
