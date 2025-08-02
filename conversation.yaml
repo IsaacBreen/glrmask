@@ -722,63 +722,42 @@ local_system:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          // Trivial case -------------------------------------------------------
           if productions.is_empty() {
               return Vec::new();
           }
 
-          // Pre-compute nullability of all non-terminals once.
           let nullability = compute_nonterminal_nullability(productions);
-
-          // Helper -------------------------------------------------------------
-          // For one symbol return the possible “kept” variants
-          //   • terminals / non-nullable NT  →  [ Some(sym) ]
-          //   •   Null       NT              →  [ None ]         (must disappear)
-          //   •   Nullable   NT              →  [ Some(sym), None ]
-          fn symbol_options(
-              sym: &Symbol,
-              nullability: &BTreeMap<NonTerminal, Nullability>,
-          ) -> Vec<Option<Symbol>> {
-              match sym {
-                  Symbol::Terminal(_) => vec![Some(sym.clone())],
-                  Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                      Some(Nullability::Null) => vec![None],
-                      Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-                      _ => vec![Some(sym.clone())],
-                  },
-              }
-          }
-
-          // Produce every RHS variant by Cartesian product over symbol options.
-          let mut rhs_variants = |rhs: &[Symbol]| -> Vec<Vec<Symbol>> {
-              let mut variants: Vec<Vec<Symbol>> = vec![Vec::new()];
-              for sym in rhs {
-                  let mut next = Vec::<Vec<Symbol>>::new();
-                  for v in variants.iter() {
-                      for opt in symbol_options(sym, &nullability) {
-                          let mut new_v = v.clone();
-                          if let Some(s) = opt {
-                              new_v.push(s);
-                          }
-                          next.push(new_v);
-                      }
-                  }
-                  variants = next;
-              }
-              variants
-          };
-
-          // Build final set ----------------------------------------------------
           let mut seen = BTreeSet::<Production>::new();
           let mut out = Vec::<Production>::new();
 
-          // Keep the start production verbatim to preserve ordering.
           let start_prod = productions[0].clone();
           seen.insert(start_prod.clone());
           out.push(start_prod);
 
-          for prod in productions {
-              for rhs in rhs_variants(&prod.rhs) {
+          for prod in &productions[1..] {
+              // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+              let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                  let sym_options = match sym {
+                      Symbol::Terminal(_) => vec![Some(sym.clone())],
+                      Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                          Some(Nullability::Null) => vec![None], // Must be removed
+                          Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+                          _ => vec![Some(sym.clone())], // Must be kept
+                      },
+                  };
+
+                  acc.into_iter().flat_map(|variant| {
+                      sym_options.iter().map(move |opt| {
+                          let mut new_variant = variant.clone();
+                          if let Some(s) = opt {
+                              new_variant.push(s.clone());
+                          }
+                          new_variant
+                      })
+                  }).collect()
+              });
+
+              for rhs in rhs_variants {
                   let new_prod = Production { lhs: prod.lhs.clone(), rhs };
                   if seen.insert(new_prod.clone()) {
                       out.push(new_prod);
@@ -786,8 +765,6 @@ local_system:
               }
           }
 
-          // Drop super-fluous ε-productions ------------------------------------
-          // Keep ε only if its LHS still appears on RHS of the start production
           let start_rhs_nts: BTreeSet<_> = productions[0]
               .rhs
               .iter()
@@ -1715,7 +1692,7 @@ local_system:
     src/glr/parser.rs: |
       use std::any::Any;
       use std::cmp::Ordering;
-      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -2538,7 +2515,6 @@ local_system:
               });
           }
 
-
           #[time_it("GLRParserState::reduce_and_goto")]
           fn reduce_and_goto(
               &mut self,
@@ -2666,18 +2642,91 @@ local_system:
                           crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                         self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                         r.len, state_id.0, state.stack.num_predecessors());
-                          timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                          self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                          r.len, state_id.0), {
+                          // timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
+                          //                 self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                          //                 r.len, state_id.0), {
+                          timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
                               // For each peek in the current state, reduce and goto.
                               // This is the core of phase 3: reducing all stacks with the same state_id.
                               // We will merge the results into a new stack part.
-                          });
                           let mut reduced_stack = GSSNode::new_fresh();
                           for peek in state.stack.peek_iter() {
                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
                               //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
-                              let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+
+
+                              let len = r.len;
+                              let nt = r.nonterminal_id;
+                              let popped = timeit!(peek.popn(len));
+                              crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                              crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+
+                              let mut out = Vec::new();
+                              for popper_item in popped.iter() {
+                                  for peek2 in popper_item.peek_iter() {
+                                      timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
+                                      let mut goto_state_ids = BTreeSet::new();
+                                      let state_id = peek2.edge_value().state_id;
+                                      let mut current_nt = nt;
+                                      // println!("loop start");
+                                      let mut i = 0;
+                                      loop {
+                                          i += 1;
+                                          // println!("loop current_nt: {:?}", current_nt);
+                                          let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
+                                              format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
+                                          );
+
+                                          if goto.accept {
+                                              crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
+                                              self.accepted = true;
+                                          }
+
+                                          if let Some(goto_state_id) = goto.state_id {
+                                              timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
+                                              let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
+                                              let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
+                                              // let continue_fast_reduce = false;
+                                              if continue_fast_reduce {
+                                                  if *clone_and_merge {
+                                                      goto_state_ids.insert(goto_state_id);
+                                                  }
+                                                  current_nt = reduce.clone().unwrap().nonterminal_id;
+                                              } else {
+                                                  goto_state_ids.insert(goto_state_id);
+                                                  // println!("break reason: continue_fast_reduce is false");
+                                                  break;
+                                              }
+                                          } else {
+                                              // println!("break reason: goto.state_id is None");
+                                              break;
+                                          }
+                                      }
+                                      if i > 1 {
+                                          println!("number of loops: {}", i);
+                                          // panic!("number of loops: {}", i);
+                                      }
+
+                                      let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
+                                      out.push(new_gss_node);
+                                  }
+                              }
+
+                              let new_stack_part = if out.is_empty() {
+                                  Arc::new(GSSNode::new_fresh())
+                              } else if out.len() == 1 {
+                                  Arc::new(out.into_iter().next().unwrap())
+                              } else {
+                                  let mut out_iter = out.into_iter();
+                                  let mut out_node = out_iter.next().unwrap();
+                                  for next_node in out_iter {
+                                      out_node.merge_with_depth(2, &next_node);
+                                  }
+                                  Arc::new(out_node)
+                              };
+
+
+                              // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                               if !new_stack_part.is_empty() {
                                   reduced_stack.merge_with_depth(1, &new_stack_part);
                               }
@@ -2694,6 +2743,7 @@ local_system:
                                       .or_insert(isolated);
                               }
                           }
+                          });
                       }
 
                       if row.default_reduce.clone_and_merge {
@@ -3867,9 +3917,11 @@ local_system:
           println!("After direct right recursion:\n{}", display_productions(&productions));
 
           if true {
-              println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              println!("Before inlining nullable productions: Number of productions: {}", productions.len());
               productions = inline_null_productions(&productions);
-              println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              println!("After inlining nullable productions: Number of productions: {}", productions.len());
           }
           if false {
               println!("Before inlining unit productions:\n{}", display_productions(&productions));
@@ -5889,63 +5941,42 @@ local_system:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          // Trivial case -------------------------------------------------------
           if productions.is_empty() {
               return Vec::new();
           }
 
-          // Pre-compute nullability of all non-terminals once.
           let nullability = compute_nonterminal_nullability(productions);
-
-          // Helper -------------------------------------------------------------
-          // For one symbol return the possible “kept” variants
-          //   • terminals / non-nullable NT  →  [ Some(sym) ]
-          //   •   Null       NT              →  [ None ]         (must disappear)
-          //   •   Nullable   NT              →  [ Some(sym), None ]
-          fn symbol_options(
-              sym: &Symbol,
-              nullability: &BTreeMap<NonTerminal, Nullability>,
-          ) -> Vec<Option<Symbol>> {
-              match sym {
-                  Symbol::Terminal(_) => vec![Some(sym.clone())],
-                  Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                      Some(Nullability::Null) => vec![None],
-                      Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-                      _ => vec![Some(sym.clone())],
-                  },
-              }
-          }
-
-          // Produce every RHS variant by Cartesian product over symbol options.
-          let mut rhs_variants = |rhs: &[Symbol]| -> Vec<Vec<Symbol>> {
-              let mut variants: Vec<Vec<Symbol>> = vec![Vec::new()];
-              for sym in rhs {
-                  let mut next = Vec::<Vec<Symbol>>::new();
-                  for v in variants.iter() {
-                      for opt in symbol_options(sym, &nullability) {
-                          let mut new_v = v.clone();
-                          if let Some(s) = opt {
-                              new_v.push(s);
-                          }
-                          next.push(new_v);
-                      }
-                  }
-                  variants = next;
-              }
-              variants
-          };
-
-          // Build final set ----------------------------------------------------
           let mut seen = BTreeSet::<Production>::new();
           let mut out = Vec::<Production>::new();
 
-          // Keep the start production verbatim to preserve ordering.
           let start_prod = productions[0].clone();
           seen.insert(start_prod.clone());
           out.push(start_prod);
 
-          for prod in productions {
-              for rhs in rhs_variants(&prod.rhs) {
+          for prod in &productions[1..] {
+              // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+              let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                  let sym_options = match sym {
+                      Symbol::Terminal(_) => vec![Some(sym.clone())],
+                      Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                          Some(Nullability::Null) => vec![None], // Must be removed
+                          Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+                          _ => vec![Some(sym.clone())], // Must be kept
+                      },
+                  };
+
+                  acc.into_iter().flat_map(|variant| {
+                      sym_options.iter().map(move |opt| {
+                          let mut new_variant = variant.clone();
+                          if let Some(s) = opt {
+                              new_variant.push(s.clone());
+                          }
+                          new_variant
+                      })
+                  }).collect()
+              });
+
+              for rhs in rhs_variants {
                   let new_prod = Production { lhs: prod.lhs.clone(), rhs };
                   if seen.insert(new_prod.clone()) {
                       out.push(new_prod);
@@ -5953,8 +5984,6 @@ local_system:
               }
           }
 
-          // Drop super-fluous ε-productions ------------------------------------
-          // Keep ε only if its LHS still appears on RHS of the start production
           let start_rhs_nts: BTreeSet<_> = productions[0]
               .rhs
               .iter()
@@ -6882,7 +6911,7 @@ local_system:
     src/glr/parser.rs: |
       use std::any::Any;
       use std::cmp::Ordering;
-      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -7705,7 +7734,6 @@ local_system:
               });
           }
 
-
           #[time_it("GLRParserState::reduce_and_goto")]
           fn reduce_and_goto(
               &mut self,
@@ -7833,18 +7861,91 @@ local_system:
                           crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                         self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                         r.len, state_id.0, state.stack.num_predecessors());
-                          timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                          self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                          r.len, state_id.0), {
+                          // timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
+                          //                 self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                          //                 r.len, state_id.0), {
+                          timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
                               // For each peek in the current state, reduce and goto.
                               // This is the core of phase 3: reducing all stacks with the same state_id.
                               // We will merge the results into a new stack part.
-                          });
                           let mut reduced_stack = GSSNode::new_fresh();
                           for peek in state.stack.peek_iter() {
                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
                               //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
-                              let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+
+
+                              let len = r.len;
+                              let nt = r.nonterminal_id;
+                              let popped = timeit!(peek.popn(len));
+                              crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                              crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+
+                              let mut out = Vec::new();
+                              for popper_item in popped.iter() {
+                                  for peek2 in popper_item.peek_iter() {
+                                      timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
+                                      let mut goto_state_ids = BTreeSet::new();
+                                      let state_id = peek2.edge_value().state_id;
+                                      let mut current_nt = nt;
+                                      // println!("loop start");
+                                      let mut i = 0;
+                                      loop {
+                                          i += 1;
+                                          // println!("loop current_nt: {:?}", current_nt);
+                                          let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
+                                              format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
+                                          );
+
+                                          if goto.accept {
+                                              crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
+                                              self.accepted = true;
+                                          }
+
+                                          if let Some(goto_state_id) = goto.state_id {
+                                              timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
+                                              let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
+                                              let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
+                                              // let continue_fast_reduce = false;
+                                              if continue_fast_reduce {
+                                                  if *clone_and_merge {
+                                                      goto_state_ids.insert(goto_state_id);
+                                                  }
+                                                  current_nt = reduce.clone().unwrap().nonterminal_id;
+                                              } else {
+                                                  goto_state_ids.insert(goto_state_id);
+                                                  // println!("break reason: continue_fast_reduce is false");
+                                                  break;
+                                              }
+                                          } else {
+                                              // println!("break reason: goto.state_id is None");
+                                              break;
+                                          }
+                                      }
+                                      if i > 1 {
+                                          println!("number of loops: {}", i);
+                                          // panic!("number of loops: {}", i);
+                                      }
+
+                                      let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
+                                      out.push(new_gss_node);
+                                  }
+                              }
+
+                              let new_stack_part = if out.is_empty() {
+                                  Arc::new(GSSNode::new_fresh())
+                              } else if out.len() == 1 {
+                                  Arc::new(out.into_iter().next().unwrap())
+                              } else {
+                                  let mut out_iter = out.into_iter();
+                                  let mut out_node = out_iter.next().unwrap();
+                                  for next_node in out_iter {
+                                      out_node.merge_with_depth(2, &next_node);
+                                  }
+                                  Arc::new(out_node)
+                              };
+
+
+                              // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                               if !new_stack_part.is_empty() {
                                   reduced_stack.merge_with_depth(1, &new_stack_part);
                               }
@@ -7861,6 +7962,7 @@ local_system:
                                       .or_insert(isolated);
                               }
                           }
+                          });
                       }
 
                       if row.default_reduce.clone_and_merge {
@@ -9034,9 +9136,11 @@ local_system:
           println!("After direct right recursion:\n{}", display_productions(&productions));
 
           if true {
-              println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              println!("Before inlining nullable productions: Number of productions: {}", productions.len());
               productions = inline_null_productions(&productions);
-              println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              println!("After inlining nullable productions: Number of productions: {}", productions.len());
           }
           if false {
               println!("Before inlining unit productions:\n{}", display_productions(&productions));
@@ -11079,63 +11183,42 @@ messages:
       }
 
       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-          // Trivial case -------------------------------------------------------
           if productions.is_empty() {
               return Vec::new();
           }
 
-          // Pre-compute nullability of all non-terminals once.
           let nullability = compute_nonterminal_nullability(productions);
-
-          // Helper -------------------------------------------------------------
-          // For one symbol return the possible “kept” variants
-          //   • terminals / non-nullable NT  →  [ Some(sym) ]
-          //   •   Null       NT              →  [ None ]         (must disappear)
-          //   •   Nullable   NT              →  [ Some(sym), None ]
-          fn symbol_options(
-              sym: &Symbol,
-              nullability: &BTreeMap<NonTerminal, Nullability>,
-          ) -> Vec<Option<Symbol>> {
-              match sym {
-                  Symbol::Terminal(_) => vec![Some(sym.clone())],
-                  Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                      Some(Nullability::Null) => vec![None],
-                      Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-                      _ => vec![Some(sym.clone())],
-                  },
-              }
-          }
-
-          // Produce every RHS variant by Cartesian product over symbol options.
-          let mut rhs_variants = |rhs: &[Symbol]| -> Vec<Vec<Symbol>> {
-              let mut variants: Vec<Vec<Symbol>> = vec![Vec::new()];
-              for sym in rhs {
-                  let mut next = Vec::<Vec<Symbol>>::new();
-                  for v in variants.iter() {
-                      for opt in symbol_options(sym, &nullability) {
-                          let mut new_v = v.clone();
-                          if let Some(s) = opt {
-                              new_v.push(s);
-                          }
-                          next.push(new_v);
-                      }
-                  }
-                  variants = next;
-              }
-              variants
-          };
-
-          // Build final set ----------------------------------------------------
           let mut seen = BTreeSet::<Production>::new();
           let mut out = Vec::<Production>::new();
 
-          // Keep the start production verbatim to preserve ordering.
           let start_prod = productions[0].clone();
           seen.insert(start_prod.clone());
           out.push(start_prod);
 
-          for prod in productions {
-              for rhs in rhs_variants(&prod.rhs) {
+          for prod in &productions[1..] {
+              // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+              let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                  let sym_options = match sym {
+                      Symbol::Terminal(_) => vec![Some(sym.clone())],
+                      Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                          Some(Nullability::Null) => vec![None], // Must be removed
+                          Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+                          _ => vec![Some(sym.clone())], // Must be kept
+                      },
+                  };
+
+                  acc.into_iter().flat_map(|variant| {
+                      sym_options.iter().map(move |opt| {
+                          let mut new_variant = variant.clone();
+                          if let Some(s) = opt {
+                              new_variant.push(s.clone());
+                          }
+                          new_variant
+                      })
+                  }).collect()
+              });
+
+              for rhs in rhs_variants {
                   let new_prod = Production { lhs: prod.lhs.clone(), rhs };
                   if seen.insert(new_prod.clone()) {
                       out.push(new_prod);
@@ -11143,8 +11226,6 @@ messages:
               }
           }
 
-          // Drop super-fluous ε-productions ------------------------------------
-          // Keep ε only if its LHS still appears on RHS of the start production
           let start_rhs_nts: BTreeSet<_> = productions[0]
               .rhs
               .iter()
@@ -12102,7 +12183,7 @@ messages:
       ```rust 'src/glr/parser.rs'
       use std::any::Any;
       use std::cmp::Ordering;
-      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -12925,7 +13006,6 @@ messages:
               });
           }
 
-
           #[time_it("GLRParserState::reduce_and_goto")]
           fn reduce_and_goto(
               &mut self,
@@ -13053,18 +13133,91 @@ messages:
                           crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                         self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                         r.len, state_id.0, state.stack.num_predecessors());
-                          timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                          self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                          r.len, state_id.0), {
+                          // timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
+                          //                 self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                          //                 r.len, state_id.0), {
+                          timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
                               // For each peek in the current state, reduce and goto.
                               // This is the core of phase 3: reducing all stacks with the same state_id.
                               // We will merge the results into a new stack part.
-                          });
                           let mut reduced_stack = GSSNode::new_fresh();
                           for peek in state.stack.peek_iter() {
                               // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
                               //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
-                              let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+
+
+                              let len = r.len;
+                              let nt = r.nonterminal_id;
+                              let popped = timeit!(peek.popn(len));
+                              crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                              crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+
+                              let mut out = Vec::new();
+                              for popper_item in popped.iter() {
+                                  for peek2 in popper_item.peek_iter() {
+                                      timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
+                                      let mut goto_state_ids = BTreeSet::new();
+                                      let state_id = peek2.edge_value().state_id;
+                                      let mut current_nt = nt;
+                                      // println!("loop start");
+                                      let mut i = 0;
+                                      loop {
+                                          i += 1;
+                                          // println!("loop current_nt: {:?}", current_nt);
+                                          let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
+                                              format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
+                                          );
+
+                                          if goto.accept {
+                                              crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
+                                              self.accepted = true;
+                                          }
+
+                                          if let Some(goto_state_id) = goto.state_id {
+                                              timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
+                                              let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
+                                              let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
+                                              // let continue_fast_reduce = false;
+                                              if continue_fast_reduce {
+                                                  if *clone_and_merge {
+                                                      goto_state_ids.insert(goto_state_id);
+                                                  }
+                                                  current_nt = reduce.clone().unwrap().nonterminal_id;
+                                              } else {
+                                                  goto_state_ids.insert(goto_state_id);
+                                                  // println!("break reason: continue_fast_reduce is false");
+                                                  break;
+                                              }
+                                          } else {
+                                              // println!("break reason: goto.state_id is None");
+                                              break;
+                                          }
+                                      }
+                                      if i > 1 {
+                                          println!("number of loops: {}", i);
+                                          // panic!("number of loops: {}", i);
+                                      }
+
+                                      let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
+                                      out.push(new_gss_node);
+                                  }
+                              }
+
+                              let new_stack_part = if out.is_empty() {
+                                  Arc::new(GSSNode::new_fresh())
+                              } else if out.len() == 1 {
+                                  Arc::new(out.into_iter().next().unwrap())
+                              } else {
+                                  let mut out_iter = out.into_iter();
+                                  let mut out_node = out_iter.next().unwrap();
+                                  for next_node in out_iter {
+                                      out_node.merge_with_depth(2, &next_node);
+                                  }
+                                  Arc::new(out_node)
+                              };
+
+
+                              // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                               if !new_stack_part.is_empty() {
                                   reduced_stack.merge_with_depth(1, &new_stack_part);
                               }
@@ -13081,6 +13234,7 @@ messages:
                                       .or_insert(isolated);
                               }
                           }
+                          });
                       }
 
                       if row.default_reduce.clone_and_merge {
@@ -14264,9 +14418,11 @@ messages:
           println!("After direct right recursion:\n{}", display_productions(&productions));
 
           if true {
-              println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              println!("Before inlining nullable productions: Number of productions: {}", productions.len());
               productions = inline_null_productions(&productions);
-              println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              println!("After inlining nullable productions: Number of productions: {}", productions.len());
           }
           if false {
               println!("Before inlining unit productions:\n{}", display_productions(&productions));
@@ -15586,144 +15742,86 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Simplify `inline_null_productions`. Make it readable, simple, understandable, and concise.
-      Ensure it's functionally equivalent.
+      In `parser.rs`, there are a lot of `.expect(format!(...))` calls that do a lot of work inside the expect, often work that isn't needed.
+      Make this more performant.
+      Define a `expect_else` method via a new trait that takes a closure, like `map_or_else` vs `map_or`.
     metadata:
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you simplify your Rust code. Dealing with grammar transformations can be tricky, and making the code clear and concise is a great goal.
+      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with performance hotspots like eagerly evaluated format strings in `expect` calls is a great optimization. Using a closure for lazy evaluation is the right approach.
 
-      Here is a simplified version of `inline_null_productions`. This refactoring focuses on improving readability by using a more functional style with `fold` to generate the production variants, while carefully preserving the original's unique (though potentially buggy) logic for ordering and filtering to ensure functional equivalence.
+      Here are the diffs for the requested changes. I've introduced a new trait `ExpectElse` in `src/glr/parser.rs` and updated the relevant calls to use it.
 
-      Here are the diffs for the file:
+      ### `src/glr/parser.rs`
+
+      I've added the `ExpectElse` trait and its implementation for `Option<T>` at the top of this file. Then, I replaced the two expensive `expect` calls in `reduce_and_goto` and `process_default_reductions` with `expect_else`. This avoids the expensive string formatting unless a panic is actually triggered.
 
       ```diff
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -810,68 +810,52 @@
-           productions.extend(new_productions);
-       }
-       
-       pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
-      -    // Trivial case -------------------------------------------------------
-           if productions.is_empty() {
-               return Vec::new();
-           }
-       
-      -    // Pre-compute nullability of all non-terminals once.
-           let nullability = compute_nonterminal_nullability(productions);
-      -
-      -    // Helper -------------------------------------------------------------
-      -    // For one symbol return the possible “kept” variants
-      -    //   • terminals / non-nullable NT  →  [ Some(sym) ]
-      -    //   •   Null       NT              →  [ None ]         (must disappear)
-      -    //   •   Nullable   NT              →  [ Some(sym), None ]
-      -    fn symbol_options(
-      -        sym: &Symbol,
-      -        nullability: &BTreeMap<NonTerminal, Nullability>,
-      -    ) -> Vec<Option<Symbol>> {
-      -        match sym {
-      -            Symbol::Terminal(_) => vec![Some(sym.clone())],
-      -            Symbol::NonTerminal(nt) => match nullability.get(nt) {
-      -                Some(Nullability::Null) => vec![None],
-      -                Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-      -                _ => vec![Some(sym.clone())],
-      -            },
-      -        }
-      -    }
-      -
-      -    // Produce every RHS variant by Cartesian product over symbol options.
-      -    let mut rhs_variants = |rhs: &[Symbol]| -> Vec<Vec<Symbol>> {
-      -        let mut variants: Vec<Vec<Symbol>> = vec![Vec::new()];
-      -        for sym in rhs {
-      -            let mut next = Vec::<Vec<Symbol>>::new();
-      -            for v in variants.iter() {
-      -                for opt in symbol_options(sym, &nullability) {
-      -                    let mut new_v = v.clone();
-      -                    if let Some(s) = opt {
-      -                        new_v.push(s);
-      -                    }
-      -                    next.push(new_v);
-      -                }
-      -            }
-      -            variants = next;
-      -        }
-      -        variants
-      -    };
-      -
-      -    // Build final set ----------------------------------------------------
-           let mut seen = BTreeSet::<Production>::new();
-           let mut out = Vec::<Production>::new();
-       
-      -    // Keep the start production verbatim to preserve ordering.
-      +    // The original implementation had a special (and likely buggy) pre-seeding
-      +    // of the output list to preserve the start production's ordering. We replicate it here.
-           let start_prod = productions[0].clone();
-           seen.insert(start_prod.clone());
-           out.push(start_prod);
-       
-           for prod in productions {
-      -        for rhs in rhs_variants(&prod.rhs) {
-      +        // Generate all RHS variants by taking the Cartesian product of options for each symbol.
-      +        let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
-      +            let sym_options = match sym {
-      +                Symbol::Terminal(_) => vec![Some(sym.clone())],
-      +                Symbol::NonTerminal(nt) => match nullability.get(nt) {
-      +                    Some(Nullability::Null) => vec![None], // Must be removed
-      +                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
-      +                    _ => vec![Some(sym.clone())], // Must be kept
-      +                },
-      +            };
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -11,6 +11,25 @@
+       use crate::glr::automaton::compute_closure;
+       use crate::glr::items::{Item, LRMode, LR_MODE};
+       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
       +
-      +            acc.into_iter().flat_map(|variant| {
-      +                sym_options.iter().map(move |opt| {
-      +                    let mut new_variant = variant.clone();
-      +                    if let Some(s) = opt {
-      +                        new_variant.push(s.clone());
-      +                    }
-      +                    new_variant
-      +                })
-      +            }).collect()
-      +        });
+      +/// A trait to provide a lazily-evaluated `expect`.
+      +pub trait ExpectElse<T> {
+      +    /// Unwraps an option, panicking with a message from a closure on `None`.
+      +    fn expect_else<F>(self, f: F) -> T
+      +    where
+      +        F: FnOnce() -> String;
+      +}
       +
-      +        for rhs in rhs_variants {
-                   let new_prod = Production { lhs: prod.lhs.clone(), rhs };
-                   if seen.insert(new_prod.clone()) {
-                       out.push(new_prod);
-                   }
-               }
-           }
+      +impl<T> ExpectElse<T> for Option<T> {
+      +    #[inline]
+      +    #[track_caller]
+      +    fn expect_else<F>(self, f: F) -> T
+      +    where
+      +        F: FnOnce() -> String,
+      +    {
+      +        match self { Some(v) => v, None => panic!("{}", f()) }
+      +    }
+      +}
        
-      -    // Drop super-fluous ε-productions ------------------------------------
-      -    // Keep ε only if its LHS still appears on RHS of the start production
-      +    // The original implementation had a very specific filtering for epsilon productions.
-      +    // To maintain functional equivalence, this logic is preserved.
-           let start_rhs_nts: BTreeSet<_> = productions[0]
-               .rhs
-               .iter()
-      @@ -883,7 +867,6 @@
-               })
-               .collect();
+       /// Helper enum that tells `process_action_queue` where the *new* states that
+       /// originate from a **reduce** should be put.
+      @@ -978,9 +997,9 @@
+               for popper_item in popped.iter() {
+                   for peek2 in popper_item.peek_iter() {
+                       let state_id = peek2.edge_value().state_id;
+      -                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+      -                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+      -                );
+      +                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect_else(|| {
+      +                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id)
+      +                });
        
-           out.into_iter()
-               .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
-               .collect()
-       }
+                       if goto.accept {
+                           crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
+      @@ -1082,9 +1101,9 @@
+                                       loop {
+                                           i += 1;
+                                           // println!("loop current_nt: {:?}", current_nt);
+      -                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
+      -                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
+      -                                    );
+      +                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
+      +                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
+      +                                    });
        
-       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
+                                           if goto.accept {
+                                               crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
 
       ```
 
-      I've replaced the imperative loops for generating variants with a more functional `fold` operation, which is more idiomatic and concise in Rust. I also added comments to explain the parts of the original logic that were preserved for functional equivalence, especially the ordering and filtering rules which seem a bit unusual.
-
-      Let me know if you have any other parts of your code you'd like to improve
+      These changes should give you a nice performance boost in the hot paths of your parser. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...

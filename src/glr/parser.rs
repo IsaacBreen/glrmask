@@ -21,6 +21,25 @@ use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
+/// A trait to provide a lazily-evaluated `expect`.
+pub trait ExpectElse<T> {
+    /// Unwraps an option, panicking with a message from a closure on `None`.
+    fn expect_else<F>(self, f: F) -> T
+    where
+        F: FnOnce() -> String;
+}
+
+impl<T> ExpectElse<T> for Option<T> {
+    #[inline]
+    #[track_caller]
+    fn expect_else<F>(self, f: F) -> T
+    where
+        F: FnOnce() -> String,
+    {
+        match self { Some(v) => v, None => panic!("{}", f()) }
+    }
+}
+
 /// Helper enum that tells `process_action_queue` where the *new* states that
 /// originate from a **reduce** should be put.
 ///
@@ -838,9 +857,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for popper_item in popped.iter() {
             for peek2 in popper_item.peek_iter() {
                 let state_id = peek2.edge_value().state_id;
-                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                );
+                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect_else(|| {
+                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id)
+                });
 
                 if goto.accept {
                     crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
@@ -981,9 +1000,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 loop {
                                     i += 1;
                                     // println!("loop current_nt: {:?}", current_nt);
-                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect(
-                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id).as_str()
-                                    );
+                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
+                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
+                                    });
 
                                     if goto.accept {
                                         crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
