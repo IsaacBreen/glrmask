@@ -993,19 +993,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if let Some(goto_state_id) = goto.state_id {
                                         timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
                                         let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
-                                        let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
-                                        // let continue_fast_reduce = false;
+                                        // let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
+                                        let continue_fast_reduce = false;
                                         if continue_fast_reduce {
                                             if *clone_and_merge {
                                                 goto_state_ids.insert(goto_state_id);
                                             }
-                                            if let Some(reduce) = reduce {
-                                                current_nt = reduce.nonterminal_id;
-                                            } else {
-                                                assert!(*clone_and_merge);
-                                                // println!("break reason: reduce is None");
-                                                break;
-                                            }
+                                            current_nt = reduce.clone().unwrap().nonterminal_id;
                                         } else {
                                             goto_state_ids.insert(goto_state_id);
                                             // println!("break reason: continue_fast_reduce is false");
@@ -1018,6 +1012,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 if i > 1 {
                                     println!("number of loops: {}", i);
+                                    panic!("number of loops: {}", i);
                                 }
 
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
