@@ -1084,26 +1084,34 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     /// Generates a Graphviz DOT representation of the GSS state graph.
     pub fn gss_to_dot(&self) -> String {
-        self.parser.gss_states_to_dot(&self.active_state.stack)
+        self.parser.gss_to_dot(&self.active_state.stack)
     }
 }
 
 impl GLRParser {
-    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+    /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
     /// This visualizes the portion of the state machine explored by the parser.
-    pub fn gss_states_to_dot(&self, root: &GSSNode) -> String {
+    pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
         let mut dot = String::new();
-        writeln!(&mut dot, "digraph GSS_States {{").unwrap();
+        writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
         writeln!(&mut dot, "  rankdir=TB;").unwrap();
         writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
         let mut visited_nodes = HashSet::new();
         let mut defined_states = BTreeSet::new();
         let mut edges = BTreeSet::new();
+        let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
 
         let mut queue = VecDeque::new();
-        if !root.is_empty() {
-            queue.push_back(Arc::new(root.clone()));
+        for (label, root) in roots {
+            if !root.is_empty() {
+                let root_arc = Arc::new((*root).clone());
+                // Label the root states
+                for (edge_val, _) in &root_arc.predecessors {
+                    root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                }
+                queue.push_back(root_arc);
+            }
         }
 
         while let Some(node_arc) = queue.pop_front() {
@@ -1134,6 +1142,12 @@ impl GLRParser {
 
         for state_id in &defined_states {
             let mut label = String::new();
+            if let Some(labels) = root_labels.get(state_id) {
+                let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
+                unique_labels.sort();
+                unique_labels.dedup();
+                writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
+            }
             self.format_state_details(&mut label, *state_id, "").unwrap();
             let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
             writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -1153,6 +1167,12 @@ impl GLRParser {
 
         writeln!(&mut dot, "}}").unwrap();
         dot
+    }
+
+    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+    /// This visualizes the portion of the state machine explored by the parser.
+    pub fn gss_to_dot(&self, root: &GSSNode) -> String {
+        self.gss_forest_to_dot(&[("Root", root)])
     }
 }
 

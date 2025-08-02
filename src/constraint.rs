@@ -1044,10 +1044,12 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         println!("\n\n--- GSS Graphviz ---");
-        for (state_id, parser) in self.state.iter() {
-            println!("\n--- State {} ---", state_id.0);
-            println!("{}", self.parent.parser.gss_states_to_dot(&parser.active_state.stack));
-        }
+        let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+        let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+            .map(|s| s.as_str())
+            .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+            .collect();
+        println!("{}", self.parent.parser.gss_forest_to_dot(&roots_with_labels));
 
         for (state_id, state) in self.state.iter() {
             crate::debug!(3, "State {}:", state_id.0);
