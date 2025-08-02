@@ -1101,9 +1101,9 @@ pub fn print_gss_forest(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    if !GSS_LOGGING_ENABLED {
-        return "".to_string();
-    }
+    // if !GSS_LOGGING_ENABLED {
+    //     return "".to_string();
+    // }
     // Recursive helper to print predecessors.
     fn print_predecessors_recursive(
         node_arc: &Arc<GSSNode>,
