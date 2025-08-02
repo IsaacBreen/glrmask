@@ -1033,6 +1033,10 @@ impl<'a> GrammarConstraintState<'a> {
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
 
+        for (state_id, state) in self.state.iter() {
+            crate::debug!(3, "State {}:", state_id.0);
+        }
+
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
 
         if self.state.is_empty() {
