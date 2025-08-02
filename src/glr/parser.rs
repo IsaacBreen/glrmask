@@ -988,17 +988,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if let Some(goto_state_id) = goto.state_id {
                                         timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
                                         let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
-
-                                        // Action 1: Update the current nonterminal if we have a single-token reduce.
+                                        if *clone_and_merge || matches!(reduce, Some(r) if r.len != 1) {
+                                            goto_state_ids.insert(goto_state_id);
+                                        }
                                         if let Some(r) = reduce {
                                             if r.len == 1 {
                                                 current_nt = r.nonterminal_id;
+                                            } else {
+                                                break;
                                             }
-                                        }
-
-                                        // Action 2: Insert the state ID if we are cloning or have a multi-token reduce.
-                                        if *clone_and_merge || matches!(reduce, Some(r) if r.len != 1) {
-                                            goto_state_ids.insert(goto_state_id);
                                         }
                                     }
                                 }
