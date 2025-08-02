@@ -988,12 +988,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if let Some(goto_state_id) = goto.state_id {
                                         timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
                                         let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
-                                        if *clone_and_merge || matches!(reduce, Some(r) if r.len != 1) {
+                                        let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
+                                        if *clone_and_merge || !continue_fast_reduce {
                                             goto_state_ids.insert(goto_state_id);
                                         }
-                                        match reduce {
-                                            Some(r) if r.len == 1 => current_nt = r.nonterminal_id,
-                                            _ => break,
+                                        if continue_fast_reduce {
+                                            current_nt = r.nonterminal_id;
+                                        } else {
+                                            break;
                                         }
                                     } else {
                                         break;
