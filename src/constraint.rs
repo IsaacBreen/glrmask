@@ -1008,7 +1008,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
         if !gss_roots.is_empty() {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            let gss_str = crate::datastructures::gss::print_gss_forest(
+            let (gss_str, _) = crate::datastructures::gss::print_gss_forest(
                 &gss_roots,
                 None,
                 usize::MAX,
@@ -1033,7 +1033,7 @@ impl<'a> GrammarConstraintState<'a> {
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        println!("{}", print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None));
+        println!("{}", print_gss_forest(&roots, None, usize::MAX, &self.parent.parser.terminal_map, None, None).0);
 
         for (state_id, state) in self.state.iter() {
             crate::debug!(3, "State {}:", state_id.0);
@@ -1204,7 +1204,7 @@ impl<'a> GrammarConstraintState<'a> {
                         let mut glr_s = glr_s.clone();
                         allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
-                        glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
+                        glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
                         crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
                         // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
@@ -1327,7 +1327,7 @@ impl<'a> GrammarConstraintState<'a> {
             &self.parent.parser.terminal_map,
             Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
             Some(&self.parent.llm_vocab.llm_token_map),
-        ));
+        ).0);
 
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 

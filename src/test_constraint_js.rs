@@ -185,7 +185,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
         if reduce_hits > 200 {
-            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0), false, false);
             profiler::print_summary();
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
         }
@@ -293,7 +293,7 @@ fn test_js_parser_reduction_explosion_isolated() -> Result<(), Box<dyn std::erro
         for state in successful_first_step_states {
             merged_state.merge_with(state);
         }
-        merged_state.log_gss("Merged states", TerminalID(0));
+        merged_state.log_gss("Merged states", TerminalID(0), false, false);
         println!("States merged successfully.");
 
         if config_pdr_after_merge {
@@ -354,7 +354,7 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
         if reduce_hits > 200 {
-            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            state_before.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0), false, false);
             profiler::print_summary();
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
         }
@@ -415,7 +415,7 @@ fn test_js_parser_reduction_explosion_simplified() -> Result<(), Box<dyn std::er
         println!("\n--- Phase 2: Merging initial state with the post-token state ---");
         let mut merged_state = initial_state.clone();
         merged_state.merge_with(state_after_first_token);
-        merged_state.log_gss("Merged states", TerminalID(0));
+        merged_state.log_gss("Merged states", TerminalID(0), false, false);
         println!("States merged successfully.");
 
         if config_pdr_after_merge {
@@ -468,7 +468,7 @@ fn test_js_parser_reduction_explosion_minimal_repro() -> Result<(), Box<dyn std:
             .unwrap_or(0);
         println!("  - {:<50}: reduce hits = {}", label, reduce_hits);
         if reduce_hits > 200 {
-            state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0));
+            state.log_gss(&format!("State BEFORE action '{}' that caused assertion failure", label), TerminalID(0), false, false);
             profiler::print_summary();
             panic!("Too many reductions ({}) for action '{}'.", reduce_hits, label);
         }

@@ -468,14 +468,14 @@ fn test_aborted_tokenizer_restart_equivalence() {
     constraint_state1.commit(llm_hash);
     println!("Scenario 1: State after committing '#': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
     for (tid, glr_state) in constraint_state1.state() {
-        glr_state.log_gss(&format!("Scenario 1, after '#', GSS for tokenizer state {}", tid.0), TerminalID(0));
+        glr_state.log_gss(&format!("Scenario 1, after '#', GSS for tokenizer state {}", tid.0), TerminalID(0), false, false);
     }
 
     println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
     constraint_state1.commit(llm_a);
     println!("Scenario 1: State after committing 'a': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
      for (tid, glr_state) in constraint_state1.state() {
-        glr_state.log_gss(&format!("Scenario 1, after 'a', GSS for tokenizer state {}", tid.0), TerminalID(0));
+        glr_state.log_gss(&format!("Scenario 1, after 'a', GSS for tokenizer state {}", tid.0), TerminalID(0), false, false);
     }
 
     // Scenario 2: Commit "#a"
@@ -484,7 +484,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
     constraint_state2.commit(llm_hash_a);
     println!("Scenario 2: State after committing '#a': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
     for (tid, glr_state) in constraint_state2.state() {
-        glr_state.log_gss(&format!("Scenario 2, after '#a', GSS for tokenizer state {}", tid.0), TerminalID(0));
+        glr_state.log_gss(&format!("Scenario 2, after '#a', GSS for tokenizer state {}", tid.0), TerminalID(0), false, false);
     }
 
     // Assert equivalence
