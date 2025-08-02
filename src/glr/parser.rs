@@ -830,6 +830,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         nt: NonTerminalID,
         len: usize,
     ) -> Arc<GSSNode> {
+        if len == 1 {
+            return self.reduce_and_goto_len_1_fast(peek, nt);
+        }
+
         let popped = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
@@ -872,52 +876,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::reduce_and_goto_len_1_fast")]
     pub fn reduce_and_goto_len_1_fast(
         &mut self,
-        peek: &GSSNode,
+        peek: &GSSPeek,
         nt: NonTerminalID,
     ) -> Arc<GSSNode> {
-        let node = Arc::new(peek.clone());
-        let acc = Arc::new(Acc::new_fresh());
-        let mut popped = GSSPopper::default();
-        popped.paths.insert(node, acc);
-        let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
-        for (parent, path_acc) in std::mem::take(&mut popped.paths) {
-            let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
-            for preds_by_depth in parent.predecessors.values() {
-                for pred_vec in preds_by_depth.values() {
-                    for child in pred_vec {
-                        if let Some(existing_acc) = new_paths.get_mut(child) {
-                            *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
-                        } else {
-                            new_paths.insert(child.clone(), new_path_acc.clone());
-                        }
-                    }
-                }
-            }
-        }
-        popped.paths = new_paths;
-
-        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), 1);
-        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
-
         let mut out = Vec::new();
-        for popper_item in popped.iter() {
-            for peek2 in popper_item.peek_iter() {
-                let state_id = peek2.edge_value().state_id;
-                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                );
+        let state_id = peek.edge_value().state_id;
+        let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+            format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+        );
 
-                if goto.accept {
-                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
-                    self.accepted = true;
-                }
+        if goto.accept {
+            crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
+            self.accepted = true;
+        }
 
-                if let Some(goto_state_id) = goto.state_id {
-                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                        out.push(new_gss_node);
-                }
-            }
+        if let Some(goto_state_id) = goto.state_id {
+            crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
+            let new_gss_node = peek.push_on_predecessor(ParseStateEdgeContent { state_id: goto_state_id });
+                out.push(new_gss_node);
         }
 
         if out.is_empty() {

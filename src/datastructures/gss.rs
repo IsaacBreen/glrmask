@@ -101,8 +101,8 @@ impl Acc {
 /// A node in the Graph-Structured Stack (GSS).
 #[derive(Debug, Clone)]
 pub struct GSSNode {
-    acc: Arc<Acc>,
-    predecessors: NodeMap,
+    pub(crate) acc: Arc<Acc>,
+    pub(crate) predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
 }
@@ -121,7 +121,7 @@ pub struct GSSPeek<'a> {
 pub struct GSSPopper {
     /// A map where the key is a node, and the value is the accumulated `Acc` for all paths leading to it.
     /// and the value is the accumulated `Acc` for that path.
-    paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
+    pub(crate) paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
 }
 
 /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
