@@ -991,12 +991,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         if *clone_and_merge || matches!(reduce, Some(r) if r.len != 1) {
                                             goto_state_ids.insert(goto_state_id);
                                         }
-                                        if let Some(r) = reduce {
-                                            if r.len == 1 {
-                                                current_nt = r.nonterminal_id;
-                                            } else {
-                                                break;
-                                            }
+                                        match reduce {
+                                            Some(r) if r.len == 1 => current_nt = r.nonterminal_id,
+                                            _ => break,
                                         }
                                     } else {
                                         break;
