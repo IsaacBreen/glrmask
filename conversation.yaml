@@ -10,7 +10,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -2042,114 +2042,204 @@ local_system:
 
               for &state_id in stack {
                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-                  self.format_state_details(&mut result, state_id, "  ").unwrap();
+
+                  // Get and print items
+                  if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                      // For LR(1), the item set in the map is the full state (closure).
+                      writeln!(&mut result, "  Items:").unwrap();
+                      if items.is_empty() {
+                          writeln!(&mut result, "    (None)").unwrap();
+                      } else {
+                          // Group items by core: (production, dot_position)
+                          let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                          for item in items {
+                              grouped_items
+                                  .entry((&item.production, item.dot_position))
+                                  .or_default()
+                                  .insert(item.lookahead.clone());
+                          }
+
+                          // Print grouped items
+                          for ((production, dot_pos), lookaheads) in grouped_items {
+                              // Print the core item part
+                              write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                              for (i, symbol) in production.rhs.iter().enumerate() {
+                                  if i == dot_pos {
+                                      write!(&mut result, " •").unwrap();
+                                  }
+                                  match symbol {
+                                      Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                      Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                                  }
+                              }
+                              if dot_pos == production.rhs.len() {
+                                  write!(&mut result, " •").unwrap();
+                              }
+                              write!(&mut result, ", {{").unwrap();
+
+                              // Print the set of lookaheads
+                              let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                              lookahead_strs.sort();
+                              write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                              writeln!(&mut result, "}}]").unwrap();
+                          }
+                      }
+                  } else {
+                      writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
+                  }
+
+                  // Get and print actions
+                  if let Some(row) = self.table.get(&state_id) {
+                      writeln!(&mut result, "  Actions (without default reduce):").unwrap();
+                      let actions = &row.shifts_and_reduces_without_default_reduce;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                      let mut sorted_actions: Vec<_> = actions.iter().collect();
+                      sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                      let max_term_len = sorted_actions.iter()
+                          .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                          .max().unwrap_or(0);
+
+                      for (terminal_id, action) in sorted_actions {
+                          let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                          let terminal_name = terminal.to_string();
+                          write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                  writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      writeln!(&mut result, "  Actions (full):").unwrap();
+                      let actions = &row.shifts_and_reduces_full;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                      let mut sorted_actions: Vec<_> = actions.iter().collect();
+                      sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                      let max_term_len = sorted_actions.iter()
+                          .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                          .max().unwrap_or(0);
+
+                      for (terminal_id, action) in sorted_actions {
+                          let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                          let terminal_name = terminal.to_string();
+                          write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                  writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      writeln!(&mut result, "  Default Action:").unwrap();
+                      if let Some(reduce_action) = &row.default_reduce.reduce {
+                          let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
+                          let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
+                          writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
+                      } else {
+                          writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
+                      }
+                      if row.default_reduce.clone_and_merge {
+                          writeln!(&mut result, "    (State will be merged after shift)").unwrap();
+                      } else {
+                          writeln!(&mut result, "    (State will not be merged after shift)").unwrap();
+                      }
+
+                      writeln!(&mut result, "  Gotos:").unwrap();
+                      if row.gotos.is_empty() {
+                          writeln!(&mut result, "    (No goto actions)").unwrap();
+                      } else {
+                          // Sort by non-terminal name
+                          let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
+                          sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
+
+                          for (non_terminal_id, goto) in sorted_gotos {
+                              let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
+                              write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
+                              if let Some(next_state_id) = goto.state_id {
+                                  if goto.accept {
+                                      writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                                  } else {
+                                      writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                                  }
+                              } else if goto.accept {
+                                  writeln!(&mut result, "Accept").unwrap();
+                              } else {
+                                  writeln!(&mut result, "No-op (should not happen)").unwrap();
+                              }
+                          }
+                      }
+
+                  } else {
+                      writeln!(&mut result, "  (State ID not found in parse table)").unwrap();
+                  }
                   writeln!(&mut result, "---").unwrap();
               }
 
               result
           }
-
-          pub fn format_state_details<W: std::fmt::Write>(
-              &self,
-              f: &mut W,
-              state_id: StateID,
-              indent: &str,
-          ) -> std::fmt::Result {
-              let sub_indent = format!("{}  ", indent);
-
-              // --- Items ---
-              if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-                  writeln!(f, "{}Items:", indent)?;
-                  if items.is_empty() {
-                      writeln!(f, "{}  (None)", indent)?;
-                  } else {
-                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-                      for item in items {
-                          grouped_items
-                              .entry((&item.production, item.dot_position))
-                              .or_default()
-                              .insert(item.lookahead.clone());
-                      }
-
-                      for ((production, dot_pos), lookaheads) in grouped_items {
-                          write!(f, "{}- [{} ->", sub_indent, production.lhs.0)?;
-                          for (i, symbol) in production.rhs.iter().enumerate() {
-                              if i == dot_pos {
-                                  write!(f, " •")?;
-                              }
-                              match symbol {
-                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
-                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
-                              }
-                          }
-                          if dot_pos == production.rhs.len() {
-                              write!(f, " •")?;
-                          }
-                          write!(f, ", {{")?;
-                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                          lookahead_strs.sort();
-                          write!(f, "{}", lookahead_strs.join(", "))?;
-                          writeln!(f, "}}]")?;
-                      }
-                  }
-              } else {
-                  writeln!(f, "{}Items: (State ID not found in item set map)", indent)?;
-              }
-
-              // --- Actions & Gotos ---
-              if let Some(row) = self.table.get(&state_id) {
-                  writeln!(f, "{}Actions (without default reduce):", indent)?;
-                  format_actions(f, &row.shifts_and_reduces_without_default_reduce, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
-
-                  writeln!(f, "{}Actions (full):", indent)?;
-                  format_actions(f, &row.shifts_and_reduces_full, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
-
-                  writeln!(f, "{}Default Action:", indent)?;
-                  if let Some(reduce_action) = &row.default_reduce.reduce {
-                      let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
-                      let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
-                      writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.len, pids.join(", "))?;
-                  } else {
-                      writeln!(f, "{}  - No default reduce", indent)?;
-                  }
-                  if row.default_reduce.clone_and_merge {
-                      writeln!(f, "{}  - Clone and merge", indent)?;
-                  } else {
-                      writeln!(f, "{}  - No clone and merge", indent)?;
-                  }
-
-                  writeln!(f, "{}Gotos:", indent)?;
-                  if row.gotos.is_empty() {
-                      writeln!(f, "{}  (No goto actions)", indent)?;
-                  } else {
-                      let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
-                      sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
-
-                      for (non_terminal_id, goto) in sorted_gotos {
-                          let non_terminal = self.non_terminal_map.get_by_right(non_terminal_id).unwrap();
-                          let goto_str = if let Some(state_id_val) = goto.state_id {
-                              if goto.accept {
-                                  format!("{} or accept", state_id_val.0)
-                              } else {
-                                  format!("{}", state_id_val.0)
-                              }
-                          } else if goto.accept {
-                              "accept".to_string()
-                          } else {
-                              "no-op".to_string()
-                          };
-                          writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
-                      }
-                  }
-              } else {
-                  writeln!(f, "{}Actions & Gotos: (State ID not found in parse table)", indent)?;
-              }
-              Ok(())
-          }
       }
 
-      fn format_actions<W: std::fmt::Write>(
-          f: &mut W,
+      fn format_actions(
+          f: &mut std::fmt::Formatter<'_>,
           actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
@@ -2215,12 +2305,88 @@ local_system:
               let item_set_map = &self.item_set_map;
 
               use crate::glr::grammar::{Production, Symbol, Terminal};
+              use crate::glr::items::{Item};
+              use std::collections::{BTreeMap, BTreeSet};
 
               writeln!(f, "Parse Table:")?;
               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
                   writeln!(f, "  State {}:", state_id.0)?;
-                  self.format_state_details(f, state_id, "    ")?;
+
+                  if let Some(items) = item_set_map.get_by_right(&state_id) {
+                      writeln!(f, "    Items:")?;
+                      // Group items by core: (production, dot_position)
+                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                      for item in items {
+                          grouped_items
+                              .entry((&item.production, item.dot_position))
+                              .or_default()
+                              .insert(item.lookahead.clone());
+                      }
+
+                      // Print grouped items
+                      for ((production, dot_pos), lookaheads) in grouped_items {
+                          // Print the core item part
+                          write!(f, "      - [{} ->", production.lhs.0)?;
+                          for (i, symbol) in production.rhs.iter().enumerate() {
+                              if i == dot_pos {
+                                  write!(f, " •")?;
+                              }
+                              match symbol {
+                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                              }
+                          }
+                          if dot_pos == production.rhs.len() {
+                              write!(f, " •")?;
+                          }
+                          write!(f, ", {{")?;
+
+                          // Print the set of lookaheads
+                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                          lookahead_strs.sort();
+                          write!(f, "{}", lookahead_strs.join(", "))?;
+
+                          writeln!(f, "}}]")?;
+                      }
+                  }
+
+                  writeln!(f, "    Actions (without default reduce):")?;
+                  format_actions(f, &row.shifts_and_reduces_without_default_reduce, terminal_map, non_terminal_map, &self.productions, "      ")?;
+
+                  writeln!(f, "    Actions (full):")?;
+                  format_actions(f, &row.shifts_and_reduces_full, terminal_map, non_terminal_map, &self.productions, "      ")?;
+
+                  writeln!(f, "    Default Action:")?;
+                  if let Some(reduce) = &row.default_reduce.reduce {
+                      let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
+                      let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
+                      writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
+                  } else {
+                      writeln!(f, "      - No default reduce")?;
+                  }
+                  if row.default_reduce.clone_and_merge {
+                      writeln!(f, "      - Clone and merge")?;
+                  } else {
+                      writeln!(f, "      - No clone and merge")?;
+                  }
+
+                  writeln!(f, "    Gotos:")?;
+                  for (&non_terminal_id, goto) in &row.gotos {
+                      let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                      let goto_str = if let Some(state_id_val) = goto.state_id {
+                          if goto.accept {
+                              format!("{} or accept", state_id_val.0)
+                          } else {
+                              format!("{}", state_id_val.0)
+                          }
+                      } else if goto.accept {
+                          "accept".to_string()
+                      } else {
+                          "no-op".to_string()
+                      };
+                      writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
+                  }
               }
 
               writeln!(f, "\nTerminal Map (name to terminal ID):")?;
@@ -7128,114 +7294,204 @@ local_system:
 
               for &state_id in stack {
                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-                  self.format_state_details(&mut result, state_id, "  ").unwrap();
+
+                  // Get and print items
+                  if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                      // For LR(1), the item set in the map is the full state (closure).
+                      writeln!(&mut result, "  Items:").unwrap();
+                      if items.is_empty() {
+                          writeln!(&mut result, "    (None)").unwrap();
+                      } else {
+                          // Group items by core: (production, dot_position)
+                          let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                          for item in items {
+                              grouped_items
+                                  .entry((&item.production, item.dot_position))
+                                  .or_default()
+                                  .insert(item.lookahead.clone());
+                          }
+
+                          // Print grouped items
+                          for ((production, dot_pos), lookaheads) in grouped_items {
+                              // Print the core item part
+                              write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                              for (i, symbol) in production.rhs.iter().enumerate() {
+                                  if i == dot_pos {
+                                      write!(&mut result, " •").unwrap();
+                                  }
+                                  match symbol {
+                                      Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                      Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                                  }
+                              }
+                              if dot_pos == production.rhs.len() {
+                                  write!(&mut result, " •").unwrap();
+                              }
+                              write!(&mut result, ", {{").unwrap();
+
+                              // Print the set of lookaheads
+                              let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                              lookahead_strs.sort();
+                              write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                              writeln!(&mut result, "}}]").unwrap();
+                          }
+                      }
+                  } else {
+                      writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
+                  }
+
+                  // Get and print actions
+                  if let Some(row) = self.table.get(&state_id) {
+                      writeln!(&mut result, "  Actions (without default reduce):").unwrap();
+                      let actions = &row.shifts_and_reduces_without_default_reduce;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                      let mut sorted_actions: Vec<_> = actions.iter().collect();
+                      sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                      let max_term_len = sorted_actions.iter()
+                          .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                          .max().unwrap_or(0);
+
+                      for (terminal_id, action) in sorted_actions {
+                          let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                          let terminal_name = terminal.to_string();
+                          write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                  writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      writeln!(&mut result, "  Actions (full):").unwrap();
+                      let actions = &row.shifts_and_reduces_full;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                      let mut sorted_actions: Vec<_> = actions.iter().collect();
+                      sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                      let max_term_len = sorted_actions.iter()
+                          .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                          .max().unwrap_or(0);
+
+                      for (terminal_id, action) in sorted_actions {
+                          let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                          let terminal_name = terminal.to_string();
+                          write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                  writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      writeln!(&mut result, "  Default Action:").unwrap();
+                      if let Some(reduce_action) = &row.default_reduce.reduce {
+                          let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
+                          let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
+                          writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
+                      } else {
+                          writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
+                      }
+                      if row.default_reduce.clone_and_merge {
+                          writeln!(&mut result, "    (State will be merged after shift)").unwrap();
+                      } else {
+                          writeln!(&mut result, "    (State will not be merged after shift)").unwrap();
+                      }
+
+                      writeln!(&mut result, "  Gotos:").unwrap();
+                      if row.gotos.is_empty() {
+                          writeln!(&mut result, "    (No goto actions)").unwrap();
+                      } else {
+                          // Sort by non-terminal name
+                          let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
+                          sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
+
+                          for (non_terminal_id, goto) in sorted_gotos {
+                              let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
+                              write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
+                              if let Some(next_state_id) = goto.state_id {
+                                  if goto.accept {
+                                      writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                                  } else {
+                                      writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                                  }
+                              } else if goto.accept {
+                                  writeln!(&mut result, "Accept").unwrap();
+                              } else {
+                                  writeln!(&mut result, "No-op (should not happen)").unwrap();
+                              }
+                          }
+                      }
+
+                  } else {
+                      writeln!(&mut result, "  (State ID not found in parse table)").unwrap();
+                  }
                   writeln!(&mut result, "---").unwrap();
               }
 
               result
           }
-
-          pub fn format_state_details<W: std::fmt::Write>(
-              &self,
-              f: &mut W,
-              state_id: StateID,
-              indent: &str,
-          ) -> std::fmt::Result {
-              let sub_indent = format!("{}  ", indent);
-
-              // --- Items ---
-              if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-                  writeln!(f, "{}Items:", indent)?;
-                  if items.is_empty() {
-                      writeln!(f, "{}  (None)", indent)?;
-                  } else {
-                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-                      for item in items {
-                          grouped_items
-                              .entry((&item.production, item.dot_position))
-                              .or_default()
-                              .insert(item.lookahead.clone());
-                      }
-
-                      for ((production, dot_pos), lookaheads) in grouped_items {
-                          write!(f, "{}- [{} ->", sub_indent, production.lhs.0)?;
-                          for (i, symbol) in production.rhs.iter().enumerate() {
-                              if i == dot_pos {
-                                  write!(f, " •")?;
-                              }
-                              match symbol {
-                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
-                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
-                              }
-                          }
-                          if dot_pos == production.rhs.len() {
-                              write!(f, " •")?;
-                          }
-                          write!(f, ", {{")?;
-                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                          lookahead_strs.sort();
-                          write!(f, "{}", lookahead_strs.join(", "))?;
-                          writeln!(f, "}}]")?;
-                      }
-                  }
-              } else {
-                  writeln!(f, "{}Items: (State ID not found in item set map)", indent)?;
-              }
-
-              // --- Actions & Gotos ---
-              if let Some(row) = self.table.get(&state_id) {
-                  writeln!(f, "{}Actions (without default reduce):", indent)?;
-                  format_actions(f, &row.shifts_and_reduces_without_default_reduce, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
-
-                  writeln!(f, "{}Actions (full):", indent)?;
-                  format_actions(f, &row.shifts_and_reduces_full, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
-
-                  writeln!(f, "{}Default Action:", indent)?;
-                  if let Some(reduce_action) = &row.default_reduce.reduce {
-                      let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
-                      let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
-                      writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.len, pids.join(", "))?;
-                  } else {
-                      writeln!(f, "{}  - No default reduce", indent)?;
-                  }
-                  if row.default_reduce.clone_and_merge {
-                      writeln!(f, "{}  - Clone and merge", indent)?;
-                  } else {
-                      writeln!(f, "{}  - No clone and merge", indent)?;
-                  }
-
-                  writeln!(f, "{}Gotos:", indent)?;
-                  if row.gotos.is_empty() {
-                      writeln!(f, "{}  (No goto actions)", indent)?;
-                  } else {
-                      let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
-                      sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
-
-                      for (non_terminal_id, goto) in sorted_gotos {
-                          let non_terminal = self.non_terminal_map.get_by_right(non_terminal_id).unwrap();
-                          let goto_str = if let Some(state_id_val) = goto.state_id {
-                              if goto.accept {
-                                  format!("{} or accept", state_id_val.0)
-                              } else {
-                                  format!("{}", state_id_val.0)
-                              }
-                          } else if goto.accept {
-                              "accept".to_string()
-                          } else {
-                              "no-op".to_string()
-                          };
-                          writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
-                      }
-                  }
-              } else {
-                  writeln!(f, "{}Actions & Gotos: (State ID not found in parse table)", indent)?;
-              }
-              Ok(())
-          }
       }
 
-      fn format_actions<W: std::fmt::Write>(
-          f: &mut W,
+      fn format_actions(
+          f: &mut std::fmt::Formatter<'_>,
           actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
@@ -7301,12 +7557,88 @@ local_system:
               let item_set_map = &self.item_set_map;
 
               use crate::glr::grammar::{Production, Symbol, Terminal};
+              use crate::glr::items::{Item};
+              use std::collections::{BTreeMap, BTreeSet};
 
               writeln!(f, "Parse Table:")?;
               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
                   writeln!(f, "  State {}:", state_id.0)?;
-                  self.format_state_details(f, state_id, "    ")?;
+
+                  if let Some(items) = item_set_map.get_by_right(&state_id) {
+                      writeln!(f, "    Items:")?;
+                      // Group items by core: (production, dot_position)
+                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                      for item in items {
+                          grouped_items
+                              .entry((&item.production, item.dot_position))
+                              .or_default()
+                              .insert(item.lookahead.clone());
+                      }
+
+                      // Print grouped items
+                      for ((production, dot_pos), lookaheads) in grouped_items {
+                          // Print the core item part
+                          write!(f, "      - [{} ->", production.lhs.0)?;
+                          for (i, symbol) in production.rhs.iter().enumerate() {
+                              if i == dot_pos {
+                                  write!(f, " •")?;
+                              }
+                              match symbol {
+                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                              }
+                          }
+                          if dot_pos == production.rhs.len() {
+                              write!(f, " •")?;
+                          }
+                          write!(f, ", {{")?;
+
+                          // Print the set of lookaheads
+                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                          lookahead_strs.sort();
+                          write!(f, "{}", lookahead_strs.join(", "))?;
+
+                          writeln!(f, "}}]")?;
+                      }
+                  }
+
+                  writeln!(f, "    Actions (without default reduce):")?;
+                  format_actions(f, &row.shifts_and_reduces_without_default_reduce, terminal_map, non_terminal_map, &self.productions, "      ")?;
+
+                  writeln!(f, "    Actions (full):")?;
+                  format_actions(f, &row.shifts_and_reduces_full, terminal_map, non_terminal_map, &self.productions, "      ")?;
+
+                  writeln!(f, "    Default Action:")?;
+                  if let Some(reduce) = &row.default_reduce.reduce {
+                      let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
+                      let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
+                      writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
+                  } else {
+                      writeln!(f, "      - No default reduce")?;
+                  }
+                  if row.default_reduce.clone_and_merge {
+                      writeln!(f, "      - Clone and merge")?;
+                  } else {
+                      writeln!(f, "      - No clone and merge")?;
+                  }
+
+                  writeln!(f, "    Gotos:")?;
+                  for (&non_terminal_id, goto) in &row.gotos {
+                      let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                      let goto_str = if let Some(state_id_val) = goto.state_id {
+                          if goto.accept {
+                              format!("{} or accept", state_id_val.0)
+                          } else {
+                              format!("{}", state_id_val.0)
+                          }
+                      } else if goto.accept {
+                          "accept".to_string()
+                      } else {
+                          "no-op".to_string()
+                      };
+                      writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
+                  }
               }
 
               writeln!(f, "\nTerminal Map (name to terminal ID):")?;
@@ -12267,114 +12599,204 @@ messages:
 
               for &state_id in stack {
                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-                  self.format_state_details(&mut result, state_id, "  ").unwrap();
+
+                  // Get and print items
+                  if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+                      // For LR(1), the item set in the map is the full state (closure).
+                      writeln!(&mut result, "  Items:").unwrap();
+                      if items.is_empty() {
+                          writeln!(&mut result, "    (None)").unwrap();
+                      } else {
+                          // Group items by core: (production, dot_position)
+                          let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                          for item in items {
+                              grouped_items
+                                  .entry((&item.production, item.dot_position))
+                                  .or_default()
+                                  .insert(item.lookahead.clone());
+                          }
+
+                          // Print grouped items
+                          for ((production, dot_pos), lookaheads) in grouped_items {
+                              // Print the core item part
+                              write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+                              for (i, symbol) in production.rhs.iter().enumerate() {
+                                  if i == dot_pos {
+                                      write!(&mut result, " •").unwrap();
+                                  }
+                                  match symbol {
+                                      Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+                                      Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+                                  }
+                              }
+                              if dot_pos == production.rhs.len() {
+                                  write!(&mut result, " •").unwrap();
+                              }
+                              write!(&mut result, ", {{").unwrap();
+
+                              // Print the set of lookaheads
+                              let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                              lookahead_strs.sort();
+                              write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+
+                              writeln!(&mut result, "}}]").unwrap();
+                          }
+                      }
+                  } else {
+                      writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
+                  }
+
+                  // Get and print actions
+                  if let Some(row) = self.table.get(&state_id) {
+                      writeln!(&mut result, "  Actions (without default reduce):").unwrap();
+                      let actions = &row.shifts_and_reduces_without_default_reduce;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                      let mut sorted_actions: Vec<_> = actions.iter().collect();
+                      sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                      let max_term_len = sorted_actions.iter()
+                          .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                          .max().unwrap_or(0);
+
+                      for (terminal_id, action) in sorted_actions {
+                          let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                          let terminal_name = terminal.to_string();
+                          write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                  writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      writeln!(&mut result, "  Actions (full):").unwrap();
+                      let actions = &row.shifts_and_reduces_full;
+                      if actions.is_empty() {
+                          writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                      } else {
+                          // Sort by terminal name for consistent output
+                      let mut sorted_actions: Vec<_> = actions.iter().collect();
+                      sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                      let max_term_len = sorted_actions.iter()
+                          .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+                          .max().unwrap_or(0);
+
+                      for (terminal_id, action) in sorted_actions {
+                          let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                          let terminal_name = terminal.to_string();
+                          write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                  writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                      if production_ids.len() == 1 {
+                                          let prod_id = production_ids.iter().next().unwrap();
+                                          let prod = &self.productions[prod_id.0];
+                                          writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                      } else {
+                                          let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                          writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                      }
+                                  }
+                                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                      writeln!(&mut result, "Conflict:").unwrap();
+                                      if let Some(shift_state) = shift {
+                                          writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                      }
+                                      for (_len, nts) in reduces {
+                                          for (_nt_id, prod_ids) in nts {
+                                              for prod_id in prod_ids {
+                                                  let prod = &self.productions[prod_id.0];
+                                                  writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      writeln!(&mut result, "  Default Action:").unwrap();
+                      if let Some(reduce_action) = &row.default_reduce.reduce {
+                          let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
+                          let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
+                          writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
+                      } else {
+                          writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
+                      }
+                      if row.default_reduce.clone_and_merge {
+                          writeln!(&mut result, "    (State will be merged after shift)").unwrap();
+                      } else {
+                          writeln!(&mut result, "    (State will not be merged after shift)").unwrap();
+                      }
+
+                      writeln!(&mut result, "  Gotos:").unwrap();
+                      if row.gotos.is_empty() {
+                          writeln!(&mut result, "    (No goto actions)").unwrap();
+                      } else {
+                          // Sort by non-terminal name
+                          let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
+                          sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
+
+                          for (non_terminal_id, goto) in sorted_gotos {
+                              let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
+                              write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
+                              if let Some(next_state_id) = goto.state_id {
+                                  if goto.accept {
+                                      writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+                                  } else {
+                                      writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+                                  }
+                              } else if goto.accept {
+                                  writeln!(&mut result, "Accept").unwrap();
+                              } else {
+                                  writeln!(&mut result, "No-op (should not happen)").unwrap();
+                              }
+                          }
+                      }
+
+                  } else {
+                      writeln!(&mut result, "  (State ID not found in parse table)").unwrap();
+                  }
                   writeln!(&mut result, "---").unwrap();
               }
 
               result
           }
-
-          pub fn format_state_details<W: std::fmt::Write>(
-              &self,
-              f: &mut W,
-              state_id: StateID,
-              indent: &str,
-          ) -> std::fmt::Result {
-              let sub_indent = format!("{}  ", indent);
-
-              // --- Items ---
-              if let Some(items) = self.item_set_map.get_by_right(&state_id) {
-                  writeln!(f, "{}Items:", indent)?;
-                  if items.is_empty() {
-                      writeln!(f, "{}  (None)", indent)?;
-                  } else {
-                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-                      for item in items {
-                          grouped_items
-                              .entry((&item.production, item.dot_position))
-                              .or_default()
-                              .insert(item.lookahead.clone());
-                      }
-
-                      for ((production, dot_pos), lookaheads) in grouped_items {
-                          write!(f, "{}- [{} ->", sub_indent, production.lhs.0)?;
-                          for (i, symbol) in production.rhs.iter().enumerate() {
-                              if i == dot_pos {
-                                  write!(f, " •")?;
-                              }
-                              match symbol {
-                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
-                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
-                              }
-                          }
-                          if dot_pos == production.rhs.len() {
-                              write!(f, " •")?;
-                          }
-                          write!(f, ", {{")?;
-                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                          lookahead_strs.sort();
-                          write!(f, "{}", lookahead_strs.join(", "))?;
-                          writeln!(f, "}}]")?;
-                      }
-                  }
-              } else {
-                  writeln!(f, "{}Items: (State ID not found in item set map)", indent)?;
-              }
-
-              // --- Actions & Gotos ---
-              if let Some(row) = self.table.get(&state_id) {
-                  writeln!(f, "{}Actions (without default reduce):", indent)?;
-                  format_actions(f, &row.shifts_and_reduces_without_default_reduce, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
-
-                  writeln!(f, "{}Actions (full):", indent)?;
-                  format_actions(f, &row.shifts_and_reduces_full, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
-
-                  writeln!(f, "{}Default Action:", indent)?;
-                  if let Some(reduce_action) = &row.default_reduce.reduce {
-                      let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
-                      let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
-                      writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.len, pids.join(", "))?;
-                  } else {
-                      writeln!(f, "{}  - No default reduce", indent)?;
-                  }
-                  if row.default_reduce.clone_and_merge {
-                      writeln!(f, "{}  - Clone and merge", indent)?;
-                  } else {
-                      writeln!(f, "{}  - No clone and merge", indent)?;
-                  }
-
-                  writeln!(f, "{}Gotos:", indent)?;
-                  if row.gotos.is_empty() {
-                      writeln!(f, "{}  (No goto actions)", indent)?;
-                  } else {
-                      let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
-                      sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
-
-                      for (non_terminal_id, goto) in sorted_gotos {
-                          let non_terminal = self.non_terminal_map.get_by_right(non_terminal_id).unwrap();
-                          let goto_str = if let Some(state_id_val) = goto.state_id {
-                              if goto.accept {
-                                  format!("{} or accept", state_id_val.0)
-                              } else {
-                                  format!("{}", state_id_val.0)
-                              }
-                          } else if goto.accept {
-                              "accept".to_string()
-                          } else {
-                              "no-op".to_string()
-                          };
-                          writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
-                      }
-                  }
-              } else {
-                  writeln!(f, "{}Actions & Gotos: (State ID not found in parse table)", indent)?;
-              }
-              Ok(())
-          }
       }
 
-      fn format_actions<W: std::fmt::Write>(
-          f: &mut W,
+      fn format_actions(
+          f: &mut std::fmt::Formatter<'_>,
           actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
@@ -12440,12 +12862,88 @@ messages:
               let item_set_map = &self.item_set_map;
 
               use crate::glr::grammar::{Production, Symbol, Terminal};
+              use crate::glr::items::{Item};
+              use std::collections::{BTreeMap, BTreeSet};
 
               writeln!(f, "Parse Table:")?;
               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
                   writeln!(f, "  State {}:", state_id.0)?;
-                  self.format_state_details(f, state_id, "    ")?;
+
+                  if let Some(items) = item_set_map.get_by_right(&state_id) {
+                      writeln!(f, "    Items:")?;
+                      // Group items by core: (production, dot_position)
+                      let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                      for item in items {
+                          grouped_items
+                              .entry((&item.production, item.dot_position))
+                              .or_default()
+                              .insert(item.lookahead.clone());
+                      }
+
+                      // Print grouped items
+                      for ((production, dot_pos), lookaheads) in grouped_items {
+                          // Print the core item part
+                          write!(f, "      - [{} ->", production.lhs.0)?;
+                          for (i, symbol) in production.rhs.iter().enumerate() {
+                              if i == dot_pos {
+                                  write!(f, " •")?;
+                              }
+                              match symbol {
+                                  Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+                                  Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                              }
+                          }
+                          if dot_pos == production.rhs.len() {
+                              write!(f, " •")?;
+                          }
+                          write!(f, ", {{")?;
+
+                          // Print the set of lookaheads
+                          let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+                          lookahead_strs.sort();
+                          write!(f, "{}", lookahead_strs.join(", "))?;
+
+                          writeln!(f, "}}]")?;
+                      }
+                  }
+
+                  writeln!(f, "    Actions (without default reduce):")?;
+                  format_actions(f, &row.shifts_and_reduces_without_default_reduce, terminal_map, non_terminal_map, &self.productions, "      ")?;
+
+                  writeln!(f, "    Actions (full):")?;
+                  format_actions(f, &row.shifts_and_reduces_full, terminal_map, non_terminal_map, &self.productions, "      ")?;
+
+                  writeln!(f, "    Default Action:")?;
+                  if let Some(reduce) = &row.default_reduce.reduce {
+                      let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
+                      let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
+                      writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
+                  } else {
+                      writeln!(f, "      - No default reduce")?;
+                  }
+                  if row.default_reduce.clone_and_merge {
+                      writeln!(f, "      - Clone and merge")?;
+                  } else {
+                      writeln!(f, "      - No clone and merge")?;
+                  }
+
+                  writeln!(f, "    Gotos:")?;
+                  for (&non_terminal_id, goto) in &row.gotos {
+                      let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                      let goto_str = if let Some(state_id_val) = goto.state_id {
+                          if goto.accept {
+                              format!("{} or accept", state_id_val.0)
+                          } else {
+                              format!("{}", state_id_val.0)
+                          }
+                      } else if goto.accept {
+                          "accept".to_string()
+                      } else {
+                          "no-op".to_string()
+                      };
+                      writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
+                  }
               }
 
               writeln!(f, "\nTerminal Map (name to terminal ID):")?;
@@ -15343,446 +15841,429 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      I want to be able to visualise a GSS stack.
-      I don't really care about the Acc values. Just the state IDs and the structure of the stack.
-      Each state ID represents a state, which is represented nicely in textual format by the print/display code.
-      So that's what I wanna see for each state.
-
-      But for the structure of the stack, it's more tricky.
-      I wanna do it two ways. The code should be able to do both.
-
-      I wanna be able to print the GSS using print_gss_forest as it works right now.
-      But then below that I wanna be able to also (if I want) print an explaination for the states shown in the output of print_gss_forest in the order they're shown.
-      e.g. if we have this output
-      ```
-      GSS Forest (Max Nodes: 18446744073709551615):
-      Root 0: Node 0 (depth 2) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        ├── Edge StateID(0) -> Node 1 (depth 1) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        │ └── Edge StateID(960) -> Node 2 (depth 0) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        ├── Edge StateID(161) -> Node 3 (depth 1) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        │ └── Edge StateID(960) -> Node 2 (depth 0) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        ├── Edge StateID(192) -> Node 4 (depth 1) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        │ └── Edge StateID(960) -> Node 2 (depth 0) [LLM(U)(All), LLM(I)(All), Disallowed Term(U)(State(s) 45: [IDENTIFIER]), Disallowed Term(I)(State(s) 45: [IDENTIFIER])]
-        ├── Edge StateID(201) -> Node 5 (depth 1) [LLM(U)(All), LLM(I)(All), Disallowed
-      ```
-      then I wanna show the explain for these states **in this order**:
-      - 0
-      - 960
-      - 161
-      - (skipping 960 because we already showed this)
-      - 192
-      - 201
-      - 207
-      - 213
-      etc.
-
-      So that's the first way I want to do it.
-      Implement this.
+      The parser is represented nicely by the code in `impl Display for GLRParser`.
+      But there's a lot of code that's similar with `explain_stack`. Simplify this.
+      And make it reusable. eg often I wanna display a state nicely. Just one or something.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request to visualize the GSS stack. Being able to inspect the states in the order they appear in the GSS forest is a great debugging tool.
+      Hello! As a helpful AI assistant, I'd be happy to help you with your request. Dealing with code duplication can be a drag, but refactoring it will surely make your code cleaner and more maintainable. Here are the suggested changes to refactor your display logic.
 
-      Here are the necessary changes to implement this functionality. I've added a helper function to traverse the GSS and collect the state IDs in the same order they are printed, and then updated the logging function to print detailed explanations for each unique state.
+      I've extracted the state formatting logic into a new generic function `format_state_details`. This function is now used by both `impl Display for GLRParser` and `explain_stack`, which eliminates the redundant code and ensures consistent output.
 
-      ### Modified `src/glr/parser.rs`
-
-      I'll add a new helper method `get_gss_states_in_dfs_order` to `GLRParserState` and update `log_gss` to use it. This will give you the GSS forest visualization followed by a detailed breakdown of each state appearing in that forest.
+      Here are the diffs for the modified file:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -911,6 +911,35 @@
-       }
+      @@ -400,118 +400,114 @@
+           pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
+               let mut state = self.init_glr_parser(llm_vocab);
+               state.parse(input);
+               state
+           }
        
-       impl<'a> GLRParserState<'a> { // No longer generic
-      +    fn get_gss_states_in_dfs_order(&self, roots: &[Arc<GSSNode>]) -> Vec<StateID> {
-      +        let mut state_ids = Vec::new();
-      +        let mut visited_states = BTreeSet::new();
-      +        let mut visited_nodes = BTreeSet::new(); // To avoid cycles
+           pub fn explain_stack(&self, stack: &[StateID]) -> String {
+               let mut result = String::new();
+               writeln!(&mut result, "--- Explaining Parse Stack: {:?} ---", stack.iter().map(|s| s.0).collect::<Vec<_>>()).unwrap();
+       
+               for &state_id in stack {
+                   writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
+      -
+      -            // Get and print items
+      -            if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+      -                // For LR(1), the item set in the map is the full state (closure).
+      -                writeln!(&mut result, "  Items:").unwrap();
+      -                if items.is_empty() {
+      -                    writeln!(&mut result, "    (None)").unwrap();
+      -                } else {
+      -                    // Group items by core: (production, dot_position)
+      -                    let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+      -                    for item in items {
+      -                        grouped_items
+      -                            .entry((&item.production, item.dot_position))
+      -                            .or_default()
+      -                            .insert(item.lookahead.clone());
+      -                    }
+      -
+      -                    // Print grouped items
+      -                    for ((production, dot_pos), lookaheads) in grouped_items {
+      -                        // Print the core item part
+      -                        write!(&mut result, "    - [{} ->", production.lhs.0).unwrap();
+      -                        for (i, symbol) in production.rhs.iter().enumerate() {
+      -                            if i == dot_pos {
+      -                                write!(&mut result, " •").unwrap();
+      -                            }
+      -                            match symbol {
+      -                                Symbol::Terminal(terminal) => write!(&mut result, " {}", terminal).unwrap(),
+      -                                Symbol::NonTerminal(non_terminal) => write!(&mut result, " {}", non_terminal.0).unwrap(),
+      -                            }
+      -                        }
+      -                        if dot_pos == production.rhs.len() {
+      -                            write!(&mut result, " •").unwrap();
+      -                        }
+      -                        write!(&mut result, ", {{").unwrap();
+      -
+      -                        // Print the set of lookaheads
+      -                        let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+      -                        lookahead_strs.sort();
+      -                        write!(&mut result, "{}", lookahead_strs.join(", ")).unwrap();
+      -
+      -                        writeln!(&mut result, "}}]").unwrap();
+      -                    }
+      -                }
+      -            } else {
+      -                writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
+      -            }
+      -
+      -            // Get and print actions
+      -            if let Some(row) = self.table.get(&state_id) {
+      -                writeln!(&mut result, "  Actions (without default reduce):").unwrap();
+      -                let actions = &row.shifts_and_reduces_without_default_reduce;
+      -                if actions.is_empty() {
+      -                    writeln!(&mut result, "    (No lookahead actions)").unwrap();
+      -                } else {
+      -                    // Sort by terminal name for consistent output
+      -                let mut sorted_actions: Vec<_> = actions.iter().collect();
+      -                sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+      -
+      -                let max_term_len = sorted_actions.iter()
+      -                    .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+      -                    .max().unwrap_or(0);
+      -
+      -                for (terminal_id, action) in sorted_actions {
+      -                    let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+      -                    let terminal_name = terminal.to_string();
+      -                    write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+      -                    match action {
+      -                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+      -                            writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+      -                                if production_ids.len() == 1 {
+      -                                    let prod_id = production_ids.iter().next().unwrap();
+      -                                    let prod = &self.productions[prod_id.0];
+      -                                    writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+      -                                } else {
+      -                                    let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+      -                                    writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+      -                                }
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      -                                writeln!(&mut result, "Conflict:").unwrap();
+      -                                if let Some(shift_state) = shift {
+      -                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+      -                                }
+      -                                for (_len, nts) in reduces {
+      -                                    for (_nt_id, prod_ids) in nts {
+      -                                        for prod_id in prod_ids {
+      -                                            let prod = &self.productions[prod_id.0];
+      -                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+      -                                        }
+      -                                    }
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -
+      -                writeln!(&mut result, "  Actions (full):").unwrap();
+      -                let actions = &row.shifts_and_reduces_full;
+      -                if actions.is_empty() {
+      -                    writeln!(&mut result, "    (No lookahead actions)").unwrap();
+      -                } else {
+      -                    // Sort by terminal name for consistent output
+      -                let mut sorted_actions: Vec<_> = actions.iter().collect();
+      -                sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+      -
+      -                let max_term_len = sorted_actions.iter()
+      -                    .map(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap().to_string().len())
+      -                    .max().unwrap_or(0);
+      -
+      -                for (terminal_id, action) in sorted_actions {
+      -                    let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+      -                    let terminal_name = terminal.to_string();
+      -                    write!(&mut result, "    - On '{:<width$}': ", terminal_name, width = max_term_len).unwrap();
+      -                    match action {
+      -                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+      -                            writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+      -                                if production_ids.len() == 1 {
+      -                                    let prod_id = production_ids.iter().next().unwrap();
+      -                                    let prod = &self.productions[prod_id.0];
+      -                                    writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+      -                                } else {
+      -                                    let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+      -                                    writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+      -                                }
+      -                            }
+      -                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      -                                writeln!(&mut result, "Conflict:").unwrap();
+      -                                if let Some(shift_state) = shift {
+      -                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+      -                                }
+      -                                for (_len, nts) in reduces {
+      -                                    for (_nt_id, prod_ids) in nts {
+      -                                        for prod_id in prod_ids {
+      -                                            let prod = &self.productions[prod_id.0];
+      -                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+      -                                        }
+      -                                    }
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -
+      -                writeln!(&mut result, "  Default Action:").unwrap();
+      -                if let Some(reduce_action) = &row.default_reduce.reduce {
+      -                    let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
+      -                    let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
+      -                    writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
+      -                } else {
+      -                    writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
+      -                }
+      -                if row.default_reduce.clone_and_merge {
+      -                    writeln!(&mut result, "    (State will be merged after shift)").unwrap();
+      -                } else {
+      -                    writeln!(&mut result, "    (State will not be merged after shift)").unwrap();
+      -                }
+      -
+      -                writeln!(&mut result, "  Gotos:").unwrap();
+      -                if row.gotos.is_empty() {
+      -                    writeln!(&mut result, "    (No goto actions)").unwrap();
+      -                } else {
+      -                    // Sort by non-terminal name
+      -                    let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
+      -                    sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
+      -
+      -                    for (non_terminal_id, goto) in sorted_gotos {
+      -                        let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
+      -                        write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
+      -                        if let Some(next_state_id) = goto.state_id {
+      -                            if goto.accept {
+      -                                writeln!(&mut result, "Goto State {} or Accept", next_state_id.0).unwrap();
+      -                            } else {
+      -                                writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap();
+      -                            }
+      -                        } else if goto.accept {
+      -                            writeln!(&mut result, "Accept").unwrap();
+      -                        } else {
+      -                            writeln!(&mut result, "No-op (should not happen)").unwrap();
+      -                        }
+      -                    }
+      -                }
+      -
+      -            } else {
+      -                writeln!(&mut result, "  (State ID not found in parse table)").unwrap();
+      -            }
+      +            self.format_state_details(&mut result, state_id, "  ").unwrap();
+                   writeln!(&mut result, "---").unwrap();
+               }
+       
+               result
+           }
       +
-      +        fn traverse(
-      +            node: Arc<GSSNode>,
-      +            state_ids: &mut Vec<StateID>,
-      +            visited_states: &mut BTreeSet<StateID>,
-      +            visited_nodes: &mut BTreeSet<Arc<GSSNode>>,
-      +        ) {
-      +            if !visited_nodes.insert(node.clone()) {
-      +                return;
-      +            }
+      +    pub fn format_state_details<W: std::fmt::Write>(
+      +        &self,
+      +        f: &mut W,
+      +        state_id: StateID,
+      +        indent: &str,
+      +    ) -> std::fmt::Result {
+      +        let sub_indent = format!("{}  ", indent);
       +
-      +            for peek in node.peek_iter() {
-      +                let state_id = peek.edge_value().state_id;
-      +                if visited_states.insert(state_id) {
-      +                    state_ids.push(state_id);
+      +        // --- Items ---
+      +        if let Some(items) = self.item_set_map.get_by_right(&state_id) {
+      +            writeln!(f, "{}Items:", indent)?;
+      +            if items.is_empty() {
+      +                writeln!(f, "{}  (None)", indent)?;
+      +            } else {
+      +                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+      +                for item in items {
+      +                    grouped_items
+      +                        .entry((&item.production, item.dot_position))
+      +                        .or_default()
+      +                        .insert(item.lookahead.clone());
       +                }
       +
-      +                let parent = Arc::new(peek.isolated_parent());
-      +                traverse(parent, state_ids, visited_states, visited_nodes);
+      +                for ((production, dot_pos), lookaheads) in grouped_items {
+      +                    write!(f, "{}- [{} ->", sub_indent, production.lhs.0)?;
+      +                    for (i, symbol) in production.rhs.iter().enumerate() {
+      +                        if i == dot_pos {
+      +                            write!(f, " •")?;
+      +                        }
+      +                        match symbol {
+      +                            Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+      +                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+      +                        }
+      +                    }
+      +                    if dot_pos == production.rhs.len() {
+      +                        write!(f, " •")?;
+      +                    }
+      +                    write!(f, ", {{")?;
+      +                    let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+      +                    lookahead_strs.sort();
+      +                    write!(f, "{}", lookahead_strs.join(", "))?;
+      +                    writeln!(f, "}}]")?;
+      +                }
       +            }
+      +        } else {
+      +            writeln!(f, "{}Items: (State ID not found in item set map)", indent)?;
       +        }
       +
-      +        for root in roots {
-      +            traverse(root.clone(), &mut state_ids, &mut visited_states, &mut visited_nodes);
+      +        // --- Actions & Gotos ---
+      +        if let Some(row) = self.table.get(&state_id) {
+      +            writeln!(f, "{}Actions (without default reduce):", indent)?;
+      +            format_actions(f, &row.shifts_and_reduces_without_default_reduce, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
+      +
+      +            writeln!(f, "{}Actions (full):", indent)?;
+      +            format_actions(f, &row.shifts_and_reduces_full, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
+      +
+      +            writeln!(f, "{}Default Action:", indent)?;
+      +            if let Some(reduce_action) = &row.default_reduce.reduce {
+      +                let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
+      +                let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
+      +                writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.len, pids.join(", "))?;
+      +            } else {
+      +                writeln!(f, "{}  - No default reduce", indent)?;
+      +            }
+      +            if row.default_reduce.clone_and_merge {
+      +                writeln!(f, "{}  - Clone and merge", indent)?;
+      +            } else {
+      +                writeln!(f, "{}  - No clone and merge", indent)?;
+      +            }
+      +
+      +            writeln!(f, "{}Gotos:", indent)?;
+      +            if row.gotos.is_empty() {
+      +                writeln!(f, "{}  (No goto actions)", indent)?;
+      +            } else {
+      +                let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
+      +                sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
+      +
+      +                for (non_terminal_id, goto) in sorted_gotos {
+      +                    let non_terminal = self.non_terminal_map.get_by_right(non_terminal_id).unwrap();
+      +                    let goto_str = if let Some(state_id_val) = goto.state_id {
+      +                        if goto.accept {
+      +                            format!("{} or accept", state_id_val.0)
+      +                        } else {
+      +                            format!("{}", state_id_val.0)
+      +                        }
+      +                    } else if goto.accept {
+      +                        "accept".to_string()
+      +                    } else {
+      +                        "no-op".to_string()
+      +                    };
+      +                    writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
+      +                }
+      +            }
+      +        } else {
+      +            writeln!(f, "{}Actions & Gotos: (State ID not found in parse table)", indent)?;
       +        }
-      +        state_ids
+      +        Ok(())
       +    }
-      +
-           fn push_state(
-               &self,
-               peek: &GSSPeek,
-      @@ -1280,29 +1309,38 @@
-               crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                             phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+       }
        
-      -        let make_msg = |print_full_forest, max_nodes_to_print| {
-      -            if print_full_forest {
-      -                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-      -                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
-      -            } else {
-      -                match find_longest_path(&self.active_state.stack) {
-      -                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-      -                                       stats.unique_nodes,
-      -                                       p.len(),
-      -                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-      -                                            .map(|id| id.to_string())
-      -                                            .collect::<Vec<_>>()
-      -                                            .join(" → ")),
-      -                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
+      -fn format_actions(
+      -    f: &mut std::fmt::Formatter<'_>,
+      +fn format_actions<W: std::fmt::Write>(
+      +    f: &mut W,
+           actions: &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+      @@ -638,58 +630,11 @@
+               let item_set_map = &self.item_set_map;
+       
+               use crate::glr::grammar::{Production, Symbol, Terminal};
+      -        use crate::glr::items::{Item};
+      -        use std::collections::{BTreeMap, BTreeSet};
+       
+               writeln!(f, "Parse Table:")?;
+               writeln!(f, "  Start State: {}", self.start_state_id.0)?;
+               for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
+                   writeln!(f, "  State {}:", state_id.0)?;
+      -
+      -            if let Some(items) = item_set_map.get_by_right(&state_id) {
+      -                writeln!(f, "    Items:")?;
+      -                // Group items by core: (production, dot_position)
+      -                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+      -                for item in items {
+      -                    grouped_items
+      -                        .entry((&item.production, item.dot_position))
+      -                        .or_default()
+      -                        .insert(item.lookahead.clone());
+      -                }
+      -
+      -                // Print grouped items
+      -                for ((production, dot_pos), lookaheads) in grouped_items {
+      -                    // Print the core item part
+      -                    write!(f, "      - [{} ->", production.lhs.0)?;
+      -                    for (i, symbol) in production.rhs.iter().enumerate() {
+      -                        if i == dot_pos {
+      -                            write!(f, " •")?;
+      -                        }
+      -                        match symbol {
+      -                            Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
+      -                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+      -                        }
+      -                    }
+      -                    if dot_pos == production.rhs.len() {
+      -                        write!(f, " •")?;
+      -                    }
+      -                    write!(f, ", {{")?;
+      -
+      -                    // Print the set of lookaheads
+      -                    let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
+      -                    lookahead_strs.sort();
+      -                    write!(f, "{}", lookahead_strs.join(", "))?;
+      -
+      -                    writeln!(f, "}}]")?;
       -                }
       -            }
-      -        };
-      +        let print_full_forest = stats.unique_nodes <= MAX;
-      +
-      +        let mut msg = if print_full_forest {
-      +            format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-      +                    print_gss_forest(&roots, None, MAX, &self.parser.terminal_map, None, None))
-      +        } else {
-      +            match find_longest_path(&self.active_state.stack) {
-      +                Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-      +                                   stats.unique_nodes,
-      +                                   p.len(),
-      +                                   p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-      +                                        .map(|id| id.to_string())
-      +                                        .collect::<Vec<_>>()
-      +                                        .join(" → ")),
-      +                None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-      +            }
-      +        };
-      +
-      +        if print_full_forest {
-      +            let state_ids = self.get_gss_states_in_dfs_order(&roots);
-      +            if !state_ids.is_empty() {
-      +                writeln!(&mut msg, "\n--- GSS State Explanations (in order of appearance) ---").unwrap();
-      +                for state_id in state_ids {
-      +                    writeln!(&mut msg, "\n--- State {} ---", state_id.0).unwrap();
-      +                    self.parser.format_state_details(&mut msg, state_id, "  ").unwrap();
-      +                }
-      +                writeln!(&mut msg, "--- End GSS State Explanations ---").unwrap();
-      +            }
-      +        }
-       
-               if stats.unique_nodes > PANIC_THRESHOLD {
-      -            let msg = make_msg(true, usize::MAX);
-                   panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
-               }
-       
-      -        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
-      -    }
-      -}
-      +        debug!(4, "{}", msg);
-      +    }
-      +}
-
-      ```
-
-      These changes should give you the desired GSS visualization output. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -563,6 +563,38 @@ }
-       
-       impl<'a> GLRParserState<'a> { // No longer generic
-      +    fn get_gss_states_in_dfs_order(&self, roots: &[Arc<GSSNode>]) -> Vec<StateID> {
-      +        let mut state_ids = Vec::new();
-      +        let mut visited_states = BTreeSet::new();
-      +        let mut visited_nodes = BTreeSet::new(); // To avoid cycles
-      +
-      +        fn traverse(
-      +            node: Arc<GSSNode>,
-      +            state_ids: &mut Vec<StateID>,
-      +            visited_states: &mut BTreeSet<StateID>,
-      +            visited_nodes: &mut BTreeSet<Arc<GSSNode>>,
-      +        ) {
-      +            if !visited_nodes.insert(node.clone()) {
-      +                return;
-      +            }
-      +
-      +            for peek in node.peek_iter() {
-      +                let state_id = peek.edge_value().state_id;
-      +                if visited_states.insert(state_id) {
-      +                    state_ids.push(state_id);
-      +                }
-      +
-      +                let parent = Arc::new(peek.isolated_parent());
-      +                traverse(parent, state_ids, visited_states, visited_nodes);
-      +            }
-      +        }
-      +
-      +        for root in roots {
-      +            traverse(root.clone(), &mut state_ids, &mut visited_states, &mut visited_nodes);
-      +        }
-      +        state_ids
-      +    }
-      +
-           fn push_state(
-               &self,
-               peek: &GSSPeek,
-      @@ -1038,30 +1070,41 @@         crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                             phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
-       
-      -        let make_msg = |print_full_forest, max_nodes_to_print| {
-      -            if print_full_forest {
-      -                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-      -                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
+      -
+      -            writeln!(f, "    Actions (without default reduce):")?;
+      -            format_actions(f, &row.shifts_and_reduces_without_default_reduce, terminal_map, non_terminal_map, &self.productions, "      ")?;
+      -
+      -            writeln!(f, "    Actions (full):")?;
+      -            format_actions(f, &row.shifts_and_reduces_full, terminal_map, non_terminal_map, &self.productions, "      ")?;
+      -
+      -            writeln!(f, "    Default Action:")?;
+      -            if let Some(reduce) = &row.default_reduce.reduce {
+      -                let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
+      -                let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
+      -                writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
       -            } else {
-      -                match find_longest_path(&self.active_state.stack) {
-      -                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-      -                                       stats.unique_nodes,
-      -                                       p.len(),
-      -                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-      -                                            .map(|id| id.to_string())
-      -                                            .collect::<Vec<_>>()
-      -                                            .join(" → ")),
-      -                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-      +        let print_full_forest = stats.unique_nodes <= MAX;
-      +
-      +        let mut msg = if print_full_forest {
-      +            format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-      +                    print_gss_forest(&roots, None, MAX, &self.parser.terminal_map, None, None))
-      +        } else {
-      +            match find_longest_path(&self.active_state.stack) {
-      +                Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-      +                                   stats.unique_nodes,
-      +                                   p.len(),
-      +                                   p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-      +                                        .map(|id| id.to_string())
-      +                                        .collect::<Vec<_>>()
-      +                                        .join(" → ")),
-      +                None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-      +            }
-      +        };
-      +
-      +        if print_full_forest {
-      +            let state_ids = self.get_gss_states_in_dfs_order(&roots);
-      +            if !state_ids.is_empty() {
-      +                writeln!(&mut msg, "\n--- GSS State Explanations (in order of appearance) ---").unwrap();
-      +                for state_id in state_ids {
-      +                    writeln!(&mut msg, "\n--- State {} ---", state_id.0).unwrap();
-      +                    self.parser.format_state_details(&mut msg, state_id, "  ").unwrap();
-                       }
+      -                writeln!(f, "      - No default reduce")?;
       -            }
-      -        };
-      +                writeln!(&mut msg, "--- End GSS State Explanations ---").unwrap();
-      +            }
-      +        }
-       
-               if stats.unique_nodes > PANIC_THRESHOLD {
-      -            let msg = make_msg(true, usize::MAX);
-                   panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
+      -            if row.default_reduce.clone_and_merge {
+      -                writeln!(f, "      - Clone and merge")?;
+      -            } else {
+      -                writeln!(f, "      - No clone and merge")?;
+      -            }
+      -
+      -            writeln!(f, "    Gotos:")?;
+      -            for (&non_terminal_id, goto) in &row.gotos {
+      -                let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+      -                let goto_str = if let Some(state_id_val) = goto.state_id {
+      -                    if goto.accept {
+      -                        format!("{} or accept", state_id_val.0)
+      -                    } else {
+      -                        format!("{}", state_id_val.0)
+      -                    }
+      -                } else if goto.accept {
+      -                    "accept".to_string()
+      -                } else {
+      -                    "no-op".to_string()
+      -                };
+      -                writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
+      -            }
+      +            self.format_state_details(f, state_id, "    ")?;
                }
        
-      -        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
-      +        debug!(4, "{}", msg);
-           }
-       }
-       
+               writeln!(f, "\nTerminal Map (name to terminal ID):")?;
 
       ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
 
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      The second way is that I want to be able to output a graphviz that shows it the full GSS.
-      The 'nodes' should be states, and inside them the explaination like we usually print (in monospace font, so stuff lines up like it would in a console). And arrows between them to represent the stack.
-    metadata:
-  - assistant: |-
-      Of course! Generating a Graphviz visualization of the GSS is an excellent way to understand the parser's state. Here are the changes to implement this feature.
-
-      I've added a new function, `generate_gss_graphviz`, which traverses the GSS and produces a DOT file representing the stack structure. The nodes in the graph correspond to parser states, with their labels containing the detailed explanation you're familiar with. This function is called from the existing `log_gss` method, so whenever GSS logging is enabled, it will now also attempt to write a `.dot` file for the current GSS.
-
-      To view the output, you will need to have Graphviz installed. You can then render the generated `.dot` file into an image using a command like `dot -Tpng gss_output.dot -o gss_output.png`.
-
-      Here is the diff for `src/glr/parser.rs`:
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -8,6 +8,9 @@
-       use crate::profiler::GSS_LOGGING_ENABLED;
-       use crate::json_serialization::{JSONConvertible, JSONNode};
-       use std::collections::BTreeMap as StdMap;
-      +use std::fs::File;
-      +use std::io::Write;
-      +use std::time::{SystemTime, UNIX_EPOCH};
-       use deterministic_hash::DeterministicHasher;
-       use profiler_macro::{time_it, timeit};
-       use crate::glr::automaton::compute_closure;
-      @@ -29,6 +32,8 @@
-           }
-       }
-       
-      +pub const GSS_GRAPHVIZ_ENABLED: bool = true;
-      +
-       /// Helper enum that tells `process_action_queue` where the *new* states that
-       /// originate from a **reduce** should be put.
-       ///
-      @@ -564,6 +569,62 @@
-       }
-       
-       impl<'a> GLRParserState<'a> { // No longer generic
-      +    #[allow(dead_code)]
-      +    fn generate_gss_graphviz(&self, roots: &[Arc<GSSNode>]) -> String {
-      +        let mut dot = String::new();
-      +        writeln!(&mut dot, "digraph GSS {{").unwrap();
-      +        writeln!(&mut dot, "    rankdir=TB;");
-      +        writeln!(&mut dot, "    node [shape=box, fontname=\"Courier New, Courier, monospace\"];").unwrap();
-      +
-      +        let mut all_states = BTreeSet::new();
-      +        let mut all_links = BTreeSet::new(); // (from_state, to_state)
-      +        let mut visited_gss_nodes = BTreeSet::new();
-      +        let mut worklist: VecDeque<Arc<GSSNode>> = roots.iter().cloned().collect();
-      +
-      +        while let Some(gss_node) = worklist.pop_front() {
-      +            if !visited_gss_nodes.insert(gss_node.clone()) {
-      +                continue;
-      +            }
-      +
-      +            for edge in &gss_node.predecessors {
-      +                let top_state_id = edge.content.state_id;
-      +                all_states.insert(top_state_id);
-      +
-      +                let pred_gss_node = &edge.target;
-      +                for pred_edge in &pred_gss_node.predecessors {
-      +                    let next_state_id = pred_edge.content.state_id;
-      +                    all_links.insert((top_state_id, next_state_id));
-      +                }
-      +
-      +                if !pred_gss_node.is_empty() {
-      +                    worklist.push_back(pred_gss_node.clone());
-      +                }
-      +            }
-      +        }
-      +
-      +        // Define nodes
-      +        for state_id in all_states {
-      +            let mut label = String::new();
-      +            // The explanation header is "--- State X ---", which is redundant if the node is named SX.
-      +            // Let's just format the details.
-      +            self.parser.format_state_details(&mut label, state_id, "").unwrap();
-      +
-      +            // Escape for DOT label. `\l` is for left-justified newlines.
-      +            let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-      +
-      +            writeln!(&mut dot, "    S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
-      +        }
-      +
-      +        // Define edges
-      +        for (from, to) in all_links {
-      +            writeln!(&mut dot, "    S{} -> S{};", from.0, to.0).unwrap();
-      +        }
-      +
-      +        writeln!(&mut dot, "}}").unwrap();
-      +        dot
-      +    }
-      +
-           fn get_gss_states_in_dfs_order(&self, roots: &[Arc<GSSNode>]) -> Vec<StateID> {
-               let mut state_ids = Vec::new();
-               let mut visited_states = BTreeSet::new();
-      @@ -1070,6 +1131,20 @@
-               let roots: Vec<_> = vec![self.active_state.stack.clone()];
-               let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-               crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                             phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
-      +
-      +        if GSS_GRAPHVIZ_ENABLED && !roots.is_empty() && !roots[0].is_empty() {
-      +            let dot_string = self.generate_gss_graphviz(&roots);
-      +            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-      +            let filename = format!("gss_{}_{}.dot", timestamp, phase.replace('/', "-"));
-      +            if let Ok(mut file) = File::create(&filename) {
-      +                if let Err(e) = file.write_all(dot_string.as_bytes()) {
-      +                    crate::debug!(0, "Error writing GSS graphviz file: {}", e);
-      +                } else {
-      +                    crate::debug!(3, "Wrote GSS graphviz to {}", filename);
-      +                }
-      +            }
-      +        }
-       
-               let print_full_forest = stats.unique_nodes <= MAX;
-       
-
-      ```
+      I hope this refactoring helps improve your code. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
