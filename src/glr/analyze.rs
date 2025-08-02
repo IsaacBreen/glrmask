@@ -718,7 +718,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     seen.insert(start_prod.clone());
     out.push(start_prod);
 
-    for prod in productions {
+    for prod in &productions[1..] {
         // Generate all RHS variants by taking the Cartesian product of options for each symbol.
         let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
             let sym_options = match sym {
