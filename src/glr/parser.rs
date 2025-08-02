@@ -969,10 +969,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
                                   self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                   r.len, state_id.0, state.stack.num_predecessors());
-                    // timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                    //                 self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                    //                 r.len, state_id.0), {
-                    timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
+                    timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
+                                    self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                                    r.len, state_id.0), {
+                    // timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
                         // For each peek in the current state, reduce and goto.
                         // This is the core of phase 3: reducing all stacks with the same state_id.
                         // We will merge the results into a new stack part.
