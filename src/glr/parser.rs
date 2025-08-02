@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopperItem};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
@@ -874,10 +874,29 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &mut self,
         peek: &GSSNode,
         nt: NonTerminalID,
-        len: usize,
     ) -> Arc<GSSNode> {
-        let popped = timeit!(peek.popn(len));
-        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+        let node = Arc::new(peek.clone());
+        let acc = Arc::new(Acc::new_fresh());
+        let mut popped = GSSPopper::default();
+        popped.paths.insert(node, acc);
+        let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
+        for (parent, path_acc) in std::mem::take(&mut popped.paths) {
+            let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
+            for preds_by_depth in parent.predecessors.values() {
+                for pred_vec in preds_by_depth.values() {
+                    for child in pred_vec {
+                        if let Some(existing_acc) = new_paths.get_mut(child) {
+                            *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
+                        } else {
+                            new_paths.insert(child.clone(), new_path_acc.clone());
+                        }
+                    }
+                }
+            }
+        }
+        popped.paths = new_paths;
+
+        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), 1);
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
 
         let mut out = Vec::new();
