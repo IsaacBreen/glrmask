@@ -403,6 +403,20 @@ impl GSSNode {
         Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
+    /// Helper to create a GSSNode with multiple predecessors, used by `push_many`.
+    fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, acc: Acc) -> Self {
+        let mut predecessors_map = NodeMap::new();
+        for edge_value in edge_values {
+            predecessors_map
+                .entry(edge_value)
+                .or_default()
+                .entry(predecessor_arc.dest_key())
+                .or_default()
+                .push(predecessor_arc.clone());
+        }
+        Self::new_with_map(Arc::new(acc), predecessors_map)
+    }
+
     pub fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
@@ -440,6 +454,11 @@ impl GSSNode {
     pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
         let acc = (*self.acc).clone();
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
+    }
+
+    pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
+        let acc = (*self.acc).clone();
+        Self::new_with_many_predecessors(Arc::new(self.clone()), edge_values, acc)
     }
 
     /// Performs a multi-level pop operation on this node.

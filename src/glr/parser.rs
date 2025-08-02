@@ -1011,10 +1011,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     }
                                 }
 
-                                for goto_state_id in goto_state_ids {
-                                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                    out.push(new_gss_node);
-                                }
+                                let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
+                                out.push(new_gss_node);
                             }
                         }
 
