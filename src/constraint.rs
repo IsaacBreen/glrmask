@@ -1008,15 +1008,15 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
         if !gss_roots.is_empty() {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            let (gss_str, _) = crate::datastructures::gss::print_gss_forest(
-                &gss_roots,
-                None,
-                usize::MAX,
-                &self.parent.parser.terminal_map,
-                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-                Some(&self.parent.llm_vocab.llm_token_map),
-                false,
-            );
+            let config = GSSPrintConfig {
+                labels: None,
+                max_nodes: 50,
+                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+                verbose: false,
+            };
+            let (gss_str, _) =
+                crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
             write!(f, "{}", gss_str)?;
         }
 
