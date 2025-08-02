@@ -1165,10 +1165,9 @@ impl GLRParser {
         // Define GSS state nodes
         for state_id in &defined_states {
             let mut label = String::new();
-            // No longer adding "ROOTS: ..." to the label
             self.format_state_details(&mut label, *state_id, "").unwrap();
             let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-            writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
+            writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
         }
 
         if edges.iter().any(|(_, to)| to.is_none()) {

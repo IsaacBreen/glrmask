@@ -5785,15 +5785,16 @@ local_system:
               let mut visited_nodes = HashSet::new();
               let mut defined_states = BTreeSet::new();
               let mut edges = BTreeSet::new();
-              let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
+              // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
+              let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
 
               let mut queue = VecDeque::new();
               for (label, root) in roots {
                   if !root.is_empty() {
                       let root_arc = Arc::new((*root).clone());
-                      // Label the root states
+                      let root_states = root_connections.entry(label.to_string()).or_default();
                       for (edge_val, _) in &root_arc.predecessors {
-                          root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                          root_states.insert(edge_val.state_id);
                       }
                       queue.push_back(root_arc);
                   }
@@ -5825,14 +5826,19 @@ local_system:
                   }
               }
 
+              // Define root label nodes as separate nodes
+              writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
+              writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
+              writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
+              for label in root_connections.keys() {
+                  writeln!(&mut dot, "    \"{}\";", label).unwrap();
+              }
+              writeln!(&mut dot, "  }}").unwrap();
+
+              // Define GSS state nodes
               for state_id in &defined_states {
                   let mut label = String::new();
-                  if let Some(labels) = root_labels.get(state_id) {
-                      let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
-                      unique_labels.sort();
-                      unique_labels.dedup();
-                      writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
-                  }
+                  // No longer adding "ROOTS: ..." to the label
                   self.format_state_details(&mut label, *state_id, "").unwrap();
                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -5842,6 +5848,14 @@ local_system:
                   writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
               }
 
+              // Draw edges from root labels to GSS states
+              for (label, states) in &root_connections {
+                  for state_id in states {
+                      writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
+                  }
+              }
+
+              // Draw edges between GSS states
               for (from_opt, to_opt) in edges {
                   match (from_opt, to_opt) {
                       (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
@@ -13973,15 +13987,16 @@ local_system:
               let mut visited_nodes = HashSet::new();
               let mut defined_states = BTreeSet::new();
               let mut edges = BTreeSet::new();
-              let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
+              // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
+              let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
 
               let mut queue = VecDeque::new();
               for (label, root) in roots {
                   if !root.is_empty() {
                       let root_arc = Arc::new((*root).clone());
-                      // Label the root states
+                      let root_states = root_connections.entry(label.to_string()).or_default();
                       for (edge_val, _) in &root_arc.predecessors {
-                          root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                          root_states.insert(edge_val.state_id);
                       }
                       queue.push_back(root_arc);
                   }
@@ -14013,14 +14028,19 @@ local_system:
                   }
               }
 
+              // Define root label nodes as separate nodes
+              writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
+              writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
+              writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
+              for label in root_connections.keys() {
+                  writeln!(&mut dot, "    \"{}\";", label).unwrap();
+              }
+              writeln!(&mut dot, "  }}").unwrap();
+
+              // Define GSS state nodes
               for state_id in &defined_states {
                   let mut label = String::new();
-                  if let Some(labels) = root_labels.get(state_id) {
-                      let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
-                      unique_labels.sort();
-                      unique_labels.dedup();
-                      writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
-                  }
+                  // No longer adding "ROOTS: ..." to the label
                   self.format_state_details(&mut label, *state_id, "").unwrap();
                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -14030,6 +14050,14 @@ local_system:
                   writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
               }
 
+              // Draw edges from root labels to GSS states
+              for (label, states) in &root_connections {
+                  for state_id in states {
+                      writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
+                  }
+              }
+
+              // Draw edges between GSS states
               for (from_opt, to_opt) in edges {
                   match (from_opt, to_opt) {
                       (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
@@ -22224,15 +22252,16 @@ messages:
               let mut visited_nodes = HashSet::new();
               let mut defined_states = BTreeSet::new();
               let mut edges = BTreeSet::new();
-              let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
+              // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
+              let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
 
               let mut queue = VecDeque::new();
               for (label, root) in roots {
                   if !root.is_empty() {
                       let root_arc = Arc::new((*root).clone());
-                      // Label the root states
+                      let root_states = root_connections.entry(label.to_string()).or_default();
                       for (edge_val, _) in &root_arc.predecessors {
-                          root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                          root_states.insert(edge_val.state_id);
                       }
                       queue.push_back(root_arc);
                   }
@@ -22264,14 +22293,19 @@ messages:
                   }
               }
 
+              // Define root label nodes as separate nodes
+              writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
+              writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
+              writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
+              for label in root_connections.keys() {
+                  writeln!(&mut dot, "    \"{}\";", label).unwrap();
+              }
+              writeln!(&mut dot, "  }}").unwrap();
+
+              // Define GSS state nodes
               for state_id in &defined_states {
                   let mut label = String::new();
-                  if let Some(labels) = root_labels.get(state_id) {
-                      let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
-                      unique_labels.sort();
-                      unique_labels.dedup();
-                      writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
-                  }
+                  // No longer adding "ROOTS: ..." to the label
                   self.format_state_details(&mut label, *state_id, "").unwrap();
                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -22281,6 +22315,14 @@ messages:
                   writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
               }
 
+              // Draw edges from root labels to GSS states
+              for (label, states) in &root_connections {
+                  for state_id in states {
+                      writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
+                  }
+              }
+
+              // Draw edges between GSS states
               for (from_opt, to_opt) in edges {
                   match (from_opt, to_opt) {
                       (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
@@ -24660,115 +24702,35 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: |-
-      The root labels for the graphviz aren't done right.
-      They shouldn't be *on* nodes. They should be *themselves* nodes.
-      They represent tokenizer state IDs.
-      Fix it.
+  - user: In the graphviz, it's showing an explaination of the state in the node.
+      Which is good. But it should also show the **state ID**.
     metadata:
   - assistant: |-
-      Of course! Dealing with graph visualizations can be tricky. You're right, representing tokenizer states as distinct nodes makes the relationship clearer than embedding them as labels. Here are the changes to achieve that.
+      Of course! Displaying the state ID in the Graphviz nodes is a great idea for better readability. Here are the changes to achieve that.
 
-      I'll adjust the Graphviz DOT generation logic to create separate, styled nodes for each tokenizer state and draw edges from them to the corresponding parser states in the GSS.
+      I'll modify `src/glr/parser.rs` to prepend the state ID to the node label in the DOT output.
 
-      Here is the patch for `src/glr/parser.rs`:
+      Here is the diff for the change:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -1001,26 +1001,20 @@
-               writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-               writeln!(&mut dot, "  rankdir=LR;").unwrap();
-               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
-       
-               let mut visited_nodes = HashSet::new();
-               let mut defined_states = BTreeSet::new();
-               let mut edges = BTreeSet::new();
-      -        let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
-      +        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
-      +        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
-       
-               let mut queue = VecDeque::new();
-               for (label, root) in roots {
-                   if !root.is_empty() {
-                       let root_arc = Arc::new((*root).clone());
-      -                // Label the root states
-      +                let root_states = root_connections.entry(label.to_string()).or_default();
-                       for (edge_val, _) in &root_arc.predecessors {
-      -                    root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
-      +                    root_states.insert(edge_val.state_id);
-                       }
-                       queue.push_back(root_arc);
-                   }
-               }
-       
-               while let Some(node_arc) = queue.pop_front() {
-                   let node_ptr = Arc::as_ptr(&node_arc);
-                   if !visited_nodes.insert(node_ptr) {
-                       continue;
-                   }
-       
-                   for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                       let parent_state_id = edge_val.state_id;
-                       defined_states.insert(parent_state_id);
-       
-                       for pred_vec in preds_by_depth.values() {
-                           for pred_arc in pred_vec {
-                               if pred_arc.predecessors.is_empty() {
-                                   edges.insert((Some(parent_state_id), None));
-                               } else {
-                                   for (pred_edge_val, _) in &pred_arc.predecessors {
-                                       let child_state_id = pred_edge_val.state_id;
-                                       edges.insert((Some(parent_state_id), Some(child_state_id)));
-                                   }
-                               }
-                               queue.push_back(pred_arc.clone());
-                           }
-                       }
-                   }
-               }
-       
-      +        // Define root label nodes as separate nodes
-      +        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
-      +        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
-      +        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
-      +        for label in root_connections.keys() {
-      +            writeln!(&mut dot, "    \"{}\";", label).unwrap();
-      +        }
-      +        writeln!(&mut dot, "  }}").unwrap();
-      +
-      +        // Define GSS state nodes
+      @@ -1000,9 +1000,8 @@
+               // Define GSS state nodes
                for state_id in &defined_states {
                    let mut label = String::new();
-      -            if let Some(labels) = root_labels.get(state_id) {
-      -                let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
-      -                unique_labels.sort();
-      -                unique_labels.dedup();
-      -                writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
-      -            }
-      +            // No longer adding "ROOTS: ..." to the label
+      -            // No longer adding "ROOTS: ..." to the label
                    self.format_state_details(&mut label, *state_id, "").unwrap();
                    let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
-                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
+      -            writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
+      +            writeln!(&mut dot, "  S{} [label=\"State {}\\l{}\"];", state_id.0, state_id.0, escaped_label).unwrap();
                }
        
                if edges.iter().any(|(_, to)| to.is_none()) {
-                   writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
-               }
-       
-      +        // Draw edges from root labels to GSS states
-      +        for (label, states) in &root_connections {
-      +            for state_id in states {
-      +                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
-      +            }
-      +        }
-      +
-      +        // Draw edges between GSS states
-               for (from_opt, to_opt) in edges {
-                   match (from_opt, to_opt) {
-                       (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
 
       ```
+
+      This change modifies the `gss_forest_to_dot` function to include a "State {id}" header in each node of the generated Graphviz graph, making it easier to identify states when debugging. No other files needed to be changed. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
