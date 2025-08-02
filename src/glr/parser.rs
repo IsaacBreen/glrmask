@@ -974,17 +974,32 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for peek2 in popper_item.peek_iter() {
                                 let mut goto_state_ids = BTreeSet::new();
                                 let state_id = peek2.edge_value().state_id;
-                                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
-                                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
-                                );
+                                let mut current_nt = nt;
+                                loop {
+                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect(
+                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id).as_str()
+                                    );
 
-                                if goto.accept {
-                                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
-                                    self.accepted = true;
-                                }
+                                    if goto.accept {
+                                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
+                                        self.accepted = true;
+                                    }
 
-                                if let Some(goto_state_id) = goto.state_id {
-                                    goto_state_ids.insert(goto_state_id);
+                                    if let Some(goto_state_id) = goto.state_id {
+                                        let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
+
+                                        // Action 1: Update the current nonterminal if we have a single-token reduce.
+                                        if let Some(r) = reduce {
+                                            if r.len == 1 {
+                                                current_nt = r.nonterminal_id;
+                                            }
+                                        }
+
+                                        // Action 2: Insert the state ID if we are cloning or have a multi-token reduce.
+                                        if *clone_and_merge || matches!(reduce, Some(r) if r.len != 1) {
+                                            goto_state_ids.insert(goto_state_id);
+                                        }
+                                    }
                                 }
 
                                 for goto_state_id in goto_state_ids {
