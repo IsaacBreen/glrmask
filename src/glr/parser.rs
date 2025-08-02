@@ -987,6 +987,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                                     if let Some(goto_state_id) = goto.state_id {
                                         let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
+                                        timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {
 
                                         // Action 1: Update the current nonterminal if we have a single-token reduce.
                                         if let Some(r) = reduce {
