@@ -563,6 +563,38 @@ impl Display for GLRParserState<'_> {
 }
 
 impl<'a> GLRParserState<'a> { // No longer generic
+    fn get_gss_states_in_dfs_order(&self, roots: &[Arc<GSSNode>]) -> Vec<StateID> {
+        let mut state_ids = Vec::new();
+        let mut visited_states = BTreeSet::new();
+        let mut visited_nodes = BTreeSet::new(); // To avoid cycles
+
+        fn traverse(
+            node: Arc<GSSNode>,
+            state_ids: &mut Vec<StateID>,
+            visited_states: &mut BTreeSet<StateID>,
+            visited_nodes: &mut BTreeSet<Arc<GSSNode>>,
+        ) {
+            if !visited_nodes.insert(node.clone()) {
+                return;
+            }
+
+            for peek in node.peek_iter() {
+                let state_id = peek.edge_value().state_id;
+                if visited_states.insert(state_id) {
+                    state_ids.push(state_id);
+                }
+
+                let parent = Arc::new(peek.isolated_parent());
+                traverse(parent, state_ids, visited_states, visited_nodes);
+            }
+        }
+
+        for root in roots {
+            traverse(root.clone(), &mut state_ids, &mut visited_states, &mut visited_nodes);
+        }
+        state_ids
+    }
+
     fn push_state(
         &self,
         peek: &GSSPeek,
@@ -1038,30 +1070,41 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
-        let make_msg = |print_full_forest, max_nodes_to_print| {
-            if print_full_forest {
-                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
-            } else {
-                match find_longest_path(&self.active_state.stack) {
-                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                       stats.unique_nodes,
-                                       p.len(),
-                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-                                            .map(|id| id.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join(" → ")),
-                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                }
+        let print_full_forest = stats.unique_nodes <= MAX;
+
+        let mut msg = if print_full_forest {
+            format!("GSS ({} nodes):\n{}", stats.unique_nodes,
+                    print_gss_forest(&roots, None, MAX, &self.parser.terminal_map, None, None))
+        } else {
+            match find_longest_path(&self.active_state.stack) {
+                Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+                                   stats.unique_nodes,
+                                   p.len(),
+                                   p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
+                                        .map(|id| id.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(" → ")),
+                None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
             }
         };
 
+        if print_full_forest {
+            let state_ids = self.get_gss_states_in_dfs_order(&roots);
+            if !state_ids.is_empty() {
+                writeln!(&mut msg, "\n--- GSS State Explanations (in order of appearance) ---").unwrap();
+                for state_id in state_ids {
+                    writeln!(&mut msg, "\n--- State {} ---", state_id.0).unwrap();
+                    self.parser.format_state_details(&mut msg, state_id, "  ").unwrap();
+                }
+                writeln!(&mut msg, "--- End GSS State Explanations ---").unwrap();
+            }
+        }
+
         if stats.unique_nodes > PANIC_THRESHOLD {
-            let msg = make_msg(true, usize::MAX);
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
-        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
+        debug!(4, "{}", msg);
     }
 }
 
