@@ -948,7 +948,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
 
                 if row.default_reduce.clone_and_merge {
+                    println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], None, usize::MAX, &Default::default(), None, None).0);
+                    println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], None, usize::MAX, &Default::default(), None, None).0);
                     next_active_state.merge(state);
+                    println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], None, usize::MAX, &Default::default(), None, None).0);
                     let stats = gather_gss_stats(&[&next_active_state.stack]);
                     if stats.unique_nodes > 5 { crate::debug!(3, "Expected at most 5 goto states to be pushed to new GSS node. Got {}", stats.unique_nodes); }
                 }
