@@ -1112,15 +1112,16 @@ impl GLRParser {
         let mut visited_nodes = HashSet::new();
         let mut defined_states = BTreeSet::new();
         let mut edges = BTreeSet::new();
-        let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
+        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
+        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
 
         let mut queue = VecDeque::new();
         for (label, root) in roots {
             if !root.is_empty() {
                 let root_arc = Arc::new((*root).clone());
-                // Label the root states
+                let root_states = root_connections.entry(label.to_string()).or_default();
                 for (edge_val, _) in &root_arc.predecessors {
-                    root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+                    root_states.insert(edge_val.state_id);
                 }
                 queue.push_back(root_arc);
             }
@@ -1152,14 +1153,19 @@ impl GLRParser {
             }
         }
 
+        // Define root label nodes as separate nodes
+        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
+        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
+        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
+        for label in root_connections.keys() {
+            writeln!(&mut dot, "    \"{}\";", label).unwrap();
+        }
+        writeln!(&mut dot, "  }}").unwrap();
+
+        // Define GSS state nodes
         for state_id in &defined_states {
             let mut label = String::new();
-            if let Some(labels) = root_labels.get(state_id) {
-                let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
-                unique_labels.sort();
-                unique_labels.dedup();
-                writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
-            }
+            // No longer adding "ROOTS: ..." to the label
             self.format_state_details(&mut label, *state_id, "").unwrap();
             let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
             writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
@@ -1169,6 +1175,14 @@ impl GLRParser {
             writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
         }
 
+        // Draw edges from root labels to GSS states
+        for (label, states) in &root_connections {
+            for state_id in states {
+                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
+            }
+        }
+
+        // Draw edges between GSS states
         for (from_opt, to_opt) in edges {
             match (from_opt, to_opt) {
                 (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),

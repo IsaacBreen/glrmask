@@ -12,7 +12,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/datastructures/gss.rs: |
@@ -5069,7 +5069,13 @@ local_system:
                           write!(f, ", {{")?;
                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
                           lookahead_strs.sort();
-                          write!(f, "{}", lookahead_strs.join(", "))?;
+                          const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
+                          if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
+                              let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
+                              write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
+                          } else {
+                              write!(f, "{}", lookahead_strs.join(", "))?;
+                          }
                           writeln!(f, "}}]")?;
                       }
                   }
@@ -5180,7 +5186,13 @@ local_system:
               // Format terminals
               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
               terminal_names.sort();
-              let terms_str = terminal_names.join(", ");
+              const MAX_TERMINALS_TO_SHOW: usize = 5;
+              let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
+                  let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
+                  format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
+              } else {
+                  terminal_names.join(", ")
+              };
 
               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
               writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
@@ -5767,7 +5779,7 @@ local_system:
           pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
               let mut dot = String::new();
               writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-              writeln!(&mut dot, "  rankdir=TB;").unwrap();
+              writeln!(&mut dot, "  rankdir=LR;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
@@ -13245,7 +13257,13 @@ local_system:
                           write!(f, ", {{")?;
                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
                           lookahead_strs.sort();
-                          write!(f, "{}", lookahead_strs.join(", "))?;
+                          const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
+                          if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
+                              let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
+                              write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
+                          } else {
+                              write!(f, "{}", lookahead_strs.join(", "))?;
+                          }
                           writeln!(f, "}}]")?;
                       }
                   }
@@ -13356,7 +13374,13 @@ local_system:
               // Format terminals
               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
               terminal_names.sort();
-              let terms_str = terminal_names.join(", ");
+              const MAX_TERMINALS_TO_SHOW: usize = 5;
+              let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
+                  let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
+                  format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
+              } else {
+                  terminal_names.join(", ")
+              };
 
               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
               writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
@@ -13943,7 +13967,7 @@ local_system:
           pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
               let mut dot = String::new();
               writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-              writeln!(&mut dot, "  rankdir=TB;").unwrap();
+              writeln!(&mut dot, "  rankdir=LR;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
@@ -21484,7 +21508,13 @@ messages:
                           write!(f, ", {{")?;
                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
                           lookahead_strs.sort();
-                          write!(f, "{}", lookahead_strs.join(", "))?;
+                          const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
+                          if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
+                              let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
+                              write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
+                          } else {
+                              write!(f, "{}", lookahead_strs.join(", "))?;
+                          }
                           writeln!(f, "}}]")?;
                       }
                   }
@@ -21595,7 +21625,13 @@ messages:
               // Format terminals
               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
               terminal_names.sort();
-              let terms_str = terminal_names.join(", ");
+              const MAX_TERMINALS_TO_SHOW: usize = 5;
+              let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
+                  let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
+                  format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
+              } else {
+                  terminal_names.join(", ")
+              };
 
               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
               writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
@@ -22182,7 +22218,7 @@ messages:
           pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
               let mut dot = String::new();
               writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-              writeln!(&mut dot, "  rankdir=TB;").unwrap();
+              writeln!(&mut dot, "  rankdir=LR;").unwrap();
               writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
 
               let mut visited_nodes = HashSet::new();
@@ -24625,218 +24661,114 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Here's an example graphviz output:
-      ```
-      digraph GSS_States {
-        rankdir=TB;
-        node [shape=box, fontname="Courier New", style=rounded];
-        S0 [label="Items:\l  - [additive_expression -> multiplicative_expression •, {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\l  - [additive_expression -> multiplicative_expression • additive_expression[0], {'!', '!=', '!==', '#', '&&', '&', '(', ')', '*', '+', '++', ',', '-', '--', '...', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\lActions (without default reduce):\l  - Shift 6 on { '+' }\l  - Shift 7 on { '-' }\lActions (full):\l  - Reduce additive_expression (len 1) via rules [374] on { '!', '!=', '!==', '#', '${', '%', '%=', '&&', '&', '&=', '(', ')', '*', '**', '**=', '*=', '++', '+=', ',', '--', '-=', '.', '...', '/', '/=', ':', ';', '<', '<<', '<<=', '<=', '=', '==', '===', '=>', '>', '>=', '>>', '>>=', '>>>', '>>>=', '?', '?.', '??', '[', ']', '^', '^=', '`', 'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '|=', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, IGNORE, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, TEMPLATE_CHAR }\l  - Conflict:\l            - Shift 6\l            - Reduce by rule #374 (additive_expression -> multiplicative_expression) on { '+' }\l  - Conflict:\l            - Shift 7\l            - Reduce by rule #374 (additive_expression -> multiplicative_expression) on { '-' }\lDefault Action:\l  - Default Reduce additive_expression (len 1) via rules [374]\l  - Clone and merge\lGotos:\l  - additive_expression[0] -> 1\l  - additive_expression[0][0] -> 4\l"];
-        S161 [label="Items:\l  - [arrow_parameters -> IDENTIFIER •, {'=>'}]\l  - [labeled_statement -> IDENTIFIER • ':' statement, {'!', '(', '+', '++', '-', '--', '[', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'if', 'import', 'let', 'new', 'return', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\l  - [primary_expression -> IDENTIFIER •, {'!', '!=', '!==', '#', '%', '%=', '&&', '&', '&=', '(', ')', '*', '**', '**=', '*=', '+', '++', '+=', ',', '-', '--', '-=', '.', '...', '/', '/=', ':', ';', '<', '<<', '<<=', '<=', '=', '==', '===', '>', '>=', '>>', '>>=', '>>>', '>>>=', '?', '?.', '??', '[', ']', '^', '^=', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '|=', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\lActions (without default reduce):\l  - Shift 628 on { ':' }\l  - Reduce arrow_parameters (len 1) via rules [317] on { '=>' }\lActions (full):\l  - Reduce primary_expression (len 1) via rules [442] on { '!', '!=', '!==', '#', '${', '%', '%=', '&&', '&', '&=', '(', ')', '*', '**', '**=', '*=', '+', '++', '+=', ',', '-', '--', '-=', '.', '...', '/', '/=', ';', '<', '<<', '<<=', '<=', '=', '==', '===', '>', '>=', '>>', '>>=', '>>>', '>>>=', '?', '?.', '??', '[', ']', '^', '^=', '`', 'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '|=', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, IGNORE, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, TEMPLATE_CHAR }\l  - Conflict:\l            - Reduce by rule #317 (arrow_parameters -> IDENTIFIER)\l            - Reduce by rule #442 (primary_expression -> IDENTIFIER) on { '=>' }\l  - Conflict:\l            - Shift 628\l            - Reduce by rule #442 (primary_expression -> IDENTIFIER) on { ':' }\lDefault Action:\l  - Default Reduce primary_expression (len 1) via rules [442]\l  - Clone and merge\lGotos:\l  (No goto actions)\l"];
-        S192 [label="Items:\l  - [assignment_expression_rr -> left_hand_side_expression • assignment_expression[0], {'!', '(', '+', '++', '-', '--', '[', '`', 'async', 'await', 'delete', 'function', 'new', 'super', 'this', 'typeof', 'void', 'yield', '{', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL}]\l  - [postfix_expression -> left_hand_side_expression •, {'!', '!=', '!==', '#', '%', '&&', '&', '(', ')', '*', '**', '+', '++', ',', '-', '--', '...', '/', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\l  - [postfix_expression -> left_hand_side_expression • postfix_expression[0], {'!', '!=', '!==', '#', '%', '&&', '&', '(', ')', '*', '**', '+', '++', ',', '-', '--', '...', '/', ':', ';', '<', '<<', '<=', '==', '===', '>', '>=', '>>', '>>>', '?', '??', '[', ']', '^', '`', 'async', 'await', 'break', 'case', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'for', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, ε}]\lActions (without default reduce):\l  - Shift 177 on { '%=' }\l  - Shift 178 on { '&=' }\l  - Shift 179 on { '**=' }\l  - Shift 180 on { '*=' }\l  - Shift 181 on { '+=' }\l  - Shift 182 on { '-=' }\l  - Shift 183 on { '/=' }\l  - Shift 184 on { '<<=' }\l  - Shift 185 on { '=' }\l  - Shift 186 on { '>>=' }\l  - Shift 187 on { '>>>=' }\l  - Shift 188 on { '^=' }\l  - Shift 189 on { '|=' }\l  - Shift 848 on { '++' }\l  - Shift 849 on { '--' }\lActions (full):\l  - Reduce postfix_expression (len 1) via rules [404] on { '!', '!=', '!==', '#', '${', '%', '&&', '&', '(', ')', '*', '**', '+', ',', '-', '.', '...', '/', ':', ';', '<', '<<', '<=', '==', '===', '=>', '>', '>=', '>>', '>>>', '?', '?.', '??', '[', ']', '^', '`', 'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', '{', '|', '||', '}', '~', BIGINT_LITERAL, BOOLEAN_LITERAL, ELISION, IDENTIFIER, IGNORE, NULL_LITERAL, NUMERIC_LITERAL, REGULAR_EXPRESSION_LITERAL, STRING_LITERAL, TEMPLATE_CHAR }\l  - Conflict:\l            - Shift 177\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '%=' }\l  - Conflict:\l            - Shift 178\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '&=' }\l  - Conflict:\l            - Shift 179\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '**=' }\l  - Conflict:\l            - Shift 180\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '*=' }\l  - Conflict:\l            - Shift 181\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '+=' }\l  - Conflict:\l            - Shift 182\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '-=' }\l  - Conflict:\l            - Shift 183\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '/=' }\l  - Conflict:\l            - Shift 184\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '<<=' }\l  - Conflict:\l            - Shift 185\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '=' }\l  - Conflict:\l            - Shift 186\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '>>=' }\l  - Conflict:\l            - Shift 187\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '>>>=' }\l  - Conflict:\l            - Shift 188\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '^=' }\l  - Conflict:\l            - Shift 189\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '|=' }\l  - Conflict:\l            - Shift 848\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '++' }\l  - Conflict:\l            - Shift 849\l            - Reduce by rule #404 (postfix_expression -> left_hand_side_expression) on { '--' }\lDefault Action:\l  - Default Reduce postfix_expression (len 1) via rules [404]\l  - Clone and merge\lGotos:\l  - assignment_expression[0] -> 193\l  - postfix_expression[0] -> 846\l  - postfix_expression[0][0] -> 847\l"];
-        ...
-        START [shape=doublecircle, label="START"];
-        S0 -> S960;
-        S161 -> S960;
-        S192 -> S960;
-        S201 -> S960;
-        S207 -> S960;
-        S213 -> S960;
-        S250 -> S960;
-        S293 -> S960;
-        S299 -> S960;
-        S326 -> S960;
-        S336 -> S960;
-        S364 -> S960;
-        S640 -> S960;
-        S646 -> S960;
-        S741 -> S960;
-        S933 -> S960;
-        S951 -> S960;
-        S960 -> START;
-        S980 -> S960;
-      }
-      ```
-      Because the text quite long here, the nodes are barely visible. Fix it.
+      The root labels for the graphviz aren't done right.
+      They shouldn't be *on* nodes. They should be *themselves* nodes.
+      They represent tokenizer state IDs.
+      Fix it.
     metadata:
   - assistant: |-
-      Hello! I see you're having trouble with long, unreadable labels in your Graphviz output. That's a common issue when dealing with complex grammars that have large lookahead sets.
+      Of course! Dealing with graph visualizations can be tricky. You're right, representing tokenizer states as distinct nodes makes the relationship clearer than embedding them as labels. Here are the changes to achieve that.
 
-      I've prepared a patch that truncates the lists of terminals and lookaheads in the `dot` file output to keep the graph nodes readable. Here are the changes:
+      I'll adjust the Graphviz DOT generation logic to create separate, styled nodes for each tokenizer state and draw edges from them to the corresponding parser states in the GSS.
 
-      In `src/glr/parser.rs`, I'll update the `format_state_details` and `format_actions` functions to limit the number of items they print in lists.
+      Here is the patch for `src/glr/parser.rs`:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -410,8 +410,14 @@
-                           }
-                           write!(f, ", {{")?;
-                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                           lookahead_strs.sort();
-      -                    write!(f, "{}", lookahead_strs.join(", "))?;
-      +                    const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
-      +                    if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
-      +                        let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
-      +                        write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
-      +                    } else {
-      +                        write!(f, "{}", lookahead_strs.join(", "))?;
-      +                    }
-                           writeln!(f, "}}]")?;
-                       }
-                   }
-      @@ -491,7 +497,13 @@
-               // Format terminals
-               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-               terminal_names.sort();
-      -        let terms_str = terminal_names.join(", ");
-      +        const MAX_TERMINALS_TO_SHOW: usize = 5;
-      +        let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-      +            let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-      +            format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-      +        } else {
-      +            terminal_names.join(", ")
-      +        };
-       
-               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-               writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
-
-      ```
-
-      These changes will make your Graphviz output much more manageable by showing only the first few terminals in long lists and then indicating how many more there are. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-    metadata:
-  - user: |-
-      Diff of src/datastructures/gss.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/analyze.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/automaton.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/grammar.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/items.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/minimizer.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -396,7 +396,13 @@                     write!(f, ", {{")?;
-                           let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                           lookahead_strs.sort();
-      -                    write!(f, "{}", lookahead_strs.join(", "))?;
-      +                    const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
-      +                    if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
-      +                        let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
-      +                        write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
-      +                    } else {
-      +                        write!(f, "{}", lookahead_strs.join(", "))?;
-      +                    }
-                           writeln!(f, "}}]")?;
-                       }
-                   }
-      @@ -507,7 +513,13 @@         // Format terminals
-               let mut terminal_names: Vec<_> = terminals.iter().map(|t| t.to_string()).collect();
-               terminal_names.sort();
-      -        let terms_str = terminal_names.join(", ");
-      +        const MAX_TERMINALS_TO_SHOW: usize = 5;
-      +        let terms_str = if terminal_names.len() > MAX_TERMINALS_TO_SHOW {
-      +            let truncated: Vec<_> = terminal_names.iter().take(MAX_TERMINALS_TO_SHOW).map(|s| s.as_str()).collect();
-      +            format!("{}... ({} total)", truncated.join(", "), terminal_names.len())
-      +        } else {
-      +            terminal_names.join(", ")
-      +        };
-       
-               // Put action on its own line, then terminals on the next, to avoid extremely long lines.
-               writeln!(f, "{}- {} on {{ {} }}", indent, action_str, terms_str)?;
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/stats.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/table.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/tests.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: It's still hard to read. Perhaps if it flows horizontally instead of vertically?
-      Like, the direction of the node progressions...
-    metadata:
-  - assistant: |-
-      Of course! A horizontal layout can definitely improve readability for certain graph structures.
-
-      I'll change the graph direction from Top-to-Bottom (`TB`) to Left-to-Right (`LR`). Here is the patch for `src/glr/parser.rs`:
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -1100,7 +1100,7 @@
-           pub fn gss_forest_to_dot(&self, roots: &[(&str, &GSSNode)]) -> String {
-               let mut dot = String::new();
+      @@ -1001,26 +1001,20 @@
                writeln!(&mut dot, "digraph GSS_Forest_States {{").unwrap();
-      -        writeln!(&mut dot, "  rankdir=TB;").unwrap();
-      +        writeln!(&mut dot, "  rankdir=LR;").unwrap();
+               writeln!(&mut dot, "  rankdir=LR;").unwrap();
                writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
        
                let mut visited_nodes = HashSet::new();
+               let mut defined_states = BTreeSet::new();
+               let mut edges = BTreeSet::new();
+      -        let mut root_labels: BTreeMap<StateID, Vec<String>> = BTreeMap::new();
+      +        // Map from a root label (e.g., "State 0") to the set of top-level GSS states.
+      +        let mut root_connections: BTreeMap<String, BTreeSet<StateID>> = BTreeMap::new();
+       
+               let mut queue = VecDeque::new();
+               for (label, root) in roots {
+                   if !root.is_empty() {
+                       let root_arc = Arc::new((*root).clone());
+      -                // Label the root states
+      +                let root_states = root_connections.entry(label.to_string()).or_default();
+                       for (edge_val, _) in &root_arc.predecessors {
+      -                    root_labels.entry(edge_val.state_id).or_default().push(label.to_string());
+      +                    root_states.insert(edge_val.state_id);
+                       }
+                       queue.push_back(root_arc);
+                   }
+               }
+       
+               while let Some(node_arc) = queue.pop_front() {
+                   let node_ptr = Arc::as_ptr(&node_arc);
+                   if !visited_nodes.insert(node_ptr) {
+                       continue;
+                   }
+       
+                   for (edge_val, preds_by_depth) in &node_arc.predecessors {
+                       let parent_state_id = edge_val.state_id;
+                       defined_states.insert(parent_state_id);
+       
+                       for pred_vec in preds_by_depth.values() {
+                           for pred_arc in pred_vec {
+                               if pred_arc.predecessors.is_empty() {
+                                   edges.insert((Some(parent_state_id), None));
+                               } else {
+                                   for (pred_edge_val, _) in &pred_arc.predecessors {
+                                       let child_state_id = pred_edge_val.state_id;
+                                       edges.insert((Some(parent_state_id), Some(child_state_id)));
+                                   }
+                               }
+                               queue.push_back(pred_arc.clone());
+                           }
+                       }
+                   }
+               }
+       
+      +        // Define root label nodes as separate nodes
+      +        writeln!(&mut dot, "  subgraph cluster_roots {{").unwrap();
+      +        writeln!(&mut dot, "    label=\"Tokenizer States\";").unwrap();
+      +        writeln!(&mut dot, "    node [shape=ellipse, style=filled, fillcolor=lightblue];").unwrap();
+      +        for label in root_connections.keys() {
+      +            writeln!(&mut dot, "    \"{}\";", label).unwrap();
+      +        }
+      +        writeln!(&mut dot, "  }}").unwrap();
+      +
+      +        // Define GSS state nodes
+               for state_id in &defined_states {
+                   let mut label = String::new();
+      -            if let Some(labels) = root_labels.get(state_id) {
+      -                let mut unique_labels: Vec<_> = labels.iter().cloned().collect();
+      -                unique_labels.sort();
+      -                unique_labels.dedup();
+      -                writeln!(&mut label, "ROOTS: {}", unique_labels.join(", ")).unwrap();
+      -            }
+      +            // No longer adding "ROOTS: ..." to the label
+                   self.format_state_details(&mut label, *state_id, "").unwrap();
+                   let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\l");
+                   writeln!(&mut dot, "  S{} [label=\"{}\"];", state_id.0, escaped_label).unwrap();
+               }
+       
+               if edges.iter().any(|(_, to)| to.is_none()) {
+                   writeln!(&mut dot, "  START [shape=doublecircle, label=\"START\"];").unwrap();
+               }
+       
+      +        // Draw edges from root labels to GSS states
+      +        for (label, states) in &root_connections {
+      +            for state_id in states {
+      +                writeln!(&mut dot, "  \"{}\" -> S{};", label, state_id.0).unwrap();
+      +            }
+      +        }
+      +
+      +        // Draw edges between GSS states
+               for (from_opt, to_opt) in edges {
+                   match (from_opt, to_opt) {
+                       (Some(from), Some(to)) => writeln!(&mut dot, "  S{} -> S{};", from.0, to.0).unwrap(),
 
       ```
-
-      This small change should reorient your Graphviz output to flow from left to right, which might make the progression of states easier to follow. Let me know if there's anything else I can adjust
     metadata:
   - user: |
       Apply result (git-llm mode):
