@@ -1047,7 +1047,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let mut out_iter = out.into_iter();
                             let mut out_node = out_iter.next().unwrap();
                             for next_node in out_iter {
-                                out_node.merge_with_depth(2, &next_node);
+                                out_node.merge_with_depth(3, &next_node);
                             }
                             Arc::new(out_node)
                         };
