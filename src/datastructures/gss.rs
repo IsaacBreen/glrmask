@@ -379,11 +379,16 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
                 *target_preds_vec = nodes_to_merge;
             } else {
                 let mut iter = nodes_to_merge.into_iter();
-                let mut merged = (*iter.next().unwrap()).clone();
+                let first = iter.next().unwrap();
+                let mut merged = first.as_ref().clone();
                 for other in iter {
                     merged._merge(&other, merge_depth - 1);
                 }
-                *target_preds_vec = vec![Arc::new(merged)];
+                let mut merged = Arc::new(merged);
+                if merged == first {
+                    merged = first;
+                }
+                *target_preds_vec = vec![merged];
             }
         }
     }
