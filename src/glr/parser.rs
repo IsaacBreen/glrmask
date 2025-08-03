@@ -807,8 +807,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
         // timeit!("GLRParserState::step::phase3", {
             while let Some(((_depth, state_id), state)) = work_map.pop_first() {
-                let stats = gather_gss_stats(&[&state.stack]);
-                if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                // let stats = gather_gss_stats(&[&state.stack]);
+                // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
 
                 let row = &self.parser.table[&state_id];
 
@@ -897,8 +897,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 crate::debug!(4, "Pushing {} goto states to new GSS node", goto_state_ids.len());
                                 let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
 
-                                let stats = gather_gss_stats(&[&new_gss_node]);
-                                if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                                // let stats = gather_gss_stats(&[&new_gss_node]);
+                                // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
 
                                 out.push(new_gss_node);
                             }
@@ -916,15 +916,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Arc::new(out_node)
                         };
-                        let stats = gather_gss_stats(&[&new_stack_part]);
-                        if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                        // let stats = gather_gss_stats(&[&new_stack_part]);
+                        // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
 
                         // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack_part.is_empty() {
                             reduced_stack.merge_with_depth(1, &new_stack_part);
 
-                            let stats = gather_gss_stats(&[&reduced_stack]);
-                            if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                            // let stats = gather_gss_stats(&[&reduced_stack]);
+                            // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
                         }
                     }
 
@@ -940,20 +940,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
 
                         for ((new_depth, new_state_id), new_stack) in work_map.iter() {
-                            let stats = gather_gss_stats(&[&new_stack.stack]);
-                            if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                            // let stats = gather_gss_stats(&[&new_stack.stack]);
+                            // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
                         }
                     }
                     });
                 }
 
                 if row.default_reduce.clone_and_merge {
-                    println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
-                    println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
+                    // println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
+                    // println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
                     next_active_state.merge(state);
-                    println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
-                    let stats = gather_gss_stats(&[&next_active_state.stack]);
-                    if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                    // println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
+                    // let stats = gather_gss_stats(&[&next_active_state.stack]);
+                    // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
                 }
             }
         });
