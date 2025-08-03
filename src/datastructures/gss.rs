@@ -1535,4 +1535,61 @@ mod tests {
         let path1_again = sample_path(&[&root], 0).unwrap();
         assert_eq!(path1, path1_again);
     }
+
+    #[test]
+    fn test_merge_maintains_structural_sharing() {
+        // This test reproduces a scenario where merging two GSSs with shared
+        // sub-structure leads to duplicated nodes instead of sharing them.
+
+        // 1. Create a common leaf node.
+        let leaf = Arc::new(GSSNode::new(empty_acc()));
+
+        // 2. Create two intermediate nodes. They are structurally identical
+        // (same acc, same single predecessor 'leaf' with the same edge),
+        // but they are different objects in memory.
+        let intermediate1 = Arc::new(GSSNode::new_with_single_predecessor(
+            leaf.clone(),
+            mock_edge(960),
+            empty_acc(),
+        ));
+        let intermediate2 = Arc::new(GSSNode::new_with_single_predecessor(
+            leaf.clone(),
+            mock_edge(960),
+            empty_acc(),
+        ));
+
+        // Sanity check: they are equal in value, but different pointers.
+        assert_eq!(*intermediate1, *intermediate2);
+        assert_ne!(Arc::as_ptr(&intermediate1), Arc::as_ptr(&intermediate2));
+
+        // 3. Create two GSS root nodes, each with one of the intermediate nodes as a predecessor.
+        // The edges leading to the intermediate nodes are different.
+        let mut gss1 = GSSNode::new_with_single_predecessor(
+            intermediate1,
+            mock_edge(161),
+            empty_acc(),
+        );
+        let gss2 = GSSNode::new_with_single_predecessor(
+            intermediate2,
+            mock_edge(0),
+            empty_acc(),
+        );
+
+        // 4. Merge gss2 into gss1.
+        gss1.merge_with_depth(1, &gss2);
+
+        // 5. Analyze the merged GSS.
+        let stats = gather_gss_stats(&[&gss1]);
+
+        // After the merge, the root `gss1` has two predecessors. Because `intermediate1` and
+        // `intermediate2` are structurally identical, a correct merge operation should unify
+        // them into a single shared node. This means the number of unique nodes should equal
+        // the number of structurally unique nodes.
+        assert_eq!(
+            stats.unique_nodes, stats.structurally_unique_nodes,
+            "Merge created redundant structures. Stats: {:?}",
+            stats
+        );
+        assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+    }
 }
