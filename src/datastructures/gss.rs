@@ -522,7 +522,34 @@ impl GSSNode {
         // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
         // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
         
-        *self = GSSNode::new_with_map(merged_acc, new_predecessors);
+        let final_predecessors = if merge_depth > 0 {
+            // After merging, unify structurally identical predecessors to increase sharing.
+            // This is important for preventing the GSS from bloating with redundant nodes
+            // when merging branches that have common substructures.
+            let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+            let mut unified_predecessors = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in new_predecessors {
+                let mut unified_preds_by_depth = BTreeMap::new();
+                for (depth, pred_vec) in preds_by_depth {
+                    let mut unified_pred_vec = Vec::new();
+                    for pred_arc in pred_vec {
+                        // Find or create a canonical Arc for the node's value.
+                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+                        unified_pred_vec.push(canonical_arc);
+                    }
+                    // Remove duplicate Arcs.
+                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                    unified_preds_by_depth.insert(depth, unified_pred_vec);
+                }
+                unified_predecessors.insert(edge_val, unified_preds_by_depth);
+            }
+            unified_predecessors
+        } else {
+            new_predecessors
+        };
+        *self = GSSNode::new_with_map(merged_acc, final_predecessors);
     }
 
     pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
