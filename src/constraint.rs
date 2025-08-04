@@ -38,6 +38,7 @@ use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
+use crate::profiler::GSS_LOGGING_ENABLED;
 
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
@@ -1034,28 +1035,30 @@ impl<'a> GrammarConstraintState<'a> {
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
-        println!("{}", s);
-        println!("\n\n--- GSS State Explanations ---\n");
-        for state_id in state_ids {
-            let mut explanation = String::new();
-            println!("\n--- State {} ---", state_id.0);
-            self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-            println!("{}", explanation);
-        }
+        if GSS_LOGGING_ENABLED {
+            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            println!("{}", s);
+            println!("\n\n--- GSS State Explanations ---\n");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
 
-        println!("\n\n--- Begin GSS Graphviz ---");
-        let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-        let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
-            .map(|s| s.as_str())
-            .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-            .collect();
-        println!("{}", self.parent.parser.gss_forest_to_dot(
-            &roots_with_labels,
-            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-            Some(&self.parent.llm_vocab.llm_token_map),
-        ));
-        println!("\n\n--- End GSS Graphviz ---");
+            println!("\n\n--- Begin GSS Graphviz ---");
+            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                .map(|s| s.as_str())
+                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .collect();
+            println!("{}", self.parent.parser.gss_forest_to_dot(
+                &roots_with_labels,
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
+            ));
+            println!("\n\n--- End GSS Graphviz ---");
+        }
 
         for (state_id, state) in self.state.iter() {
             crate::debug!(3, "State {}:", state_id.0);
