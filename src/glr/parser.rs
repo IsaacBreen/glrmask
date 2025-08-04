@@ -783,10 +783,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
         // Key is (depth, state_id) to process shortest stacks first.
-        let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
-
-
-        let enqueue = |work_map: &mut BTreeMap<(usize, StateID), ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
+        type WorkMapKey = (usize, StateID);
+        let enqueue = |work_map: &mut BTreeMap<WorkMapKey, ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
             // let depth = peek.max_depth();
             let depth = 0;
             let state_id = peek.edge_value().state_id;
@@ -794,7 +792,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 .and_modify(|s| s.merge(isolated_state.clone()))
                 .or_insert(isolated_state.clone());
         };
-
+        let mut work_map: BTreeMap<WorkMapKey, ParseState> = BTreeMap::new();
 
         // Peel off the top edges to populate the initial work map.
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
