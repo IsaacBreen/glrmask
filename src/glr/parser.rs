@@ -701,62 +701,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for popper_item in popped.iter() {
             for peek2 in popper_item.peek_iter() {
                 let state_id = peek2.edge_value().state_id;
-
-                // Perform the first goto for the initial reduction
                 let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect_else(|| {
                     format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id)
                 });
 
                 if goto.accept {
+                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
                     self.accepted = true;
                 }
 
-                if let Some(mut current_goto_state_id) = goto.state_id {
-                    // Fast loop for subsequent len-1 default reductions
-                    loop {
-                        let row = &self.parser.table[&current_goto_state_id];
-
-                        // If we are in phase 1/2, we must stop if there are other actions.
-                        // The `clone_and_merge` flag tells us this.
-                        if row.default_reduce.clone_and_merge {
-                            break; // Stop fast loop, materialize current_goto_state_id.
-                        }
-
-                        if let Some(reduce) = &row.default_reduce.reduce {
-                            if reduce.len == 1 {
-                                // It's a pure len-1 default reduce, continue chain.
-                                let next_nt = reduce.nonterminal_id;
-
-                                // The goto is from the same state on the stack (`state_id`)
-                                let next_goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&next_nt)).expect_else(|| {
-                                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&next_nt).unwrap(), state_id)
-                                });
-
-                                if next_goto.accept {
-                                    self.accepted = true;
-                                }
-
-                                if let Some(next_goto_state_id) = next_goto.state_id {
-                                    current_goto_state_id = next_goto_state_id;
-                                } else {
-                                    // Chain ends here, no goto. We need to signal not to push.
-                                    current_goto_state_id = StateID(usize::MAX);
-                                    break;
-                                }
-                            } else {
-                                // Default reduce is not len 1. Stop.
-                                break;
-                            }
-                        } else {
-                            // No default reduce. Stop.
-                            break;
-                        }
-                    }
-
-                    if current_goto_state_id.0 != usize::MAX {
-                        let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: current_goto_state_id });
+                if let Some(goto_state_id) = goto.state_id {
+                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
+                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                         out.push(new_gss_node);
-                    }
                 }
             }
         }
