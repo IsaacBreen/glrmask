@@ -756,7 +756,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut out_iter = out.into_iter();
             let mut out_node = out_iter.next().unwrap();
             for next_node in out_iter {
-                out_node.merge_with_depth(5, &next_node);
+                out_node.merge_with_depth(1, &next_node);
             }
             Arc::new(out_node)
         }
@@ -964,7 +964,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let mut out_iter = out.into_iter();
                             let mut out_node = out_iter.next().unwrap();
                             for next_node in out_iter {
-                                out_node.merge_with_depth(5, &next_node);
+                                out_node.merge_with_depth(1, &next_node);
                             }
                             Arc::new(out_node)
                         };
@@ -973,7 +973,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                         // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                         if !new_stack_part.is_empty() {
-                            reduced_stack.merge_with_depth(4, &new_stack_part);
+                            reduced_stack.merge_with_depth(1, &new_stack_part);
 
                             // let stats = gather_gss_stats(&[&reduced_stack]);
                             // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
@@ -1316,7 +1316,7 @@ impl ParseState { // No longer generic
         // if self.stack.max_depth() > other.stack.max_depth() {
         //     std::mem::swap(self, &mut other);
         // }
-        Arc::make_mut(&mut self.stack).merge_with_depth(4, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
     }
 }
 
