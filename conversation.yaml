@@ -20808,27 +20808,29 @@ messages:
       If it's a 1-reduction, we can do it.
       If it's a shift or a conflict, or a reduction not of length 1, we cannot do it, and we should finish.
       So, basically, unlike in `process_default_reductions`, we won't be gathering goto state IDs. We'll be looking for just the single final goto state ID we arrive at. And if there's any ambiguity, we don't look at `clone_and_merge`, we just finish there.
+      Do it.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with performance optimizations in parsers can be tricky, but it's rewarding. Here are the suggested changes to bring the fast reduction loop from `process_default_reductions` into your general `reduce_and_goto` logic.
+      Hello! As an AI assistant, I'd be happy to help you with your code. Dealing with performance optimizations in parsers can be tricky, but your idea of adapting the fast reduction loop is a good one. Here are the changes to implement the performance improvements for length-1 reduction chains in `reduce_and_goto`.
 
-      I've modified `reduce_and_goto` to perform a series of length-1 reductions based on the lookahead token, similar to the optimization you pointed out. This should improve performance for grammars with reduction chains.
+      I've modified `reduce_and_goto` to include the fast-loop logic for non-default, length-1 reductions based on the current lookahead token. This avoids expensive GSS operations for chains of unit-reductions. I've also updated `process_action_queue` to pass the necessary information to the new `reduce_and_goto` function.
 
-      Here are the diffs for the modified file:
+      Here is the git diff for the changes:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -611,7 +611,7 @@
-               mut reduce_queue: ReduceQueue,
+      @@ -499,8 +499,7 @@
                shifted_states_todo: &mut VecDeque<ParseState>,
                action_selector: F,
-      -    ) where
-      +    ) where F: Fn(&Row) // This needs to be `Fn` not `FnOnce` because it's used in a loop.
-                   -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+           ) where
+      -        F: Fn(&Row)
+      -            -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
            {
                while let Some(state) = work_queue.pop_front() {
-      @@ -630,7 +630,7 @@
+                   for peek in GSSNode::peek_iter(&state.stack) {
+      @@ -517,7 +516,7 @@
                                    ..
                                } => {
                                    crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
@@ -20837,7 +20839,7 @@ messages:
                                    if !s_new_arc.is_empty() {
                                        let new_parse_state = ParseState { stack: s_new_arc };
                                        match &mut reduce_queue {
-      @@ -649,7 +649,7 @@
+      @@ -537,7 +536,7 @@
                                    for (len, nts) in reduces {
                                        for (nt, _prod_ids) in nts {
                                            crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
@@ -20846,7 +20848,7 @@ messages:
                                            if !s_new_arc.is_empty() {
                                                let new_parse_state = ParseState { stack: s_new_arc };
                                                match &mut reduce_queue {
-      @@ -685,43 +685,71 @@
+      @@ -573,41 +572,59 @@
            }
        
            #[time_it("GLRParserState::reduce_and_goto")]
@@ -20870,7 +20872,7 @@ messages:
                let mut out = Vec::new();
                for popper_item in popped.iter() {
                    for peek2 in popper_item.peek_iter() {
-                       let state_id = peek2.edge_value().state_id;
+      -                let state_id = peek2.edge_value().state_id;
       -                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect_else(|| {
       -                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id)
       -                });
@@ -20883,395 +20885,54 @@ messages:
       -                if let Some(goto_state_id) = goto.state_id {
       -                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
       -                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+      -                        out.push(new_gss_node);
+      +                let predecessor_state_id = peek2.edge_value().state_id;
       +                let mut current_nt = nt;
-      +                let mut final_goto_state_id: Option<StateID> = None;
       +
+      +                // Fast loop for unit reduction chains based on the current lookahead token.
       +                loop {
-      +                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
-      +                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
+      +                    let goto = self.parser.table.get(&predecessor_state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
+      +                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id)
       +                    });
       +
       +                    if goto.accept {
-      +                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
+      +                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
       +                        self.accepted = true;
       +                    }
       +
       +                    if let Some(goto_state_id) = goto.state_id {
-      +                        // We have a potential next state. Check if we can continue the fast reduce chain.
       +                        let next_row = &self.parser.table[&goto_state_id];
-      +                        let action_map = action_selector(next_row);
-      +
-      +                        if let Some(action) = action_map.get(&token_id) {
-      +                            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len: 1, .. } = action {
-      +                                // It's a length-1 reduce. Continue the fast loop.
-      +                                // The next reduction will pop 1, and land on the same `peek2`, so `state_id` remains the same.
-      +                                // The new non-terminal is `nonterminal_id`.
-      +                                current_nt = *nonterminal_id;
-      +                                continue; // next iteration of fast loop
-      +                            }
+      +                        // Check if the action in the new state for the current token is a len-1 reduce.
+      +                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                            // It is. Continue the chain by updating the non-terminal and looping.
+      +                            current_nt = *next_nt;
+      +                        } else {
+      +                            // It's not a len-1 reduce. This is our final state for this chain.
+      +                            let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+      +                            out.push(new_gss_node);
+      +                            break; // Exit the fast loop for this path
       +                        }
-      +                        // Not a length-1 reduce, or no action. Break.
-      +                        final_goto_state_id = Some(goto_state_id);
-      +                        break;
       +                    } else {
-      +                        // No goto state. Break.
-      +                        final_goto_state_id = None;
-      +                        break;
+      +                        // No further state to go to. This path terminates here.
+      +                        break; // Exit the fast loop for this path
       +                    }
-      +                }
-      +
-      +                if let Some(goto_state_id) = final_goto_state_id {
-      +                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id, goto_state_id.0);
-      +                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                               out.push(new_gss_node);
                        }
                    }
                }
        
                if out.is_empty() {
-                   Arc::new(GSSNode::new_fresh())
 
       ```
 
-      I've made `reduce_and_goto` generic and implemented the fast loop to handle consecutive length-1 reductions based on the lookahead token. The calls within `process_action_queue` have been updated accordingly. This should give you the performance boost you're looking for in those specific scenarios.
-
-      Let me know if you have any other questions
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Error applying patch to src/glr/parser.rs:
-      Hunk #1 (header: @@ -611,7 +611,7 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-              mut reduce_queue: ReduceQueue,
-              shifted_states_todo: &mut VecDeque<ParseState>,
-              action_selector: F,
-          ) where
-                  -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-          {
-              while let Some(state) = work_queue.pop_front() {
-      --- Expected Context (from patch, after normalization): ---
-      mut reduce_queue: ReduceQueue,
-      shifted_states_todo: &mut VecDeque<ParseState>,
-      action_selector: F,
-      ) where
-      -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      {
-      while let Some(state) = work_queue.pop_front() {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 597 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        mut reduce_queue: ReduceQueue,
-        shifted_states_todo: &mut VecDeque<ParseState>,
-        action_selector: F,
-        ) where
-      + F: Fn(&Row)
-        -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-        {
-      - while let Some(state) = work_queue.pop_front() {
-      Problematic diff content:
-      ---
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -611,7 +611,7 @@
-               mut reduce_queue: ReduceQueue,
-               shifted_states_todo: &mut VecDeque<ParseState>,
-               action_selector: F,
-      -    ) where
-      +    ) where F: Fn(&Row) // This needs to be `Fn` not `FnOnce` because it's used in a loop.
-                   -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-           {
-               while let Some(state) = work_queue.pop_front() {
-      @@ -630,7 +630,7 @@
-                                   ..
-                               } => {
-                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-      -                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      +                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
-                                   if !s_new_arc.is_empty() {
-                                       let new_parse_state = ParseState { stack: s_new_arc };
-                                       match &mut reduce_queue {
-      @@ -649,7 +649,7 @@
-                                   for (len, nts) in reduces {
-                                       for (nt, _prod_ids) in nts {
-                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-      -                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      +                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
-                                           if !s_new_arc.is_empty() {
-                                               let new_parse_state = ParseState { stack: s_new_arc };
-                                               match &mut reduce_queue {
-      @@ -685,43 +685,71 @@
-           }
-       
-           #[time_it("GLRParserState::reduce_and_goto")]
-      -    fn reduce_and_goto(
-      +    fn reduce_and_goto<F>(
-               &mut self,
-               peek: &GSSPeek,
-               nt: NonTerminalID,
-               len: usize,
-      -    ) -> Arc<GSSNode> {
-      +        token_id: TerminalID,
-      +        action_selector: &F,
-      +    ) -> Arc<GSSNode>
-      +    where
-      +        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      +    {
-               let popped = timeit!(peek.popn(len));
-               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-               crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
-       
-               let mut out = Vec::new();
-               for popper_item in popped.iter() {
-                   for peek2 in popper_item.peek_iter() {
-                       let state_id = peek2.edge_value().state_id;
-      -                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect_else(|| {
-      -                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id)
-      -                });
-      -
-      -                if goto.accept {
-      -                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
-      -                    self.accepted = true;
-      -                }
-      -
-      -                if let Some(goto_state_id) = goto.state_id {
-      -                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-      -                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-      +                let mut current_nt = nt;
-      +                let mut final_goto_state_id: Option<StateID> = None;
-      +
-      +                loop {
-      +                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
-      +                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
-      +                    });
-      +
-      +                    if goto.accept {
-      +                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
-      +                        self.accepted = true;
-      +                    }
-      +
-      +                    if let Some(goto_state_id) = goto.state_id {
-      +                        // We have a potential next state. Check if we can continue the fast reduce chain.
-      +                        let next_row = &self.parser.table[&goto_state_id];
-      +                        let action_map = action_selector(next_row);
-      +
-      +                        if let Some(action) = action_map.get(&token_id) {
-      +                            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len: 1, .. } = action {
-      +                                // It's a length-1 reduce. Continue the fast loop.
-      +                                // The next reduction will pop 1, and land on the same `peek2`, so `state_id` remains the same.
-      +                                // The new non-terminal is `nonterminal_id`.
-      +                                current_nt = *nonterminal_id;
-      +                                continue; // next iteration of fast loop
-      +                            }
-      +                        }
-      +                        // Not a length-1 reduce, or no action. Break.
-      +                        final_goto_state_id = Some(goto_state_id);
-      +                        break;
-      +                    } else {
-      +                        // No goto state. Break.
-      +                        final_goto_state_id = None;
-      +                        break;
-      +                    }
-      +                }
-      +
-      +                if let Some(goto_state_id) = final_goto_state_id {
-      +                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id, goto_state_id.0);
-      +                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                               out.push(new_gss_node);
-                       }
-                   }
-               }
-       
-               if out.is_empty() {
-                   Arc::new(GSSNode::new_fresh())
-
-      ---
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+      This change should give you a nice performance boost when parsing grammars with chains of unit-productions. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Error applying patch to src/glr/parser.rs:
-      Hunk #1 (header: @@ -611,7 +611,7 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-              mut reduce_queue: ReduceQueue,
-              shifted_states_todo: &mut VecDeque<ParseState>,
-              action_selector: F,
-          ) where
-                  -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-          {
-              while let Some(state) = work_queue.pop_front() {
-      --- Expected Context (from patch, after normalization): ---
-      mut reduce_queue: ReduceQueue,
-      shifted_states_todo: &mut VecDeque<ParseState>,
-      action_selector: F,
-      ) where
-      -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      {
-      while let Some(state) = work_queue.pop_front() {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 597 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        mut reduce_queue: ReduceQueue,
-        shifted_states_todo: &mut VecDeque<ParseState>,
-        action_selector: F,
-        ) where
-      + F: Fn(&Row)
-        -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-        {
-      - while let Some(state) = work_queue.pop_front() {
-      Problematic diff content:
-      ---
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -611,7 +611,7 @@
-               mut reduce_queue: ReduceQueue,
-               shifted_states_todo: &mut VecDeque<ParseState>,
-               action_selector: F,
-      -    ) where
-      +    ) where F: Fn(&Row) // This needs to be `Fn` not `FnOnce` because it's used in a loop.
-                   -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-           {
-               while let Some(state) = work_queue.pop_front() {
-      @@ -630,7 +630,7 @@
-                                   ..
-                               } => {
-                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-      -                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      +                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
-                                   if !s_new_arc.is_empty() {
-                                       let new_parse_state = ParseState { stack: s_new_arc };
-                                       match &mut reduce_queue {
-      @@ -649,7 +649,7 @@
-                                   for (len, nts) in reduces {
-                                       for (nt, _prod_ids) in nts {
-                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-      -                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-      +                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
-                                           if !s_new_arc.is_empty() {
-                                               let new_parse_state = ParseState { stack: s_new_arc };
-                                               match &mut reduce_queue {
-      @@ -685,43 +685,71 @@
-           }
-       
-           #[time_it("GLRParserState::reduce_and_goto")]
-      -    fn reduce_and_goto(
-      +    fn reduce_and_goto<F>(
-               &mut self,
-               peek: &GSSPeek,
-               nt: NonTerminalID,
-               len: usize,
-      -    ) -> Arc<GSSNode> {
-      +        token_id: TerminalID,
-      +        action_selector: &F,
-      +    ) -> Arc<GSSNode>
-      +    where
-      +        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      +    {
-               let popped = timeit!(peek.popn(len));
-               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-               crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
-       
-               let mut out = Vec::new();
-               for popper_item in popped.iter() {
-                   for peek2 in popper_item.peek_iter() {
-                       let state_id = peek2.edge_value().state_id;
-      -                let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&nt)).expect_else(|| {
-      -                    format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id)
-      -                });
-      -
-      -                if goto.accept {
-      -                    crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id);
-      -                    self.accepted = true;
-      -                }
-      -
-      -                if let Some(goto_state_id) = goto.state_id {
-      -                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), state_id, goto_state_id.0);
-      -                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-      +                let mut current_nt = nt;
-      +                let mut final_goto_state_id: Option<StateID> = None;
-      +
-      +                loop {
-      +                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
-      +                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
-      +                    });
-      +
-      +                    if goto.accept {
-      +                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
-      +                        self.accepted = true;
-      +                    }
-      +
-      +                    if let Some(goto_state_id) = goto.state_id {
-      +                        // We have a potential next state. Check if we can continue the fast reduce chain.
-      +                        let next_row = &self.parser.table[&goto_state_id];
-      +                        let action_map = action_selector(next_row);
-      +
-      +                        if let Some(action) = action_map.get(&token_id) {
-      +                            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len: 1, .. } = action {
-      +                                // It's a length-1 reduce. Continue the fast loop.
-      +                                // The next reduction will pop 1, and land on the same `peek2`, so `state_id` remains the same.
-      +                                // The new non-terminal is `nonterminal_id`.
-      +                                current_nt = *nonterminal_id;
-      +                                continue; // next iteration of fast loop
-      +                            }
-      +                        }
-      +                        // Not a length-1 reduce, or no action. Break.
-      +                        final_goto_state_id = Some(goto_state_id);
-      +                        break;
-      +                    } else {
-      +                        // No goto state. Break.
-      +                        final_goto_state_id = None;
-      +                        break;
-      +                    }
-      +                }
-      +
-      +                if let Some(goto_state_id) = final_goto_state_id {
-      +                    crate::debug!(4, "Goto found for NT '{}' in state {:?}: Goto State {}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id, goto_state_id.0);
-      +                    let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                               out.push(new_gss_node);
-                       }
-                   }
-               }
-       
-               if out.is_empty() {
-                   Arc::new(GSSNode::new_fresh())
-
-      ---
-
-
-      LLM apply output:
-      Using model 'gp' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      No JSON action block found, but no file actions seem required based on context. Proceeding.
-      Found 0 code blocks with filepaths in attempt 1.
-      No file actions specified in JSON. Nothing to apply.
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...
