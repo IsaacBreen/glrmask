@@ -799,7 +799,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // state_id1.cmp(&state_id2).then_with(|| depth1.cmp(&depth2))
                 // depth1.cmp(&depth2).then_with(|| state_id1.cmp(&state_id2))
                 // state_id1.cmp(&state_id2)
-                depth1.cmp(&depth2)
+                depth1.cmp(&depth2) // discovered by experimentation to be the fastest
                 // std::cmp::Ordering::Equal
             }
         }
