@@ -783,8 +783,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
         assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
         // Key is (depth, state_id) to process shortest stacks first.
-        #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Debug, PartialEq, Eq)]
         struct WorkMapKey(usize, StateID);
+        impl PartialOrd for WorkMapKey {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for WorkMapKey {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
+            }
+        }
         let make_work_map_key = |depth: usize, state_id: StateID| WorkMapKey(depth, state_id);
         let enqueue = |work_map: &mut BTreeMap<WorkMapKey, ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
             let depth = isolated_state.stack.max_depth();
