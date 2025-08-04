@@ -296,15 +296,13 @@ pub fn compute_closure(
 
             // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
             for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
-                let new_lookaheads = if prod == productions[start_production_id] && existing_lookaheads.contains(&None) {
-                    existing_lookaheads.clone()
-                } else if let Some(follows) = follow_sets.get(&prod.lhs) {
-                    follows.clone()
-                } else {
-                    BTreeSet::new()
-                };
-                for lookahead in new_lookaheads {
-                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+                if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+                    for lookahead in lookaheads {
+                        if lookahead == &None && !existing_lookaheads.contains(&None) {
+                            continue;
+                        }
+                        lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+                    }
                 }
             }
             lalr_closure
