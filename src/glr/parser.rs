@@ -783,12 +783,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
         assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
         // Key is (depth, state_id) to process shortest stacks first.
-        type WorkMapKey = (usize, StateID);
+        #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+        struct WorkMapKey(usize, StateID);
+        let make_work_map_key = |depth: usize, state_id: StateID| WorkMapKey(depth, state_id);
         let enqueue = |work_map: &mut BTreeMap<WorkMapKey, ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
-            // let depth = peek.max_depth();
-            let depth = 0;
+            let depth = isolated_state.stack.max_depth();
+            // let depth = 0;
             let state_id = peek.edge_value().state_id;
-            work_map.entry((depth, state_id))
+            work_map.entry(make_work_map_key(depth, state_id))
                 .and_modify(|s| s.merge(isolated_state.clone()))
                 .or_insert(isolated_state.clone());
         };
@@ -808,7 +810,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
         timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
         // timeit!("GLRParserState::step::phase3", {
-            while let Some(((_depth, state_id), state)) = work_map.pop_first() {
+            while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
                 // let stats = gather_gss_stats(&[&state.stack]);
                 // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
 
@@ -937,7 +939,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 enqueue(&mut work_map, &isolated, &new_peek);
                         }
 
-                        for ((new_depth, new_state_id), new_stack) in work_map.iter() {
+                        for (WorkMapKey(new_depth, new_state_id), new_stack) in work_map.iter() {
                             // let stats = gather_gss_stats(&[&new_stack.stack]);
                             // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
                         }
