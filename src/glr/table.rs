@@ -1,4 +1,3 @@
-use crate::glr::items::LR_MODE;
 use super::items::{Item, LRMode};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -456,38 +455,33 @@ fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map:
     // into
     //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
     // ie it removes the None entries, which represent EOF.
+    // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+    // merging with any existing production ID sets in the reduces map.
     let mut stage_5_table = BTreeMap::new();
-
-    // Heuristically find the EOF terminal. A more robust solution would be to formally
-    // designate one, but this works for common conventions like "$" or "EOF".
-    let eof_terminal = terminal_map.left_values().find(|t| {
-        if let Terminal::RegexName(name) = t {
-            name == "$" || name == "EOF"
-        } else {
-            false
-        }
-    }).cloned();
+    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
 
     for (item_set, row) in stage_4_table {
-        let Stage4Row { shifts, gotos, mut reduces } = row;
+        let Stage4Row { shifts, gotos, reduces } = row;
 
+        // 2. Start building the new reduces map keyed by concrete terminals.
         let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
 
-        // Handle reductions on EOF (lookahead is None) by mapping them to the explicit EOF terminal.
-        if let Some(eof_prods) = reduces.remove(&None) {
-            if let Some(eof_term) = &eof_terminal {
-                new_reduces.entry(eof_term.clone()).or_default().extend(eof_prods);
-            }
-            // If no explicit EOF token, these reductions are for abstract end-of-input and are not
-            // mapped to any concrete terminal.
-        }
 
+        // 2a. Copy over entries that already have a concrete terminal key.
         for (opt_term, prod_ids) in reduces {
             if let Some(term) = opt_term {
                 new_reduces
                     .entry(term)
                     .or_default()
                     .extend(prod_ids.into_iter());
+            } else {
+                // 2b. For None entries, copy the production IDs to all terminals.
+                for terminal in &all_terminals {
+                    new_reduces
+                        .entry(terminal.clone())
+                        .or_default()
+                        .extend(prod_ids.iter().cloned());
+                }
             }
         }
 
@@ -895,57 +889,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
     crate::debug!(2, "Finalizing table");
-    let mut final_table = stage_8_table;
-    let mut item_set_map = item_set_map;
-    let mut start_state_id = start_state_id;
-
-    // --- IELR(1)-style state merging ---
-    // This is a simplified version of IELR(1). It merges LALR(1) compatible states (same core)
-    // only if they are conflict-free in the canonical LR(1) automaton. This avoids "mysterious
-    // invasive conflicts" where a conflict from one state incorrectly affects another after merging.
-    if LR_MODE == LRMode::LR1 {
-        crate::debug!(2, "Performing IELR(1)-style state merging");
-
-        // 1. Group states by core
-        let mut states_by_core: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
-        for (item_set, state_id) in &item_set_map {
-            let core = item_set.iter().map(|item| (item.production.clone(), item.dot_position)).collect();
-            states_by_core.entry(core).or_default().push(*state_id);
-        }
-
-        // 2. Identify states with conflicts
-        let mut conflicts: BTreeMap<StateID, bool> = BTreeMap::new();
-        for (state_id, row) in &final_table {
-            let has_conflict = row.shifts_and_reduces_full.values().any(|action| {
-                matches!(action, Stage7ShiftsAndReducesLookaheadValue::Split {..})
-            });
-            conflicts.insert(*state_id, has_conflict);
-        }
-
-        // 3. Find compatible pairs (only merge conflict-free states with the same core)
-        let mut compatible_pairs = Vec::new();
-        for group in states_by_core.values() {
-            if group.len() <= 1 { continue; }
-
-            let conflict_free_states: Vec<_> = group.iter().cloned().filter(|s| !conflicts.get(s).unwrap_or(&false)).collect();
-
-            if conflict_free_states.len() > 1 {
-                for i in 0..conflict_free_states.len() {
-                    for j in i + 1..conflict_free_states.len() {
-                        compatible_pairs.push((conflict_free_states[i], conflict_free_states[j]));
-                    }
-                }
-            }
-        }
-
-        // 4. Merge states
-        if !compatible_pairs.is_empty() {
-            let (merged_table, merged_item_set_map, new_start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
-            final_table = merged_table;
-            item_set_map = merged_item_set_map;
-            start_state_id = new_start_state_id;
-        }
-    }
+    let final_table = stage_8_table;
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());

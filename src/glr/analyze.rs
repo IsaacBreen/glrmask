@@ -669,8 +669,7 @@ pub fn resolve_direct_right_recursion(
             if p.rhs.len() < 2 { return false; }
             if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
             let alpha = &p.rhs[..p.rhs.len() - 1];
-            // Only consider simple right recursion where the prefix is all terminals.
-            !alpha.iter().any(|s| matches!(s, Symbol::NonTerminal(_)))
+            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
         });
 
         // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
