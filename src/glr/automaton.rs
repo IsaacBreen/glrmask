@@ -289,13 +289,16 @@ pub fn compute_closure(
 
             // Separate reduce and non-reduce items, and group reduce items by core
             for item in closure {
-                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
+                reduce_item_cores.entry((item.production, item.dot_position)).or_default().insert(item.lookahead);
             }
 
             // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-            for ((prod, dot_pos), _) in reduce_item_cores {
+            for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
                 if let Some(follows) = follow_sets.get(&prod.lhs) {
                     for lookahead in follows {
+                        if lookahead == &None && !existing_lookaheads.contains(&None) {
+                            continue;
+                        }
                         lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
                     }
                 }
