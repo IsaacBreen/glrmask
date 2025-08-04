@@ -793,12 +793,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         impl Ord for WorkMapKey {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
                 self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
+                self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
             }
         }
         let make_work_map_key = |depth: usize, state_id: StateID| WorkMapKey(depth, state_id);
         let enqueue = |work_map: &mut BTreeMap<WorkMapKey, ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
             let depth = isolated_state.stack.max_depth();
-            // let depth = 0;
             let state_id = peek.edge_value().state_id;
             work_map.entry(make_work_map_key(depth, state_id))
                 .and_modify(|s| s.merge(isolated_state.clone()))
