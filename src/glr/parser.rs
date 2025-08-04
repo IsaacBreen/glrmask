@@ -786,16 +786,23 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut work_map: BTreeMap<(usize, StateID), ParseState> = BTreeMap::new();
 
         // let get_depth = |peek: &GSSNode| peek.max_depth();
-        let get_depth = |peek: &GSSNode| 0;
+        // let get_depth = |peek: &GSSNode| 0;
+
+        // let get_work_map_key = |isolated_state: &ParseState, peek: &GSSNode| (peek.max_depth(), isolated_state.stack.as_ref().unwrap().edge_value().state_id);
+        let mut enqueue = |isolated_state: &ParseState, peek: &GSSPeek| {
+            // let depth = peek.max_depth();
+            let depth = 0;
+            let state_id = peek.edge_value().state_id;
+            work_map.entry((depth, state_id))
+                .and_modify(|s| s.merge(isolated_state.clone()))
+                .or_insert(isolated_state.clone());
+        };
+
 
         // Peel off the top edges to populate the initial work map.
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
             let isolated_state = ParseState { stack: peek.isolated_parent() };
-            let depth = get_depth(&isolated_state.stack);
-            let state_id = peek.edge_value().state_id;
-            work_map.entry((depth, state_id))
-                .and_modify(|s| s.merge(isolated_state.clone()))
-                .or_insert(isolated_state);
+            enqueue(&isolated_state, &peek);
         }
 
         let mut next_active_state = ParseState::new();
@@ -932,11 +939,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // Deconstruct the result and put it back into the work map.
                         for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
                             let isolated = ParseState { stack: new_peek.isolated_parent() };
-                            let new_depth = get_depth(&isolated.stack);
-                            let new_state_id = new_peek.edge_value().state_id;
-                            work_map.entry((new_depth, new_state_id))
-                                .and_modify(|s| s.merge(isolated.clone()))
-                                .or_insert(isolated);
+                                enqueue(&isolated, &new_peek);
                         }
 
                         for ((new_depth, new_state_id), new_stack) in work_map.iter() {
