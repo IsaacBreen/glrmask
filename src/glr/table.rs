@@ -320,13 +320,13 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
         dot_position: 0,
         lookahead: None,
     };
-    let initial_closure = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
+    let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
-    let mut worklist = VecDeque::from([initial_closure.clone()]); // Use initial_closure here
+    let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
