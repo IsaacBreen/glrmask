@@ -456,33 +456,38 @@ fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map:
     // into
     //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
     // ie it removes the None entries, which represent EOF.
-    // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
-    // merging with any existing production ID sets in the reduces map.
     let mut stage_5_table = BTreeMap::new();
-    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+
+    // Heuristically find the EOF terminal. A more robust solution would be to formally
+    // designate one, but this works for common conventions like "$" or "EOF".
+    let eof_terminal = terminal_map.left_values().find(|t| {
+        if let Terminal::RegexName(name) = t {
+            name == "$" || name == "EOF"
+        } else {
+            false
+        }
+    }).cloned();
 
     for (item_set, row) in stage_4_table {
-        let Stage4Row { shifts, gotos, reduces } = row;
+        let Stage4Row { shifts, gotos, mut reduces } = row;
 
-        // 2. Start building the new reduces map keyed by concrete terminals.
         let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
 
+        // Handle reductions on EOF (lookahead is None) by mapping them to the explicit EOF terminal.
+        if let Some(eof_prods) = reduces.remove(&None) {
+            if let Some(eof_term) = &eof_terminal {
+                new_reduces.entry(eof_term.clone()).or_default().extend(eof_prods);
+            }
+            // If no explicit EOF token, these reductions are for abstract end-of-input and are not
+            // mapped to any concrete terminal.
+        }
 
-        // 2a. Copy over entries that already have a concrete terminal key.
         for (opt_term, prod_ids) in reduces {
             if let Some(term) = opt_term {
                 new_reduces
                     .entry(term)
                     .or_default()
                     .extend(prod_ids.into_iter());
-            } else {
-                // 2b. For None entries, copy the production IDs to all terminals.
-                for terminal in &all_terminals {
-                    new_reduces
-                        .entry(terminal.clone())
-                        .or_default()
-                        .extend(prod_ids.iter().cloned());
-                }
             }
         }
 

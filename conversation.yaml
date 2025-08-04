@@ -12,7 +12,7 @@ local_system:
     - src/glr/tests.rs
     - /Users/isaacbreen/Projects2/obsidian/grammars25/Paper - IELR(1) - Practical
       LR(1) Parser Tables for Non-LR(1) Grammars with Conflict Resolution.md
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -17511,6 +17511,2178 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+      --- original version of src/glr/table.rs+++ current version of src/glr/table.rs@@ -1,3 +1,4 @@+use crate::glr::items::LR_MODE;
+       use super::items::{Item, LRMode};
+       use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      @@ -889,7 +890,57 @@     let stage_8_table = stage_8(stage_7_table);
+           crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let final_table = stage_8_table;
+      +    let mut final_table = stage_8_table;
+      +    let mut item_set_map = item_set_map;
+      +    let mut start_state_id = start_state_id;
+      +
+      +    // --- IELR(1)-style state merging ---
+      +    // This is a simplified version of IELR(1). It merges LALR(1) compatible states (same core)
+      +    // only if they are conflict-free in the canonical LR(1) automaton. This avoids "mysterious
+      +    // invasive conflicts" where a conflict from one state incorrectly affects another after merging.
+      +    if LR_MODE == LRMode::LR1 {
+      +        crate::debug!(2, "Performing IELR(1)-style state merging");
+      +
+      +        // 1. Group states by core
+      +        let mut states_by_core: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
+      +        for (item_set, state_id) in &item_set_map {
+      +            let core = item_set.iter().map(|item| (item.production.clone(), item.dot_position)).collect();
+      +            states_by_core.entry(core).or_default().push(*state_id);
+      +        }
+      +
+      +        // 2. Identify states with conflicts
+      +        let mut conflicts: BTreeMap<StateID, bool> = BTreeMap::new();
+      +        for (state_id, row) in &final_table {
+      +            let has_conflict = row.shifts_and_reduces_full.values().any(|action| {
+      +                matches!(action, Stage7ShiftsAndReducesLookaheadValue::Split {..})
+      +            });
+      +            conflicts.insert(*state_id, has_conflict);
+      +        }
+      +
+      +        // 3. Find compatible pairs (only merge conflict-free states with the same core)
+      +        let mut compatible_pairs = Vec::new();
+      +        for group in states_by_core.values() {
+      +            if group.len() <= 1 { continue; }
+      +
+      +            let conflict_free_states: Vec<_> = group.iter().cloned().filter(|s| !conflicts.get(s).unwrap_or(&false)).collect();
+      +
+      +            if conflict_free_states.len() > 1 {
+      +                for i in 0..conflict_free_states.len() {
+      +                    for j in i + 1..conflict_free_states.len() {
+      +                        compatible_pairs.push((conflict_free_states[i], conflict_free_states[j]));
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        // 4. Merge states
+      +        if !compatible_pairs.is_empty() {
+      +            let (merged_table, merged_item_set_map, new_start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+      +            final_table = merged_table;
+      +            item_set_map = merged_item_set_map;
+      +            start_state_id = new_start_state_id;
+      +        }
+      +    }
+       
+           crate::debug!(2, "Done generating GLR parser");
+           // crate::debug!(6, "Number of states: {}", final_table.len());
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Paper - IELR(1) - Practical LR(1) Parser Tables for Non-LR(1) Grammars with Conflict Resolution.md since previous turn:
+      ```diff
+      --- original version of /Users/isaacbreen/Projects2/obsidian/grammars25/Paper - IELR(1) - Practical LR(1) Parser Tables for Non-LR(1) Grammars with Conflict Resolution.md+++ current version of /Users/isaacbreen/Projects2/obsidian/grammars25/Paper - IELR(1) - Practical LR(1) Parser Tables for Non-LR(1) Grammars with Conflict Resolution.md@@ -1,7 +1,7 @@ `````ad-attachment
+       collapse: closed
+       
+      -\documentclass{sig-alternate}
+      +\documentclass{article}
+       \usepackage{graphicx}
+       \usepackage{url}
+       \usepackage{tikz}
+
+      ```
+    metadata:
+  - user: |+
+      [DEBUG 14:06:28.020 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> E '$'
+      E -> E '+' E
+      E -> E '*' E
+      E -> id
+
+      Before recursion resolution:
+      S' -> E '$'
+      E -> E '+' E
+      E -> E '*' E
+      E -> id
+
+      After direct right recursion:
+      S' -> E '$'
+      E -> E '+' E
+      E -> E '*' E
+      E -> id
+
+      Before inlining nullable productions: Number of productions: 4
+      After inlining nullable productions: Number of productions: 4
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:945: Done generating GLR parser
+      [DEBUG 14:06:28.020 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> Stmt '$'
+      Stmt -> if Expr then Stmt
+      Stmt -> if Expr then Stmt else Stmt
+      Stmt -> other
+      Expr -> id
+
+      Before recursion resolution:
+      S' -> Stmt '$'
+      Stmt -> if Expr then Stmt
+      Stmt -> if Expr then Stmt else Stmt
+      Stmt -> other
+      Expr -> id
+
+      [DEBUG 14:06:28.023 2] src/glr/analyze.rs:677: Resolving direct right-recursion for 'Stmt', creating new non-terminal 'Stmt_rr'
+      [DEBUG 14:06:28.023 2] src/glr/analyze.rs:685:   Transforming non-recursive rule 'Stmt -> if Expr then Stmt else Stmt' -> 'Stmt -> Stmt_rr if Expr then Stmt else Stmt'
+      [DEBUG 14:06:28.023 2] src/glr/analyze.rs:685:   Transforming non-recursive rule 'Stmt -> other' -> 'Stmt -> Stmt_rr other'
+      [DEBUG 14:06:28.023 2] src/glr/analyze.rs:695:   Transforming recursive rule 'Stmt -> if Expr then Stmt' -> 'Stmt_rr -> Stmt_rr if Expr then'
+      [DEBUG 14:06:28.023 2] src/glr/analyze.rs:699:   Adding new epsilon rule: 'Stmt_rr ->'
+      After direct right recursion:
+      S' -> Stmt '$'
+      Stmt -> Stmt_rr if Expr then Stmt else Stmt
+      Stmt -> Stmt_rr other
+      Stmt_rr -> Stmt_rr if Expr then
+      Stmt_rr -> 
+      Expr -> id
+
+      Before inlining nullable productions: Number of productions: 6
+      After inlining nullable productions: Number of productions: 8
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:747: Merging 13 compatible state pairs.
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:820: Merged states. Original: 34, New: 21
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:945: Done generating GLR parser
+
+
+      GLR parser should accept ambiguous dangling else input
+      thread 'glr::tests::test_ambiguous_dangling_else' panicked at src/glr/tests.rs:493:5:
+      GLR parser should accept ambiguous dangling else input
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/panicking.rs:697:5
+         1: core::panicking::panic_fmt
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:75:14
+         2: sep1::glr::tests::test_ambiguous_dangling_else
+                   at ./src/glr/tests.rs:493:5
+         3: sep1::glr::tests::test_ambiguous_dangling_else::{{closure}}
+                   at ./src/glr/tests.rs:456:34
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      [DEBUG 14:06:28.020 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> S '$'
+      S -> A B
+      A -> x
+      A -> 
+      B -> x
+      B -> 
+
+      Before recursion resolution:
+      S' -> S '$'
+      S -> A B
+      A -> x
+      A -> 
+      B -> x
+      B -> 
+
+      After direct right recursion:
+      S' -> S '$'
+      S -> A B
+      A -> x
+      A -> 
+      B -> x
+      B -> 
+
+      Before inlining nullable productions: Number of productions: 6
+      After inlining nullable productions: Number of productions: 7
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 5
+        State 0:
+          Items:
+            - [A -> x •, {'$', x}]
+            - [B -> x •, {'$'}]
+          Actions (without default reduce):
+            - On '$': Reduce B (len 1) via rules [6]
+          Actions (full):
+            - On '$': Reduce-Reduce Conflict:
+                      - Reduce by rule #5 (A -> x)
+                      - Reduce by rule #6 (B -> x)
+            - On x: Reduce A (len 1) via rules [5]
+          Default Action:
+            - Default Reduce A (len 1) via rules [5]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [B -> x •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce B (len 1) via rules [6]
+          Default Action:
+            - Default Reduce B (len 1) via rules [6]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [S -> A •, {'$'}]
+            - [S -> A • B, {'$'}]
+          Actions (without default reduce):
+            - On x: Shift 1
+          Actions (full):
+            - On '$': Reduce S (len 1) via rules [2]
+            - On x: Shift 1
+          Default Action:
+            - Default Reduce S (len 1) via rules [2]
+            - Clone and merge
+          Gotos:
+            - B -> 3
+        State 3:
+          Items:
+            - [S -> A B •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 2) via rules [1]
+          Default Action:
+            - Default Reduce S (len 2) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 4:
+          Items:
+            - [S -> B •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 1) via rules [3]
+          Default Action:
+            - Default Reduce S (len 1) via rules [3]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 5:
+          Items:
+            - [S' -> • S '$', {ε}]
+          Actions (without default reduce):
+            - On x: Shift 0
+          Actions (full):
+            - On '$': Reduce S (len 0) via rules [4]
+            - On x: Shift 0
+          Default Action:
+            - Default Reduce S (len 0) via rules [4]
+            - Clone and merge
+          Gotos:
+            - A -> 2
+            - B -> 4
+            - S -> 6
+            - S' -> accept
+        State 6:
+          Items:
+            - [S' -> S • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 7
+          Actions (full):
+            - On '$': Shift 7
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 7:
+          Items:
+            - [S' -> S '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S' (len 2) via rules [0]
+            - On x: Reduce S' (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S' (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 0
+        x -> 1
+
+      Non-Terminal Map:
+        A -> 2
+        B -> 3
+        S -> 1
+        S' -> 0
+
+
+      Test ignored.
+      [DEBUG 14:06:28.020 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> E '$'
+      E -> E '+' T
+      E -> T
+      T -> T '*' F
+      T -> F
+      F -> '(' E ')'
+      F -> i
+
+      Before recursion resolution:
+      S -> E '$'
+      E -> E '+' T
+      E -> T
+      T -> T '*' F
+      T -> F
+      F -> '(' E ')'
+      F -> i
+
+      After direct right recursion:
+      S -> E '$'
+      E -> E '+' T
+      E -> T
+      T -> T '*' F
+      T -> F
+      F -> '(' E ')'
+      F -> i
+
+      Before inlining nullable productions: Number of productions: 7
+      After inlining nullable productions: Number of productions: 7
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:747: Merging 10 compatible state pairs.
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:820: Merged states. Original: 23, New: 13
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 15
+        State 0:
+          Items:
+            - [E -> E • '+' T, {'$', '+'}]
+            - [S -> E • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 16
+            - On '+': Shift 3
+          Actions (full):
+            - On '$': Shift 16
+            - On '+': Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [E -> E • '+' T, {')', '+'}]
+            - [F -> '(' E • ')', {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On ')': Shift 11
+            - On '+': Shift 3
+          Actions (full):
+            - On ')': Shift 11
+            - On '+': Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [E -> E '+' • T, {'$', ')', '+'}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - F -> 17
+            - T -> 5
+        State 5:
+          Items:
+            - [E -> E '+' T •, {'$', ')', '+'}]
+            - [T -> T • '*' F, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '*': Shift 19
+          Actions (full):
+            - On '$': Reduce E (len 3) via rules [1]
+            - On '*': Shift 19
+            - On '+': Reduce E (len 3) via rules [1]
+          Default Action:
+            - Default Reduce E (len 3) via rules [1]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 7:
+          Items:
+            - [E -> T •, {'$', ')', '+'}]
+            - [T -> T • '*' F, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '*': Shift 19
+          Actions (full):
+            - On '$': Reduce E (len 1) via rules [2]
+            - On '*': Shift 19
+            - On '+': Reduce E (len 1) via rules [2]
+          Default Action:
+            - Default Reduce E (len 1) via rules [2]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 9:
+          Items:
+            - [F -> '(' • E ')', {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - E -> 1
+            - F -> 17
+            - T -> 7
+        State 11:
+          Items:
+            - [F -> '(' E ')' •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce F (len 3) via rules [5]
+            - On '*': Reduce F (len 3) via rules [5]
+            - On '+': Reduce F (len 3) via rules [5]
+          Default Action:
+            - Default Reduce F (len 3) via rules [5]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 13:
+          Items:
+            - [F -> i •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce F (len 1) via rules [6]
+            - On '*': Reduce F (len 1) via rules [6]
+            - On '+': Reduce F (len 1) via rules [6]
+          Default Action:
+            - Default Reduce F (len 1) via rules [6]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 15:
+          Items:
+            - [S -> • E '$', {ε}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - E -> 0
+            - F -> 17
+            - S -> accept
+            - T -> 7
+        State 16:
+          Items:
+            - [S -> E '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 2) via rules [0]
+            - On '(': Reduce S (len 2) via rules [0]
+            - On ')': Reduce S (len 2) via rules [0]
+            - On '*': Reduce S (len 2) via rules [0]
+            - On '+': Reduce S (len 2) via rules [0]
+            - On i: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 17:
+          Items:
+            - [T -> F •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce T (len 1) via rules [4]
+            - On '*': Reduce T (len 1) via rules [4]
+            - On '+': Reduce T (len 1) via rules [4]
+          Default Action:
+            - Default Reduce T (len 1) via rules [4]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 19:
+          Items:
+            - [T -> T '*' • F, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - F -> 21
+        State 21:
+          Items:
+            - [T -> T '*' F •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce T (len 3) via rules [3]
+            - On '*': Reduce T (len 3) via rules [3]
+            - On '+': Reduce T (len 3) via rules [3]
+          Default Action:
+            - Default Reduce T (len 3) via rules [3]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 0
+        '(' -> 3
+        ')' -> 4
+        '*' -> 2
+        '+' -> 1
+        i -> 5
+
+      Non-Terminal Map:
+        E -> 1
+        F -> 3
+        S -> 0
+        T -> 2
+
+
+
+      Parse check failed for input: '(i+i)*i'
+      Left:  false
+      Right: true
+      <Click to see difference>
+
+      thread 'glr::tests::test_expression_parse_table_generation_and_parse' panicked at src/glr/tests.rs:212:9:
+      assertion `left == right` failed: Parse check failed for input: '(i+i)*i'
+        left: false
+       right: true
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/panicking.rs:697:5
+         1: core::panicking::panic_fmt
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:388:5
+         4: sep1::glr::tests::test_expression_parse_table_generation_and_parse
+                   at ./src/glr/tests.rs:212:9
+         5: sep1::glr::tests::test_expression_parse_table_generation_and_parse::{{closure}}
+                   at ./src/glr/tests.rs:187:54
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      [DEBUG 14:06:28.020 3] src/glr/analyze.rs:416: filter_productions_by_reachability: CanDeriveInteresting set: ["S", "X"]
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> S '$'
+      S -> a S B
+      S -> b
+      B -> 
+
+      Before recursion resolution:
+      S' -> S '$'
+      S -> a S B
+      S -> b
+      B -> 
+
+      After direct right recursion:
+      S' -> S '$'
+      S -> a S B
+      S -> b
+      B -> 
+
+      Before inlining nullable productions: Number of productions: 4
+      After inlining nullable productions: Number of productions: 3
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:945: Done generating GLR parser
+      [DEBUG 14:06:28.020 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> S '$'
+      S -> S S
+      S -> a
+
+      Before recursion resolution:
+      S' -> S '$'
+      S -> S S
+      S -> a
+
+      After direct right recursion:
+      S' -> S '$'
+      S -> S S
+      S -> a
+
+      Before inlining nullable productions: Number of productions: 3
+      After inlining nullable productions: Number of productions: 3
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:945: Done generating GLR parser
+
+      Test ignored.
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> A '$'
+      A -> B c
+      B -> d
+      B -> 
+
+      Before recursion resolution:
+      S' -> A '$'
+      A -> B c
+      B -> d
+      B -> 
+
+      After direct right recursion:
+      S' -> A '$'
+      A -> B c
+      B -> d
+      B -> 
+
+      Before inlining nullable productions: Number of productions: 4
+      After inlining nullable productions: Number of productions: 4
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 4
+        State 0:
+          Items:
+            - [A -> c •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce A (len 1) via rules [2]
+          Default Action:
+            - Default Reduce A (len 1) via rules [2]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [A -> B • c, {'$'}]
+          Actions (without default reduce):
+            - On c: Shift 2
+          Actions (full):
+            - On c: Shift 2
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [A -> B c •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce A (len 2) via rules [1]
+          Default Action:
+            - Default Reduce A (len 2) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [B -> d •, {c}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On c: Reduce B (len 1) via rules [3]
+          Default Action:
+            - Default Reduce B (len 1) via rules [3]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 4:
+          Items:
+            - [S' -> • A '$', {ε}]
+          Actions (without default reduce):
+            - On c: Shift 0
+            - On d: Shift 3
+          Actions (full):
+            - On c: Shift 0
+            - On d: Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - A -> 5
+            - B -> 1
+            - S' -> accept
+        State 5:
+          Items:
+            - [S' -> A • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 6
+          Actions (full):
+            - On '$': Shift 6
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 6:
+          Items:
+            - [S' -> A '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S' (len 2) via rules [0]
+            - On c: Reduce S' (len 2) via rules [0]
+            - On d: Reduce S' (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S' (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 0
+        c -> 1
+        d -> 2
+
+      Non-Terminal Map:
+        A -> 1
+        B -> 2
+        S' -> 0
+
+
+      Test ignored.
+      [DEBUG 14:06:28.020 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> S '$'
+      S -> A
+      S -> B
+      A -> x
+      B -> x
+
+      Before recursion resolution:
+      S' -> S '$'
+      S -> A
+      S -> B
+      A -> x
+      B -> x
+
+      After direct right recursion:
+      S' -> S '$'
+      S -> A
+      S -> B
+      A -> x
+      B -> x
+
+      Before inlining nullable productions: Number of productions: 5
+      After inlining nullable productions: Number of productions: 5
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.023 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.024 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 3
+        State 0:
+          Items:
+            - [A -> x •, {'$'}]
+            - [B -> x •, {'$'}]
+          Actions (without default reduce):
+            - On '$': Reduce A (len 1) via rules [3]
+          Actions (full):
+            - On '$': Reduce-Reduce Conflict:
+                      - Reduce by rule #3 (A -> x)
+                      - Reduce by rule #4 (B -> x)
+          Default Action:
+            - Default Reduce B (len 1) via rules [4]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [S -> A •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 1) via rules [1]
+          Default Action:
+            - Default Reduce S (len 1) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [S -> B •, {'$'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 1) via rules [2]
+          Default Action:
+            - Default Reduce S (len 1) via rules [2]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [S' -> • S '$', {ε}]
+          Actions (without default reduce):
+            - On x: Shift 0
+          Actions (full):
+            - On x: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - A -> 1
+            - B -> 2
+            - S -> 4
+            - S' -> accept
+        State 4:
+          Items:
+            - [S' -> S • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 5
+          Actions (full):
+            - On '$': Shift 5
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 5:
+          Items:
+            - [S' -> S '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S' (len 2) via rules [0]
+            - On x: Reduce S' (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S' (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 0
+        x -> 1
+
+      Non-Terminal Map:
+        A -> 2
+        B -> 3
+        S -> 1
+        S' -> 0
+
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:233: Removing 1 productions with undefined non-terminals.
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:238: Missing non-terminals (1) in productions:
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:240:   C
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:242: Removed productions:
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:244:   B -> C
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:233: Removing 1 productions with undefined non-terminals.
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:238: Missing non-terminals (1) in productions:
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:240:   B
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:242: Removed productions:
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:244:   A -> B
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:233: Removing 1 productions with undefined non-terminals.
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:238: Missing non-terminals (1) in productions:
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:240:   A
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:242: Removed productions:
+      [DEBUG 14:06:28.024 2] src/glr/analyze.rs:244:   S -> A
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:233: Removing 1 productions with undefined non-terminals.
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:238: Missing non-terminals (1) in productions:
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:240:   B
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:242: Removed productions:
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:244:   A -> B
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:233: Removing 1 productions with undefined non-terminals.
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:238: Missing non-terminals (1) in productions:
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:240:   A
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:242: Removed productions:
+      [DEBUG 14:06:28.025 2] src/glr/analyze.rs:244:   S -> A
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> S a
+      S -> a
+
+      Before recursion resolution:
+      S -> S a
+      S -> a
+
+      After direct right recursion:
+      S -> S a
+      S -> a
+
+      Before inlining nullable productions: Number of productions: 2
+      After inlining nullable productions: Number of productions: 2
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.025 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 1
+        State 0:
+          Items:
+            - [S -> a •, {a}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On a: Reduce S (len 1) via rules [1]
+          Default Action:
+            - Default Reduce S (len 1) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [S -> • S a, {ε}]
+          Actions (without default reduce):
+            - On a: Shift 0
+          Actions (full):
+            - On a: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - S -> 2 or accept
+        State 2:
+          Items:
+            - [S -> S • a, {a, ε}]
+          Actions (without default reduce):
+            - On a: Shift 3
+          Actions (full):
+            - On a: Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [S -> S a •, {a, ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On a: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        a -> 0
+
+      Non-Terminal Map:
+        S -> 0
+
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> S a
+      S -> a
+      Other -> b
+
+      Before recursion resolution:
+      S -> S a
+      S -> a
+      Other -> b
+
+      After direct right recursion:
+      S -> S a
+      S -> a
+      Other -> b
+
+      Before inlining nullable productions: Number of productions: 3
+      After inlining nullable productions: Number of productions: 3
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.026 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 1
+        State 0:
+          Items:
+            - [S -> a •, {a}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On a: Reduce S (len 1) via rules [1]
+          Default Action:
+            - Default Reduce S (len 1) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [S -> • S a, {ε}]
+          Actions (without default reduce):
+            - On a: Shift 0
+          Actions (full):
+            - On a: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - S -> 2 or accept
+        State 2:
+          Items:
+            - [S -> S • a, {a, ε}]
+          Actions (without default reduce):
+            - On a: Shift 3
+          Actions (full):
+            - On a: Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [S -> S a •, {a, ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On a: Reduce S (len 2) via rules [0]
+            - On b: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        a -> 0
+        b -> 1
+
+      Non-Terminal Map:
+        Other -> 1
+        S -> 0
+
+
+
+      Parse should fail for 'ab'
+      thread 'glr::tests::test_repetition_no_eof_2' panicked at src/glr/tests.rs:94:5:
+      Parse should fail for 'ab'
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/panicking.rs:697:5
+         1: core::panicking::panic_fmt
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:75:14
+         2: sep1::glr::tests::test_repetition_no_eof_2
+                   at ./src/glr/tests.rs:94:5
+         3: sep1::glr::tests::test_repetition_no_eof_2::{{closure}}
+                   at ./src/glr/tests.rs:70:30
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+      Test ignored.
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S' -> S '$'
+      S -> a S
+      S -> b
+
+      Before recursion resolution:
+      S' -> S '$'
+      S -> a S
+      S -> b
+
+      [DEBUG 14:06:28.027 2] src/glr/analyze.rs:677: Resolving direct right-recursion for 'S', creating new non-terminal 'S_rr'
+      [DEBUG 14:06:28.027 2] src/glr/analyze.rs:685:   Transforming non-recursive rule 'S -> b' -> 'S -> S_rr b'
+      [DEBUG 14:06:28.027 2] src/glr/analyze.rs:695:   Transforming recursive rule 'S -> a S' -> 'S_rr -> S_rr a'
+      [DEBUG 14:06:28.027 2] src/glr/analyze.rs:699:   Adding new epsilon rule: 'S_rr ->'
+      After direct right recursion:
+      S' -> S '$'
+      S -> S_rr b
+      S_rr -> S_rr a
+      S_rr -> 
+
+      Before inlining nullable productions: Number of productions: 4
+      After inlining nullable productions: Number of productions: 5
+      [DEBUG 14:06:28.027 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.028 2] src/glr/table.rs:945: Done generating GLR parser
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> A '$'
+      A -> A a
+      A -> b
+
+      Before recursion resolution:
+      S -> A '$'
+      A -> A a
+      A -> b
+
+      After direct right recursion:
+      S -> A '$'
+      A -> A a
+      A -> b
+
+      Before inlining nullable productions: Number of productions: 3
+      After inlining nullable productions: Number of productions: 3
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.032 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.033 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 3
+        State 0:
+          Items:
+            - [A -> b •, {'$', a}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce A (len 1) via rules [2]
+            - On a: Reduce A (len 1) via rules [2]
+          Default Action:
+            - Default Reduce A (len 1) via rules [2]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [A -> A • a, {'$', a}]
+            - [S -> A • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 4
+            - On a: Shift 2
+          Actions (full):
+            - On '$': Shift 4
+            - On a: Shift 2
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [A -> A a •, {'$', a}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce A (len 2) via rules [1]
+            - On a: Reduce A (len 2) via rules [1]
+          Default Action:
+            - Default Reduce A (len 2) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [S -> • A '$', {ε}]
+          Actions (without default reduce):
+            - On b: Shift 0
+          Actions (full):
+            - On b: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - A -> 1
+            - S -> accept
+        State 4:
+          Items:
+            - [S -> A '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 2) via rules [0]
+            - On a: Reduce S (len 2) via rules [0]
+            - On b: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 0
+        a -> 1
+        b -> 2
+
+      Non-Terminal Map:
+        A -> 1
+        S -> 0
+
+      Testing input: 'b'
+      Testing input: 'ba'
+      Testing input: 'baa'
+      Testing input: 'a'
+      Testing input: 'bb'
+      [DEBUG 14:06:28.034 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> E EOF
+      E -> E PLUS T
+      E -> T
+      T -> T TIMES F
+      T -> F
+      F -> LPAREN E RPAREN
+      F -> I
+
+      Before recursion resolution:
+      S -> E EOF
+      E -> E PLUS T
+      E -> T
+      T -> T TIMES F
+      T -> F
+      F -> LPAREN E RPAREN
+      F -> I
+
+      After direct right recursion:
+      S -> E EOF
+      E -> E PLUS T
+      E -> T
+      T -> T TIMES F
+      T -> F
+      F -> LPAREN E RPAREN
+      F -> I
+
+      Before inlining nullable productions: Number of productions: 7
+      After inlining nullable productions: Number of productions: 7
+      [DEBUG 14:06:28.034 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.034 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.035 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.037 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.037 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.037 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.037 2] src/glr/table.rs:747: Merging 10 compatible state pairs.
+      [DEBUG 14:06:28.037 2] src/glr/table.rs:820: Merged states. Original: 23, New: 13
+      [DEBUG 14:06:28.037 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 15
+        State 0:
+          Items:
+            - [E -> E • PLUS T, {EOF, PLUS}]
+            - [S -> E • EOF, {ε}]
+          Actions (without default reduce):
+            - On EOF: Shift 16
+            - On PLUS: Shift 3
+          Actions (full):
+            - On EOF: Shift 16
+            - On PLUS: Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [E -> E • PLUS T, {PLUS, RPAREN}]
+            - [F -> LPAREN E • RPAREN, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+            - On PLUS: Shift 3
+            - On RPAREN: Shift 13
+          Actions (full):
+            - On PLUS: Shift 3
+            - On RPAREN: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [E -> E PLUS • T, {EOF, PLUS, RPAREN}]
+          Actions (without default reduce):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Actions (full):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - F -> 17
+            - T -> 5
+        State 5:
+          Items:
+            - [E -> E PLUS T •, {EOF, PLUS, RPAREN}]
+            - [T -> T • TIMES F, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+            - On TIMES: Shift 19
+          Actions (full):
+            - On EOF: Reduce E (len 3) via rules [1]
+            - On PLUS: Reduce E (len 3) via rules [1]
+            - On TIMES: Shift 19
+          Default Action:
+            - Default Reduce E (len 3) via rules [1]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 7:
+          Items:
+            - [E -> T •, {EOF, PLUS, RPAREN}]
+            - [T -> T • TIMES F, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+            - On TIMES: Shift 19
+          Actions (full):
+            - On EOF: Reduce E (len 1) via rules [2]
+            - On PLUS: Reduce E (len 1) via rules [2]
+            - On TIMES: Shift 19
+          Default Action:
+            - Default Reduce E (len 1) via rules [2]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 9:
+          Items:
+            - [F -> I •, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On EOF: Reduce F (len 1) via rules [6]
+            - On PLUS: Reduce F (len 1) via rules [6]
+            - On TIMES: Reduce F (len 1) via rules [6]
+          Default Action:
+            - Default Reduce F (len 1) via rules [6]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 11:
+          Items:
+            - [F -> LPAREN • E RPAREN, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Actions (full):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - E -> 1
+            - F -> 17
+            - T -> 7
+        State 13:
+          Items:
+            - [F -> LPAREN E RPAREN •, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On EOF: Reduce F (len 3) via rules [5]
+            - On PLUS: Reduce F (len 3) via rules [5]
+            - On TIMES: Reduce F (len 3) via rules [5]
+          Default Action:
+            - Default Reduce F (len 3) via rules [5]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 15:
+          Items:
+            - [S -> • E EOF, {ε}]
+          Actions (without default reduce):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Actions (full):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - E -> 0
+            - F -> 17
+            - S -> accept
+            - T -> 7
+        State 16:
+          Items:
+            - [S -> E EOF •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On EOF: Reduce S (len 2) via rules [0]
+            - On I: Reduce S (len 2) via rules [0]
+            - On LPAREN: Reduce S (len 2) via rules [0]
+            - On PLUS: Reduce S (len 2) via rules [0]
+            - On RPAREN: Reduce S (len 2) via rules [0]
+            - On TIMES: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 17:
+          Items:
+            - [T -> F •, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On EOF: Reduce T (len 1) via rules [4]
+            - On PLUS: Reduce T (len 1) via rules [4]
+            - On TIMES: Reduce T (len 1) via rules [4]
+          Default Action:
+            - Default Reduce T (len 1) via rules [4]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 19:
+          Items:
+            - [T -> T TIMES • F, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Actions (full):
+            - On I: Shift 9
+            - On LPAREN: Shift 11
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - F -> 21
+        State 21:
+          Items:
+            - [T -> T TIMES F •, {EOF, PLUS, RPAREN, TIMES}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On EOF: Reduce T (len 3) via rules [3]
+            - On PLUS: Reduce T (len 3) via rules [3]
+            - On TIMES: Reduce T (len 3) via rules [3]
+          Default Action:
+            - Default Reduce T (len 3) via rules [3]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        EOF -> 0
+        I -> 5
+        LPAREN -> 3
+        PLUS -> 1
+        RPAREN -> 4
+        TIMES -> 2
+
+      Non-Terminal Map:
+        E -> 1
+        F -> 3
+        S -> 0
+        T -> 2
+
+
+
+      Parse check failed for input: 'LPAREN I RPAREN EOF'
+      Left:  false
+      Right: true
+      <Click to see difference>
+
+      thread 'glr::tests::test_standard_expression_grammar_parse' panicked at src/glr/tests.rs:911:9:
+      assertion `left == right` failed: Parse check failed for input: 'LPAREN I RPAREN EOF'
+        left: false
+       right: true
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/panicking.rs:697:5
+         1: core::panicking::panic_fmt
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:388:5
+         4: sep1::glr::tests::test_standard_expression_grammar_parse
+                   at ./src/glr/tests.rs:911:9
+         5: sep1::glr::tests::test_standard_expression_grammar_parse::{{closure}}
+                   at ./src/glr/tests.rs:852:44
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> a '$'
+
+      Before recursion resolution:
+      S -> a '$'
+
+      After direct right recursion:
+      S -> a '$'
+
+      Before inlining nullable productions: Number of productions: 1
+      After inlining nullable productions: Number of productions: 1
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.036 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 0
+        State 0:
+          Items:
+            - [S -> • a '$', {ε}]
+          Actions (without default reduce):
+            - On a: Shift 1
+          Actions (full):
+            - On a: Shift 1
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - S -> accept
+        State 1:
+          Items:
+            - [S -> a • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 2
+          Actions (full):
+            - On '$': Shift 2
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [S -> a '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 2) via rules [0]
+            - On a: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 1
+        a -> 0
+
+      Non-Terminal Map:
+        S -> 0
+
+      [DEBUG 14:06:28.039 2] src/glr/table.rs:829: Removing productions with undefined non-terminals
+      Before removing undefined non-terminals:
+      S -> E '$'
+      E -> E '+' T
+      E -> T
+      T -> T '*' F
+      T -> F
+      F -> '(' E ')'
+      F -> i
+
+      Before recursion resolution:
+      S -> E '$'
+      E -> E '+' T
+      E -> T
+      T -> T '*' F
+      T -> F
+      F -> '(' E ')'
+      F -> i
+
+      After direct right recursion:
+      S -> E '$'
+      E -> E '+' T
+      E -> T
+      T -> T '*' F
+      T -> F
+      F -> '(' E ')'
+      F -> i
+
+      Before inlining nullable productions: Number of productions: 7
+      After inlining nullable productions: Number of productions: 7
+      [DEBUG 14:06:28.039 2] src/glr/table.rs:865: Validating
+      [DEBUG 14:06:28.039 2] src/glr/table.rs:868: Stage 1
+      [DEBUG 14:06:28.040 2] src/glr/table.rs:871: Stage 2
+      [DEBUG 14:06:28.040 2] src/glr/table.rs:874: Stage 3
+      [DEBUG 14:06:28.040 2] src/glr/table.rs:877: Stage 4
+      [DEBUG 14:06:28.041 2] src/glr/table.rs:880: Stage 5
+      [DEBUG 14:06:28.041 2] src/glr/table.rs:883: Stage 6
+      [DEBUG 14:06:28.041 2] src/glr/table.rs:886: Stage 7
+      [DEBUG 14:06:28.041 2] src/glr/table.rs:889: Stage 8
+      [DEBUG 14:06:28.042 2] src/glr/table.rs:892: Finalizing table
+      [DEBUG 14:06:28.042 2] src/glr/table.rs:902: Performing IELR(1)-style state merging
+      [DEBUG 14:06:28.042 2] src/glr/table.rs:747: Merging 10 compatible state pairs.
+      [DEBUG 14:06:28.042 2] src/glr/table.rs:820: Merged states. Original: 23, New: 13
+      [DEBUG 14:06:28.042 2] src/glr/table.rs:945: Done generating GLR parser
+      Parser with elimination: Parse Table:
+        Start State: 15
+        State 0:
+          Items:
+            - [E -> E • '+' T, {'$', '+'}]
+            - [S -> E • '$', {ε}]
+          Actions (without default reduce):
+            - On '$': Shift 16
+            - On '+': Shift 3
+          Actions (full):
+            - On '$': Shift 16
+            - On '+': Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [E -> E • '+' T, {')', '+'}]
+            - [F -> '(' E • ')', {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On ')': Shift 11
+            - On '+': Shift 3
+          Actions (full):
+            - On ')': Shift 11
+            - On '+': Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [E -> E '+' • T, {'$', ')', '+'}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - F -> 17
+            - T -> 5
+        State 5:
+          Items:
+            - [E -> E '+' T •, {'$', ')', '+'}]
+            - [T -> T • '*' F, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '*': Shift 19
+          Actions (full):
+            - On '$': Reduce E (len 3) via rules [1]
+            - On '*': Shift 19
+            - On '+': Reduce E (len 3) via rules [1]
+          Default Action:
+            - Default Reduce E (len 3) via rules [1]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 7:
+          Items:
+            - [E -> T •, {'$', ')', '+'}]
+            - [T -> T • '*' F, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '*': Shift 19
+          Actions (full):
+            - On '$': Reduce E (len 1) via rules [2]
+            - On '*': Shift 19
+            - On '+': Reduce E (len 1) via rules [2]
+          Default Action:
+            - Default Reduce E (len 1) via rules [2]
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 9:
+          Items:
+            - [F -> '(' • E ')', {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - E -> 1
+            - F -> 17
+            - T -> 7
+        State 11:
+          Items:
+            - [F -> '(' E ')' •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce F (len 3) via rules [5]
+            - On '*': Reduce F (len 3) via rules [5]
+            - On '+': Reduce F (len 3) via rules [5]
+          Default Action:
+            - Default Reduce F (len 3) via rules [5]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 13:
+          Items:
+            - [F -> i •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce F (len 1) via rules [6]
+            - On '*': Reduce F (len 1) via rules [6]
+            - On '+': Reduce F (len 1) via rules [6]
+          Default Action:
+            - Default Reduce F (len 1) via rules [6]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 15:
+          Items:
+            - [S -> • E '$', {ε}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - E -> 0
+            - F -> 17
+            - S -> accept
+            - T -> 7
+        State 16:
+          Items:
+            - [S -> E '$' •, {ε}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce S (len 2) via rules [0]
+            - On '(': Reduce S (len 2) via rules [0]
+            - On ')': Reduce S (len 2) via rules [0]
+            - On '*': Reduce S (len 2) via rules [0]
+            - On '+': Reduce S (len 2) via rules [0]
+            - On i: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 17:
+          Items:
+            - [T -> F •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce T (len 1) via rules [4]
+            - On '*': Reduce T (len 1) via rules [4]
+            - On '+': Reduce T (len 1) via rules [4]
+          Default Action:
+            - Default Reduce T (len 1) via rules [4]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 19:
+          Items:
+            - [T -> T '*' • F, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Actions (full):
+            - On '(': Shift 9
+            - On i: Shift 13
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - F -> 21
+        State 21:
+          Items:
+            - [T -> T '*' F •, {'$', ')', '*', '+'}]
+          Actions (without default reduce):
+             (none)
+          Actions (full):
+            - On '$': Reduce T (len 3) via rules [3]
+            - On '*': Reduce T (len 3) via rules [3]
+            - On '+': Reduce T (len 3) via rules [3]
+          Default Action:
+            - Default Reduce T (len 3) via rules [3]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+
+      Terminal Map (name to terminal ID):
+        '$' -> 0
+        '(' -> 3
+        ')' -> 4
+        '*' -> 2
+        '+' -> 1
+        i -> 5
+
+      Non-Terminal Map:
+        E -> 1
+        F -> 3
+        S -> 0
+        T -> 2
+
+      Stats with elimination:
+      --- GLR Parser Stats ---
+      Grammar: 7 productions, 6 terminals, 4 non-terminals
+      Parse Table: 13 states, 0 S/R conflicts, 0 R/R conflicts
+
+      --- State Details ---
+      State 0   │ Actions: 2   (S:2, R:0, Sp:0) │ Gotos: 0  │ Unique Actions: 2
+                └─ (x1 ) S→3
+                └─ (x1 ) S→16
+      State 1   │ Actions: 2   (S:2, R:0, Sp:0) │ Gotos: 0  │ Unique Actions: 2
+                └─ (x1 ) S→3
+                └─ (x1 ) S→11
+      State 3   │ Actions: 2   (S:2, R:0, Sp:0) │ Gotos: 2  │ Unique Actions: 2
+                └─ (x1 ) S→9
+                └─ (x1 ) S→13
+      State 5   │ Actions: 3   (S:1, R:2, Sp:0) │ Gotos: 0  │ Unique Actions: 2
+                └─ (x1 ) S→19
+                └─ (x2 ) R(NT:1,len:3,#p:1)
+      State 7   │ Actions: 3   (S:1, R:2, Sp:0) │ Gotos: 0  │ Unique Actions: 2
+                └─ (x1 ) S→19
+                └─ (x2 ) R(NT:1,len:1,#p:1)
+      State 9   │ Actions: 2   (S:2, R:0, Sp:0) │ Gotos: 3  │ Unique Actions: 2
+                └─ (x1 ) S→9
+                └─ (x1 ) S→13
+      State 11  │ Actions: 3   (S:0, R:3, Sp:0) │ Gotos: 0  │ Unique Actions: 1
+                └─ (x3 ) R(NT:3,len:3,#p:1)
+      State 13  │ Actions: 3   (S:0, R:3, Sp:0) │ Gotos: 0  │ Unique Actions: 1
+                └─ (x3 ) R(NT:3,len:1,#p:1)
+      State 15  │ Actions: 2   (S:2, R:0, Sp:0) │ Gotos: 4  │ Unique Actions: 2
+                └─ (x1 ) S→9
+                └─ (x1 ) S→13
+      State 16  │ Actions: 6   (S:0, R:6, Sp:0) │ Gotos: 0  │ Unique Actions: 1
+                └─ (x6 ) R(NT:0,len:2,#p:1)
+      State 17  │ Actions: 3   (S:0, R:3, Sp:0) │ Gotos: 0  │ Unique Actions: 1
+                └─ (x3 ) R(NT:2,len:1,#p:1)
+      State 19  │ Actions: 2   (S:2, R:0, Sp:0) │ Gotos: 1  │ Unique Actions: 2
+                └─ (x1 ) S→9
+                └─ (x1 ) S→13
+      State 21  │ Actions: 3   (S:0, R:3, Sp:0) │ Gotos: 0  │ Unique Actions: 1
+                └─ (x3 ) R(NT:2,len:3,#p:1)
+      ---------------------
+
+
+
+      Parser WITH elimination failed for input: '(i+i)*i'
+      Left:  false
+      Right: true
+      <Click to see difference>
+
+      thread 'glr::tests::test_unit_production_elimination' panicked at src/glr/tests.rs:1153:9:
+      assertion `left == right` failed: Parser WITH elimination failed for input: '(i+i)*i'
+        left: false
+       right: true
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/panicking.rs:697:5
+         1: core::panicking::panic_fmt
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:388:5
+         4: sep1::glr::tests::test_unit_production_elimination
+                   at ./src/glr/tests.rs:1153:9
+         5: sep1::glr::tests::test_unit_production_elimination::{{closure}}
+                   at ./src/glr/tests.rs:1115:38
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: Fix these. These tests used to work properly.
+    metadata:
+  - assistant: |-
+      It looks like there are two separate issues causing the test failures.
+
+      1.  The `resolve_direct_right_recursion` function in `src/glr/analyze.rs` is too aggressive. It's incorrectly transforming grammars that use recursion for structure (like the dangling-else example) as if they were simple list-style right-recursive grammars. This mangles the grammar and causes parsing to fail. I'll adjust it to only transform simple right-recursive rules where the prefix consists only of terminals.
+
+      2.  The `stage_5` function in `src/glr/table.rs`, which handles parser table generation, has a bug. It incorrectly copies reduce actions intended for the end-of-input (EOF) to *all* other terminals. This causes the parser to perform unexpected reductions instead of reporting syntax errors, as seen in `test_repetition_no_eof_2`. The fix is to map EOF-based reductions only to a specific EOF token (like `$` or `EOF`) if one exists in the grammar, and to not copy them otherwise.
+
+      Here are the patches to fix these issues.
+
+      In `src/glr/analyze.rs`, I'll make the right-recursion check more specific.
+
+      ```diff
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -665,7 +665,8 @@
+                   if p.rhs.len() < 2 { return false; }
+                   if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+                   let alpha = &p.rhs[..p.rhs.len() - 1];
+      -            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+      +            // Only consider simple right recursion where the prefix is all terminals.
+      +            !alpha.iter().any(|s| matches!(s, Symbol::NonTerminal(_)))
+               });
+       
+               // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
+
+      ```
+
+      Next, in `src/glr/table.rs`, I'll correct the logic for handling EOF reductions.
+
+      ```diff
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -500,29 +500,34 @@
+           // into
+           //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+           // ie it removes the None entries, which represent EOF.
+      -    // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+      -    // merging with any existing production ID sets in the reduces map.
+           let mut stage_5_table = BTreeMap::new();
+      -    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+      +
+      +    // Heuristically find the EOF terminal. A more robust solution would be to formally
+      +    // designate one, but this works for common conventions like "$" or "EOF".
+      +    let eof_terminal = terminal_map.left_values().find(|t| {
+      +        if let Terminal::RegexName(name) = t {
+      +            name == "$" || name == "EOF"
+      +        } else {
+      +            false
+      +        }
+      +    }).cloned();
+       
+           for (item_set, row) in stage_4_table {
+      -        let Stage4Row { shifts, gotos, reduces } = row;
+      +        let Stage4Row { shifts, gotos, mut reduces } = row;
+       
+      -        // 2. Start building the new reduces map keyed by concrete terminals.
+               let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+       
+      +        // Handle reductions on EOF (lookahead is None) by mapping them to the explicit EOF terminal.
+      +        if let Some(eof_prods) = reduces.remove(&None) {
+      +            if let Some(eof_term) = &eof_terminal {
+      +                new_reduces.entry(eof_term.clone()).or_default().extend(eof_prods);
+      +            }
+      +            // If no explicit EOF token, these reductions are for abstract end-of-input and are not
+      +            // mapped to any concrete terminal.
+      +        }
+       
+      -        // 2a. Copy over entries that already have a concrete terminal key.
+               for (opt_term, prod_ids) in reduces {
+                   if let Some(term) = opt_term {
+                       new_reduces
+                           .entry(term)
+                           .or_default()
+                           .extend(prod_ids.into_iter());
+      -            } else {
+      -                // 2b. For None entries, copy the production IDs to all terminals.
+      -                for terminal in &all_terminals {
+      -                    new_reduces
+      -                        .entry(terminal.clone())
+      -                        .or_default()
+      -                        .extend(prod_ids.iter().cloned());
+      -                }
+                   }
+               }
+       
+      ```
+
+      These changes should resolve the test failures and make the parser generation process more robust and correct.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/glr/table.rs
       Applying patch to 'src/glr/table.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/table.rs.
