@@ -794,12 +794,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
                 let WorkMapKey(depth1, state_id1) = self;
                 let WorkMapKey(depth2, state_id2) = other;
-                // let (depth2, depth1) = (depth1, depth2);
+                let (depth2, depth1) = (depth1, depth2);
                 // let (state_id2, state_id1) = (state_id1, state_id2);
                 // state_id1.cmp(&state_id2).then_with(|| depth1.cmp(&depth2))
-                // depth1.cmp(&depth2).then_with(|| state_id1.cmp(&state_id2))
+                depth1.cmp(&depth2).then_with(|| state_id1.cmp(&state_id2))
                 // state_id1.cmp(&state_id2)
-                depth1.cmp(&depth2) // discovered by experimentation to be the fastest
+                // depth1.cmp(&depth2)
                 // std::cmp::Ordering::Equal
             }
         }
