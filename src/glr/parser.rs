@@ -792,8 +792,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         impl Ord for WorkMapKey {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
-                self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
+                let WorkMapKey(depth1, state_id1) = self;
+                let WorkMapKey(depth2, state_id2) = other;
+                depth1.cmp(&depth2).then_with(|| state_id1.cmp(&state_id2))
+                // state_id1.cmp(&state_id2).then_with(|| depth1.cmp(&depth2))
+                // state_id1.cmp(&state_id2)
+                // depth1.cmp(&depth2)
+                // std::cmd::Ordering::Equal
             }
         }
         let make_work_map_key = |depth: usize, state_id: StateID| WorkMapKey(depth, state_id);
