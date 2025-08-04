@@ -1,4 +1,4 @@
-use super::items::{Item, LRMode};
+use super::items::{Item, LRMode, LR_MODE};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
@@ -709,6 +709,40 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     stage_8_table
 }
 
+fn find_compatible_states(
+    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+    non_mergeable_states: &BTreeSet<StateID>,
+) -> Vec<(StateID, StateID)> {
+    let get_lr0_core = |item_set: &BTreeSet<Item>| -> BTreeSet<(Production, usize)> {
+        item_set
+            .iter()
+            .map(|item| (item.production.clone(), item.dot_position))
+            .collect()
+    };
+
+    let mut core_to_states: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
+    for (item_set, state_id) in item_set_map.iter() {
+        if non_mergeable_states.contains(state_id) {
+            continue;
+        }
+        let core = get_lr0_core(item_set);
+        core_to_states.entry(core).or_default().push(*state_id);
+    }
+
+    let mut compatible_pairs = Vec::new();
+    for states in core_to_states.values() {
+        if states.len() > 1 {
+            // All pairs in this group are compatible
+            for i in 0..states.len() {
+                for j in i + 1..states.len() {
+                    compatible_pairs.push((states[i], states[j]));
+                }
+            }
+        }
+    }
+    compatible_pairs
+}
+
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
 ///
 /// This function takes a table and a list of compatible state pairs. It merges these
@@ -870,6 +904,16 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
     crate::debug!(6, &stage_2_table);
+
+    let mut goto_item_sets = BTreeSet::new();
+    if LR_MODE == LRMode::LALR_EX_GOTO {
+        for row in stage_2_table.values() {
+            for item_set in row.gotos.values() {
+                goto_item_sets.insert(item_set.clone());
+            }
+        }
+    }
+
     crate::debug!(2, "Stage 3");
     let stage_3_table = stage_3(stage_2_table, &productions);
     crate::debug!(6, &stage_3_table);
@@ -883,13 +927,23 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
     crate::debug!(2, "Finalizing table");
-    let final_table = stage_8_table;
+    let mut final_table = stage_8_table;
+
+    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
+        let non_mergeable_states: BTreeSet<StateID> = if LR_MODE == LRMode::LALR_EX_GOTO {
+            goto_item_sets.iter().filter_map(|item_set| item_set_map.get_by_left(item_set).copied()).collect()
+        } else {
+            BTreeSet::new()
+        };
+        let compatible_pairs = find_compatible_states(&item_set_map, &non_mergeable_states);
+        (final_table, item_set_map, start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+    }
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());

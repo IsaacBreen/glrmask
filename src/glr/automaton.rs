@@ -282,7 +282,7 @@ pub fn compute_closure(
         }
     }
 
-    if LR_MODE == LRMode::LALR {
+    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
         let mut lalr_closure = BTreeSet::new();
         let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 

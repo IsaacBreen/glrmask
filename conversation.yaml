@@ -3333,20 +3333,6 @@ local_system:
           }
       }
 
-      /// Helper enum that tells `process_action_queue` where the *new* states that
-      /// originate from a **reduce** should be put.
-      ///
-      /// • `SameAsWork`   – push the produced states back onto the current
-      ///                    `work_queue` (this is the classic LR(1) behaviour that
-      ///                    Phase-2 needs).
-      /// • `Separate(_)` – push the states onto **another** queue that the caller
-      ///                   supplies (Phase-1 needs this so that the reduce results
-      ///                   are processed later during Phase-2).
-      enum ReduceQueue<'a> {
-          SameAsWork,
-          Separate(&'a mut VecDeque<ParseState>),
-      }
-
       pub trait DynEq {
           fn dyn_eq(&self, other: &dyn Any) -> bool;
       }
@@ -3875,21 +3861,17 @@ local_system:
           }
 
           /// Shared inner loop for phase 1 and phase 2.
-          ///
-          /// `reduce_queue`
-          ///   • `ReduceQueue::Separate(queue)` – reduces are pushed onto `queue`
-          ///   • `ReduceQueue::SameAsWork`      – reduces are pushed back onto `work_queue`
-          ///
           /// `action_selector` chooses between the phase-1 or phase-2 action map.
-          fn process_action_queue<F>(
+          fn process_action_queue<F, R>(
               &mut self,
               token_id: TerminalID,
               work_queue: &mut VecDeque<ParseState>,
-              mut reduce_queue: ReduceQueue,
+              mut reduce_handler: R,
               shifted_states_todo: &mut VecDeque<ParseState>,
               action_selector: F,
           ) where
               F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+              R: FnMut(&mut VecDeque<ParseState>, ParseState),
           {
               while let Some(state) = work_queue.pop_front() {
                   for peek in GSSNode::peek_iter(&state.stack) {
@@ -3910,11 +3892,7 @@ local_system:
                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                   if !s_new_arc.is_empty() {
-                                      let new_parse_state = ParseState { stack: s_new_arc };
-                                      match &mut reduce_queue {
-                                          ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-                                          ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-                                      }
+                                      reduce_handler(work_queue, ParseState { stack: s_new_arc });
                                   }
                               }
                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -3930,11 +3908,7 @@ local_system:
                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                           let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                           if !s_new_arc.is_empty() {
-                                              let new_parse_state = ParseState { stack: s_new_arc };
-                                              match &mut reduce_queue {
-                                                  ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-                                                  ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-                                              }
+                                              reduce_handler(work_queue, ParseState { stack: s_new_arc });
                                           }
                                       }
                                   }
@@ -3954,7 +3928,7 @@ local_system:
                   self.process_action_queue(
                       token_id,
                       phase1_todo,
-                      ReduceQueue::Separate(phase2_todo),
+                      |_, new_parse_state| phase2_todo.push_back(new_parse_state),
                       shifted_states_todo,
                       |row| &row.shifts_and_reduces_without_default_reduce,
                   );
@@ -3968,7 +3942,7 @@ local_system:
                   self.process_action_queue(
                       token_id,
                       phase2_todo,
-                      ReduceQueue::SameAsWork,
+                      |work_queue, new_parse_state| work_queue.push_back(new_parse_state),
                       shifted_states_todo,
                       |row| &row.shifts_and_reduces_full,
                   );
@@ -10267,20 +10241,6 @@ local_system:
           }
       }
 
-      /// Helper enum that tells `process_action_queue` where the *new* states that
-      /// originate from a **reduce** should be put.
-      ///
-      /// • `SameAsWork`   – push the produced states back onto the current
-      ///                    `work_queue` (this is the classic LR(1) behaviour that
-      ///                    Phase-2 needs).
-      /// • `Separate(_)` – push the states onto **another** queue that the caller
-      ///                   supplies (Phase-1 needs this so that the reduce results
-      ///                   are processed later during Phase-2).
-      enum ReduceQueue<'a> {
-          SameAsWork,
-          Separate(&'a mut VecDeque<ParseState>),
-      }
-
       pub trait DynEq {
           fn dyn_eq(&self, other: &dyn Any) -> bool;
       }
@@ -10809,21 +10769,17 @@ local_system:
           }
 
           /// Shared inner loop for phase 1 and phase 2.
-          ///
-          /// `reduce_queue`
-          ///   • `ReduceQueue::Separate(queue)` – reduces are pushed onto `queue`
-          ///   • `ReduceQueue::SameAsWork`      – reduces are pushed back onto `work_queue`
-          ///
           /// `action_selector` chooses between the phase-1 or phase-2 action map.
-          fn process_action_queue<F>(
+          fn process_action_queue<F, R>(
               &mut self,
               token_id: TerminalID,
               work_queue: &mut VecDeque<ParseState>,
-              mut reduce_queue: ReduceQueue,
+              mut reduce_handler: R,
               shifted_states_todo: &mut VecDeque<ParseState>,
               action_selector: F,
           ) where
               F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+              R: FnMut(&mut VecDeque<ParseState>, ParseState),
           {
               while let Some(state) = work_queue.pop_front() {
                   for peek in GSSNode::peek_iter(&state.stack) {
@@ -10844,11 +10800,7 @@ local_system:
                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                   if !s_new_arc.is_empty() {
-                                      let new_parse_state = ParseState { stack: s_new_arc };
-                                      match &mut reduce_queue {
-                                          ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-                                          ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-                                      }
+                                      reduce_handler(work_queue, ParseState { stack: s_new_arc });
                                   }
                               }
                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -10864,11 +10816,7 @@ local_system:
                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                           let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                           if !s_new_arc.is_empty() {
-                                              let new_parse_state = ParseState { stack: s_new_arc };
-                                              match &mut reduce_queue {
-                                                  ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-                                                  ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-                                              }
+                                              reduce_handler(work_queue, ParseState { stack: s_new_arc });
                                           }
                                       }
                                   }
@@ -10888,7 +10836,7 @@ local_system:
                   self.process_action_queue(
                       token_id,
                       phase1_todo,
-                      ReduceQueue::Separate(phase2_todo),
+                      |_, new_parse_state| phase2_todo.push_back(new_parse_state),
                       shifted_states_todo,
                       |row| &row.shifts_and_reduces_without_default_reduce,
                   );
@@ -10902,7 +10850,7 @@ local_system:
                   self.process_action_queue(
                       token_id,
                       phase2_todo,
-                      ReduceQueue::SameAsWork,
+                      |work_queue, new_parse_state| work_queue.push_back(new_parse_state),
                       shifted_states_todo,
                       |row| &row.shifts_and_reduces_full,
                   );
@@ -17259,20 +17207,6 @@ messages:
           }
       }
 
-      /// Helper enum that tells `process_action_queue` where the *new* states that
-      /// originate from a **reduce** should be put.
-      ///
-      /// • `SameAsWork`   – push the produced states back onto the current
-      ///                    `work_queue` (this is the classic LR(1) behaviour that
-      ///                    Phase-2 needs).
-      /// • `Separate(_)` – push the states onto **another** queue that the caller
-      ///                   supplies (Phase-1 needs this so that the reduce results
-      ///                   are processed later during Phase-2).
-      enum ReduceQueue<'a> {
-          SameAsWork,
-          Separate(&'a mut VecDeque<ParseState>),
-      }
-
       pub trait DynEq {
           fn dyn_eq(&self, other: &dyn Any) -> bool;
       }
@@ -17801,21 +17735,17 @@ messages:
           }
 
           /// Shared inner loop for phase 1 and phase 2.
-          ///
-          /// `reduce_queue`
-          ///   • `ReduceQueue::Separate(queue)` – reduces are pushed onto `queue`
-          ///   • `ReduceQueue::SameAsWork`      – reduces are pushed back onto `work_queue`
-          ///
           /// `action_selector` chooses between the phase-1 or phase-2 action map.
-          fn process_action_queue<F>(
+          fn process_action_queue<F, R>(
               &mut self,
               token_id: TerminalID,
               work_queue: &mut VecDeque<ParseState>,
-              mut reduce_queue: ReduceQueue,
+              mut reduce_handler: R,
               shifted_states_todo: &mut VecDeque<ParseState>,
               action_selector: F,
           ) where
               F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+              R: FnMut(&mut VecDeque<ParseState>, ParseState),
           {
               while let Some(state) = work_queue.pop_front() {
                   for peek in GSSNode::peek_iter(&state.stack) {
@@ -17836,11 +17766,7 @@ messages:
                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                   if !s_new_arc.is_empty() {
-                                      let new_parse_state = ParseState { stack: s_new_arc };
-                                      match &mut reduce_queue {
-                                          ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-                                          ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-                                      }
+                                      reduce_handler(work_queue, ParseState { stack: s_new_arc });
                                   }
                               }
                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -17856,11 +17782,7 @@ messages:
                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                           let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                           if !s_new_arc.is_empty() {
-                                              let new_parse_state = ParseState { stack: s_new_arc };
-                                              match &mut reduce_queue {
-                                                  ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-                                                  ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-                                              }
+                                              reduce_handler(work_queue, ParseState { stack: s_new_arc });
                                           }
                                       }
                                   }
@@ -17880,7 +17802,7 @@ messages:
                   self.process_action_queue(
                       token_id,
                       phase1_todo,
-                      ReduceQueue::Separate(phase2_todo),
+                      |_, new_parse_state| phase2_todo.push_back(new_parse_state),
                       shifted_states_todo,
                       |row| &row.shifts_and_reduces_without_default_reduce,
                   );
@@ -17894,7 +17816,7 @@ messages:
                   self.process_action_queue(
                       token_id,
                       phase2_todo,
-                      ReduceQueue::SameAsWork,
+                      |work_queue, new_parse_state| work_queue.push_back(new_parse_state),
                       shifted_states_todo,
                       |row| &row.shifts_and_reduces_full,
                   );
@@ -20892,123 +20814,446 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: Modify this so that instead of `ReduceQueue`, we have a closure that takes
-      as arguments `work_queue` (mutable) and `new_parse_state` (with ownership).
+  - user: Add a LR mode called LALR_EX_GOTO that is similar to LALR except that it
+      excludes from merging any state that can appear in as a GOTO state. All other
+      states can be merged as usual for LALR.
     metadata:
   - assistant: |-
-      Of course! As a helpful assistant, I'd be happy to help you with your code. Here are the suggested changes to refactor `ReduceQueue` into a closure.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the suggested changes to add the `LALR_EX_GOTO` LR mode.
 
-      I've refactored `process_action_queue` in `src/glr/parser.rs` to use a closure for handling reduced states. This removes the `ReduceQueue` enum and makes the data flow for different parsing phases more explicit at the call sites.
+      I'll add the `LALR_EX_GOTO` variant to the `LRMode` enum, update the closure computation to treat it like LALR, and implement the logic to exclude GOTO states from merging during table generation.
 
-      Here is the git diff for the modified file:
+      Here are the diffs for the files that need to be modified:
 
       ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -47,17 +47,6 @@
-           }
+      --- a/src/glr/items.rs
+      +++ b/src/glr/items.rs
+      @@ -83,6 +83,7 @@
+       #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+       pub enum LRMode {
+           LALR,
+      +    LALR_EX_GOTO,
+           LR1,
        }
        
-      -/// Helper enum that tells `process_action_queue` where the *new* states that
-      -/// originate from a **reduce** should be put.
-      -///
-      -/// • `SameAsWork`   – push the produced states back onto the current
-      -///                    `work_queue` (this is the classic LR(1) behaviour that
-      -///                    Phase-2 needs).
-      -/// • `Separate(_)` – push the states onto **another** queue that the caller
-      -///                   supplies (Phase-1 needs this so that the reduce results
-      -///                   are processed later during Phase-2).
-      -enum ReduceQueue<'a> {
-      -    SameAsWork,
-      -    Separate(&'a mut VecDeque<ParseState>),
-      -}
-      -
-       pub trait DynEq {
-           fn dyn_eq(&self, other: &dyn Any) -> bool;
-       }
-      @@ -571,20 +560,16 @@
+      ``````diff
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -248,7 +248,7 @@
+               }
            }
        
-           /// Shared inner loop for phase 1 and phase 2.
-      -    ///
-      -    /// `reduce_queue`
-      -    ///   • `ReduceQueue::Separate(queue)` – reduces are pushed onto `queue`
-      -    ///   • `ReduceQueue::SameAsWork`      – reduces are pushed back onto `work_queue`
-      -    ///
-           /// `action_selector` chooses between the phase-1 or phase-2 action map.
-      -    fn process_action_queue<F>(
-      +    fn process_action_queue<F, R>(
-               &mut self,
-               token_id: TerminalID,
-               work_queue: &mut VecDeque<ParseState>,
-      -        mut reduce_queue: ReduceQueue,
-      +        mut reduce_handler: R,
-               shifted_states_todo: &mut VecDeque<ParseState>,
-               action_selector: F,
-           ) where
-      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      +        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      +        R: FnMut(&mut VecDeque<ParseState>, ParseState),
-           {
-               while let Some(state) = work_queue.pop_front() {
-                   for peek in GSSNode::peek_iter(&state.stack) {
-      @@ -605,11 +590,7 @@
-                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
-                                   if !s_new_arc.is_empty() {
-      -                                let new_parse_state = ParseState { stack: s_new_arc };
-      -                                match &mut reduce_queue {
-      -                                    ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-      -                                    ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-      -                                }
-      +                                reduce_handler(work_queue, ParseState { stack: s_new_arc });
-                                   }
-                               }
-                               Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      @@ -625,11 +606,7 @@
-                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                           let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
-                                           if !s_new_arc.is_empty() {
-      -                                        let new_parse_state = ParseState { stack: s_new_arc };
-      -                                        match &mut reduce_queue {
-      -                                            ReduceQueue::SameAsWork         => work_queue.push_back(new_parse_state),
-      -                                            ReduceQueue::Separate(queue) => queue.push_back(new_parse_state),
-      -                                        }
-      +                                        reduce_handler(work_queue, ParseState { stack: s_new_arc });
-                                           }
-                                       }
-                                   }
-      @@ -648,8 +625,8 @@
-               timeit!("GLRParserState::step::phase1", {
-                   self.process_action_queue(
-                       token_id,
-                       phase1_todo,
-      -                ReduceQueue::Separate(phase2_todo),
-      +                |_, new_parse_state| phase2_todo.push_back(new_parse_state),
-                       shifted_states_todo,
-                       |row| &row.shifts_and_reduces_without_default_reduce,
-                   );
-      @@ -663,7 +640,7 @@
-                   self.process_action_queue(
-                       token_id,
-                       phase2_todo,
-      -                ReduceQueue::SameAsWork,
-      +                |work_queue, new_parse_state| work_queue.push_back(new_parse_state),
-                       shifted_states_todo,
-                       |row| &row.shifts_and_reduces_full,
-                   );
+      -    if LR_MODE == LRMode::LALR {
+      +    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
+               let mut lalr_closure = BTreeSet::new();
+               let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+       
+
+      ``````diff
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -511,6 +511,41 @@
+           stage_8_table
+       }
+       
+      +fn find_compatible_states(
+      +    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+      +    non_mergeable_states: &BTreeSet<StateID>,
+      +) -> Vec<(StateID, StateID)> {
+      +    let get_lr0_core = |item_set: &BTreeSet<Item>| -> BTreeSet<(Production, usize)> {
+      +        item_set
+      +            .iter()
+      +            .map(|item| (item.production.clone(), item.dot_position))
+      +            .collect()
+      +    };
+      +
+      +    let mut core_to_states: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
+      +    for (item_set, state_id) in item_set_map.iter() {
+      +        if non_mergeable_states.contains(state_id) {
+      +            continue;
+      +        }
+      +        let core = get_lr0_core(item_set);
+      +        core_to_states.entry(core).or_default().push(*state_id);
+      +    }
+      +
+      +    let mut compatible_pairs = Vec::new();
+      +    for states in core_to_states.values() {
+      +        if states.len() > 1 {
+      +            // All pairs in this group are compatible
+      +            for i in 0..states.len() {
+      +                for j in i + 1..states.len() {
+      +                    compatible_pairs.push((states[i], states[j]));
+      +                }
+      +            }
+      +        }
+      +    }
+      +    compatible_pairs
+      +}
+      +
+       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+       ///
+       /// This function takes a table and a list of compatible state pairs. It merges these
+      @@ -644,6 +679,15 @@
+           let stage_2_table = stage_2(stage_1_table, &productions);
+           crate::debug!(6, &stage_2_table);
+       
+      +    let mut goto_item_sets = BTreeSet::new();
+      +    if LR_MODE == LRMode::LALR_EX_GOTO {
+      +        for row in stage_2_table.values() {
+      +            for item_set in row.gotos.values() {
+      +                goto_item_sets.insert(item_set.clone());
+      +            }
+      +        }
+      +    }
+      +
+           crate::debug!(2, "Stage 3");
+           let stage_3_table = stage_3(stage_2_table, &productions);
+           crate::debug!(6, &stage_3_table);
+      @@ -657,13 +701,23 @@
+           let stage_6_table = stage_6(stage_5_table);
+           crate::debug!(6, &stage_6_table);
+           crate::debug!(2, "Stage 7");
+      -    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+      +    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+           crate::debug!(2, "Stage 8");
+           let stage_8_table = stage_8(stage_7_table);
+           crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let final_table = stage_8_table;
+      +    let mut final_table = stage_8_table;
+      +
+      +    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
+      +        let non_mergeable_states: BTreeSet<StateID> = if LR_MODE == LRMode::LALR_EX_GOTO {
+      +            goto_item_sets.iter().filter_map(|item_set| item_set_map.get_by_left(item_set).copied()).collect()
+      +        } else {
+      +            BTreeSet::new()
+      +        };
+      +        let compatible_pairs = find_compatible_states(&item_set_map, &non_mergeable_states);
+      +        (final_table, item_set_map, start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+      +    }
+       
+           crate::debug!(2, "Done generating GLR parser");
+           // crate::debug!(6, "Number of states: {}", final_table.len());
 
       ```
 
-      Let me know if you have any other questions
+      These changes introduce the `LALR_EX_GOTO` mode and integrate it into the table generation pipeline. Let me know if you have any other questions
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/items.rs
+      Applying patch to 'src/glr/items.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/items.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Error applying patch to src/glr/table.rs:
+      Hunk #2 (header: @@ -644,6 +679,15 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          let stage_2_table = stage_2(stage_1_table, &productions);
+          crate::debug!(6, &stage_2_table);
+
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, &productions);
+          crate::debug!(6, &stage_3_table);
+      --- Expected Context (from patch, after normalization): ---
+      let stage_2_table = stage_2(stage_1_table, &productions);
+      crate::debug!(6, &stage_2_table);
+
+      crate::debug!(2, "Stage 3");
+      let stage_3_table = stage_3(stage_2_table, &productions);
+      crate::debug!(6, &stage_3_table);
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 904 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + crate::debug!(2, "Stage 2");
+        let stage_2_table = stage_2(stage_1_table, &productions);
+        crate::debug!(6, &stage_2_table);
+      - 
+        crate::debug!(2, "Stage 3");
+        let stage_3_table = stage_3(stage_2_table, &productions);
+        crate::debug!(6, &stage_3_table);
+      Problematic diff content:
+      ---
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -511,6 +511,41 @@
+           stage_8_table
+       }
+       
+      +fn find_compatible_states(
+      +    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+      +    non_mergeable_states: &BTreeSet<StateID>,
+      +) -> Vec<(StateID, StateID)> {
+      +    let get_lr0_core = |item_set: &BTreeSet<Item>| -> BTreeSet<(Production, usize)> {
+      +        item_set
+      +            .iter()
+      +            .map(|item| (item.production.clone(), item.dot_position))
+      +            .collect()
+      +    };
+      +
+      +    let mut core_to_states: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
+      +    for (item_set, state_id) in item_set_map.iter() {
+      +        if non_mergeable_states.contains(state_id) {
+      +            continue;
+      +        }
+      +        let core = get_lr0_core(item_set);
+      +        core_to_states.entry(core).or_default().push(*state_id);
+      +    }
+      +
+      +    let mut compatible_pairs = Vec::new();
+      +    for states in core_to_states.values() {
+      +        if states.len() > 1 {
+      +            // All pairs in this group are compatible
+      +            for i in 0..states.len() {
+      +                for j in i + 1..states.len() {
+      +                    compatible_pairs.push((states[i], states[j]));
+      +                }
+      +            }
+      +        }
+      +    }
+      +    compatible_pairs
+      +}
+      +
+       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+       ///
+       /// This function takes a table and a list of compatible state pairs. It merges these
+      @@ -644,6 +679,15 @@
+           let stage_2_table = stage_2(stage_1_table, &productions);
+           crate::debug!(6, &stage_2_table);
+       
+      +    let mut goto_item_sets = BTreeSet::new();
+      +    if LR_MODE == LRMode::LALR_EX_GOTO {
+      +        for row in stage_2_table.values() {
+      +            for item_set in row.gotos.values() {
+      +                goto_item_sets.insert(item_set.clone());
+      +            }
+      +        }
+      +    }
+      +
+           crate::debug!(2, "Stage 3");
+           let stage_3_table = stage_3(stage_2_table, &productions);
+           crate::debug!(6, &stage_3_table);
+      @@ -657,13 +701,23 @@
+           let stage_6_table = stage_6(stage_5_table);
+           crate::debug!(6, &stage_6_table);
+           crate::debug!(2, "Stage 7");
+      -    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+      +    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+           crate::debug!(2, "Stage 8");
+           let stage_8_table = stage_8(stage_7_table);
+           crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let final_table = stage_8_table;
+      +    let mut final_table = stage_8_table;
+      +
+      +    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
+      +        let non_mergeable_states: BTreeSet<StateID> = if LR_MODE == LRMode::LALR_EX_GOTO {
+      +            goto_item_sets.iter().filter_map(|item_set| item_set_map.get_by_left(item_set).copied()).collect()
+      +        } else {
+      +            BTreeSet::new()
+      +        };
+      +        let compatible_pairs = find_compatible_states(&item_set_map, &non_mergeable_states);
+      +        (final_table, item_set_map, start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+      +    }
+       
+           crate::debug!(2, "Done generating GLR parser");
+           // crate::debug!(6, "Number of states: {}", final_table.len());
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Git apply failed. Fallback to LLM apply:
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/glr/items.rs
+      Applying patch to 'src/glr/items.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/items.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Error applying patch to src/glr/table.rs:
+      Hunk #2 (header: @@ -644,6 +679,15 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          let stage_2_table = stage_2(stage_1_table, &productions);
+          crate::debug!(6, &stage_2_table);
+
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, &productions);
+          crate::debug!(6, &stage_3_table);
+      --- Expected Context (from patch, after normalization): ---
+      let stage_2_table = stage_2(stage_1_table, &productions);
+      crate::debug!(6, &stage_2_table);
+
+      crate::debug!(2, "Stage 3");
+      let stage_3_table = stage_3(stage_2_table, &productions);
+      crate::debug!(6, &stage_3_table);
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 904 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + crate::debug!(2, "Stage 2");
+        let stage_2_table = stage_2(stage_1_table, &productions);
+        crate::debug!(6, &stage_2_table);
+      - 
+        crate::debug!(2, "Stage 3");
+        let stage_3_table = stage_3(stage_2_table, &productions);
+        crate::debug!(6, &stage_3_table);
+      Problematic diff content:
+      ---
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -511,6 +511,41 @@
+           stage_8_table
+       }
+       
+      +fn find_compatible_states(
+      +    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+      +    non_mergeable_states: &BTreeSet<StateID>,
+      +) -> Vec<(StateID, StateID)> {
+      +    let get_lr0_core = |item_set: &BTreeSet<Item>| -> BTreeSet<(Production, usize)> {
+      +        item_set
+      +            .iter()
+      +            .map(|item| (item.production.clone(), item.dot_position))
+      +            .collect()
+      +    };
+      +
+      +    let mut core_to_states: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
+      +    for (item_set, state_id) in item_set_map.iter() {
+      +        if non_mergeable_states.contains(state_id) {
+      +            continue;
+      +        }
+      +        let core = get_lr0_core(item_set);
+      +        core_to_states.entry(core).or_default().push(*state_id);
+      +    }
+      +
+      +    let mut compatible_pairs = Vec::new();
+      +    for states in core_to_states.values() {
+      +        if states.len() > 1 {
+      +            // All pairs in this group are compatible
+      +            for i in 0..states.len() {
+      +                for j in i + 1..states.len() {
+      +                    compatible_pairs.push((states[i], states[j]));
+      +                }
+      +            }
+      +        }
+      +    }
+      +    compatible_pairs
+      +}
+      +
+       /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+       ///
+       /// This function takes a table and a list of compatible state pairs. It merges these
+      @@ -644,6 +679,15 @@
+           let stage_2_table = stage_2(stage_1_table, &productions);
+           crate::debug!(6, &stage_2_table);
+       
+      +    let mut goto_item_sets = BTreeSet::new();
+      +    if LR_MODE == LRMode::LALR_EX_GOTO {
+      +        for row in stage_2_table.values() {
+      +            for item_set in row.gotos.values() {
+      +                goto_item_sets.insert(item_set.clone());
+      +            }
+      +        }
+      +    }
+      +
+           crate::debug!(2, "Stage 3");
+           let stage_3_table = stage_3(stage_2_table, &productions);
+           crate::debug!(6, &stage_3_table);
+      @@ -657,13 +701,23 @@
+           let stage_6_table = stage_6(stage_5_table);
+           crate::debug!(6, &stage_6_table);
+           crate::debug!(2, "Stage 7");
+      -    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+      +    let (stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+           crate::debug!(6, &stage_7_table);
+           crate::debug!(2, "Stage 8");
+           let stage_8_table = stage_8(stage_7_table);
+           crate::debug!(6, &stage_8_table);
+           crate::debug!(2, "Finalizing table");
+      -    let final_table = stage_8_table;
+      +    let mut final_table = stage_8_table;
+      +
+      +    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
+      +        let non_mergeable_states: BTreeSet<StateID> = if LR_MODE == LRMode::LALR_EX_GOTO {
+      +            goto_item_sets.iter().filter_map(|item_set| item_set_map.get_by_left(item_set).copied()).collect()
+      +        } else {
+      +            BTreeSet::new()
+      +        };
+      +        let compatible_pairs = find_compatible_states(&item_set_map, &non_mergeable_states);
+      +        (final_table, item_set_map, start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+      +    }
+       
+           crate::debug!(2, "Done generating GLR parser");
+           // crate::debug!(6, "Number of states: {}", final_table.len());
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/items.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/automaton.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/table.rs"
+        }
+      ]
+      Found 3 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/items.rs
+      Received code for required file: src/glr/automaton.rs
+      Received code for required file: src/glr/table.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/automaton.rs
+      Successfully replaced file: src/glr/items.rs
+      Successfully replaced file: src/glr/table.rs
     metadata:
 ...

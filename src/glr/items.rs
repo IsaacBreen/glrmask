@@ -90,6 +90,7 @@ impl Item {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LRMode {
     LALR,
+    LALR_EX_GOTO,
     LR1,
 }
 
