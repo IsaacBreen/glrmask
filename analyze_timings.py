@@ -123,9 +123,15 @@ def main():
             commit_time = parse_duration(m_commit.group(1))
             
         special_map_time = None
-        m_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
-        if m_special_map:
-            special_map_time = parse_duration(m_special_map.group(1))
+        m_after_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
+        m_initial_values = re.search(r"after initial_values_for_map:\s*(.*?)\n", token_log)
+
+        if m_after_special_map and m_initial_values:
+            after_special_map_duration = parse_duration(m_after_special_map.group(1))
+            initial_values_duration = parse_duration(m_initial_values.group(1))
+            special_map_time = after_special_map_duration - initial_values_duration
+        elif m_after_special_map:
+            special_map_time = parse_duration(m_after_special_map.group(1))
 
         token_info['timings'] = {
             'get_mask (total)': get_mask_time,
