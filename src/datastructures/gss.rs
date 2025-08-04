@@ -1042,7 +1042,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     }
     stats.structurally_unique_nodes = structural_cache.len();
     if stats.unique_nodes > 0 {
-        stats.structural_redundancy = 1.0 - (stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64);
+        stats.structural_redundancy = stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64;
     }
     stats
 }
