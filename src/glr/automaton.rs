@@ -255,8 +255,6 @@ pub fn compute_first_set_for_item(
 pub fn compute_closure(
     items: &BTreeSet<Item>,
     productions: &[Production],
-    start_production_id: usize,
-    initial_item_set: &BTreeSet<Item>,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
@@ -295,12 +293,9 @@ pub fn compute_closure(
             }
 
             // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-            for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
-                if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
-                    for lookahead in lookaheads {
-                        if lookahead == &None && !existing_lookaheads.contains(&None) {
-                            continue;
-                        }
+            for ((prod, dot_pos), _) in reduce_item_cores {
+                if let Some(follows) = follow_sets.get(&prod.lhs) {
+                    for lookahead in follows {
                         lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
                     }
                 }
