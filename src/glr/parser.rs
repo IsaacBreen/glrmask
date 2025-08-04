@@ -708,7 +708,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let mut current_nt = nt;
 
                 // Fast loop for unit reduction chains based on the current lookahead token.
+                let mut i = 0;
                 loop {
+                    i += 1;
                     let goto = self.parser.table.get(&predecessor_state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
                         format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id)
                     });
@@ -735,6 +737,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         break; // Exit the fast loop for this path
                     }
                 }
+                // Round to nearest power of 2
+                let i_rounded_to_nearest_pow = if i == 0 {
+                    1
+                } else {
+                    1 << (32 - (i as u32 - 1).leading_zeros())
+                };
+
+                timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
             }
         }
 
@@ -795,6 +805,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_default_reductions")]
     pub fn process_default_reductions(&mut self) {
+        return;
         self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
