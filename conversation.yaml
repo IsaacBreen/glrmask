@@ -25383,33 +25383,39 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: |-
-      fix structural redundancy metric. It should simply be (num structurally unique nodes) / (num unique nodes).
-      ...where num structurally unique nodes is number of nodes in the structurally canonicalized GSS.
+  - user: Along with `structural_redundancy` in `GSSStats`, put the absolute number
+      of redundant nodes, ie unique nodes - num structurally unique nodes.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with structural redundancy metrics can be tricky. Here are the suggested changes to fix the metric as you requested.
+      Hello! As a helpful assistant, I've reviewed your request. Here are the changes to add the absolute number of redundant nodes to `GSSStats`.
 
-      I've adjusted the calculation for `structural_redundancy` in `gather_gss_stats` to be the ratio of structurally unique nodes to the total number of unique nodes.
+      I've modified `src/datastructures/gss.rs` to include the `num_redundant_nodes` field in the `GSSStats` struct and calculated its value within the `gather_gss_stats` function.
 
-      Here is the git diff for the change:
+      Here is the git diff for the modified file:
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -1111,7 +1111,7 @@
-           }
-           stats.structurally_unique_nodes = structural_cache.len();
+      @@ -1110,6 +1110,7 @@
+           pub unique_nodes: usize,
+           pub structurally_unique_nodes: usize,
+           pub structural_redundancy: f64,
+      +    pub num_redundant_nodes: usize,
+           pub max_depth: usize,
+           pub average_depth: f64,
+           pub merge_points: usize,
+      @@ -1183,6 +1184,7 @@
            if stats.unique_nodes > 0 {
-      -        stats.structural_redundancy = 1.0 - (stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64);
-      +        stats.structural_redundancy = stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64;
+               stats.structural_redundancy = 1.0 - (stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64);
            }
+      +    stats.num_redundant_nodes = stats.unique_nodes - stats.structurally_unique_nodes;
            stats
        }
+       
 
       ```
 
-      This change directly implements the formula you described. Let me know if you have any other questions
+      These changes should address your request. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):

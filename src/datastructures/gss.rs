@@ -960,6 +960,7 @@ pub struct GSSStats {
     pub unique_nodes: usize,
     pub structurally_unique_nodes: usize,
     pub structural_redundancy: f64,
+    pub num_redundant_nodes: usize,
     pub max_depth: usize,
     pub average_depth: f64,
     pub merge_points: usize,
@@ -1044,6 +1045,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     if stats.unique_nodes > 0 {
         stats.structural_redundancy = 1.0 - (stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64);
     }
+    stats.num_redundant_nodes = stats.unique_nodes - stats.structurally_unique_nodes;
     stats
 }
 
