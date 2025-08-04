@@ -282,9 +282,9 @@ impl GrammarConstraint {
         // Assuming compute_first_sets is available from grammar module.
 
         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
-        crate::debug!(3, "terminal_follow_sets_named:");
+        crate::debug!(5, "terminal_follow_sets_named:");
         for (terminal, following_terminals) in &terminal_follow_sets_named {
-            crate::debug!(3, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
+            crate::debug!(4, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
         }
 
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
@@ -585,7 +585,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Starting precompute DFS");
         crate::debug!(3, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
-            crate::debug!(3, "  {}: {:p}", sid.0, Arc::as_ptr(root));
+            crate::debug!(6, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
         self.dfs(&self.vocab.root, assoc, HashMap::new());
         crate::debug!(2, "Finished precompute DFS");
