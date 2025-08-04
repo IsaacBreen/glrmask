@@ -789,7 +789,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // let get_depth = |peek: &GSSNode| 0;
 
         // let get_work_map_key = |isolated_state: &ParseState, peek: &GSSNode| (peek.max_depth(), isolated_state.stack.as_ref().unwrap().edge_value().state_id);
-        let mut enqueue = |isolated_state: &ParseState, peek: &GSSPeek| {
+        let enqueue = |work_map: &mut BTreeMap<(usize, StateID), ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
             // let depth = peek.max_depth();
             let depth = 0;
             let state_id = peek.edge_value().state_id;
@@ -802,7 +802,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Peel off the top edges to populate the initial work map.
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
             let isolated_state = ParseState { stack: peek.isolated_parent() };
-            enqueue(&isolated_state, &peek);
+            enqueue(&mut work_map, &isolated_state, &peek);
         }
 
         let mut next_active_state = ParseState::new();
@@ -939,7 +939,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // Deconstruct the result and put it back into the work map.
                         for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
                             let isolated = ParseState { stack: new_peek.isolated_parent() };
-                                enqueue(&isolated, &new_peek);
+                                enqueue(&mut work_map, &isolated, &new_peek);
                         }
 
                         for ((new_depth, new_state_id), new_stack) in work_map.iter() {
