@@ -255,6 +255,8 @@ pub fn compute_first_set_for_item(
 pub fn compute_closure(
     items: &BTreeSet<Item>,
     productions: &[Production],
+    start_production_id: usize,
+    initial_item_set: &BTreeSet<Item>,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
