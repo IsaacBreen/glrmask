@@ -1,3 +1,4 @@
+use crate::glr::items::LR_MODE;
 use super::items::{Item, LRMode};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -889,7 +890,57 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
     crate::debug!(2, "Finalizing table");
-    let final_table = stage_8_table;
+    let mut final_table = stage_8_table;
+    let mut item_set_map = item_set_map;
+    let mut start_state_id = start_state_id;
+
+    // --- IELR(1)-style state merging ---
+    // This is a simplified version of IELR(1). It merges LALR(1) compatible states (same core)
+    // only if they are conflict-free in the canonical LR(1) automaton. This avoids "mysterious
+    // invasive conflicts" where a conflict from one state incorrectly affects another after merging.
+    if LR_MODE == LRMode::LR1 {
+        crate::debug!(2, "Performing IELR(1)-style state merging");
+
+        // 1. Group states by core
+        let mut states_by_core: BTreeMap<BTreeSet<(Production, usize)>, Vec<StateID>> = BTreeMap::new();
+        for (item_set, state_id) in &item_set_map {
+            let core = item_set.iter().map(|item| (item.production.clone(), item.dot_position)).collect();
+            states_by_core.entry(core).or_default().push(*state_id);
+        }
+
+        // 2. Identify states with conflicts
+        let mut conflicts: BTreeMap<StateID, bool> = BTreeMap::new();
+        for (state_id, row) in &final_table {
+            let has_conflict = row.shifts_and_reduces_full.values().any(|action| {
+                matches!(action, Stage7ShiftsAndReducesLookaheadValue::Split {..})
+            });
+            conflicts.insert(*state_id, has_conflict);
+        }
+
+        // 3. Find compatible pairs (only merge conflict-free states with the same core)
+        let mut compatible_pairs = Vec::new();
+        for group in states_by_core.values() {
+            if group.len() <= 1 { continue; }
+
+            let conflict_free_states: Vec<_> = group.iter().cloned().filter(|s| !conflicts.get(s).unwrap_or(&false)).collect();
+
+            if conflict_free_states.len() > 1 {
+                for i in 0..conflict_free_states.len() {
+                    for j in i + 1..conflict_free_states.len() {
+                        compatible_pairs.push((conflict_free_states[i], conflict_free_states[j]));
+                    }
+                }
+            }
+        }
+
+        // 4. Merge states
+        if !compatible_pairs.is_empty() {
+            let (merged_table, merged_item_set_map, new_start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+            final_table = merged_table;
+            item_set_map = merged_item_set_map;
+            start_state_id = new_start_state_id;
+        }
+    }
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
