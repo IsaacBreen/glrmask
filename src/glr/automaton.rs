@@ -282,26 +282,28 @@ pub fn compute_closure(
         }
     }
 
-    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
-        let mut lalr_closure = BTreeSet::new();
-        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+    match LR_MODE {
+        LRMode::LALR | LRMode::LALR_EX_GOTO => {
+            let mut lalr_closure = BTreeSet::new();
+            let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
-        // Separate reduce and non-reduce items, and group reduce items by core
-        for item in closure {
-            reduce_item_cores.entry((item.production, item.dot_position)).or_default();
-        }
+            // Separate reduce and non-reduce items, and group reduce items by core
+            for item in closure {
+                reduce_item_cores.entry((item.production, item.dot_position)).or_default();
+            }
 
-        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-        for ((prod, dot_pos), _) in reduce_item_cores {
-            if let Some(follows) = follow_sets.get(&prod.lhs) {
-                for lookahead in follows {
-                    lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+            // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+            for ((prod, dot_pos), _) in reduce_item_cores {
+                if let Some(follows) = follow_sets.get(&prod.lhs) {
+                    for lookahead in follows {
+                        lalr_closure.insert(Item { production: prod.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+                    }
                 }
             }
+            lalr_closure
         }
-        return lalr_closure;
+        LRMode::LR1 => closure,
     }
-    closure
 }
 
 pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {

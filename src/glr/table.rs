@@ -906,12 +906,15 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(6, &stage_2_table);
 
     let mut goto_item_sets = BTreeSet::new();
-    if LR_MODE == LRMode::LALR_EX_GOTO {
-        for row in stage_2_table.values() {
-            for item_set in row.gotos.values() {
-                goto_item_sets.insert(item_set.clone());
+    match LR_MODE {
+        LRMode::LALR_EX_GOTO => {
+            for row in stage_2_table.values() {
+                for item_set in row.gotos.values() {
+                    goto_item_sets.insert(item_set.clone());
+                }
             }
         }
+        LRMode::LALR | LRMode::LR1 => {}
     }
 
     crate::debug!(2, "Stage 3");
@@ -935,14 +938,21 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Finalizing table");
     let mut final_table = stage_8_table;
 
-    if LR_MODE == LRMode::LALR || LR_MODE == LRMode::LALR_EX_GOTO {
-        let non_mergeable_states: BTreeSet<StateID> = if LR_MODE == LRMode::LALR_EX_GOTO {
-            goto_item_sets.iter().filter_map(|item_set| item_set_map.get_by_left(item_set).copied()).collect()
-        } else {
-            BTreeSet::new()
-        };
-        let compatible_pairs = find_compatible_states(&item_set_map, &non_mergeable_states);
-        (final_table, item_set_map, start_state_id) = merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+    match LR_MODE {
+        LRMode::LALR | LRMode::LALR_EX_GOTO => {
+            let non_mergeable_states: BTreeSet<StateID> = match LR_MODE {
+                LRMode::LALR_EX_GOTO => goto_item_sets
+                    .iter()
+                    .filter_map(|item_set| item_set_map.get_by_left(item_set).copied())
+                    .collect(),
+                LRMode::LALR => BTreeSet::new(),
+                LRMode::LR1 => unreachable!(),
+            };
+            let compatible_pairs = find_compatible_states(&item_set_map, &non_mergeable_states);
+            (final_table, item_set_map, start_state_id) =
+                merge_compatible_states(&final_table, &item_set_map, start_state_id, &compatible_pairs);
+        }
+        LRMode::LR1 => {}
     }
 
     crate::debug!(2, "Done generating GLR parser");

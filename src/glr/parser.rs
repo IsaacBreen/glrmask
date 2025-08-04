@@ -987,44 +987,46 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
-        if LR_MODE != LRMode::LR1 {
-            return None;
-        }
-        if Some(token_id) == self.parser.ignore_terminal_id {
-            timeit!("GLRParserState::has_action_for::ignore_token", {
-                crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
-                // return Some(self.active_state.stack.allowed_llm_tokens());
-                return Some(LLMTokenBV::max_ones());
-            });
-        }
-        // let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-        // self.active_state.hash(&mut hasher);
-        // let self_hash = hasher.finish();
-        // println!("GLRParserState::has_action_for: {:?}", self_hash);
-        self.log_gss("has_action_for-start", token_id, false, false);
-        let mut llm_tokens = LLMTokenBV::zeros();
-        for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let row = &self.parser.table[&peek.edge_value().state_id];
-            let shifts_and_reduces = match self.phase {
-                ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
-                ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
-            };
-            if let Some(action) = shifts_and_reduces.get(&token_id) {
-                crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
-                              self.parser.terminal_map.get_by_right(&token_id).unwrap(),
-                              peek.edge_value().state_id.0, action);
-                // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
-                timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
-                    let peek_llm_tokens = timeit!(peek.resolved_llm_tokens_union());
-                    timeit!(llm_tokens |= peek_llm_tokens);
-                });
-            } else {
-                timeit!("GLRParserState::has_action_for::no_action_found", {
-                    crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
-                });
+        match LR_MODE {
+            LRMode::LR1 => {
+                if Some(token_id) == self.parser.ignore_terminal_id {
+                    timeit!("GLRParserState::has_action_for::ignore_token", {
+                        crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
+                        // return Some(self.active_state.stack.allowed_llm_tokens());
+                        return Some(LLMTokenBV::max_ones());
+                    });
+                }
+                // let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+                // self.active_state.hash(&mut hasher);
+                // let self_hash = hasher.finish();
+                // println!("GLRParserState::has_action_for: {:?}", self_hash);
+                self.log_gss("has_action_for-start", token_id, false, false);
+                let mut llm_tokens = LLMTokenBV::zeros();
+                for peek in GSSNode::peek_iter(&self.active_state.stack) {
+                    let row = &self.parser.table[&peek.edge_value().state_id];
+                    let shifts_and_reduces = match self.phase {
+                        ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
+                        ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
+                    };
+                    if let Some(action) = shifts_and_reduces.get(&token_id) {
+                        crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
+                                      self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                                      peek.edge_value().state_id.0, action);
+                        // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                        timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
+                            let peek_llm_tokens = timeit!(peek.resolved_llm_tokens_union());
+                            timeit!(llm_tokens |= peek_llm_tokens);
+                        });
+                    } else {
+                        timeit!("GLRParserState::has_action_for::no_action_found", {
+                            crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
+                        });
+                    }
+                }
+                Some(llm_tokens)
             }
+            LRMode::LALR | LRMode::LALR_EX_GOTO => None,
         }
-        Some(llm_tokens)
     }
 
     #[time_it("GLRParserState::step")]
