@@ -1343,17 +1343,19 @@ impl<'a> GrammarConstraintState<'a> {
         crate::profiler::reset();
 
         // Log the GSSs
-        crate::debug!(3, "Final GSS states after get_mask:");
-        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
-        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
-        let config = GSSPrintConfig {
-            labels: Some(&labels),
-            max_nodes: 300,
-            original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-            verbose: false,
-        };
-        print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
+        if GSS_LOGGING_ENABLED {
+            crate::debug!(3, "Final GSS states after get_mask:");
+            let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+            let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+            let config = GSSPrintConfig {
+                labels: Some(&labels),
+                max_nodes: 300,
+                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+                verbose: false,
+            };
+            print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
+        }
 
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
