@@ -13,7 +13,7 @@ use crate::interface::display_productions;
 
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
-type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+pub(crate) type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
 type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
 type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
 type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
@@ -25,7 +25,7 @@ pub type Table = BTreeMap<StateID, Row>;
 
 type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Stage2Row {
+pub(crate) struct Stage2Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeSet<Item>,
@@ -313,7 +313,7 @@ type Stage7Result = (
     StateID,
 );
 
-fn stage_1(productions: &[Production]) -> Stage1Result {
+fn stage_1(productions: &[Production], lr_mode: LRMode) -> Stage1Result {
     let start_production_id = 0;
     let initial_item = Item {
         production: productions[start_production_id].clone(),
@@ -326,6 +326,17 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
+    let item_sets_that_appear_in_lalr_gotos: Option<BTreeSet<BTreeSet<Item>>> = match lr_mode {
+        LRMode::LALR_EX_GOTO => Some({
+            let stage_1_table = stage_1(&productions, LRMode::LALR);
+            let stage_2_table = stage_2(stage_1_table, productions);
+            let item_sets_that_appear_in_lalr_gotos = BTreeSet::new();
+            for item_set in stage_2_table.keys() {
+        }),
+        LRMode::LALR => None,
+        LRMode::LR1 => None,
+    };
+
     let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
@@ -335,7 +346,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
             continue;
         }
 
-        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
+        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets, &item_sets_that_appear_in_lalr_gotos, lr_mode);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
@@ -865,7 +876,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions);
+    let stage_1_table = stage_1(&productions, LR_MODE);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);

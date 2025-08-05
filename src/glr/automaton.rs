@@ -1,6 +1,7 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use crate::glr::table::Stage2Table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Nullability {
@@ -258,8 +259,10 @@ pub fn compute_closure(
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-
+    item_sets_that_appear_in_lalr_gotos: &Option<BTreeSet<BTreeSet<Item>>>,
+    lr_mode: LRMode,
 ) -> BTreeSet<Item> {
+    assert_eq!(item_sets_that_appear_in_lalr_gotos.is_some(), lr_mode == LRMode::LALR_EX_GOTO);
     // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
@@ -282,7 +285,7 @@ pub fn compute_closure(
         }
     }
 
-    match LR_MODE {
+    match lr_mode {
         LRMode::LALR | LRMode::LALR_EX_GOTO => {
             let mut lalr_closure = BTreeSet::new();
             let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
