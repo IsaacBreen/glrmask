@@ -1155,7 +1155,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |glr_s, grammar_token_opt, dest_map| {
-                if true {
+                if false {
                     timeit!("get_mask try to avoid step for no additional llm tokens", {
                     let mut all_edge_llm_tokens = HybridBitset::zeros();
                     for edge_llm_tokens_bv in dest_map.values() {
@@ -1185,35 +1185,35 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 timeit!(format!("get_mask step_fn - end only? {}", num_end > 0 && num_non_end == 0), {
-                    if num_non_end == 0 {
-                        if let Some(gtid) = grammar_token_opt {
-                            // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
-                            // crate::debug!(3, "Step for grammar token {:?} with only end nodes, GSS stats: {:#?}", gtid, stats);
-                            // Perhaps we can avoid stepping by calling `has_action_for`
-                            match glr_s.has_action_for(*gtid) {
-                                Some(glr_s_llm_tokens) => {
-                                    timeit!(format!("get_mask step_fn - has_action_for"), {
-                                        // This token will succeed
-                                        crate::debug!(4, "Step with grammar token {:?} has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid);
-                                        let mut edge_llm_tokens = HybridBitset::zeros();
-                                        for edge_llm_tokens_bv in dest_map.values() {
-                                            edge_llm_tokens |= edge_llm_tokens_bv;
-                                        }
-                                        let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
-                                        crate::debug!(4, "Adding tokens {:?} to final mask", llm_tokens);
-                                        *final_mask_internal.borrow_mut() |= llm_tokens;
-                                        return Vec::new();
-                                    });
-                                },
-                                None => {
-                                    timeit!(format!("get_mask step_fn - has_action_for - inconclusive"), {
-                                        // Inconclusive
-                                        crate::debug!(4, "Inconclusive step for grammar token {:?}, no action found.", gtid);
-                                    });
-                                },
-                            }
-                        }
-                    }
+                    // if num_non_end == 0 {
+                    //     if let Some(gtid) = grammar_token_opt {
+                    //         // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                    //         // crate::debug!(3, "Step for grammar token {:?} with only end nodes, GSS stats: {:#?}", gtid, stats);
+                    //         // Perhaps we can avoid stepping by calling `has_action_for`
+                    //         match glr_s.has_action_for(*gtid) {
+                    //             Some(glr_s_llm_tokens) => {
+                    //                 timeit!(format!("get_mask step_fn - has_action_for"), {
+                    //                     // This token will succeed
+                    //                     crate::debug!(4, "Step with grammar token {:?} has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid);
+                    //                     let mut edge_llm_tokens = HybridBitset::zeros();
+                    //                     for edge_llm_tokens_bv in dest_map.values() {
+                    //                         edge_llm_tokens |= edge_llm_tokens_bv;
+                    //                     }
+                    //                     let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
+                    //                     crate::debug!(4, "Adding tokens {:?} to final mask", llm_tokens);
+                    //                     *final_mask_internal.borrow_mut() |= llm_tokens;
+                    //                     return Vec::new();
+                    //                 });
+                    //             },
+                    //             None => {
+                    //                 timeit!(format!("get_mask step_fn - has_action_for - inconclusive"), {
+                    //                     // Inconclusive
+                    //                     crate::debug!(4, "Inconclusive step for grammar token {:?}, no action found.", gtid);
+                    //                 });
+                    //             },
+                    //         }
+                    //     }
+                    // }
 
                     let mut results = Vec::new();
                     let mut glr_s = glr_s.clone();
