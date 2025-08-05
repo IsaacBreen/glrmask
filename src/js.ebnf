@@ -144,7 +144,8 @@ exponentiation_expression ::= unary_expression ( '**' exponentiation_expression 
 
 unary_expression ::=
     postfix_expression
-  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+  //| ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+  | ( 'delete' | 'void' | 'typeof' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
   ;
 
 postfix_expression ::=
