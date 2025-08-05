@@ -1,3 +1,5 @@
+!!!!!!!!!!!!!true
+
 class Dog extends Animal {
     constructor(name, breed) {
         super(name); // Call to super()
