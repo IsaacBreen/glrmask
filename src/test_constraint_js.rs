@@ -536,7 +536,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         });
         println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
 
-        gpt2_raw_vocab.push("---".to_string()); // Add a specific token for testing
+        gpt2_raw_vocab.push("-----".to_string()); // Add a specific token for testing
 
         // Filter 2: Keep only tokens where all alphabetic chars are 'a'
         // gpt2_raw_vocab.retain(|s| {
