@@ -278,7 +278,7 @@ REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 //)* ;
 
 //template_literal ::= '';
-template_literal ::= '`' 'asdfasdfasdfasdf' '`';
+//template_literal ::= '`' 'asdfasdfasdfasdf' '`';
 
 //template_literal ::= TEMPLATE_LITERAL ;
 //TEMPLATE_LITERAL ::= '`' TEMPLATE_CHAR+ '`' ;
@@ -289,9 +289,9 @@ template_literal ::= '`' 'asdfasdfasdfasdf' '`';
 //TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
 //TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
-//template_literal ::= '`' TEMPLATE_CHARS '`' ;
-//TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
-//TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+template_literal ::= '`' TEMPLATE_CHARS '`' ;
+TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
+TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
 //template_literal ::= 'asdfasdfasdfasdfasdfsaf' ;
 
