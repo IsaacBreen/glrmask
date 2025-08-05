@@ -1,4 +1,4 @@
-!!!!!!!!!!!!!true
+------------------x
 
 class Dog extends Animal {
     constructor(name, breed) {

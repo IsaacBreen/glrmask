@@ -284,9 +284,9 @@ REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 //TEMPLATE_LITERAL ::= '`' TEMPLATE_CHAR+ '`' ;
 //TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
-//template_literal ::= TEMPLATE_LITERAL ;
-//TEMPLATE_LITERAL ::= '`' TEMPLATE_CHARS '`' ;
-template_literal ::= '`' TEMPLATE_CHARS '`' ;
+template_literal ::= TEMPLATE_LITERAL ;
+TEMPLATE_LITERAL ::= '`' TEMPLATE_CHARS '`' ;
+//template_literal ::= '`' TEMPLATE_CHARS '`' ;
 TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
 TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
