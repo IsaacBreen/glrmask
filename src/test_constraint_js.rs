@@ -551,7 +551,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
         // Filter 3: Keep only tokens that contain at least one '-'
-        // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
+        gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
 
         // Option 3: Set to a few specific tokens
         // gpt2_raw_vocab = vec![
