@@ -7,6 +7,14 @@ class Dog extends Animal {
     // Overriding method
     speak() {
         super.speak(); // Call to super method
+        console.log("${this.name} barks.");
+        console.log("${this.name} barks.");
+        console.log("${this.name} barks.");
+        console.log("${this.name} barks.");
+        console.log("${this.name} barks.");
+        console.log("${this.name} barks.");
+        console.log(`${this.name} barks.`);
+        console.log(`${this.name} barks.`);
         console.log(`${this.name} barks.`);
         console.log(`${this.name} barks.`);
         console.log(`${this.name} barks.`);
