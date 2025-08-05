@@ -263,19 +263,23 @@ REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 //TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 //template_substitution ::= '${' expression '}' ;
 
-template_literal ::= TEMPLATE_START template_middle* TEMPLATE_END ;
-TEMPLATE_START ::= '`' ;
-TEMPLATE_END ::= TEMPLATE_FILL '$'? '`' ;
-TEMPLATE_MIDDLE ::= TEMPLATE_FILL '$' '{' ;
-template_middle ::= TEMPLATE_MIDDLE expression '}' ;
-TEMPLATE_FILL ::= (
-    [^`$\\]
-  | '\\' .
-  | '$' (
-      [^`\\]
-    | '\\' .
-    )
-)* ;
+//template_literal ::= TEMPLATE_START template_middle* TEMPLATE_END ;
+//TEMPLATE_START ::= '`' ;
+//TEMPLATE_END ::= TEMPLATE_FILL '$'? '`' ;
+//TEMPLATE_MIDDLE ::= TEMPLATE_FILL '$' '{' ;
+//template_middle ::= TEMPLATE_MIDDLE expression '}' ;
+//TEMPLATE_FILL ::= (
+//    [^`$\\]
+//  | '\\' .
+//  | '$' (
+//      [^`\\]
+//    | '\\' .
+//    )
+//)* ;
+
+template_literal ::= TEMPLATE_LITERAL ;
+TEMPLATE_LITERAL ::= '`' TEMPLATE_CHAR+ '`' ;
+TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
 // Identifiers
 IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
