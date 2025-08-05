@@ -8,6 +8,31 @@ class Dog extends Animal {
     speak() {
         super.speak(); // Call to super method
         console.log(`${this.name} barks.`);
+        console.log(`${this.name} barks.`);
+        console.log(`${this.name} barks.`);
+        console.log(`${this.name} barks.`);
+        console.log(`${this.name} barks.`);
+        console.log(`${this.name} barks.`);
+    }
+
+    // Getter
+    get description() {
+        return `${this.name} is a ${this.breed}.`;
+    }
+
+    // Getter
+    get description() {
+        return `${this.name} is a ${this.breed}.`;
+    }
+
+    // Getter
+    get description() {
+        return `${this.name} is a ${this.breed}.`;
+    }
+
+    // Getter
+    get description() {
+        return `${this.name} is a ${this.breed}.`;
     }
 
     // Getter
