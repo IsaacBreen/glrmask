@@ -288,7 +288,11 @@ REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 //TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
 //TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
-template_literal ::= 'asdfasdfasdfasdfasdfsaf' ;
+template_literal ::= '`' TEMPLATE_CHARS '`' ;
+TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
+TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+
+//template_literal ::= 'asdfasdfasdfasdfasdfsaf' ;
 
 // Identifiers
 IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
