@@ -258,10 +258,10 @@ REGULAR_EXPRESSION_LITERAL ::= '/' REGEX_BODY '/' REGEX_FLAGS? ;
 REGEX_BODY ::= ( [^/\n\r\\] | '\\' . )+ ; // Any char except /, newline, or backslash, or any escaped char.
 REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 
-//template_literal ::= '`' ( TEMPLATE_CHARS | template_substitution )* '`' ;
-//TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
-//TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
-//template_substitution ::= '${' expression '}' ;
+template_literal ::= '`' ( TEMPLATE_CHARS | template_substitution )* '`' ;
+TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
+TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+template_substitution ::= '${' expression '}' ;
 
 //template_literal ::= TEMPLATE_START template_middle* TEMPLATE_END ;
 //TEMPLATE_START ::= '`' ;
@@ -277,9 +277,10 @@ REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 //    )
 //)* ;
 
-template_literal ::= TEMPLATE_LITERAL ;
-TEMPLATE_LITERAL ::= '`' TEMPLATE_CHAR+ '`' ;
-TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+//template_literal ::= '';
+//template_literal ::= TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL ::= '`' TEMPLATE_CHAR+ '`' ;
+//TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
 // Identifiers
 IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
