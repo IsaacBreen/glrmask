@@ -350,7 +350,6 @@ impl GrammarConstraint {
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
-        helper.prune_on_no_terminal_follow();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -597,7 +596,7 @@ impl<'r> Precomputer<'r> {
     fn prune_on_no_terminal_follow(&mut self) {
         crate::debug!(2, "Pruning based on terminal follow sets.");
 
-        let terminal_follow_map = &self.terminal_follow_map;
+        let terminal_follow_map = self.terminal_follow_map;
         let ignore_terminal_id = self.ignore_terminal_id;
 
         // Collect all terminals from the tokenizer.
@@ -656,22 +655,23 @@ impl<'r> Precomputer<'r> {
     fn prune_dead_paths(&mut self) {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
-        let mut live_nodes_cache: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
-        let mut visited_for_dfs: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
+        // A cache of nodes to the set of "live" LLM tokens reachable from them.
+        let mut live_tokens_cache: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
 
         // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
         // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
         // is live and prunes its dead children.
         //
         // We can't use `BTreeMap::retain` directly because its closure would borrow `self`
-        // immutably (to call `is_live_and_prune`) while `retain` itself holds a mutable borrow
+        // immutably (to call `get_live_tokens_and_prune`) while `retain` itself holds a mutable borrow
         // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
         let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
             let root_wrapper = ArcPtrWrapper::new(root_arc.clone());
-            if self.is_live_and_prune(root_wrapper, &mut live_nodes_cache, &mut visited_for_dfs) {
-                None // This root is live, keep it.
+            // A root is dead if no live tokens are reachable from it.
+            if self.get_live_tokens_and_prune(root_wrapper, &mut live_tokens_cache).is_empty() {
+                Some(*sid) // This root is dead, mark for removal.
             } else {
-                Some(*sid) // This root is not live, mark for removal.
+                None // This root is live, keep it.
             }
         }).collect();
 
@@ -682,72 +682,91 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished pruning dead paths.");
     }
 
-    /// Recursively determines if a node is "live" (can reach an end node)
-    /// and prunes its children that are not live. This is a post-order traversal.
+    /// Recursively computes the set of "live" LLM tokens reachable from a node
+    /// and prunes its children that are not live or have dead token paths.
+    /// This is a post-order traversal.
     ///
     /// - `node_wrapper`: The node to check.
-    /// - `live_nodes_cache`: A cache of nodes already determined to be live.
-    /// - `visited_for_dfs`: Tracks nodes visited in the current DFS traversal to handle shared nodes and cycles.
+    /// - `live_tokens_cache`: A cache of nodes to their live token bitvectors.
     ///
-    /// Returns `true` if `node_wrapper` is live, `false` otherwise.
-    fn is_live_and_prune(
+    /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
+    fn get_live_tokens_and_prune(
         &self,
         node_wrapper: ArcPtrWrapper<Mutex<PrecomputeNode>>,
-        live_nodes_cache: &mut HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-        visited_for_dfs: &mut HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-    ) -> bool {
-        // If we've already determined this node is live, we're done.
-        if live_nodes_cache.contains(&node_wrapper) {
-            return true;
+        live_tokens_cache: &mut HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
+    ) -> LLMTokenBV {
+        // If we've already computed the live tokens for this node, return the cached result.
+        if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
+            return cached_bv.clone();
         }
-        // If we've visited this node in the DFS but it's not in the live cache,
-        // it means it was processed and found to be dead.
-        if visited_for_dfs.contains(&node_wrapper) {
-            return false;
-        }
-        visited_for_dfs.insert(node_wrapper.clone());
+        // Insert a temporary empty BV to break cycles. If we revisit this node during this
+        // recursion, it will return an empty set, which is correct as no new live paths
+        // have been found through it yet.
+        live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
 
         let node_arc = node_wrapper.as_arc();
 
-        // A node is live if it's an end node itself.
-        let is_this_node_an_end_node = node_arc.lock().unwrap().value.end;
-
-        // Or if it has at least one live child. We find out by recursing.
         // We must collect children before recursing to avoid holding the lock.
         let children_to_check: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = {
             let node_guard = node_arc.lock().unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
 
-        let mut live_children_for_this_node = HashSet::new();
-        let mut has_live_child = false;
-
+        // Recursively call on all unique children to populate the cache for them.
         for child_wrapper in children_to_check {
-            if self.is_live_and_prune(child_wrapper.clone(), live_nodes_cache, visited_for_dfs) {
-                has_live_child = true;
-                live_children_for_this_node.insert(child_wrapper);
-            }
+            self.get_live_tokens_and_prune(child_wrapper, live_tokens_cache);
         }
 
-        // Now that we know which children are live, prune the dead ones.
+        // Now that the cache is populated for all children, we can prune the current node.
+        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
         {
             let mut node_guard = node_arc.lock().unwrap();
+
+            // A node is live if it's an end node itself. The tokens that end here are
+            // on the edges pointing to this node.
+            if node_guard.value.end {
+                // This is the special "end node". It doesn't represent tokens itself,
+                // but it is the source of "liveness". The tokens are on the edges leading *to* it.
+                // When we calculate the live tokens for a parent, the edge BV leading to this
+                // end node will be considered fully live. For the end node itself, we can
+                // consider it to represent "all possible tokens" for the purpose of intersection,
+                // so that any edge leading to it is kept.
+                live_tokens_for_this_node = self.all_llm_tokens.clone();
+            }
+
             node_guard.children_mut().retain(|_edge_key, dest_map| {
-                dest_map.retain(|child_wrapper, _edge_value| {
-                    live_children_for_this_node.contains(child_wrapper)
+                dest_map.retain_mut(|child_wrapper, edge_value_bv| {
+                    // Get the live tokens reachable from the child node. This must be in the cache.
+                    let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
+                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+
+                    // The tokens on this edge that are actually live are the intersection
+                    // of the edge's original tokens and the live tokens from the child.
+                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                    if live_tokens_for_this_edge.is_empty() {
+                        false // Prune this destination, as no live paths go through it.
+                    } else {
+                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV.
+                        true // Keep this destination.
+                    }
                 });
                 // Keep the edge key only if it still has destinations.
                 !dest_map.is_empty()
             });
+
+            // The total live tokens for the current node are the union of all its (now narrowed) outgoing edge BVs.
+            for dest_map in node_guard.children().values() {
+                for edge_bv in dest_map.values() {
+                    live_tokens_for_this_node |= edge_bv;
+                }
+            }
         }
 
-        let is_node_live = is_this_node_an_end_node || has_live_child;
+        // Update the cache with the final computed live tokens for this node.
+        live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
 
-        if is_node_live {
-            live_nodes_cache.insert(node_wrapper);
-        }
-
-        is_node_live
+        live_tokens_for_this_node
     }
 
     fn merge_nodes(&mut self) {
