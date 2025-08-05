@@ -735,7 +735,7 @@ impl<'r> Precomputer<'r> {
             }
 
             node_guard.children_mut().retain(|_edge_key, dest_map| {
-                dest_map.retain_mut(|child_wrapper, edge_value_bv| {
+                dest_map.retain(|child_wrapper, edge_value_bv| {
                     // Get the live tokens reachable from the child node. This must be in the cache.
                     let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
                         .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
