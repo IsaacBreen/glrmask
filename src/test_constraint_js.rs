@@ -544,9 +544,9 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
                 if b.is_ascii_alphabetic() {
                     b.to_ascii_lowercase() == b'a'
                 } else {
-                    true
+                    // true
+                    b"- &=a*;#[(:".contains(&b)
                 }
-                // b"- &=a".contains(&b)
             })
         });
         println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
