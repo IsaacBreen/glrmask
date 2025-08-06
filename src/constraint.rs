@@ -1290,7 +1290,9 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(4, "Processing precomputed node data: {:?}", precomputed_node_data);
                     if precomputed_node_data.value.end {
                         let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                        crate::debug!(4, "Precomputed node data is an end node, adding active tokens {:?} to final mask", glr_active_tokens);
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                        crate::debug!(4, "Final mask after adding end node tokens: {:?}", final_mask_internal.borrow());
                         false
                     } else {
                         let mut num_outgoing_edges_that_lead_to_non_end_nodes = 0;
