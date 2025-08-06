@@ -525,34 +525,34 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     let vocab_file_name = "gpt2_vocab.json";
     let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
-    if false { // Manual vocabulary modifications for debugging
+    if true { // Manual vocabulary modifications for debugging
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 2;
+        let x = 4;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
         });
         println!("  - After length filter (<= {x}): {} tokens remaining.", gpt2_raw_vocab.len());
 
-        gpt2_raw_vocab.push("-----".to_string()); // Add a specific token for testing
-
-        // Filter 2: Keep only tokens where all alphabetic chars are 'a'
-        gpt2_raw_vocab.retain(|s| {
-            s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
-                // if b.is_ascii_alphabetic() {
-                //     // b.to_ascii_lowercase() == b'a'
-                //     false
-                // } else {
-                //     // true
-                //     b"-` &=a*;#[(:`".contains(&b)
-                //     // !b" &=a*;#[(:{}()[]?|<>+%~!.,^".contains(&b)
-                // }
-                b"-`".contains(&b)
-            })
-        });
-        println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
+        // gpt2_raw_vocab.push("-----".to_string()); // Add a specific token for testing
+        //
+        // // Filter 2: Keep only tokens where all alphabetic chars are 'a'
+        // gpt2_raw_vocab.retain(|s| {
+        //     s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
+        //         // if b.is_ascii_alphabetic() {
+        //         //     // b.to_ascii_lowercase() == b'a'
+        //         //     false
+        //         // } else {
+        //         //     // true
+        //         //     b"-` &=a*;#[(:`".contains(&b)
+        //         //     // !b" &=a*;#[(:{}()[]?|<>+%~!.,^".contains(&b)
+        //         // }
+        //         b"-`".contains(&b)
+        //     })
+        // });
+        // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
         // Filter 3: Keep only tokens that contain at least one '-'
         // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
