@@ -220,6 +220,7 @@ pub fn compute_follow_sets_for_nonterminals(
     follow_sets
 }
 
+#[time_it]
 pub fn compute_first_set_for_item(
     item: &Item,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
@@ -280,9 +281,9 @@ pub fn compute_closure<'a>(
     while let Some(item) = worklist.pop_front() {
         if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
             if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
+                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
                 for &prod in prods_for_nt {
-                    let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
-                    for lookahead in lookaheads {
+                    for lookahead in lookaheads.iter().cloned() {
                         let new_item = Item {
                             production: prod.clone(),
                             dot_position: 0,
