@@ -149,8 +149,7 @@ unary_expression ::=
   ;
 
 postfix_expression ::=
-    //left_hand_side_expression ( '++' | '--' )?
-    left_hand_side_expression ( '++' )?
+    left_hand_side_expression ( '++' | '--' )?
   ;
 
 left_hand_side_expression ::=
