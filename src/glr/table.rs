@@ -9,6 +9,7 @@ pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::time_it;
+use std::sync::Arc;
 use crate::interface::display_productions;
 // Added for derive macro pattern
 
@@ -318,7 +319,7 @@ type Stage7Result = (
 fn stage_1(productions: &[Production]) -> Stage1Result {
     let start_production_id = 0;
     let initial_item = Item {
-        production: productions[start_production_id].clone(),
+        production: Arc::new(productions[start_production_id].clone()),
         dot_position: 0,
         lookahead: None,
     };
@@ -329,9 +330,9 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Arc<Production>>> = BTreeMap::new();
     for p in productions {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(Arc::new(p.clone()));
     }
 
     let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here
@@ -437,7 +438,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
         for (terminal, item_set) in row.reduces {
             let mut prod_ids = BTreeSet::new();
             for item in item_set {
-                let prod_id = production_ids.get(&item.production).unwrap();
+                let prod_id = production_ids.get(&*item.production).unwrap();
                 prod_ids.insert(*prod_id);
             }
             reduces.insert(terminal.clone(), prod_ids);
@@ -612,7 +613,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
     }
 
     let initial_item = Item {
-        production: productions[start_production_id].clone(),
+        production: Arc::new(productions[start_production_id].clone()),
         dot_position: 0,
         lookahead: None,
     };
