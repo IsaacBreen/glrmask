@@ -1009,9 +1009,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
                     };
                     if let Some(action) = shifts_and_reduces.get(&token_id) {
-                        crate::debug!(4, "Found action for token '{}' in state {}: {:?}",
+                        crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
                                       self.parser.terminal_map.get_by_right(&token_id).unwrap(),
-                                      peek.edge_value().state_id.0, action);
+                                      peek.edge_value().state_id.0, action, peek.resolved_llm_tokens_union());
                         // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
                         timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
                             let peek_llm_tokens = timeit!(peek.resolved_llm_tokens_union());
