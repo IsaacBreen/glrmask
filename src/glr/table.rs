@@ -330,7 +330,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
-    crate::debug!(1, "Starting stage 1 with initial item set: {:?}", initial_item_set);
+    crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
         let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
         let splits = split_on_dot(&closure);
