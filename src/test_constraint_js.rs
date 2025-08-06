@@ -545,7 +545,8 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
                     b.to_ascii_lowercase() == b'a'
                 } else {
                     // true
-                    b"- &=a*;#[(:".contains(&b)
+                    // b"- &=a*;#[(:".contains(&b)
+                    !b" &=a*;#[(:".contains(&b)
                 }
             })
         });
