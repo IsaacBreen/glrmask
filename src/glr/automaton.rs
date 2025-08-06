@@ -213,7 +213,6 @@ pub fn compute_follow_sets_for_nonterminals(
                     }
                 }
             }
-            }
         }
     }
 
@@ -278,17 +277,18 @@ pub fn compute_closure<'a>(
 
     while let Some(item) = worklist.pop_front() {
         if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
-            if let Some(prods_for_nt) = prods_by_lhs.get(nt) {
+            if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
                 for &prod in prods_for_nt {
                     let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
-                for lookahead in lookaheads {
-                    let new_item = Item {
-                        production: prod.clone(),
-                        dot_position: 0,
-                        lookahead,
-                    };
-                    if closure.insert(new_item.clone()) {
-                        worklist.push_back(new_item);
+                    for lookahead in lookaheads {
+                        let new_item = Item {
+                            production: prod.clone(),
+                            dot_position: 0,
+                            lookahead,
+                        };
+                        if closure.insert(new_item.clone()) {
+                            worklist.push_back(new_item);
+                        }
                     }
                 }
             }
