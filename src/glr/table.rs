@@ -326,13 +326,19 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
+    // Pre-computation for compute_closure: group productions by their LHS non-terminal.
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    }
+
     let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
     crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
-        let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
+        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 

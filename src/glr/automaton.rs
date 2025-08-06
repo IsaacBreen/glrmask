@@ -213,6 +213,7 @@ pub fn compute_follow_sets_for_nonterminals(
                     }
                 }
             }
+            }
         }
     }
 
@@ -221,18 +222,23 @@ pub fn compute_follow_sets_for_nonterminals(
 
 pub fn compute_first_set_for_item(
     item: &Item,
-    productions: &[Production],
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
+    cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
 ) -> BTreeSet<Option<Terminal>> {
-    if let Some((symbol, next_item)) = item.next() {
+    if let Some(cached) = cache.get(item) {
+        return cached.clone();
+    }
+
+    let result = if let Some((symbol, next_item)) = item.next() {
         match symbol {
             Symbol::Terminal(t) => {
                 // If the next symbol is a terminal, the first is just that terminal
                 BTreeSet::from([Some(t)])
             }
             Symbol::NonTerminal(nt) => {
-                let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default().into_iter()
+                let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default()
+                    .into_iter()
                     .map(Some)
                     .collect();
 
@@ -240,9 +246,9 @@ pub fn compute_first_set_for_item(
                     // If the non-terminal is nullable, we also need to include the firsts for the next item
                     let next_firsts = compute_first_set_for_item(
                         &next_item,
-                        productions,
                         first_sets,
                         nullable_nonterminals,
+                        cache,
                     );
                     first_set.extend(next_firsts);
                 }
@@ -252,25 +258,29 @@ pub fn compute_first_set_for_item(
     } else {
         // The dot is at the end. The first is the lookahead.
         BTreeSet::from([item.lookahead.clone()])
-    }
+    };
+
+    cache.insert(item.clone(), result.clone());
+    result
 }
 
-pub fn compute_closure(
+pub fn compute_closure<'a>(
     items: &BTreeSet<Item>,
-    productions: &[Production],
+    prods_by_lhs: &BTreeMap<NonTerminal, Vec<&'a Production>>,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
-
 ) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+    let mut first_set_cache: BTreeMap<Item, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
     while let Some(item) = worklist.pop_front() {
         if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
-            for prod in productions.iter().filter(|p| p.lhs == nt) {
-                let lookaheads = compute_first_set_for_item(&next_item, productions, &first_sets, &nullable_nonterminals);
+            if let Some(prods_for_nt) = prods_by_lhs.get(nt) {
+                for &prod in prods_for_nt {
+                    let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
                 for lookahead in lookaheads {
                     let new_item = Item {
                         production: prod.clone(),
