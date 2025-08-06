@@ -1200,7 +1200,7 @@ impl<'a> GrammarConstraintState<'a> {
                                             edge_llm_tokens |= edge_llm_tokens_bv;
                                         }
                                         let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
-                                        crate::debug!(4, "Adding tokens {:?} to final mask", llm_tokens);
+                                        crate::debug!(4, "Adding active tokens {:?} to final mask", llm_tokens);
                                         *final_mask_internal.borrow_mut() |= llm_tokens;
                                         crate::debug!(4, "Final mask after adding tokens: {:?}", final_mask_internal.borrow());
                                         return Vec::new();
