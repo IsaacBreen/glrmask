@@ -8,6 +8,7 @@ use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use std::sync::Arc;
 use profiler_macro::time_it;
 use crate::interface::display_productions;
 // Added for derive macro pattern
@@ -315,23 +316,24 @@ type Stage7Result = (
 );
 
 #[time_it]
-fn stage_1(productions: &[Production]) -> Stage1Result {
+fn stage_1(productions: &[Arc<Production>]) -> Stage1Result {
     let start_production_id = 0;
     let initial_item = Item {
-        production: productions[start_production_id].clone(),
+        production: productions[start_production_id].clone(), // Arc clone
         dot_position: 0,
         lookahead: None,
     };
     let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
-    let first_sets = compute_first_sets_for_nonterminals(productions);
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+    let productions_deref: Vec<_> = productions.iter().map(|p| (**p).clone()).collect();
+    let first_sets = compute_first_sets_for_nonterminals(&productions_deref);
+    let nullable_nonterminals = compute_nullable_nonterminals(&productions_deref);
+    let follow_sets = compute_follow_sets_for_nonterminals(&productions_deref, &first_sets, &nullable_nonterminals);
 
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Arc<Production>>> = BTreeMap::new();
     for p in productions {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
     }
 
     let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here
@@ -360,7 +362,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     transitions
 }
 
-fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+fn stage_2(stage_1_table: Stage1Table) -> Stage2Result {
     let mut stage_2_table = BTreeMap::new();
     for (item_set, transitions) in stage_1_table {
         let mut shifts = BTreeMap::new();
@@ -396,7 +398,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     stage_2_table
 }
 
-fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+fn stage_3(stage_2_table: Stage2Table) -> Stage3Result {
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
@@ -422,11 +424,11 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
     stage_3_table
 }
 
-fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-    let production_ids: BTreeMap<Production, ProductionID> = productions
+fn stage_4(stage_3_table: Stage3Table, productions: &[Arc<Production>]) -> Stage4Result {
+    let production_ids: BTreeMap<Arc<Production>, ProductionID> = productions
         .iter()
         .enumerate()
-        .map(|(i, p)| (p.clone(), ProductionID(i)))
+        .map(|(i, p)| (p.clone(), ProductionID(i))) // Arc clone
         .collect();
 
     let mut stage_4_table = BTreeMap::new();
@@ -456,7 +458,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     stage_4_table
 }
 
-fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+fn stage_5(stage_4_table: Stage4Table, terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
     // Stage 5 turns
     //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
     // into
@@ -540,7 +542,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+fn stage_7(stage_6_table: Stage6Table, productions: &[Arc<Production>], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let start_production_id = 0;
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
@@ -612,7 +614,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
     }
 
     let initial_item = Item {
-        production: productions[start_production_id].clone(),
+        production: productions[start_production_id].clone(), // Arc clone
         dot_position: 0,
         lookahead: None,
     };
@@ -873,25 +875,27 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions);
+    let productions_arc: Vec<Arc<Production>> = productions.iter().cloned().map(Arc::new).collect();
+
+    let stage_1_table = stage_1(&productions_arc);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
-    let stage_2_table = stage_2(stage_1_table, &productions);
+    let stage_2_table = stage_2(stage_1_table);
     crate::debug!(6, &stage_2_table);
     crate::debug!(2, "Stage 3");
-    let stage_3_table = stage_3(stage_2_table, &productions);
+    let stage_3_table = stage_3(stage_2_table);
     crate::debug!(6, &stage_3_table);
     crate::debug!(2, "Stage 4");
-    let stage_4_table = stage_4(stage_3_table, &productions);
+    let stage_4_table = stage_4(stage_3_table, &productions_arc);
     crate::debug!(6, &stage_4_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
+    let stage_5_table = stage_5(stage_4_table, &terminal_map);
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions_arc, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);

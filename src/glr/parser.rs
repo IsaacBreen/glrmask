@@ -359,10 +359,10 @@ impl GLRParser {
             if items.is_empty() {
                 writeln!(f, "{}  (None)", indent)?;
             } else {
-                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+                let mut grouped_items: BTreeMap<(Arc<Production>, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                 for item in items {
                     grouped_items
-                        .entry((&item.production, item.dot_position))
+                        .entry((item.production.clone(), item.dot_position))
                         .or_default()
                         .insert(item.lookahead.clone());
                 }

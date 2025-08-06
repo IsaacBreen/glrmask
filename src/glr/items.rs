@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 // Added for derive macro pattern
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
-    pub production: Production,
+    pub production: Arc<Production>,
     pub dot_position: usize,
     pub lookahead: Option<Terminal>,
 }
@@ -25,13 +26,13 @@ impl JSONConvertible for Item {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let production = obj.remove("production").ok_or_else(|| "Missing field production for Item".to_string())
+                let production: Production = obj.remove("production").ok_or_else(|| "Missing field production for Item".to_string())
                                     .and_then(Production::from_json)?;
                 let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
                                       .and_then(usize::from_json)?;
                 let lookahead = obj.remove("lookahead").ok_or_else(|| "Missing field lookahead for Item".to_string())
                                       .and_then(Option::<Terminal>::from_json)?;
-                Ok(Item { production, dot_position, lookahead })
+                Ok(Item { production: Arc::new(production), dot_position, lookahead })
             }
             _ => Err("Expected JSONNode::Object for Item".to_string()),
         }
