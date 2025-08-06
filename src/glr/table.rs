@@ -339,7 +339,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
             row.insert(symbol.clone(), item_set.clone());
             if symbol.is_some() {
                 let goto_set = compute_goto(item_set);
-                if transitions.contains_key(&goto_set) {
+                if !transitions.contains_key(&goto_set) {
                     worklist.push_back(goto_set);
                 }
             }
