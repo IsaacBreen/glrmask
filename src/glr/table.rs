@@ -335,9 +335,9 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
         prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
     }
 
-    let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here
-
-    let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+    let mut worklist = VecDeque::from([initial_item_set.clone()]);
+    let mut transitions: Stage1Table = BTreeMap::new();
+    let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
 
     crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
@@ -345,17 +345,17 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
-        for (symbol, item_set) in &splits {
-            row.insert(symbol.clone(), item_set.clone());
+        for (symbol, items_in_split) in &splits {
+            row.insert(symbol.clone(), items_in_split.clone());
             if symbol.is_some() {
-                let goto_set = compute_goto(item_set);
-                if !transitions.contains_key(&goto_set) {
+                let goto_set = compute_goto(items_in_split);
+                if visited_kernels.insert(goto_set.clone()) {
                     worklist.push_back(goto_set);
                 }
             }
         }
 
-        transitions.insert(item_set.clone(), row);
+        transitions.insert(item_set, row);
     }
 
     transitions
