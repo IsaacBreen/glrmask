@@ -525,7 +525,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     let vocab_file_name = "gpt2_vocab.json";
     let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
-    if true { // Manual vocabulary modifications for debugging
+    if false { // Manual vocabulary modifications for debugging
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
