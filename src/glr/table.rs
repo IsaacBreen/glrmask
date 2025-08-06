@@ -338,7 +338,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let mut worklist = VecDeque::from([initial_item_set.clone()]);
     let mut transitions: Stage1Table = BTreeMap::new();
     let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
-    
+
     crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
         let lalr_mode = match LR_MODE {

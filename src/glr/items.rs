@@ -72,53 +72,29 @@ impl Item {
         self.dot_position == self.production.rhs.len()
     }
 
-    // pub fn next(&self) -> Option<(Symbol, Self)> {
-    //     if let Some(symbol) = self.production.rhs.get(self.dot_position) {
-    //         Some((
-    //             symbol.clone(),
-    //             Item {
-    //             production: self.production.clone(),
-    //             dot_position: self.dot_position + 1,
-    //             lookahead: self.lookahead.clone(),
-    //             },
-    //         ))
-    //     } else {
-    //         None
-    //     }
-    // }
-    //
-    // pub fn prev(&self) -> Option<(Symbol, Self)> {
-    //     if self.dot_position > 0 {
-    //         let symbol = self.production.rhs[self.dot_position - 1].clone();
-    //         Some((
-    //             symbol,
-    //             Item {
-    //                 production: self.production.clone(),
-    //                 dot_position: self.dot_position - 1,
-    //                 lookahead: self.lookahead.clone(),
-    //             },
-    //         ))
-    //     } else {
-    //         None
-    //     }
-    // }
-
     pub fn next(&self) -> Option<(Symbol, Self)> {
-        self.offset(1)
-    }
-
-    pub fn prev(&self) -> Option<(Symbol, Self)> {
-        self.offset(-1)
-    }
-
-    fn offset(&self, offset: isize) -> Option<(Symbol, Self)> {
-        let new_dot_position = usize::try_from(isize::try_from(self.dot_position).ok()? + offset).ok()?;
-        if let Some(symbol) = self.production.rhs.get(new_dot_position) {
+        if let Some(symbol) = self.production.rhs.get(self.dot_position) {
             Some((
                 symbol.clone(),
                 Item {
                     production: self.production.clone(),
-                    dot_position: new_dot_position as usize,
+                    dot_position: self.dot_position + 1,
+                    lookahead: self.lookahead.clone(),
+                },
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub fn prev(&self) -> Option<(Symbol, Self)> {
+        if self.dot_position > 0 {
+            let symbol = self.production.rhs[self.dot_position - 1].clone();
+            Some((
+                symbol,
+                Item {
+                    production: self.production.clone(),
+                    dot_position: self.dot_position - 1,
                     lookahead: self.lookahead.clone(),
                 },
             ))
