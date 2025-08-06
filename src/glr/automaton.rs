@@ -221,7 +221,21 @@ pub fn compute_follow_sets_for_nonterminals(
 }
 
 #[time_it]
-pub fn compute_first_set_for_item(
+fn compute_first_set_for_item(
+    item: &Item,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+    nullable_nonterminals: &BTreeSet<NonTerminal>,
+    cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+) -> BTreeSet<Option<Terminal>> {
+    _compute_first_set_for_item(
+        item,
+        first_sets,
+        nullable_nonterminals,
+        cache,
+    )
+}
+
+fn _compute_first_set_for_item(
     item: &Item,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
@@ -245,7 +259,7 @@ pub fn compute_first_set_for_item(
 
                 if nullable_nonterminals.contains(&nt) {
                     // If the non-terminal is nullable, we also need to include the firsts for the next item
-                    let next_firsts = compute_first_set_for_item(
+                    let next_firsts = _compute_first_set_for_item(
                         &next_item,
                         first_sets,
                         nullable_nonterminals,
