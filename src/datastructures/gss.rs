@@ -44,6 +44,7 @@ pub struct Acc {
     pub llm_tokens_intersection: HybridBitset,
     pub terminals_union: HybridL2Bitset,
     pub terminals_intersection: HybridL2Bitset,
+    pub needs_push_down: bool,
 }
 
 impl Acc {
@@ -54,6 +55,7 @@ impl Acc {
             llm_tokens_intersection: HybridBitset::max_ones(),
             terminals_union: HybridL2Bitset::all(),
             terminals_intersection: HybridL2Bitset::all(),
+            needs_push_down: false,
         }
     }
 
@@ -64,6 +66,7 @@ impl Acc {
             llm_tokens_intersection: llm_tokens,
             terminals_union: terminals.clone(),
             terminals_intersection: terminals,
+            needs_push_down: false,
         }
     }
 
@@ -73,6 +76,7 @@ impl Acc {
             llm_tokens_intersection: &from.llm_tokens_union & &to.llm_tokens_intersection,
             terminals_union: &from.terminals_union & &to.terminals_union,
             terminals_intersection: &from.terminals_union & &to.terminals_intersection,
+            needs_push_down: false,
         }
         // Acc {
         //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
@@ -88,6 +92,7 @@ impl Acc {
             llm_tokens_intersection: &lhs.llm_tokens_intersection & &rhs.llm_tokens_intersection,
             terminals_union: &lhs.terminals_union | &rhs.terminals_union,
             terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
+            needs_push_down: false,
         }
     }
 
@@ -508,7 +513,16 @@ impl GSSNode {
             return;
         }
 
-        let merged_acc = Arc::new(Acc::merge(&self.acc, &other.acc));
+        let mut merged_acc_val = Acc::merge(&self.acc, &other.acc);
+        let acc_changed = merged_acc_val.llm_tokens_union != self.acc.llm_tokens_union ||
+                          merged_acc_val.llm_tokens_intersection != self.acc.llm_tokens_intersection ||
+                          merged_acc_val.terminals_union != self.acc.terminals_union ||
+                          merged_acc_val.terminals_intersection != self.acc.terminals_intersection;
+
+        // If the acc changes, it needs to be pushed down to the newly merged children.
+        // It also needs pushdown if either of the parents already needed one.
+        merged_acc_val.needs_push_down = acc_changed || self.acc.needs_push_down || other.acc.needs_push_down;
+        let merged_acc = Arc::new(merged_acc_val);
         
         let mut self_predecessors = self.get_pushed_down_predecessors();
         let mut other_predecessors = other.get_pushed_down_predecessors();
@@ -555,6 +569,10 @@ impl GSSNode {
     }
 
     fn get_pushed_down_predecessors(&self) -> NodeMap {
+        if !self.acc.needs_push_down {
+            return self.predecessors.clone();
+        }
+
         let mut predecessors = self.predecessors.clone();
         for preds_by_depth in predecessors.values_mut() {
             for pred_vec in preds_by_depth.values_mut() {
@@ -567,10 +585,17 @@ impl GSSNode {
     }
 
     fn narrow_with_acc(node: &mut Arc<GSSNode>, acc: &Acc) {
-        let new_acc = Acc::narrow(&node.acc, acc);
-        if *node.acc == new_acc {
+        let mut new_acc = Acc::narrow(&node.acc, acc);
+        let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
+                          new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
+                          new_acc.terminals_union != node.acc.terminals_union ||
+                          new_acc.terminals_intersection != node.acc.terminals_intersection;
+
+        if !acc_changed {
             return;
         }
+        // The acc of this node has changed, so it needs to be pushed down to its own children later.
+        new_acc.needs_push_down = true;
         let new_node = GSSNode::new_with_map(Arc::new(new_acc), node.predecessors.clone());
         *node = Arc::new(new_node);
     }
@@ -712,7 +737,16 @@ fn prune_and_transform_recursive(
             memo.insert(node_ptr, None);
             None
         }
-        Some((new_local_acc, continue_recursion)) => {
+        Some((mut new_local_acc, continue_recursion)) => {
+            if !continue_recursion {
+                let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
+                                  new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
+                                  new_local_acc.terminals_union != node_arc.acc.terminals_union ||
+                                  new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection;
+                if acc_changed {
+                    new_local_acc.needs_push_down = true;
+                }
+            }
             let new_node_predecessors_map = if continue_recursion {
                 let mut new_predecessors_set = NodeSet::new();
                 for (edge_val, preds_by_depth) in &node_arc.predecessors {
