@@ -510,14 +510,16 @@ impl GSSNode {
 
         let merged_acc = Arc::new(Acc::merge(&self.acc, &other.acc));
         
-        let mut new_predecessors = self.predecessors.clone();
+        let mut self_predecessors = self.get_pushed_down_predecessors();
+        let mut other_predecessors = other.get_pushed_down_predecessors();
 
         // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
         // let other_predecessors_flattened: Vec<_> = other.predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
         // println!("new_predecessors_flattened: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
         // println!("other_predecessors_flattened: {:?}", print_gss_forest(&other_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
 
-        merge_node_maps(&mut new_predecessors, other.predecessors.clone(), merge_depth);
+
+        merge_node_maps(&mut self_predecessors, other_predecessors, merge_depth);
 
         // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
         // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
@@ -529,7 +531,7 @@ impl GSSNode {
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
 
-            for (edge_val, preds_by_depth) in new_predecessors {
+            for (edge_val, preds_by_depth) in self_predecessors {
                 let mut unified_preds_by_depth = BTreeMap::new();
                 for (depth, pred_vec) in preds_by_depth {
                     let mut unified_pred_vec = Vec::new();
@@ -547,9 +549,30 @@ impl GSSNode {
             }
             unified_predecessors
         } else {
-            new_predecessors
+            self_predecessors
         };
         *self = GSSNode::new_with_map(merged_acc, final_predecessors);
+    }
+
+    fn get_pushed_down_predecessors(&self) -> NodeMap {
+        let mut predecessors = self.predecessors.clone();
+        for preds_by_depth in predecessors.values_mut() {
+            for pred_vec in preds_by_depth.values_mut() {
+                for pred_arc in pred_vec.iter_mut() {
+                    Self::narrow_with_acc(pred_arc, &self.acc);
+                }
+            }
+        }
+        predecessors
+    }
+
+    fn narrow_with_acc(node: &mut Arc<GSSNode>, acc: &Acc) {
+        let new_acc = Acc::narrow(&node.acc, acc);
+        if *node.acc == new_acc {
+            return;
+        }
+        let new_node = GSSNode::new_with_map(Arc::new(new_acc), node.predecessors.clone());
+        *node = Arc::new(new_node);
     }
 
     pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
