@@ -1195,7 +1195,6 @@ impl<'a> GrammarConstraintState<'a> {
                                     timeit!(format!("get_mask step_fn - has_action_for"), {
                                         // This token will succeed
                                         crate::debug!(4, "Step with grammar token {:?} ({}) has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid, self.parent.parser.terminal_map.get_by_right(gtid).map_or("UNKNOWN_TERMINAL".to_string(), |s| s.to_string()));
-                                        crate::debug!(4, "Child node pointers: {:?}", dest_map.keys().map(|w| Arc::as_ptr(w.as_arc())).collect::<Vec<_>>());
                                         let mut edge_llm_tokens = HybridBitset::zeros();
                                         for edge_llm_tokens_bv in dest_map.values() {
                                             edge_llm_tokens |= edge_llm_tokens_bv;
