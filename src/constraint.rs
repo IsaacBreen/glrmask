@@ -1177,7 +1177,7 @@ impl<'a> GrammarConstraintState<'a> {
                 // Count num end nodes vs non end nodes
                 let mut num_end = 0;
                 let mut num_non_end = 0;
-                for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
+                for child_node_trie_data in dest_map.keys() {
                     if child_node_trie_data.as_arc().lock().unwrap().value.end {
                         num_end += 1;
                     } else {
