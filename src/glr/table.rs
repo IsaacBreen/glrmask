@@ -331,10 +331,6 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
     while let Some(item_set) = worklist.pop_front() {
-        if transitions.contains_key(&item_set) {
-            continue;
-        }
-
         let closure = compute_closure(&item_set, productions, &first_sets, &nullable_nonterminals, &follow_sets);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
@@ -343,7 +339,9 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
             row.insert(symbol.clone(), item_set.clone());
             if symbol.is_some() {
                 let goto_set = compute_goto(item_set);
-                worklist.push_back(goto_set);
+                if transitions.contains_key(&goto_set) {
+                    worklist.push_back(goto_set);
+                }
             }
         }
 
