@@ -540,13 +540,13 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
         // Filter 2: Keep only tokens where all alphabetic chars are 'a'
         gpt2_raw_vocab.retain(|s| {
-            s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
-                if b.is_ascii_alphabetic() {
-                    b.to_ascii_lowercase() == b'a'
-                } else {
-                    true
-                }
-                // b"- &=".contains(&b)
+            // s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").as_bytes().iter().all(|&b| {
+            //     if b.is_ascii_alphabetic() {
+            //         b.to_ascii_lowercase() == b'a'
+            //     } else {
+            //         true
+            //     }
+                b"- &=a".contains(&b)
             })
         });
         println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
