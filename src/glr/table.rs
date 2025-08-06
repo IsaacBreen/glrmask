@@ -330,9 +330,9 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Arc<Production>>> = BTreeMap::new();
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
     for p in productions {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(Arc::new(p.clone()));
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
     }
 
     let mut worklist = VecDeque::from([initial_item_set.clone()]); // Use initial_item_set here

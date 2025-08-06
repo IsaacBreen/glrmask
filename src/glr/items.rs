@@ -7,34 +7,11 @@ use std::sync::Arc;
 // Added for derive macro pattern
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
     pub production: Arc<Production>,
     pub dot_position: usize,
     pub lookahead: Option<Terminal>,
-}
-
-impl PartialEq for Item {
-    fn eq(&self, other: &Self) -> bool {
-        self.dot_position == other.dot_position &&
-        self.lookahead == other.lookahead &&
-        *self.production == *other.production
-    }
-}
-impl Eq for Item {}
-
-impl PartialOrd for Item {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Item {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.production.as_ref().cmp(other.production.as_ref())
-            .then_with(|| self.dot_position.cmp(&other.dot_position))
-            .then_with(|| self.lookahead.cmp(&other.lookahead))
-    }
 }
 
 // Manual impl for Item (could be derived)
