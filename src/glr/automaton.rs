@@ -158,7 +158,7 @@ pub fn compute_follow_sets_for_nonterminals(
     // Initialize for all non-terminals
     for production in productions {
         follow_sets.entry(production.lhs.clone()).or_default();
-        for symbol in &production.rhs {
+        for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
             if let Symbol::NonTerminal(nt) = symbol {
                 follow_sets.entry(nt.clone()).or_default();
             }
@@ -179,40 +179,37 @@ pub fn compute_follow_sets_for_nonterminals(
             let lhs = &production.lhs;
             let rhs = &production.rhs;
 
-            // Start with the FOLLOW set of the rule's LHS.
-            // This will be propagated to any non-terminals at the end of the rule.
-            let mut trailer = follow_sets.get(lhs).unwrap().clone();
+            for (i, symbol) in rhs.iter().enumerate() {
+                if let Symbol::NonTerminal(nt) = symbol {
+                    let old_len = follow_sets.get(nt).unwrap().len();
 
-            for symbol in rhs.iter().rev() {
-                match symbol {
-                    Symbol::Terminal(t) => {
-                        // The new trailer is just the FIRST set of this terminal.
-                        trailer = BTreeSet::from([Some(t.clone())]);
-                    }
-                    Symbol::NonTerminal(nt) => {
-                        // The FOLLOW set of the current non-terminal `nt` is updated with the trailer.
-                        let follow_nt = follow_sets.get_mut(nt).unwrap();
-                        let old_len = follow_nt.len();
-                        follow_nt.extend(trailer.iter().cloned());
-                        if follow_nt.len() != old_len {
-                            changed = true;
-                        }
-
-                        // Update the trailer for the next symbol to the left.
-                        if nullable_nonterminals.contains(nt) {
-                            // If `nt` is nullable, the new trailer is FIRST(nt) U old_trailer.
-                            if let Some(first_nt) = first_sets.get(nt) {
-                                trailer.extend(first_nt.iter().cloned().map(Some));
+                    let mut suffix_is_nullable = true;
+                    for next_symbol in &rhs[i + 1..] {
+                        match next_symbol {
+                            Symbol::Terminal(t_next) => {
+                                follow_sets.get_mut(nt).unwrap().insert(Some(t_next.clone()));
+                                suffix_is_nullable = false;
+                                break;
                             }
-                        } else {
-                            // If `nt` is not nullable, the new trailer is just FIRST(nt).
-                            trailer = first_sets.get(nt)
-                                .cloned()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(Some)
-                                .collect();
+                            Symbol::NonTerminal(nt_next) => {
+                                let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
+                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
+
+                                if !nullable_nonterminals.contains(nt_next) {
+                                    suffix_is_nullable = false;
+                                    break;
+                                }
+                            }
                         }
+                    }
+
+                    if suffix_is_nullable {
+                        let follow_lhs = follow_sets.get(lhs).unwrap().clone();
+                        follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
+                    }
+
+                    if follow_sets.get(nt).unwrap().len() != old_len {
+                        changed = true;
                     }
                 }
             }
