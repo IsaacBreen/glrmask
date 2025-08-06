@@ -1215,7 +1215,6 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
 
-                    let mut results = Vec::new();
                     let mut glr_s = glr_s.clone();
 
                     if let Some(gtid) = grammar_token_opt {
@@ -1235,13 +1234,15 @@ impl<'a> GrammarConstraintState<'a> {
                         if glr_s.is_ok() {
                             entry.successful += 1;
                         } else {
-                            return results;
+                            return Vec::new();
 
                         }
                     }
 
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
                     // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+
+                    let mut results = Vec::new();
 
                     crate::debug!(4, "Processing edge: {:?}", grammar_token_opt);
                     for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
