@@ -92,6 +92,7 @@ pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerm
 }
 
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+    crate::debug!(3, "Computing nullable non-terminals");
     compute_nonterminal_nullability(productions)
         .into_iter()
         .filter_map(|(nt, status)| (status == Nullability::Nullable || status == Nullability::Null).then_some(nt))
@@ -99,6 +100,7 @@ pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<Non
 }
 
 pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+    crate::debug!(3, "Computing first sets for non-terminals");
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
@@ -150,6 +152,7 @@ pub fn compute_follow_sets_for_nonterminals(
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+    crate::debug!(3, "Computing follow sets for non-terminals");
     let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
     // Initialize for all non-terminals
