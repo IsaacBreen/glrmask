@@ -8,6 +8,7 @@ use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use profiler_macro::time_it;
 use crate::interface::display_productions;
 // Added for derive macro pattern
 
@@ -313,6 +314,7 @@ type Stage7Result = (
     StateID,
 );
 
+#[time_it]
 fn stage_1(productions: &[Production]) -> Stage1Result {
     let start_production_id = 0;
     let initial_item = Item {
@@ -826,6 +828,7 @@ fn merge_compatible_states(
     (new_table, new_item_set_map, new_start_state_id)
 }
 
+#[time_it]
 pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, crate::glr::parser::ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let original_productions = productions.to_vec();
     let start_production_id = 0;
@@ -900,6 +903,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     // crate::debug!(6, "Number of states: {}", final_table.len());
     // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
 
+    print_summary();
+    print_summary_flat();
+
     crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
 }
 
@@ -945,3 +951,4 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     non_terminal_map
 }
 use crate::glr::parser::{GLRParser, ActionFn};
+use crate::profiler::{print_summary, print_summary_flat};

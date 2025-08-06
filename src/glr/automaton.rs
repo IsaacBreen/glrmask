@@ -1,6 +1,7 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use profiler_macro::time_it;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Nullability {
@@ -263,6 +264,7 @@ pub fn compute_first_set_for_item(
     result
 }
 
+#[time_it]
 pub fn compute_closure<'a>(
     items: &BTreeSet<Item>,
     prods_by_lhs: &BTreeMap<NonTerminal, Vec<&'a Production>>,
