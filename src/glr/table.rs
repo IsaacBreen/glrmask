@@ -338,10 +338,24 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let mut worklist = VecDeque::from([initial_item_set.clone()]);
     let mut transitions: Stage1Table = BTreeMap::new();
     let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
-
+    
     crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
-        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets);
+        let lalr_mode = match LR_MODE {
+            LRMode::LALR => true,
+            LRMode::LR1 => false,
+            LRMode::LALR_EX_GOTO => {
+                let mut do_lalr = true;
+                for item in &item_set {
+                    if matches!(item.prev(), Some((Symbol::Terminal(_), _))) {
+                        do_lalr = false;
+                        break;
+                    }
+                }
+                do_lalr
+            }
+        };
+        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 

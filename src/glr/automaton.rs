@@ -287,6 +287,7 @@ pub fn compute_closure<'a>(
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+    lalr_mode: bool,
 ) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();
@@ -313,43 +314,30 @@ pub fn compute_closure<'a>(
         }
     }
 
-    match LR_MODE {
-        LRMode::LALR | LRMode::LALR_EX_GOTO => {
-            let item_set_is_next_for_any_shift = items.iter().any(|item| {
-                item.dot_position
-                    .checked_sub(1)
-                    .and_then(|pos| item.production.rhs.get(pos))
-                    .map_or(false, |symbol| matches!(symbol, Symbol::Terminal(_)))
-            });
+    if lalr_mode {
+        crate::debug!(4, "Computing LALR closure.");
+        let mut lalr_closure = BTreeSet::new();
+        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
-            if LR_MODE == LRMode::LALR_EX_GOTO && !item_set_is_next_for_any_shift {
-                crate::debug!(4, "Item set is next for any shift. Computing LR(1) closure.");
-                closure
-            } else {
-                crate::debug!(4, "Item set is not next for any shift. Computing LALR closure.");
-                let mut lalr_closure = BTreeSet::new();
-                let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+        // Separate reduce and non-reduce items, and group reduce items by core
+        for item in closure {
+            reduce_item_cores.entry(((*item.production).clone(), item.dot_position)).or_default().insert(item.lookahead);
+        }
 
-                // Separate reduce and non-reduce items, and group reduce items by core
-                for item in closure {
-                    reduce_item_cores.entry(((*item.production).clone(), item.dot_position)).or_default().insert(item.lookahead);
-                }
-
-                // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-                for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
-                    if let Some(follows) = follow_sets.get(&prod.lhs) {
-                        for lookahead in follows {
-                            if lookahead == &None && !existing_lookaheads.contains(&None) {
-                                continue;
-                            }
-                            lalr_closure.insert(Item { production: Arc::new(prod.clone()), dot_position: dot_pos, lookahead: lookahead.clone() });
-                        }
+        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+        for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
+            if let Some(follows) = follow_sets.get(&prod.lhs) {
+                for lookahead in follows {
+                    if lookahead == &None && !existing_lookaheads.contains(&None) {
+                        continue;
                     }
+                    lalr_closure.insert(Item { production: Arc::new(prod.clone()), dot_position: dot_pos, lookahead: lookahead.clone() });
                 }
-                lalr_closure
             }
         }
-        LRMode::LR1 => closure,
+        lalr_closure
+    } else {
+        closure
     }
 }
 
