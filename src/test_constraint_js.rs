@@ -546,7 +546,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     // true
                     // b"- &=a*;#[(:".contains(&b)
-                    !b" &=a*;#[(:{}()[]?|<>+%~!.`,".contains(&b)
+                    !b" &=a*;#[(:{}()[]?|<>+%~!".contains(&b)
                 }
             })
         });
