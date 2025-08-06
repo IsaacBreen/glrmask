@@ -1202,6 +1202,7 @@ impl<'a> GrammarConstraintState<'a> {
                                         let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
                                         crate::debug!(4, "Adding tokens {:?} to final mask", llm_tokens);
                                         *final_mask_internal.borrow_mut() |= llm_tokens;
+                                        crate::debug!(4, "Final mask after adding tokens: {:?}", final_mask_internal.borrow());
                                         return Vec::new();
                                     });
                                 },
@@ -1267,6 +1268,7 @@ impl<'a> GrammarConstraintState<'a> {
                             // timeit!("get_mask final_mask update", {
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
                             // });
+                            crate::debug!(4, "Final mask after adding end node tokens: {:?}", final_mask_internal.borrow());
                         }
 
                         results.push((child_node_trie_data.clone(), glr_s));
