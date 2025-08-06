@@ -290,7 +290,7 @@ impl GLRParser {
             parser: self,
             active_state: ParseState::new(),
             accepted: false,
-            phase: ParserPhase::ReadyForToken, // It's empty, so it's ready for a token.
+            phase: ParserPhase::ReadyForDefaultReductions,
         }
     }
 
@@ -300,7 +300,7 @@ impl GLRParser {
             parser: self,
             active_state: initial_parse_state,
             accepted: false,
-            phase: ParserPhase::ReadyForDefaultReductions, // An initial state might have default reductions.
+            phase: ParserPhase::ReadyForDefaultReductions,
         };
         parser_state
     }
