@@ -630,7 +630,11 @@ impl<'r> Precomputer<'r> {
                 // Move each destination from the ignore token map to the None map.
                 for (dest_wrapper, edge_bv) in dest_map_for_ignore_token {
                     // If an edge to this destination already exists under None, merge the bitvectors.
-                    dest_map_for_none.entry(dest_wrapper).and_modify(|existing_bv| *existing_bv |= &edge_bv).or_insert(edge_bv);
+                    if let Some(existing_bv) = dest_map_for_none.get_mut(&dest_wrapper) {
+                        *existing_bv |= &edge_bv;
+                    } else {
+                        dest_map_for_none.insert(dest_wrapper, edge_bv);
+                    }
                 }
             }
         }
