@@ -574,7 +574,8 @@ impl Ord for WorkMapKey {
         // The idea is that deeper stacks are more constrained and processing them
         // first might lead to quicker pruning of invalid paths.
         // Sorting by depth descending, then by state_id ascending.
-        other.0.cmp(&self.0).then_with(|| self.1.cmp(&other.1))
+        // other.0.cmp(&self.0).then_with(|| self.1.cmp(&other.1))
+        self.1.cmp(&other.1)
     }
 }
 
