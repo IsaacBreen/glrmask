@@ -480,13 +480,6 @@ struct Precomputer<'r> {
     end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
 }
 
-#[derive(Default, Clone)]
-struct WorkQueueValue {
-    by_tokenizer_state: BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-    by_terminal: BTreeMap<TerminalID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-}
-
-
 impl<'r> Precomputer<'r> {
     fn new(
         tokenizer:        &'r Regex,
@@ -835,31 +828,18 @@ impl<'r> Precomputer<'r> {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut work_queue: BTreeMap<usize, WorkQueueValue> = BTreeMap::new();
-            let mut initial_work_value = WorkQueueValue::default();
-            initial_work_value.by_tokenizer_state = assoc_by_state.clone();
-            work_queue.insert(0, initial_work_value);
+            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
+            work_queue.insert(0, assoc_by_state.clone());
 
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
-            while let Some((pos, mut work_value)) = work_queue.pop_first() {
+            while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in work_value.by_tokenizer_state {
+                    for (tokenizer_state_id, nodes) in states_at_pos {
                         next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
                     }
                     continue;
                 }
-
-                // Move items from by_terminal to by_tokenizer_state with reset state
-                let by_terminal_items = std::mem::take(&mut work_value.by_terminal);
-                if !by_terminal_items.is_empty() {
-                    let initial_state_nodes = work_value.by_tokenizer_state.entry(self.tokenizer.initial_state_id()).or_default();
-                    for nodes in by_terminal_items.values() {
-                        initial_state_nodes.extend(nodes.iter().cloned());
-                    }
-                }
-
-                let states_at_pos = std::mem::take(&mut work_value.by_tokenizer_state);
 
                 for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                     let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
@@ -874,6 +854,7 @@ impl<'r> Precomputer<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
+                        // TODO: could make this so much faster by moving loop down...
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
                                 // TODO: should be some way of avoiding ignored terminal here.
@@ -908,7 +889,8 @@ impl<'r> Precomputer<'r> {
                                 |e, n| *e |= n,
                             );
 
-                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().by_terminal.entry(terminal_id).or_default();
+                            let next_tokenizer_state = self.tokenizer.initial_state_id();
+                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.lock().unwrap().value.end));
 
@@ -951,6 +933,8 @@ impl<'r> Precomputer<'r> {
                     }
                 }
             }
+
+
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc, no_go.clone());
