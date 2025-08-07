@@ -827,21 +827,38 @@ impl<'r> Precomputer<'r> {
     ) {
         self.pb.inc(1);
 
+        #[derive(Default, Clone, Debug)]
+        struct DfsWorkItem {
+            by_state: BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+            by_terminal: BTreeMap<GrammarTokenID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+        }
+
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
-            work_queue.insert(0, assoc_by_state.clone());
+            let mut work_queue: BTreeMap<usize, DfsWorkItem> = BTreeMap::new();
+            let mut initial_item = DfsWorkItem::default();
+            initial_item.by_state = assoc_by_state.clone();
+            work_queue.insert(0, initial_item);
 
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
-            while let Some((pos, states_at_pos)) = work_queue.pop_first() {
+            while let Some((pos, mut work_item)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in states_at_pos {
+                    for (tokenizer_state_id, nodes) in work_item.by_state {
                         next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
                     }
                     continue;
                 }
 
-                for (tokenizer_state_id, precompute_nodes) in states_at_pos {
+                // Handle completed matches by moving them to the by_state map for the initial tokenizer state.
+                let mut nodes_from_terminals = OrderedHashSet::new();
+                for (_, nodes) in work_item.by_terminal {
+                    nodes_from_terminals.extend(nodes);
+                }
+                if !nodes_from_terminals.is_empty() {
+                    work_item.by_state.entry(self.tokenizer.initial_state_id()).or_default().extend(nodes_from_terminals);
+                }
+
+                for (tokenizer_state_id, precompute_nodes) in work_item.by_state {
                     let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
                     let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
@@ -889,8 +906,7 @@ impl<'r> Precomputer<'r> {
                                 |e, n| *e |= n,
                             );
 
-                            let next_tokenizer_state = self.tokenizer.initial_state_id();
-                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
+                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().by_terminal.entry(terminal_id).or_default();
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.lock().unwrap().value.end));
 
@@ -929,7 +945,7 @@ impl<'r> Precomputer<'r> {
                                 inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             }
                         }
-                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
+                        work_queue.entry(segment_bytes.len()).or_default().by_state.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
                 }
             }
