@@ -2779,6 +2779,7 @@ local_system:
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
+      use std::mem;
       use crate::datastructures::ordered_hash_map::Retain;
       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
       use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -3125,6 +3126,7 @@ local_system:
               );
 
               helper.run_dfs();
+              helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
               helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
@@ -3370,6 +3372,148 @@ local_system:
               self.pb.finish_with_message("Precomputation complete");
               crate::debug!(2, "Precomputation complete");
           }
+
+          /// Simplify out `None` edges by shortcutting predecessors to successors.
+          ///
+          /// For every `B -(None; bv2)-> C`, and for every incoming edge `A -(x; bv1)-> B`,
+          /// we:
+          ///   - add/merge an edge `A -(x; bv1 ∩ bv2)-> C`
+          ///   - remove the moved tokens `bv1 ∩ bv2` from `A -(x; ...)-> B`
+          /// After processing all incoming edges to B, we remove all `None` edges from B.
+          ///
+          /// This transformation preserves behavior while eliminating `None` edges and
+          /// allows subsequent pruning and merging passes to operate on a simpler graph.
+          fn simplify_none_edges(&mut self) {
+              crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
+
+              // 1) Collect all unique nodes reachable from any root
+              let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+              let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+              for root in self.roots.values() {
+                  for arc in Trie::all_nodes(root.clone()) {
+                      let ptr = Arc::as_ptr(&arc);
+                      if seen.insert(ptr) {
+                          all_nodes.push(arc);
+                      }
+                  }
+              }
+              // Map pointer -> Arc for quick retrieval
+              let mut arc_by_ptr: HashMap<*const Mutex<PrecomputeNode>, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+              for n in &all_nodes {
+                  arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
+              }
+
+              // 2) Build:
+              //    - incoming[B] = vec of (A, key_x, bv1) for edges A -(x; bv1)-> B
+              //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
+              //    - none_union[B] = union of all bv2 for None edges from B
+              let mut incoming: HashMap<
+                  *const Mutex<PrecomputeNode>,
+                  Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
+              > = HashMap::new();
+              let mut none_edges_from: HashMap<
+                  *const Mutex<PrecomputeNode>,
+                  Vec<(Arc<Mutex<PrecomputeNode>>, LLMTokenBV)>
+              > = HashMap::new();
+              let mut none_union: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.lock().expect("poison");
+                  // Record all outgoing edges for incoming map
+                  for (ek, dest_map) in guard.children().iter() {
+                      for (child_wrap, ev_bv) in dest_map.iter() {
+                          let child_arc = child_wrap.as_arc().clone();
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          incoming.entry(child_ptr)
+                              .or_default()
+                              .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
+                      }
+                  }
+                  // Record None edges out of src_arc (B -> C)
+                  if let Some(dest_map_none) = guard.children().get(&None) {
+                      let list = none_edges_from.entry(src_ptr).or_default();
+                      for (child_wrap, ev_bv) in dest_map_none.iter() {
+                          list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
+                          let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+                          *entry |= ev_bv;
+                      }
+                  }
+              }
+
+              // 3) For every node B that has None edges to children, rewrite predecessors.
+              for (b_ptr, none_edges) in none_edges_from.into_iter() {
+                  let union_mask = match none_union.get(&b_ptr) {
+                      Some(bv) if !bv.is_empty() => bv.clone(),
+                      _ => continue,
+                  };
+                  // If no predecessors, still remove None edges later (could help pruning)
+                  let in_edges = match incoming.get(&b_ptr) {
+                      Some(v) if !v.is_empty() => v.clone(),
+                      _ => {
+                          // Remove None edges out of B even if nobody points to B currently.
+                          if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
+                              let mut b_guard = b_arc.lock().expect("poison");
+                              b_guard.children_mut().remove(&None);
+                          }
+                          continue;
+                      }
+                  };
+
+                  let b_arc = match arc_by_ptr.get(&b_ptr) {
+                      Some(a) => a.clone(),
+                      None => continue,
+                  };
+                  let b_key = ArcPtrWrapper::new(b_arc.clone());
+
+                  // For each incoming edge A -(x; bv1)-> B, split tokens:
+                  //   move:    to C with mask (bv1 ∩ bv2)
+                  //   leftover on A->B: bv1 - union_over_C(bv1 ∩ bv2) = bv1 ∩ (!union_mask)
+                  for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
+                      let mut total_to_move = bv1_original.clone();
+                      total_to_move &= &union_mask; // total tokens to redirect to all C via None edges
+                      if total_to_move.is_empty() {
+                          continue;
+                      }
+
+                      let mut a_guard = a_arc.lock().expect("poison");
+                      let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
+
+                      // Add/merge edges to each C with per-child mask
+                      for (c_arc, bv2) in &none_edges {
+                          let mut to_move_for_c = bv1_original.clone();
+                          to_move_for_c &= bv2;
+                          if to_move_for_c.is_empty() {
+                              continue;
+                          }
+                          let c_key = ArcPtrWrapper::new(c_arc.clone());
+                          if let Some(existing_ev) = dest_map.get_mut(&c_key) {
+                              *existing_ev |= &to_move_for_c;
+                          } else {
+                              dest_map.insert(c_key, to_move_for_c);
+                          }
+                      }
+
+                      // Reduce/remove the A -> B edge for the moved tokens
+                      let mut remove_b_edge = false;
+                      if let Some(ev_ab) = dest_map.get_mut(&b_key) {
+                          *ev_ab -= &total_to_move;
+                          remove_b_edge = ev_ab.is_empty();
+                      }
+                      if remove_b_edge {
+                          dest_map.remove(&b_key);
+                      }
+                  }
+
+                  // Finally, remove all None edges out of B
+                  {
+                      let mut b_guard = b_arc.lock().expect("poison");
+                      b_guard.children_mut().remove(&None);
+                  }
+              }
+
+              crate::debug!(2, "Done simplifying None edges.");
+          }
           
           fn prune_on_no_terminal_follow(&mut self) {
               crate::debug!(2, "Pruning based on terminal follow sets.");
@@ -3377,11 +3521,8 @@ local_system:
               let terminal_follow_map = self.terminal_follow_map;
               let ignore_terminal_id = self.ignore_terminal_id;
 
-              // Collect all terminals from the tokenizer.
-              let all_terminals: BTreeSet<GrammarTokenID> = terminal_follow_map.keys().cloned().collect();
-
               let initial_nodes_and_values: Vec<_> = self.roots.values()
-                  .map(|root_arc| (root_arc.clone(), all_terminals.clone()))
+                  .map(|root_arc| (root_arc.clone(), None))
                   .collect();
 
               Trie::special_map(
@@ -3390,27 +3531,33 @@ local_system:
                   |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                       match edge_terminal_opt {
                           Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                          Some(t) => Some(BTreeSet::from([*t])),
+                          Some(t) => Some(Some(BTreeSet::from([*t]))),
                           None => Some(predecessors.clone()),
                       }
                   },
                   // merge: Union of predecessor sets from different paths.
                   |existing_set, new_set| {
-                      existing_set.extend(new_set);
+                      match (existing_set, new_set) {
+                          (None, _) => {},
+                          (existing_set @ _, None) => *existing_set = None,
+                          (Some(existing), Some(new)) => existing.extend(new),
+                      }
                   },
                   // process: Prune outgoing edges based on allowed follows.
-                  move |node, all_immediate_predecessors| {
+                  move |node, maybe_all_immediate_predecessors| {
                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
                       // all outgoing terminals are considered valid.
-                      if all_immediate_predecessors.is_empty() {
+                      if maybe_all_immediate_predecessors.is_none() {
                           return true; // Continue traversal
                       }
 
                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                       let mut allowed_follow_terminals = BTreeSet::new();
-                      for preceding_terminal in &*all_immediate_predecessors {
-                          if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                              allowed_follow_terminals.extend(follow_set.iter().cloned());
+                      if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
+                          for preceding_terminal in all_immediate_predecessors {
+                              if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                                  allowed_follow_terminals.extend(follow_set.iter().cloned());
+                              }
                           }
                       }
 
@@ -3612,6 +3759,13 @@ local_system:
                   let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
                   while let Some((pos, states_at_pos)) = work_queue.pop_first() {
+                      if pos == segment_bytes.len() {
+                          for (tokenizer_state_id, nodes) in states_at_pos {
+                              next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
+                          }
+                          continue;
+                      }
+
                       for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                           let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
@@ -3644,6 +3798,9 @@ local_system:
                                   }
 
                                   let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
+                                  if next_pos == segment_bytes.len() {
+                                      edge_bv.set(child_vocab_node.token_id(), false);
+                                  }
                                   if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                       edge_bv -= matches_for_terminal;
                                   }
@@ -3680,30 +3837,24 @@ local_system:
                           }
 
                           if let Some(end_state_val) = exec_result.end_state {
-                              let end_state_id = TokenizerStateID(end_state_val);
-                              if self.tokenizer.all_tokens_accessible_from_state(end_state_id) {
-                                  // All tokens are possible. Create a single `None` edge from each precompute node.
-                                  let dest_nodes_for_next_level = next_level_assoc.entry(end_state_id).or_default();
+                              let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
+                              for terminal_id in possible_final_tokens {
                                   for src_node_wrapper in &precompute_nodes {
-                                      let edge_bv = child_vocab_node.reachable_token_ids().clone();
-                                      if !edge_bv.is_empty() {
-                                          let mut inserter = EdgeInserter::new(
-                                              src_node_wrapper.as_arc().clone(),
-                                              None, // Unconditional edge
-                                              edge_bv.clone(),
-                                              |e, n| *e |= n,
-                                          );
-                                          // The destination is a new node that will be processed in the next level of DFS.
-                                          inserter = inserter.try_destinations_iter(dest_nodes_for_next_level.iter().map(|w| w.as_arc().clone()));
-                                          let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
-                                          dest_nodes_for_next_level.insert(ArcPtrWrapper::new(result_node.clone()));
-                                          *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
-                                      }
+                                      let llm_token_id = child_vocab_node.token_id();
+                                      let mut edge_bv = HybridBitset::zeros();
+                                      edge_bv.insert(llm_token_id);
+                                      let mut inserter = EdgeInserter::new(
+                                          src_node_wrapper.as_arc().clone(),
+                                          Some(terminal_id),
+                                          edge_bv,
+                                          |e, n| *e |= n,
+                                      );
+                                      // Print the source node.
+                                      // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
+                                      inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                                   }
-                              } else {
-                                  // Just pass the current precompute nodes to the next level.
-                                  next_level_assoc.entry(end_state_id).or_default().extend(precompute_nodes.iter().cloned());
                               }
+                              next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                           }
                       }
                   }
@@ -7106,6 +7257,7 @@ local_system:
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
+      use std::mem;
       use crate::datastructures::ordered_hash_map::Retain;
       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
       use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -7452,6 +7604,7 @@ local_system:
               );
 
               helper.run_dfs();
+              helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
               helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
@@ -7697,6 +7850,148 @@ local_system:
               self.pb.finish_with_message("Precomputation complete");
               crate::debug!(2, "Precomputation complete");
           }
+
+          /// Simplify out `None` edges by shortcutting predecessors to successors.
+          ///
+          /// For every `B -(None; bv2)-> C`, and for every incoming edge `A -(x; bv1)-> B`,
+          /// we:
+          ///   - add/merge an edge `A -(x; bv1 ∩ bv2)-> C`
+          ///   - remove the moved tokens `bv1 ∩ bv2` from `A -(x; ...)-> B`
+          /// After processing all incoming edges to B, we remove all `None` edges from B.
+          ///
+          /// This transformation preserves behavior while eliminating `None` edges and
+          /// allows subsequent pruning and merging passes to operate on a simpler graph.
+          fn simplify_none_edges(&mut self) {
+              crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
+
+              // 1) Collect all unique nodes reachable from any root
+              let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+              let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+              for root in self.roots.values() {
+                  for arc in Trie::all_nodes(root.clone()) {
+                      let ptr = Arc::as_ptr(&arc);
+                      if seen.insert(ptr) {
+                          all_nodes.push(arc);
+                      }
+                  }
+              }
+              // Map pointer -> Arc for quick retrieval
+              let mut arc_by_ptr: HashMap<*const Mutex<PrecomputeNode>, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+              for n in &all_nodes {
+                  arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
+              }
+
+              // 2) Build:
+              //    - incoming[B] = vec of (A, key_x, bv1) for edges A -(x; bv1)-> B
+              //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
+              //    - none_union[B] = union of all bv2 for None edges from B
+              let mut incoming: HashMap<
+                  *const Mutex<PrecomputeNode>,
+                  Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
+              > = HashMap::new();
+              let mut none_edges_from: HashMap<
+                  *const Mutex<PrecomputeNode>,
+                  Vec<(Arc<Mutex<PrecomputeNode>>, LLMTokenBV)>
+              > = HashMap::new();
+              let mut none_union: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.lock().expect("poison");
+                  // Record all outgoing edges for incoming map
+                  for (ek, dest_map) in guard.children().iter() {
+                      for (child_wrap, ev_bv) in dest_map.iter() {
+                          let child_arc = child_wrap.as_arc().clone();
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          incoming.entry(child_ptr)
+                              .or_default()
+                              .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
+                      }
+                  }
+                  // Record None edges out of src_arc (B -> C)
+                  if let Some(dest_map_none) = guard.children().get(&None) {
+                      let list = none_edges_from.entry(src_ptr).or_default();
+                      for (child_wrap, ev_bv) in dest_map_none.iter() {
+                          list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
+                          let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+                          *entry |= ev_bv;
+                      }
+                  }
+              }
+
+              // 3) For every node B that has None edges to children, rewrite predecessors.
+              for (b_ptr, none_edges) in none_edges_from.into_iter() {
+                  let union_mask = match none_union.get(&b_ptr) {
+                      Some(bv) if !bv.is_empty() => bv.clone(),
+                      _ => continue,
+                  };
+                  // If no predecessors, still remove None edges later (could help pruning)
+                  let in_edges = match incoming.get(&b_ptr) {
+                      Some(v) if !v.is_empty() => v.clone(),
+                      _ => {
+                          // Remove None edges out of B even if nobody points to B currently.
+                          if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
+                              let mut b_guard = b_arc.lock().expect("poison");
+                              b_guard.children_mut().remove(&None);
+                          }
+                          continue;
+                      }
+                  };
+
+                  let b_arc = match arc_by_ptr.get(&b_ptr) {
+                      Some(a) => a.clone(),
+                      None => continue,
+                  };
+                  let b_key = ArcPtrWrapper::new(b_arc.clone());
+
+                  // For each incoming edge A -(x; bv1)-> B, split tokens:
+                  //   move:    to C with mask (bv1 ∩ bv2)
+                  //   leftover on A->B: bv1 - union_over_C(bv1 ∩ bv2) = bv1 ∩ (!union_mask)
+                  for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
+                      let mut total_to_move = bv1_original.clone();
+                      total_to_move &= &union_mask; // total tokens to redirect to all C via None edges
+                      if total_to_move.is_empty() {
+                          continue;
+                      }
+
+                      let mut a_guard = a_arc.lock().expect("poison");
+                      let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
+
+                      // Add/merge edges to each C with per-child mask
+                      for (c_arc, bv2) in &none_edges {
+                          let mut to_move_for_c = bv1_original.clone();
+                          to_move_for_c &= bv2;
+                          if to_move_for_c.is_empty() {
+                              continue;
+                          }
+                          let c_key = ArcPtrWrapper::new(c_arc.clone());
+                          if let Some(existing_ev) = dest_map.get_mut(&c_key) {
+                              *existing_ev |= &to_move_for_c;
+                          } else {
+                              dest_map.insert(c_key, to_move_for_c);
+                          }
+                      }
+
+                      // Reduce/remove the A -> B edge for the moved tokens
+                      let mut remove_b_edge = false;
+                      if let Some(ev_ab) = dest_map.get_mut(&b_key) {
+                          *ev_ab -= &total_to_move;
+                          remove_b_edge = ev_ab.is_empty();
+                      }
+                      if remove_b_edge {
+                          dest_map.remove(&b_key);
+                      }
+                  }
+
+                  // Finally, remove all None edges out of B
+                  {
+                      let mut b_guard = b_arc.lock().expect("poison");
+                      b_guard.children_mut().remove(&None);
+                  }
+              }
+
+              crate::debug!(2, "Done simplifying None edges.");
+          }
           
           fn prune_on_no_terminal_follow(&mut self) {
               crate::debug!(2, "Pruning based on terminal follow sets.");
@@ -7704,11 +7999,8 @@ local_system:
               let terminal_follow_map = self.terminal_follow_map;
               let ignore_terminal_id = self.ignore_terminal_id;
 
-              // Collect all terminals from the tokenizer.
-              let all_terminals: BTreeSet<GrammarTokenID> = terminal_follow_map.keys().cloned().collect();
-
               let initial_nodes_and_values: Vec<_> = self.roots.values()
-                  .map(|root_arc| (root_arc.clone(), all_terminals.clone()))
+                  .map(|root_arc| (root_arc.clone(), None))
                   .collect();
 
               Trie::special_map(
@@ -7717,27 +8009,33 @@ local_system:
                   |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                       match edge_terminal_opt {
                           Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                          Some(t) => Some(BTreeSet::from([*t])),
+                          Some(t) => Some(Some(BTreeSet::from([*t]))),
                           None => Some(predecessors.clone()),
                       }
                   },
                   // merge: Union of predecessor sets from different paths.
                   |existing_set, new_set| {
-                      existing_set.extend(new_set);
+                      match (existing_set, new_set) {
+                          (None, _) => {},
+                          (existing_set @ _, None) => *existing_set = None,
+                          (Some(existing), Some(new)) => existing.extend(new),
+                      }
                   },
                   // process: Prune outgoing edges based on allowed follows.
-                  move |node, all_immediate_predecessors| {
+                  move |node, maybe_all_immediate_predecessors| {
                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
                       // all outgoing terminals are considered valid.
-                      if all_immediate_predecessors.is_empty() {
+                      if maybe_all_immediate_predecessors.is_none() {
                           return true; // Continue traversal
                       }
 
                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                       let mut allowed_follow_terminals = BTreeSet::new();
-                      for preceding_terminal in &*all_immediate_predecessors {
-                          if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                              allowed_follow_terminals.extend(follow_set.iter().cloned());
+                      if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
+                          for preceding_terminal in all_immediate_predecessors {
+                              if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                                  allowed_follow_terminals.extend(follow_set.iter().cloned());
+                              }
                           }
                       }
 
@@ -7939,6 +8237,13 @@ local_system:
                   let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
                   while let Some((pos, states_at_pos)) = work_queue.pop_first() {
+                      if pos == segment_bytes.len() {
+                          for (tokenizer_state_id, nodes) in states_at_pos {
+                              next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
+                          }
+                          continue;
+                      }
+
                       for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                           let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
@@ -7971,6 +8276,9 @@ local_system:
                                   }
 
                                   let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
+                                  if next_pos == segment_bytes.len() {
+                                      edge_bv.set(child_vocab_node.token_id(), false);
+                                  }
                                   if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                       edge_bv -= matches_for_terminal;
                                   }
@@ -8007,30 +8315,24 @@ local_system:
                           }
 
                           if let Some(end_state_val) = exec_result.end_state {
-                              let end_state_id = TokenizerStateID(end_state_val);
-                              if self.tokenizer.all_tokens_accessible_from_state(end_state_id) {
-                                  // All tokens are possible. Create a single `None` edge from each precompute node.
-                                  let dest_nodes_for_next_level = next_level_assoc.entry(end_state_id).or_default();
+                              let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
+                              for terminal_id in possible_final_tokens {
                                   for src_node_wrapper in &precompute_nodes {
-                                      let edge_bv = child_vocab_node.reachable_token_ids().clone();
-                                      if !edge_bv.is_empty() {
-                                          let mut inserter = EdgeInserter::new(
-                                              src_node_wrapper.as_arc().clone(),
-                                              None, // Unconditional edge
-                                              edge_bv.clone(),
-                                              |e, n| *e |= n,
-                                          );
-                                          // The destination is a new node that will be processed in the next level of DFS.
-                                          inserter = inserter.try_destinations_iter(dest_nodes_for_next_level.iter().map(|w| w.as_arc().clone()));
-                                          let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
-                                          dest_nodes_for_next_level.insert(ArcPtrWrapper::new(result_node.clone()));
-                                          *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
-                                      }
+                                      let llm_token_id = child_vocab_node.token_id();
+                                      let mut edge_bv = HybridBitset::zeros();
+                                      edge_bv.insert(llm_token_id);
+                                      let mut inserter = EdgeInserter::new(
+                                          src_node_wrapper.as_arc().clone(),
+                                          Some(terminal_id),
+                                          edge_bv,
+                                          |e, n| *e |= n,
+                                      );
+                                      // Print the source node.
+                                      // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
+                                      inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                                   }
-                              } else {
-                                  // Just pass the current precompute nodes to the next level.
-                                  next_level_assoc.entry(end_state_id).or_default().extend(precompute_nodes.iter().cloned());
                               }
+                              next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                           }
                       }
                   }
@@ -8672,7 +8974,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -11461,6 +11763,7 @@ messages:
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
+      use std::mem;
       use crate::datastructures::ordered_hash_map::Retain;
       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
       use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -11807,6 +12110,7 @@ messages:
               );
 
               helper.run_dfs();
+              helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
               helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
@@ -12052,6 +12356,148 @@ messages:
               self.pb.finish_with_message("Precomputation complete");
               crate::debug!(2, "Precomputation complete");
           }
+
+          /// Simplify out `None` edges by shortcutting predecessors to successors.
+          ///
+          /// For every `B -(None; bv2)-> C`, and for every incoming edge `A -(x; bv1)-> B`,
+          /// we:
+          ///   - add/merge an edge `A -(x; bv1 ∩ bv2)-> C`
+          ///   - remove the moved tokens `bv1 ∩ bv2` from `A -(x; ...)-> B`
+          /// After processing all incoming edges to B, we remove all `None` edges from B.
+          ///
+          /// This transformation preserves behavior while eliminating `None` edges and
+          /// allows subsequent pruning and merging passes to operate on a simpler graph.
+          fn simplify_none_edges(&mut self) {
+              crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
+
+              // 1) Collect all unique nodes reachable from any root
+              let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+              let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+              for root in self.roots.values() {
+                  for arc in Trie::all_nodes(root.clone()) {
+                      let ptr = Arc::as_ptr(&arc);
+                      if seen.insert(ptr) {
+                          all_nodes.push(arc);
+                      }
+                  }
+              }
+              // Map pointer -> Arc for quick retrieval
+              let mut arc_by_ptr: HashMap<*const Mutex<PrecomputeNode>, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+              for n in &all_nodes {
+                  arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
+              }
+
+              // 2) Build:
+              //    - incoming[B] = vec of (A, key_x, bv1) for edges A -(x; bv1)-> B
+              //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
+              //    - none_union[B] = union of all bv2 for None edges from B
+              let mut incoming: HashMap<
+                  *const Mutex<PrecomputeNode>,
+                  Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
+              > = HashMap::new();
+              let mut none_edges_from: HashMap<
+                  *const Mutex<PrecomputeNode>,
+                  Vec<(Arc<Mutex<PrecomputeNode>>, LLMTokenBV)>
+              > = HashMap::new();
+              let mut none_union: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.lock().expect("poison");
+                  // Record all outgoing edges for incoming map
+                  for (ek, dest_map) in guard.children().iter() {
+                      for (child_wrap, ev_bv) in dest_map.iter() {
+                          let child_arc = child_wrap.as_arc().clone();
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          incoming.entry(child_ptr)
+                              .or_default()
+                              .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
+                      }
+                  }
+                  // Record None edges out of src_arc (B -> C)
+                  if let Some(dest_map_none) = guard.children().get(&None) {
+                      let list = none_edges_from.entry(src_ptr).or_default();
+                      for (child_wrap, ev_bv) in dest_map_none.iter() {
+                          list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
+                          let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+                          *entry |= ev_bv;
+                      }
+                  }
+              }
+
+              // 3) For every node B that has None edges to children, rewrite predecessors.
+              for (b_ptr, none_edges) in none_edges_from.into_iter() {
+                  let union_mask = match none_union.get(&b_ptr) {
+                      Some(bv) if !bv.is_empty() => bv.clone(),
+                      _ => continue,
+                  };
+                  // If no predecessors, still remove None edges later (could help pruning)
+                  let in_edges = match incoming.get(&b_ptr) {
+                      Some(v) if !v.is_empty() => v.clone(),
+                      _ => {
+                          // Remove None edges out of B even if nobody points to B currently.
+                          if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
+                              let mut b_guard = b_arc.lock().expect("poison");
+                              b_guard.children_mut().remove(&None);
+                          }
+                          continue;
+                      }
+                  };
+
+                  let b_arc = match arc_by_ptr.get(&b_ptr) {
+                      Some(a) => a.clone(),
+                      None => continue,
+                  };
+                  let b_key = ArcPtrWrapper::new(b_arc.clone());
+
+                  // For each incoming edge A -(x; bv1)-> B, split tokens:
+                  //   move:    to C with mask (bv1 ∩ bv2)
+                  //   leftover on A->B: bv1 - union_over_C(bv1 ∩ bv2) = bv1 ∩ (!union_mask)
+                  for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
+                      let mut total_to_move = bv1_original.clone();
+                      total_to_move &= &union_mask; // total tokens to redirect to all C via None edges
+                      if total_to_move.is_empty() {
+                          continue;
+                      }
+
+                      let mut a_guard = a_arc.lock().expect("poison");
+                      let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
+
+                      // Add/merge edges to each C with per-child mask
+                      for (c_arc, bv2) in &none_edges {
+                          let mut to_move_for_c = bv1_original.clone();
+                          to_move_for_c &= bv2;
+                          if to_move_for_c.is_empty() {
+                              continue;
+                          }
+                          let c_key = ArcPtrWrapper::new(c_arc.clone());
+                          if let Some(existing_ev) = dest_map.get_mut(&c_key) {
+                              *existing_ev |= &to_move_for_c;
+                          } else {
+                              dest_map.insert(c_key, to_move_for_c);
+                          }
+                      }
+
+                      // Reduce/remove the A -> B edge for the moved tokens
+                      let mut remove_b_edge = false;
+                      if let Some(ev_ab) = dest_map.get_mut(&b_key) {
+                          *ev_ab -= &total_to_move;
+                          remove_b_edge = ev_ab.is_empty();
+                      }
+                      if remove_b_edge {
+                          dest_map.remove(&b_key);
+                      }
+                  }
+
+                  // Finally, remove all None edges out of B
+                  {
+                      let mut b_guard = b_arc.lock().expect("poison");
+                      b_guard.children_mut().remove(&None);
+                  }
+              }
+
+              crate::debug!(2, "Done simplifying None edges.");
+          }
           
           fn prune_on_no_terminal_follow(&mut self) {
               crate::debug!(2, "Pruning based on terminal follow sets.");
@@ -12059,11 +12505,8 @@ messages:
               let terminal_follow_map = self.terminal_follow_map;
               let ignore_terminal_id = self.ignore_terminal_id;
 
-              // Collect all terminals from the tokenizer.
-              let all_terminals: BTreeSet<GrammarTokenID> = terminal_follow_map.keys().cloned().collect();
-
               let initial_nodes_and_values: Vec<_> = self.roots.values()
-                  .map(|root_arc| (root_arc.clone(), all_terminals.clone()))
+                  .map(|root_arc| (root_arc.clone(), None))
                   .collect();
 
               Trie::special_map(
@@ -12072,27 +12515,33 @@ messages:
                   |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                       match edge_terminal_opt {
                           Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                          Some(t) => Some(BTreeSet::from([*t])),
+                          Some(t) => Some(Some(BTreeSet::from([*t]))),
                           None => Some(predecessors.clone()),
                       }
                   },
                   // merge: Union of predecessor sets from different paths.
                   |existing_set, new_set| {
-                      existing_set.extend(new_set);
+                      match (existing_set, new_set) {
+                          (None, _) => {},
+                          (existing_set @ _, None) => *existing_set = None,
+                          (Some(existing), Some(new)) => existing.extend(new),
+                      }
                   },
                   // process: Prune outgoing edges based on allowed follows.
-                  move |node, all_immediate_predecessors| {
+                  move |node, maybe_all_immediate_predecessors| {
                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
                       // all outgoing terminals are considered valid.
-                      if all_immediate_predecessors.is_empty() {
+                      if maybe_all_immediate_predecessors.is_none() {
                           return true; // Continue traversal
                       }
 
                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                       let mut allowed_follow_terminals = BTreeSet::new();
-                      for preceding_terminal in &*all_immediate_predecessors {
-                          if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                              allowed_follow_terminals.extend(follow_set.iter().cloned());
+                      if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
+                          for preceding_terminal in all_immediate_predecessors {
+                              if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                                  allowed_follow_terminals.extend(follow_set.iter().cloned());
+                              }
                           }
                       }
 
@@ -12294,6 +12743,13 @@ messages:
                   let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
                   while let Some((pos, states_at_pos)) = work_queue.pop_first() {
+                      if pos == segment_bytes.len() {
+                          for (tokenizer_state_id, nodes) in states_at_pos {
+                              next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
+                          }
+                          continue;
+                      }
+
                       for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                           let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
@@ -12326,6 +12782,9 @@ messages:
                                   }
 
                                   let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
+                                  if next_pos == segment_bytes.len() {
+                                      edge_bv.set(child_vocab_node.token_id(), false);
+                                  }
                                   if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                       edge_bv -= matches_for_terminal;
                                   }
@@ -12362,30 +12821,24 @@ messages:
                           }
 
                           if let Some(end_state_val) = exec_result.end_state {
-                              let end_state_id = TokenizerStateID(end_state_val);
-                              if self.tokenizer.all_tokens_accessible_from_state(end_state_id) {
-                                  // All tokens are possible. Create a single `None` edge from each precompute node.
-                                  let dest_nodes_for_next_level = next_level_assoc.entry(end_state_id).or_default();
+                              let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
+                              for terminal_id in possible_final_tokens {
                                   for src_node_wrapper in &precompute_nodes {
-                                      let edge_bv = child_vocab_node.reachable_token_ids().clone();
-                                      if !edge_bv.is_empty() {
-                                          let mut inserter = EdgeInserter::new(
-                                              src_node_wrapper.as_arc().clone(),
-                                              None, // Unconditional edge
-                                              edge_bv.clone(),
-                                              |e, n| *e |= n,
-                                          );
-                                          // The destination is a new node that will be processed in the next level of DFS.
-                                          inserter = inserter.try_destinations_iter(dest_nodes_for_next_level.iter().map(|w| w.as_arc().clone()));
-                                          let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
-                                          dest_nodes_for_next_level.insert(ArcPtrWrapper::new(result_node.clone()));
-                                          *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
-                                      }
+                                      let llm_token_id = child_vocab_node.token_id();
+                                      let mut edge_bv = HybridBitset::zeros();
+                                      edge_bv.insert(llm_token_id);
+                                      let mut inserter = EdgeInserter::new(
+                                          src_node_wrapper.as_arc().clone(),
+                                          Some(terminal_id),
+                                          edge_bv,
+                                          |e, n| *e |= n,
+                                      );
+                                      // Print the source node.
+                                      // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
+                                      inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                                   }
-                              } else {
-                                  // Just pass the current precompute nodes to the next level.
-                                  next_level_assoc.entry(end_state_id).or_default().extend(precompute_nodes.iter().cloned());
                               }
+                              next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                           }
                       }
                   }
@@ -13017,59 +13470,44 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: |-
-      A crucial optimization will be to **simplify out None edges**.
-      Essentially imagine we have a None edge from node B to node C (carrying None) with mask bv1, notated B -(None ; bv2)-> C.  To simplify it out, we need to iterate through all of node B's node's *incoming* edges. Say there's an edge A -(x ; bv1)-> B (x can be Some or None -- doesn't matter). We want to make a 'shortcut' by replacing A -(x ; bv1)-> B with A -(x ; bv1 & bv2)-> C. And to do this for all such edges.
-      Implement this.
-      Run it just before `helper.prune_dead_paths();`.
+  - user: Right before the line `helper.simplify_none_edges(); // Simplify out None-edges
+      by shortcutting predecessors to successors`, call a new optimisation that simple
+      replaces edges for ignore tokens with None edges.
     metadata:
   - assistant: |-
+      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary changes. Here are the diffs for the file you've provided.
+
+      I've added a new optimization pass to the `precompute` function. This pass runs before simplifying `None` edges and replaces any edges corresponding to "ignore" tokens with `None` edges. This should help streamline the subsequent optimization passes.
+
+      Here is the patch for `src/constraint.rs`:
+
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      index 2f7d6a3..1f6b4b1 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1,6 +1,7 @@
-       // src/constraint.rs
-       #![allow(clippy::too_many_arguments)]
-       
-      +use std::mem;
-       use crate::datastructures::ordered_hash_map::Retain;
-       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
-       use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
-      @@ -212,9 +213,10 @@ impl GrammarConstraint {
-                   ignore_terminal_id,
+      @@ -310,6 +310,7 @@
                );
        
-      -        helper.run_dfs();
-      -        helper.prune_dead_paths();
-      +        helper.run_dfs();
-      +        helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
-      +        helper.prune_dead_paths();
-               helper.prune_on_no_terminal_follow();
+               helper.run_dfs();
+      +        helper.replace_ignore_token_edges_with_none_edges();
+               helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
                helper.prune_dead_paths();
-               helper.merge_nodes();
-               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
-           }
-      @@ -410,6 +412,183 @@ impl<'r> Precomputer<'r> {
+               helper.prune_on_no_terminal_follow();
+      @@ -460,6 +461,45 @@
+               crate::debug!(2, "Finished precompute DFS");
                self.pb.finish_with_message("Precomputation complete");
                crate::debug!(2, "Precomputation complete");
-           }
+      +    }
       +
-      +    /// Simplify out `None` edges by shortcutting predecessors to successors.
-      +    ///
-      +    /// For every `B -(None; bv2)-> C`, and for every incoming edge `A -(x; bv1)-> B`,
-      +    /// we:
-      +    ///   - add/merge an edge `A -(x; bv1 ∩ bv2)-> C`
-      +    ///   - remove the moved tokens `bv1 ∩ bv2` from `A -(x; ...)-> B`
-      +    /// After processing all incoming edges to B, we remove all `None` edges from B.
-      +    ///
-      +    /// This transformation preserves behavior while eliminating `None` edges and
-      +    /// allows subsequent pruning and merging passes to operate on a simpler graph.
-      +    fn simplify_none_edges(&mut self) {
-      +        crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
+      +    fn replace_ignore_token_edges_with_none_edges(&mut self) {
+      +        let ignore_tid = if let Some(id) = self.ignore_terminal_id {
+      +            id
+      +        } else {
+      +            return; // No ignore token, nothing to do.
+      +        };
       +
-      +        // 1) Collect all unique nodes reachable from any root
+      +        crate::debug!(2, "Replacing ignore token edges with None edges...");
+      +
+      +        // 1. Collect all unique nodes.
       +        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
       +        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
       +        for root in self.roots.values() {
@@ -13080,130 +13518,33 @@ messages:
       +                }
       +            }
       +        }
-      +        // Map pointer -> Arc for quick retrieval
-      +        let mut arc_by_ptr: HashMap<*const Mutex<PrecomputeNode>, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
-      +        for n in &all_nodes {
-      +            arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
-      +        }
       +
-      +        // 2) Build:
-      +        //    - incoming[B] = vec of (A, key_x, bv1) for edges A -(x; bv1)-> B
-      +        //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
-      +        //    - none_union[B] = union of all bv2 for None edges from B
-      +        let mut incoming: HashMap<
-      +            *const Mutex<PrecomputeNode>,
-      +            Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
-      +        > = HashMap::new();
-      +        let mut none_edges_from: HashMap<
-      +            *const Mutex<PrecomputeNode>,
-      +            Vec<(Arc<Mutex<PrecomputeNode>>, LLMTokenBV)>
-      +        > = HashMap::new();
-      +        let mut none_union: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+      +        // 2. Iterate over each node and modify its children map.
+      +        for node_arc in all_nodes {
+      +            let mut node_guard = node_arc.lock().expect("poison");
+      +            
+      +            // Check if there are any edges with the ignore token key.
+      +            let ignore_key = Some(ignore_tid);
+      +            if let Some(dest_map_for_ignore_token) = node_guard.children_mut().remove(&ignore_key) {
+      +                // Get or create the destination map for None edges.
+      +                let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
       +
-      +        for src_arc in &all_nodes {
-      +            let src_ptr = Arc::as_ptr(src_arc);
-      +            let guard = src_arc.lock().expect("poison");
-      +            // Record all outgoing edges for incoming map
-      +            for (ek, dest_map) in guard.children().iter() {
-      +                for (child_wrap, ev_bv) in dest_map.iter() {
-      +                    let child_arc = child_wrap.as_arc().clone();
-      +                    let child_ptr = Arc::as_ptr(&child_arc);
-      +                    incoming.entry(child_ptr)
-      +                        .or_default()
-      +                        .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
-      +                }
-      +            }
-      +            // Record None edges out of src_arc (B -> C)
-      +            if let Some(dest_map_none) = guard.children().get(&None) {
-      +                let list = none_edges_from.entry(src_ptr).or_default();
-      +                for (child_wrap, ev_bv) in dest_map_none.iter() {
-      +                    list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
-      +                    let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
-      +                    *entry |= ev_bv;
+      +                // Move each destination from the ignore token map to the None map.
+      +                for (dest_wrapper, edge_bv) in dest_map_for_ignore_token {
+      +                    // If an edge to this destination already exists under None, merge the bitvectors.
+      +                    dest_map_for_none.entry(dest_wrapper).and_modify(|existing_bv| *existing_bv |= &edge_bv).or_insert(edge_bv);
       +                }
       +            }
       +        }
       +
-      +        // 3) For every node B that has None edges to children, rewrite predecessors.
-      +        for (b_ptr, none_edges) in none_edges_from.into_iter() {
-      +            let union_mask = match none_union.get(&b_ptr) {
-      +                Some(bv) if !bv.is_empty() => bv.clone(),
-      +                _ => continue,
-      +            };
-      +            // If no predecessors, still remove None edges later (could help pruning)
-      +            let in_edges = match incoming.get(&b_ptr) {
-      +                Some(v) if !v.is_empty() => v.clone(),
-      +                _ => {
-      +                    // Remove None edges out of B even if nobody points to B currently.
-      +                    if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-      +                        let mut b_guard = b_arc.lock().expect("poison");
-      +                        b_guard.children_mut().remove(&None);
-      +                    }
-      +                    continue;
-      +                }
-      +            };
-      +
-      +            let b_arc = match arc_by_ptr.get(&b_ptr) {
-      +                Some(a) => a.clone(),
-      +                None => continue,
-      +            };
-      +            let b_key = ArcPtrWrapper::new(b_arc.clone());
-      +
-      +            // For each incoming edge A -(x; bv1)-> B, split tokens:
-      +            //   move:    to C with mask (bv1 ∩ bv2)
-      +            //   leftover on A->B: bv1 - union_over_C(bv1 ∩ bv2) = bv1 ∩ (!union_mask)
-      +            for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
-      +                let mut total_to_move = bv1_original.clone();
-      +                total_to_move &= &union_mask; // total tokens to redirect to all C via None edges
-      +                if total_to_move.is_empty() {
-      +                    continue;
-      +                }
-      +
-      +                let mut a_guard = a_arc.lock().expect("poison");
-      +                let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
-      +
-      +                // Add/merge edges to each C with per-child mask
-      +                for (c_arc, bv2) in &none_edges {
-      +                    let mut to_move_for_c = bv1_original.clone();
-      +                    to_move_for_c &= bv2;
-      +                    if to_move_for_c.is_empty() {
-      +                        continue;
-      +                    }
-      +                    let c_key = ArcPtrWrapper::new(c_arc.clone());
-      +                    if let Some(existing_ev) = dest_map.get_mut(&c_key) {
-      +                        *existing_ev |= &to_move_for_c;
-      +                    } else {
-      +                        dest_map.insert(c_key, to_move_for_c);
-      +                    }
-      +                }
-      +
-      +                // Reduce/remove the A -> B edge for the moved tokens
-      +                let mut remove_b_edge = false;
-      +                if let Some(ev_ab) = dest_map.get_mut(&b_key) {
-      +                    *ev_ab -= &total_to_move;
-      +                    remove_b_edge = ev_ab.is_empty();
-      +                }
-      +                if remove_b_edge {
-      +                    dest_map.remove(&b_key);
-      +                }
-      +            }
-      +
-      +            // Finally, remove all None edges out of B
-      +            {
-      +                let mut b_guard = b_arc.lock().expect("poison");
-      +                b_guard.children_mut().remove(&None);
-      +            }
-      +        }
-      +
-      +        crate::debug!(2, "Done simplifying None edges.");
-      +    }
-           
-           fn prune_on_no_terminal_follow(&mut self) {
-               crate::debug!(2, "Pruning based on terminal follow sets.");
+      +        crate::debug!(2, "Done replacing ignore token edges.");
+           }
        
-               let terminal_follow_map = self.terminal_follow_map;
-               let ignore_terminal_id = self.ignore_terminal_id;
+           /// Simplify out `None` edges by shortcutting predecessors to successors.
+
       ```
+
+      I hope this helps you with your project. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):

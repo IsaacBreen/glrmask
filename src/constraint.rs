@@ -348,6 +348,7 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
+        helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
@@ -593,6 +594,48 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
+    }
+
+    fn replace_ignore_token_edges_with_none_edges(&mut self) {
+        let ignore_tid = if let Some(id) = self.ignore_terminal_id {
+            id
+        } else {
+            return; // No ignore token, nothing to do.
+        };
+
+        crate::debug!(2, "Replacing ignore token edges with None edges...");
+
+        // 1. Collect all unique nodes.
+        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        for root in self.roots.values() {
+            for arc in Trie::all_nodes(root.clone()) {
+                let ptr = Arc::as_ptr(&arc);
+                if seen.insert(ptr) {
+                    all_nodes.push(arc);
+                }
+            }
+        }
+
+        // 2. Iterate over each node and modify its children map.
+        for node_arc in all_nodes {
+            let mut node_guard = node_arc.lock().expect("poison");
+            
+            // Check if there are any edges with the ignore token key.
+            let ignore_key = Some(ignore_tid);
+            if let Some(dest_map_for_ignore_token) = node_guard.children_mut().remove(&ignore_key) {
+                // Get or create the destination map for None edges.
+                let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
+
+                // Move each destination from the ignore token map to the None map.
+                for (dest_wrapper, edge_bv) in dest_map_for_ignore_token {
+                    // If an edge to this destination already exists under None, merge the bitvectors.
+                    dest_map_for_none.entry(dest_wrapper).and_modify(|existing_bv| *existing_bv |= &edge_bv).or_insert(edge_bv);
+                }
+            }
+        }
+
+        crate::debug!(2, "Done replacing ignore token edges.");
     }
 
     /// Simplify out `None` edges by shortcutting predecessors to successors.
