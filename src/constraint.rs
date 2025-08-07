@@ -655,6 +655,8 @@ impl<'r> Precomputer<'r> {
     fn simplify_none_edges(&mut self) {
         crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
 
+        let root_node_ptrs: HashSet<*const Mutex<PrecomputeNode>> = self.roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+
         // 1) Collect all unique nodes reachable from any root
         let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
         let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
@@ -720,7 +722,15 @@ impl<'r> Precomputer<'r> {
             let in_edges = match incoming.get(&b_ptr) {
                 Some(v) if !v.is_empty() => v.clone(),
                 _ => {
-                    // Remove None edges out of B even if nobody points to B currently.
+                    // No predecessors.
+                    // If B is a root node, we must not remove its None edges, as there are no
+                    // predecessors to shortcut from.
+                    if root_node_ptrs.contains(&b_ptr) {
+                        continue; // It's a root, leave its None edges.
+                    }
+
+                    // Not a root and no predecessors means it's an unreachable internal node.
+                    // It's safe to remove its outgoing None edges.
                     if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
                         let mut b_guard = b_arc.lock().expect("poison");
                         b_guard.children_mut().remove(&None);
