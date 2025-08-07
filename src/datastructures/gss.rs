@@ -513,10 +513,6 @@ impl GSSNode {
             return;
         }
 
-        let mut merged_acc_val = Acc::merge(&self.acc, &other.acc);
-        merged_acc_val.needs_push_down = false;
-        let merged_acc = Arc::new(merged_acc_val);
-
         let mut self_predecessors = self.get_pushed_down_predecessors();
         let other_predecessors = other.get_pushed_down_predecessors();
 
@@ -549,6 +545,11 @@ impl GSSNode {
         } else {
             self_predecessors
         };
+
+        let mut merged_acc_val = Acc::merge(&self.acc, &other.acc);
+        merged_acc_val.needs_push_down = false;
+        let merged_acc = Arc::new(merged_acc_val);
+
         *self = GSSNode::new_with_map(merged_acc, final_predecessors);
     }
 
