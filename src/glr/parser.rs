@@ -7,7 +7,6 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
-use crate::tokenizer::TokenizerStateID;
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
@@ -580,64 +579,6 @@ impl Ord for WorkMapKey {
 }
 
 type WorkMap = BTreeMap<WorkMapKey, ParseState>;
-
-/// A per-position bucket for tokenizer precompute queues.
-/// Instead of mapping a position directly to only the "by state" association:
-///   BTreeMap<usize, BTreeMap<TokenizerStateID, NodeSet>>
-/// we map a position to a richer struct that holds:
-/// - by_state: tokenizer-state -> nodes (existing)
-/// - by_terminal: terminal-id -> nodes (new; for deferred "matches")
-///
-/// This allows deferring both "matches" and "end-state" threading until the loop pop,
-/// rather than mutating the queue while executing the tokenizer.
-#[derive(Debug, Clone)]
-pub struct WorkQueueValue<N> {
-    /// Nodes grouped by tokenizer state at this position.
-    pub by_state: BTreeMap<TokenizerStateID, N>,
-    /// Nodes grouped by matched terminal ID at this position.
-    pub by_terminal: BTreeMap<TerminalID, N>,
-}
-
-impl<N> Default for WorkQueueValue<N> {
-    fn default() -> Self {
-        Self {
-            by_state: BTreeMap::new(),
-            by_terminal: BTreeMap::new(),
-        }
-    }
-}
-
-impl<N: Clone> WorkQueueValue<N> {
-    pub fn new() -> Self { Self::default() }
-    pub fn is_empty(&self) -> bool {
-        self.by_state.is_empty() && self.by_terminal.is_empty()
-    }
-
-    pub fn by_state(&self) -> &BTreeMap<TokenizerStateID, N> { &self.by_state }
-    pub fn by_terminal(&self) -> &BTreeMap<TerminalID, N> { &self.by_terminal }
-    pub fn by_state_mut(&mut self) -> &mut BTreeMap<TokenizerStateID, N> { &mut self.by_state }
-    pub fn by_terminal_mut(&mut self) -> &mut BTreeMap<TerminalID, N> { &mut self.by_terminal }
-
-    /// Generic "merge" helper for by_state with a custom combine function.
-    pub fn merge_by_state_with<F>(&mut self, other: BTreeMap<TokenizerStateID, N>, combine: F)
-    where
-        F: Fn(&mut N, N),
-    {
-        for (k, v) in other {
-            self.by_state.entry(k).and_modify(|cur| combine(cur, v.clone())).or_insert(v);
-        }
-    }
-
-    /// Generic "merge" helper for by_terminal with a custom combine function.
-    pub fn merge_by_terminal_with<F>(&mut self, other: BTreeMap<TerminalID, N>, combine: F)
-    where
-        F: Fn(&mut N, N),
-    {
-        for (k, v) in other {
-            self.by_terminal.entry(k).and_modify(|cur| combine(cur, v.clone())).or_insert(v);
-        }
-    }
-}
 
 impl<'a> GLRParserState<'a> { // No longer generic
     fn enqueue(work_map: &mut WorkMap, state: ParseState) {
