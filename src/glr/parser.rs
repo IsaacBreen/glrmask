@@ -751,7 +751,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // It's not a len-1 reduce. This is our final state for this chain.
                             let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                             out.push(new_gss_node);
-                            timeit!(format!("Exiting fast loop. Reason: Found non-len-1 reduce: {:?}", action_selector(next_row).get(&token_id)), {});
+                            timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
                             break; // Exit the fast loop for this path
                         }
                     } else {
