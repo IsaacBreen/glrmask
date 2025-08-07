@@ -308,7 +308,9 @@ impl PartialOrd for Expr {
 
 impl Ord for Expr {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let discriminant_cmp = core::mem::discriminant(self).cmp(&core::mem::discriminant(other));
+        let self_d = core::mem::discriminant(self);
+        let other_d = core::mem::discriminant(other);
+        let discriminant_cmp = self_d.cmp(&other_d);
         if discriminant_cmp != std::cmp::Ordering::Equal {
             return discriminant_cmp;
         }

@@ -795,7 +795,7 @@ impl GrammarDefinition {
                     }
                 }
                 Expr::Epsilon => Nullability::AlwaysNull,
-                Expr::Shared(arc_expr) => get_nullability((**arc_expr).clone()),
+                Expr::Shared(arc_expr) => get_nullability((*arc_expr).clone()),
             }
         }
 
