@@ -826,21 +826,11 @@ impl<'r> Precomputer<'r> {
 
     ) {
         self.pb.inc(1);
-    
+
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            #[derive(Default, Clone)]
-            struct DfsWorkItem {
-                nodes_by_tokenizer_state: BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-                // TODO: The role of this field needs clarification.
-                // For now, it's unused.
-                // nodes_by_terminal: BTreeMap<GrammarTokenID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-            }
-    
-            let mut work_queue: BTreeMap<usize, DfsWorkItem> = BTreeMap::new();
-            let mut initial_item = DfsWorkItem::default();
-            initial_item.nodes_by_tokenizer_state = assoc_by_state.clone();
-            work_queue.insert(0, initial_item);
-    
+            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
+            work_queue.insert(0, assoc_by_state.clone());
+
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
@@ -850,8 +840,8 @@ impl<'r> Precomputer<'r> {
                     }
                     continue;
                 }
-    
-                for (tokenizer_state_id, precompute_nodes) in states_at_pos.nodes_by_tokenizer_state {
+
+                for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                     let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
                     let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
@@ -859,7 +849,7 @@ impl<'r> Precomputer<'r> {
                     } else {
                         BTreeMap::new()
                     };
-    
+
                     for match_info in &exec_result.matches {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
@@ -900,7 +890,7 @@ impl<'r> Precomputer<'r> {
                             );
 
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
-                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().nodes_by_tokenizer_state.entry(next_tokenizer_state).or_default();
+                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.lock().unwrap().value.end));
 
@@ -920,7 +910,7 @@ impl<'r> Precomputer<'r> {
                             *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
                         }
                     }
-    
+
                     if let Some(end_state_val) = exec_result.end_state {
                         let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
                         for terminal_id in possible_final_tokens {
@@ -939,7 +929,7 @@ impl<'r> Precomputer<'r> {
                                 inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             }
                         }
-                        work_queue.entry(segment_bytes.len()).or_default().nodes_by_tokenizer_state.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
+                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
                 }
             }
