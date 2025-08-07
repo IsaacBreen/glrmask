@@ -497,7 +497,7 @@ impl BitXor for &HybridBitset {
 
     fn bitxor(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
-            return Self::zeros();
+            return HybridBitset::zeros();
         }
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner ^ &*rhs.inner;
@@ -531,7 +531,7 @@ impl Sub for &HybridBitset {
 
     fn sub(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
-            return Self::zeros();
+            return HybridBitset::zeros();
         }
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner - &*rhs.inner;

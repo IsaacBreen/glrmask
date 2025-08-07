@@ -360,7 +360,7 @@ impl BitXor for &HybridL2Bitset {
 
     fn bitxor(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
-            return Self::new();
+            return HybridL2Bitset::new();
         }
         if self.is_simple() || rhs.is_simple() {
             return self.symmetric_difference_with(rhs, Some(HybridBitset::zeros()));
@@ -386,7 +386,7 @@ impl Sub for &HybridL2Bitset {
     type Output = HybridL2Bitset;
     fn sub(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
-            return Self::new();
+            return HybridL2Bitset::new();
         }
         if self.is_simple() || rhs.is_simple() {
             return self.zip_op(rhs, Some(HybridBitset::zeros()), |a, b| a - b);
