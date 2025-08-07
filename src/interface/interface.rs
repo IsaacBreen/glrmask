@@ -1080,25 +1080,7 @@ impl CompiledGrammar {
     /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
     pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
         debug!(2, "Building tokenizer from definition");
-        let mut terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
-
-        if let Some(ignore_terminal_id) = definition.ignore_terminal_id {
-            let ignore_group_id = ignore_terminal_id.0;
-            if ignore_group_id < terminal_expr_groups.len() {
-                // Extract the ignore expression, wrap it as shared and optional.
-                let ignore_expr = terminal_expr_groups[ignore_group_id].expr.clone();
-                let shared_optional_ignore = crate::finite_automata::shared(crate::finite_automata::opt(ignore_expr));
-
-                // Prepend the shared ignore expression to all other terminal expressions.
-                for (group_id, expr_group) in terminal_expr_groups.iter_mut().enumerate() {
-                    if group_id != ignore_group_id {
-                        let original_expr = std::mem::replace(&mut expr_group.expr, Expr::Epsilon); // placeholder
-                        expr_group.expr = Expr::Seq(vec![shared_optional_ignore.clone(), original_expr]);
-                    }
-                }
-            }
-        }
-
+        let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
         let tokenizer = tokenizer_expr_groups_obj.build();
 
