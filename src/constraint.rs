@@ -722,12 +722,14 @@ impl<'r> Precomputer<'r> {
 
             if edges_to_move.is_empty() { continue; }
 
-            let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
-
             for t in edges_to_move {
                 if let Some(dest_map_for_t) = node_guard.children_mut().remove(&Some(t)) {
                     for (dest_wrapper, edge_bv) in dest_map_for_t {
-                        *dest_map_for_none.entry(dest_wrapper).or_default() |= &edge_bv;
+                        if let Some(existing_bv) = node_guard.children_mut().entry(None).or_default().get_mut(&dest_wrapper) {
+                            *existing_bv |= &edge_bv;
+                        } else {
+                            node_guard.children_mut().entry(None).or_default().insert(dest_wrapper, edge_bv);
+                        }
                     }
                 }
             }
