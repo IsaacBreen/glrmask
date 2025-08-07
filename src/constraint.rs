@@ -850,21 +850,9 @@ impl<'r> Precomputer<'r> {
                         BTreeMap::new()
                     };
 
-                    let mut matches = exec_result.matches.clone();
-                    let end_states = exec_result.end_state.map_or_else(
-                        || vec![],
-                        |end_state_val| vec![end_state_val]
-                    );
-
-                    while let Some(match_info) = matches.pop() {
+                    for match_info in &exec_result.matches {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
-
-                        if Some(TerminalID(terminal_id.0)) == self.ignore_terminal_id {
-                            if next_pos == segment_bytes.len() {
-                                // tODO
-                            }
-                        }
 
                         // TODO: could make this so much faster by moving loop down...
                         for src_node_wrapper in &precompute_nodes {
@@ -923,7 +911,7 @@ impl<'r> Precomputer<'r> {
                         }
                     }
 
-                    for end_state_val in end_states {
+                    if let Some(end_state_val) = exec_result.end_state {
                         let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
                         for terminal_id in possible_final_tokens {
                             for src_node_wrapper in &precompute_nodes {
