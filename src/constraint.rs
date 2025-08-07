@@ -599,11 +599,8 @@ impl<'r> Precomputer<'r> {
         let terminal_follow_map = self.terminal_follow_map;
         let ignore_terminal_id = self.ignore_terminal_id;
 
-        // Collect all terminals from the tokenizer.
-        let all_terminals: BTreeSet<GrammarTokenID> = terminal_follow_map.keys().cloned().collect();
-
         let initial_nodes_and_values: Vec<_> = self.roots.values()
-            .map(|root_arc| (root_arc.clone(), all_terminals.clone()))
+            .map(|root_arc| (root_arc.clone(), None))
             .collect();
 
         Trie::special_map(
@@ -612,27 +609,33 @@ impl<'r> Precomputer<'r> {
             |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                 match edge_terminal_opt {
                     Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                    Some(t) => Some(BTreeSet::from([*t])),
+                    Some(t) => Some(Some(BTreeSet::from([*t]))),
                     None => Some(predecessors.clone()),
                 }
             },
             // merge: Union of predecessor sets from different paths.
             |existing_set, new_set| {
-                existing_set.extend(new_set);
+                match (existing_set, new_set) {
+                    (None, _) => {},
+                    (existing_set @ _, None) => *existing_set = None,
+                    (Some(existing), Some(new)) => existing.extend(new),
+                }
             },
             // process: Prune outgoing edges based on allowed follows.
-            move |node, all_immediate_predecessors| {
+            move |node, maybe_all_immediate_predecessors| {
                 // If there are no preceding terminals (e.g., root or only None-edges path from root),
                 // all outgoing terminals are considered valid.
-                if all_immediate_predecessors.is_empty() {
+                if maybe_all_immediate_predecessors.is_none() {
                     return true; // Continue traversal
                 }
 
                 // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                 let mut allowed_follow_terminals = BTreeSet::new();
-                for preceding_terminal in &*all_immediate_predecessors {
-                    if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                        allowed_follow_terminals.extend(follow_set.iter().cloned());
+                if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
+                    for preceding_terminal in all_immediate_predecessors {
+                        if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                            allowed_follow_terminals.extend(follow_set.iter().cloned());
+                        }
                     }
                 }
 
