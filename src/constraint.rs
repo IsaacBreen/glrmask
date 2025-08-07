@@ -892,17 +892,19 @@ impl<'r> Precomputer<'r> {
                                         .cloned()
                                         .collect()
                                 };
-                                let tags = self.tags.borrow();
-                                let eligible_children = children_of_src
-                                    .iter()
-                                    .filter(|child_wrapper| {
-                                        tags.get(child_wrapper)
-                                            .map_or(true, |tag| (tag & &edge_bv).is_empty())
-                                            && !child_wrapper.lock().unwrap().value.end
-                                    })
-                                    .map(|w| w.as_arc().clone());
-                                drop(tags);
-                                inserter = inserter.try_destinations_iter(eligible_children);
+                                let eligible_children = {
+                                    let tags = self.tags.borrow();
+                                    children_of_src
+                                        .iter()
+                                        .filter(|child_wrapper| {
+                                            tags.get(child_wrapper)
+                                                .map_or(true, |tag| (tag & &edge_bv).is_empty())
+                                                && !child_wrapper.lock().unwrap().value.end
+                                        })
+                                        .map(|w| w.as_arc().clone())
+                                        .collect::<Vec<_>>()
+                                }; // tags is dropped here automatically
+                                inserter = inserter.try_destinations_iter(eligible_children.into_iter());
                             }
 
                             let result_node = inserter
