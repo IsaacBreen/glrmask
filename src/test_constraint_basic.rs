@@ -665,6 +665,79 @@ fn test_a_plus_commit_equivalence() {
 }
 
 #[test]
+fn test_ignore_token() {
+    // Grammar: S -> A B
+    // Tokenizer: A='a', B='b', WS=' ' (ignore)
+    // LLM Vocab: "a", "b", " ", "a b"
+
+    let tokenizer_expr = groups![
+        eat_u8(b'a'), // ID 0 -> A
+        eat_u8(b'b'), // ID 1 -> B
+        eat_u8(b' '), // ID 2 -> WS (ignore)
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_a = LLMTokenID(0);
+    let llm_b = LLMTokenID(1);
+    let llm_ws = LLMTokenID(2);
+    let llm_a_b = LLMTokenID(3);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"b".to_vec(), llm_b);
+    llm_token_map.insert(b" ".to_vec(), llm_ws);
+    llm_token_map.insert(b"a b".to_vec(), llm_a_b);
+
+    let productions = vec![
+        prod("S", vec![t("A"), t("B")]),
+    ];
+
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    let term_a = regex_name("A");
+    let term_b = regex_name("B");
+    let term_ws = regex_name("WS");
+    let tid_a = TerminalID(0);
+    let tid_b = TerminalID(1);
+    let tid_ws = TerminalID(2);
+    grammar_token_map.insert(term_a.clone(), tid_a);
+    grammar_token_map.insert(term_b.clone(), tid_b);
+    grammar_token_map.insert(term_ws.clone(), tid_ws);
+
+    let ignore_terminal_id = Some(tid_ws);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), ignore_terminal_id);
+    assert_eq!(parser.ignore_terminal_id, ignore_terminal_id);
+
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(term_a, tid_a.0);
+    token_name_map.insert(term_b, tid_b.0);
+    token_name_map.insert(term_ws, tid_ws.0);
+
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        3, // max_original_llm_token_id
+    );
+
+    // --- Runtime check ---
+    // Scenario 1: commit "a", then " ", then "b"
+    let mut state1 = constraint.init();
+    assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_a.0, llm_a_b.0]), "Initial mask should allow 'a' or 'a b'");
+    state1.commit(llm_a);
+    assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_b.0, llm_ws.0]), "After 'a', mask should allow 'b' or ' '");
+    state1.commit(llm_ws);
+    assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_b.0]), "After 'a ', mask should allow 'b'");
+    state1.commit(llm_b);
+    assert!(state1.get_mask().is_empty(), "Mask should be empty after a complete parse");
+
+    // --- Equivalence check ---
+    let mut state2 = constraint.init();
+    state2.commit(llm_a_b);
+    assert!(state2.get_mask().is_empty(), "Mask should be empty after a complete parse");
+    assert_eq!(state1.state(), state2.state(), "States from ('a',' ','b') and ('a b') should be equivalent.");
+}
+
+#[test]
 fn test_hideous_ambiguity() {
     // 1. Define the grammar
     let productions = vec![
