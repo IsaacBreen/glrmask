@@ -718,6 +718,7 @@ fn test_ignore_token() {
         token_name_map,
         3, // max_original_llm_token_id
     );
+    constraint.dump_precomputed();
 
     // --- Runtime check ---
     // Scenario 1: commit "a", then " ", then "b"
