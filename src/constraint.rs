@@ -41,6 +41,82 @@ use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::GSS_LOGGING_ENABLED;
 
+fn strongconnect(
+    v: GrammarTokenID,
+    index: &mut usize,
+    stack: &mut Vec<GrammarTokenID>,
+    on_stack: &mut BTreeSet<GrammarTokenID>,
+    indices: &mut BTreeMap<GrammarTokenID, usize>,
+    low_links: &mut BTreeMap<GrammarTokenID, usize>,
+    sccs: &mut Vec<BTreeSet<GrammarTokenID>>,
+    graph: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+) {
+    indices.insert(v, *index);
+    low_links.insert(v, *index);
+    *index += 1;
+    stack.push(v);
+    on_stack.insert(v);
+
+    if let Some(neighbors) = graph.get(&v) {
+        for &w in neighbors {
+            if !indices.contains_key(&w) {
+                strongconnect(w, index, stack, on_stack, indices, low_links, sccs, graph);
+                let low_link_v = low_links[&v];
+                let low_link_w = low_links[&w];
+                if low_link_w < low_link_v {
+                    low_links.insert(v, low_link_w);
+                }
+            } else if on_stack.contains(&w) {
+                let low_link_v = low_links[&v];
+                let index_w = indices[&w];
+                if index_w < low_link_v {
+                    low_links.insert(v, index_w);
+                }
+            }
+        }
+    }
+
+    if low_links[&v] == indices[&v] {
+        let mut new_scc = BTreeSet::new();
+        loop {
+            let w = stack.pop().unwrap();
+            on_stack.remove(&w);
+            new_scc.insert(w);
+            if w == v {
+                break;
+            }
+        }
+        sccs.push(new_scc);
+    }
+}
+
+/// Finds the strongly connected components of a directed graph using Tarjan's algorithm.
+fn find_sccs(
+    graph: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>
+) -> Vec<BTreeSet<GrammarTokenID>> {
+    let mut index = 0;
+    let mut stack = Vec::new();
+    let mut on_stack = BTreeSet::new();
+    let mut indices = BTreeMap::new();
+    let mut low_links = BTreeMap::new();
+    let mut sccs = Vec::new();
+
+    let mut all_nodes = BTreeSet::new();
+    for (k, vs) in graph {
+        all_nodes.insert(*k);
+        for v in vs {
+            all_nodes.insert(*v);
+        }
+    }
+
+    for v in all_nodes {
+        if !indices.contains_key(&v) {
+            strongconnect(v, &mut index, &mut stack, &mut on_stack, &mut indices, &mut low_links, &mut sccs, graph);
+        }
+    }
+    sccs
+}
+
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
 
@@ -349,6 +425,7 @@ impl GrammarConstraint {
 
         helper.run_dfs();
         helper.replace_ignore_token_edges_with_none_edges();
+        helper.shortcut_chainable_terminals();
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
@@ -594,6 +671,68 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
+    }
+
+    fn shortcut_chainable_terminals(&mut self) {
+        // Find SCCs in the terminal follow graph
+        let sccs = find_sccs(&self.terminal_follow_map);
+
+        let mut chainable_terminals = BTreeSet::new();
+        for scc in sccs {
+            if scc.len() > 1 {
+                chainable_terminals.extend(scc);
+            } else if scc.len() == 1 {
+                let t = scc.iter().next().unwrap();
+                if let Some(follows) = self.terminal_follow_map.get(t) {
+                    if follows.contains(t) {
+                        chainable_terminals.insert(*t);
+                    }
+                }
+            }
+        }
+
+        if chainable_terminals.is_empty() {
+            crate::debug!(2, "No chainable terminals to shortcut.");
+            return;
+        }
+
+        crate::debug!(2, "Shortcutting chainable terminals: {:?}", chainable_terminals);
+
+        // 1. Collect all unique nodes.
+        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        for root in self.roots.values() {
+            for arc in Trie::all_nodes(root.clone()) {
+                let ptr = Arc::as_ptr(&arc);
+                if seen.insert(ptr) {
+                    all_nodes.push(arc);
+                }
+            }
+        }
+
+        // 2. Iterate over each node and modify its children map.
+        for node_arc in all_nodes {
+            let mut node_guard = node_arc.lock().expect("poison");
+            
+            let edges_to_move: Vec<_> = node_guard.children().keys()
+                .filter_map(|k| k.as_ref())
+                .filter(|k| chainable_terminals.contains(k))
+                .cloned()
+                .collect();
+
+            if edges_to_move.is_empty() { continue; }
+
+            let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
+
+            for t in edges_to_move {
+                if let Some(dest_map_for_t) = node_guard.children_mut().remove(&Some(t)) {
+                    for (dest_wrapper, edge_bv) in dest_map_for_t {
+                        *dest_map_for_none.entry(dest_wrapper).or_default() |= &edge_bv;
+                    }
+                }
+            }
+        }
+        crate::debug!(2, "Done shortcutting chainable terminals.");
     }
 
     fn replace_ignore_token_edges_with_none_edges(&mut self) {
