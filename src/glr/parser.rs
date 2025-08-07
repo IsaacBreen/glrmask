@@ -607,7 +607,7 @@ impl<N> Default for WorkQueueValue<N> {
     }
 }
 
-impl<N> WorkQueueValue<N> {
+impl<N: Clone> WorkQueueValue<N> {
     pub fn new() -> Self { Self::default() }
     pub fn is_empty(&self) -> bool {
         self.by_state.is_empty() && self.by_terminal.is_empty()
