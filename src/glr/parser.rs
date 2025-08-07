@@ -620,21 +620,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
             let row = &self.parser.table[&state_id];
             if let Some(action) = action_selector(row).get(&token_id) {
-                // For debugging, report how many have same edge value
-                if true {
-                    let mut edge_values = BTreeMap::new();
-                    for peek in GSSNode::peek_iter(&state.stack) {
-                        edge_values.entry(peek.edge_value().clone())
-                            .and_modify(|count| *count += 1)
-                            .or_insert(1);
-                    }
-                    println!("Processing state {} with {} edges", state_id.0, edge_values.len());
-                    for (edge_value, count) in edge_values {
-                        if count > 1 {
-                            println!("  Edge value {:?} has {} occurrences", edge_value, count);
-                        }
-                    }
-                }
                 for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
