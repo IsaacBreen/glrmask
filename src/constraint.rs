@@ -834,13 +834,6 @@ impl<'r> Precomputer<'r> {
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
-                if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in states_at_pos {
-                        next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
-                    }
-                    continue;
-                }
-
                 for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                     let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
@@ -912,24 +905,39 @@ impl<'r> Precomputer<'r> {
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
-                        let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
-                        for terminal_id in possible_final_tokens {
+                        let end_tokenizer_state = TokenizerStateID(end_state_val);
+                        if self.tokenizer.all_tokens_accessible_from_state(end_tokenizer_state) {
                             for src_node_wrapper in &precompute_nodes {
-                                let llm_token_id = child_vocab_node.token_id();
-                                let mut edge_bv = HybridBitset::zeros();
-                                edge_bv.insert(llm_token_id);
+                                let edge_bv = child_vocab_node.reachable_token_ids().clone();
+                                if edge_bv.is_empty() { continue; }
+
                                 let mut inserter = EdgeInserter::new(
                                     src_node_wrapper.as_arc().clone(),
-                                    Some(terminal_id),
+                                    None,
                                     edge_bv,
                                     |e, n| *e |= n,
                                 );
-                                // Print the source node.
-                                // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
-                                inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                let dest_node = self.roots.get(&end_tokenizer_state).unwrap();
+                                inserter.try_destination(dest_node.clone()).expect("Failed to insert destination for unconditional edge");
+                            }
+                        } else {
+                            let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(end_tokenizer_state);
+                            for terminal_id in possible_final_tokens {
+                                for src_node_wrapper in &precompute_nodes {
+                                    let llm_token_id = child_vocab_node.token_id();
+                                    let mut edge_bv = HybridBitset::zeros();
+                                    edge_bv.insert(llm_token_id);
+                                    let mut inserter = EdgeInserter::new(
+                                        src_node_wrapper.as_arc().clone(),
+                                        Some(terminal_id),
+                                        edge_bv,
+                                        |e, n| *e |= n,
+                                    );
+                                    inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                }
                             }
                         }
-                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
+                        next_level_assoc.entry(end_tokenizer_state).or_default().extend(precompute_nodes.iter().cloned());
                     }
                 }
             }

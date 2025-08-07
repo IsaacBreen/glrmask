@@ -118,6 +118,16 @@ impl Regex {
         regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }
 
+    pub(crate) fn all_tokens_accessible_from_state(&self, state: TokenizerStateID) -> bool {
+        if self.num_groups == 0 {
+            return true;
+        }
+        let dfa_state = &self.dfa.states[state.0];
+        let possible_groups = &dfa_state.possible_future_group_ids;
+        let finalizers = &dfa_state.finalizers;
+        possible_groups.union(finalizers).count() == self.num_groups
+    }
+
     fn max_state(&self) -> usize {
         self.dfa.states.len()
     }

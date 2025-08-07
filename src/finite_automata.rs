@@ -3,6 +3,8 @@ use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
 
@@ -158,6 +160,7 @@ impl JSONConvertible for DFA {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Regex {
     pub dfa: DFA,
+    pub num_groups: usize,
 }
 
 // Manual impl for Regex
@@ -165,6 +168,7 @@ impl JSONConvertible for Regex {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         obj.insert("dfa".to_string(), self.dfa.to_json());
+        obj.insert("num_groups".to_string(), self.num_groups.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -172,7 +176,9 @@ impl JSONConvertible for Regex {
             JSONNode::Object(mut obj) => {
                 let dfa = obj.remove("dfa").ok_or_else(|| "Missing field dfa for Regex".to_string())
                              .and_then(DFA::from_json)?;
-                Ok(Regex { dfa })
+                let num_groups = obj.remove("num_groups").ok_or_else(|| "Missing field num_groups for Regex".to_string())
+                                  .and_then(usize::from_json)?;
+                Ok(Regex { dfa, num_groups })
             }
             _ => Err("Expected JSONNode::Object for Regex".to_string()),
         }
@@ -266,7 +272,7 @@ impl<'a> JSONConvertible for RegexState<'a> {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
@@ -274,6 +280,44 @@ pub enum Expr {
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
     Epsilon, // Explicit epsilon transition
+    Shared(Arc<Expr>),
+}
+
+impl Hash for Expr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Expr::U8Seq(v) => v.hash(state),
+            Expr::U8Class(s) => s.hash(state),
+            Expr::Quantifier(e, q) => {
+                e.hash(state);
+                q.hash(state);
+            }
+            Expr::Choice(v) | Expr::Seq(v) => v.hash(state),
+            Expr::Epsilon => {}
+            Expr::Shared(arc_expr) => Arc::as_ptr(arc_expr).hash(state),
+        }
+    }
+}
+
+impl PartialOrd for Expr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Expr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        core::mem::discriminant(self).cmp(&core::mem::discriminant(other)).then_with(|| match (self, other) {
+            (Expr::U8Seq(v1), Expr::U8Seq(v2)) => v1.cmp(v2),
+            (Expr::U8Class(s1), Expr::U8Class(s2)) => s1.cmp(s2),
+            (Expr::Quantifier(e1, q1), Expr::Quantifier(e2, q2)) => e1.cmp(e2).then_with(|| q1.cmp(q2)),
+            (Expr::Choice(v1), Expr::Choice(v2)) | (Expr::Seq(v1), Expr::Seq(v2)) => v1.cmp(v2),
+            (Expr::Shared(a1), Expr::Shared(a2)) => Arc::as_ptr(a1).cmp(&Arc::as_ptr(a2)),
+            (Expr::Epsilon, Expr::Epsilon) => std::cmp::Ordering::Equal,
+            _ => unreachable!(),
+        })
+    }
 }
 
 impl JSONConvertible for Expr {
@@ -303,6 +347,9 @@ impl JSONConvertible for Expr {
             }
             Expr::Epsilon => {
                 obj.insert("variant".to_string(), JSONNode::String("Epsilon".to_string()));
+            }
+            Expr::Shared(arc_expr) => {
+                return arc_expr.to_json();
             }
         }
         JSONNode::Object(obj)
@@ -605,7 +652,8 @@ impl ExprGroups {
     pub fn build(self) -> Regex {
         let mut dfa = self.build_nfa().to_dfa();
         dfa.minimize();
-        Regex { dfa }
+        let num_groups = self.groups.len();
+        Regex { dfa, num_groups }
     }
 
     fn build_nfa(self) -> NFA {
@@ -613,9 +661,10 @@ impl ExprGroups {
             states: vec![NFAState::new()],
             start_state: 0,
         };
+        let mut cache = BTreeMap::new();
 
         for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-            let end_state = Expr::handle_expr(expr, &mut nfa, 0);
+            let end_state = Expr::handle_expr(expr, &mut nfa, 0, &mut cache);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 // Additionally, track that this finalizer is non-greedy
@@ -634,7 +683,7 @@ impl Expr {
         ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
     }
 
-    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut BTreeMap<*const Expr, (usize, usize)>) -> usize {
         match expr {
             Expr::U8Seq(u8s) => {
                 let mut next_state = current_state;
@@ -661,7 +710,7 @@ impl Expr {
                         nfa.add_epsilon_transition(current_state, loop_start_state);
 
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
+                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state, cache);
 
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
@@ -674,7 +723,7 @@ impl Expr {
                     }
                     QuantifierType::ZeroOrOne => {
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
+                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state, cache);
 
                         // Epsilon transition from current state to expr end state
                         nfa.add_epsilon_transition(current_state, expr_end_state);
@@ -690,7 +739,7 @@ impl Expr {
 
                 for expr in exprs {
                     // Process the expr and get its end state
-                    let expr_end_state = Self::handle_expr(expr, nfa, current_state);
+                    let expr_end_state = Self::handle_expr(expr, nfa, current_state, cache);
 
                     // Connect the end state of the expr to the end state of the choice
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -701,11 +750,24 @@ impl Expr {
             }
             Expr::Seq(exprs) => {
                 for expr in exprs {
-                    current_state = Self::handle_expr(expr, nfa, current_state);
+                    current_state = Self::handle_expr(expr, nfa, current_state, cache);
                 }
                 current_state
             }
-            Expr::Epsilon => current_state
+            Expr::Epsilon => current_state,
+            Expr::Shared(arc_expr) => {
+                let expr_ptr = Arc::as_ptr(&arc_expr);
+                if let Some(&(start, end)) = cache.get(&expr_ptr) {
+                    nfa.add_epsilon_transition(current_state, start);
+                    return end;
+                }
+
+                let start_state = nfa.add_state();
+                let end_state = Self::handle_expr((*arc_expr).clone(), nfa, start_state, cache);
+                cache.insert(expr_ptr, (start_state, end_state));
+                nfa.add_epsilon_transition(current_state, start_state);
+                end_state
+            }
         }
     }
 }
