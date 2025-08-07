@@ -464,6 +464,12 @@ impl GrammarConstraint {
     }
 }
 
+#[derive(Default, Clone)]
+struct WorkQueueValue {
+    by_tokenizer_state: BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+    by_terminal: BTreeMap<GrammarTokenID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+}
+
 struct Precomputer<'r> {
     tokenizer:        &'r Regex,
     vocab:            VocabPrefixTree,
@@ -813,12 +819,6 @@ impl<'r> Precomputer<'r> {
         print_precompute_stats(&self.stats, token_name_map);
 
         self.roots
-    }
-
-    #[derive(Default, Clone)]
-    struct WorkQueueValue {
-        by_tokenizer_state: BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-        by_terminal: BTreeMap<GrammarTokenID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
     }
 
     fn dfs(
