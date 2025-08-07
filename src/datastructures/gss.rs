@@ -514,30 +514,14 @@ impl GSSNode {
         }
 
         let mut merged_acc_val = Acc::merge(&self.acc, &other.acc);
-        let acc_changed = merged_acc_val.llm_tokens_union != self.acc.llm_tokens_union ||
-                          merged_acc_val.llm_tokens_intersection != self.acc.llm_tokens_intersection ||
-                          merged_acc_val.terminals_union != self.acc.terminals_union ||
-                          merged_acc_val.terminals_intersection != self.acc.terminals_intersection;
-
-        // If the acc changes, it needs to be pushed down to the newly merged children.
-        // It also needs pushdown if either of the parents already needed one.
-        merged_acc_val.needs_push_down = acc_changed || self.acc.needs_push_down || other.acc.needs_push_down;
+        merged_acc_val.needs_push_down = false;
         let merged_acc = Arc::new(merged_acc_val);
-        
+
         let mut self_predecessors = self.get_pushed_down_predecessors();
-        let mut other_predecessors = other.get_pushed_down_predecessors();
-
-        // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // let other_predecessors_flattened: Vec<_> = other.predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // println!("new_predecessors_flattened: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
-        // println!("other_predecessors_flattened: {:?}", print_gss_forest(&other_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
-
+        let other_predecessors = other.get_pushed_down_predecessors();
 
         merge_node_maps(&mut self_predecessors, other_predecessors, merge_depth);
 
-        // let new_predecessors_flattened: Vec<_> = new_predecessors.values().flat_map(|v| v.values()).flatten().cloned().collect();
-        // println!("new_predecessors_flattened after merge: {:?}", print_gss_forest(&new_predecessors_flattened, &Default::default(), &GSSPrintConfig::default()));
-        
         let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
             // This is important for preventing the GSS from bloating with redundant nodes
