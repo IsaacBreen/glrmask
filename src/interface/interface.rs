@@ -998,26 +998,43 @@ impl GrammarDefinition {
 
 
     /// Helper to get terminal expressions ordered by group ID for tokenizer construction.
-    pub fn get_terminal_expressions_for_tokenizer(&self) -> Vec<ExprGroup> {
-        if self.regex_expr_to_group_id.is_empty() {
-            return Vec::new();
+pub fn get_terminal_expressions_for_tokenizer(&self) -> Vec<ExprGroup> {
+    if self.regex_expr_to_group_id.is_empty() {
+        return Vec::new();
+    }
+
+    let max_group_id = *self.regex_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
+    let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
+
+    for (expr, group_id) in &self.regex_expr_to_group_id {
+        // Ensure the group_id is valid for the vector. This should hold if IDs are contiguous.
+        if *group_id < expr_groups_vec.len() {
+             expr_groups_vec[*group_id] = greedy_group(expr.clone());
+        } else {
+            // This case should ideally not happen if group IDs are assigned contiguously starting from 0.
+            // Handle error or resize vector if necessary. For now, log a warning.
+            debug!(0, "Warning: Group ID {} is out of bounds for tokenizer expressions vector (len {}). Terminal {:?} might be missing.", group_id, expr_groups_vec.len(), expr);
         }
-
-        let max_group_id = *self.regex_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
-        let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
-
-        for (expr, group_id) in &self.regex_expr_to_group_id {
-            // Ensure the group_id is valid for the vector. This should hold if IDs are contiguous.
-            if *group_id < expr_groups_vec.len() {
-                 expr_groups_vec[*group_id] = greedy_group(expr.clone());
-            } else {
-                // This case should ideally not happen if group IDs are assigned contiguously starting from 0.
-                // Handle error or resize vector if necessary. For now, log a warning.
-                debug!(0, "Warning: Group ID {} is out of bounds for tokenizer expressions vector (len {}). Terminal {:?} might be missing.", group_id, expr_groups_vec.len(), expr);
+    }
+    // If an ignore terminal is defined, prepend it (shared) to every terminal expression
+    // except the ignore one itself. This makes the tokenizer automatically accept
+    // ignore prefixes for other tokens.
+    if let Some(ignore_tid) = self.ignore_terminal_id {
+        let ignore_gid = ignore_tid.0;
+        if let Some(ignore_expr) = self.regex_expr_to_group_id.get_by_right(&ignore_gid).cloned() {
+            let shared_ignore = Arc::new(ignore_expr);
+            for (idx, eg) in expr_groups_vec.iter_mut().enumerate() {
+                if idx == ignore_gid {
+                    continue;
+                }
+                let original = eg.expr.clone();
+                eg.expr = Expr::Seq(vec![Expr::Shared(shared_ignore.clone()), original]);
             }
         }
-        expr_groups_vec
     }
+
+    expr_groups_vec
+}
 }
 
 // --- CompiledGrammar: Grammar with compiled tokenizer and parser ---

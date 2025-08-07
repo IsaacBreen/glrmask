@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub type GroupID = usize;
 
@@ -270,6 +272,7 @@ impl<'a> JSONConvertible for RegexState<'a> {
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
+    Shared(Arc<Expr>), // Shared sub-expression (for efficient reuse)
     Quantifier(Box<Expr>, QuantifierType),
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
@@ -287,6 +290,10 @@ impl JSONConvertible for Expr {
             Expr::U8Class(u8set) => {
                 obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
                 obj.insert("u8set".to_string(), u8set.to_json());
+            }
+            Expr::Shared(inner) => {
+                obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
+                obj.insert("expr".to_string(), (&**inner).to_json());
             }
             Expr::Quantifier(expr, q_type) => {
                 obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
@@ -323,6 +330,11 @@ impl JSONConvertible for Expr {
                         let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
                                        .and_then(U8Set::from_json)?;
                         Ok(Expr::U8Class(u8set))
+                    }
+                    "Shared" => {
+                        let inner_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Shared".to_string())?;
+                        let inner = Expr::from_json(inner_node)?;
+                        Ok(Expr::Shared(Arc::new(inner)))
                     }
                     "Quantifier" => {
                         let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
@@ -613,9 +625,10 @@ impl ExprGroups {
             states: vec![NFAState::new()],
             start_state: 0,
         };
-
+        // Cache for Shared expressions: map (expr_ptr, start_state) -> end_state
+        let mut shared_cache: HashMap<(*const Expr, usize), usize> = HashMap::new();
         for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-            let end_state = Expr::handle_expr(expr, &mut nfa, 0);
+            let end_state = Expr::handle_expr(&expr, &mut nfa, 0, &mut shared_cache);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 // Additionally, track that this finalizer is non-greedy
@@ -629,16 +642,47 @@ impl ExprGroups {
     }
 }
 
+impl Regex {
+    /// Returns the number of distinct groups (one past the largest GroupID seen).
+    pub fn num_groups(&self) -> usize {
+        let mut max = 0usize;
+        for state in &self.dfa.states {
+            for &g in &state.finalizers {
+                if g + 1 > max { max = g + 1; }
+            }
+            for &g in &state.possible_future_group_ids {
+                if g + 1 > max { max = g + 1; }
+            }
+            for (&g, _) in &state.group_id_to_u8set {
+                if g + 1 > max { max = g + 1; }
+            }
+        }
+        max
+    }
+}
+
 impl Expr {
     pub fn build(self) -> Regex {
         ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
     }
-
-    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+    /// Handle expression building with an optional cache for Shared variants.
+    /// `cache` maps (shared_ptr, start_state) -> end_state to avoid rebuilding shared sub-NFAs.
+    fn handle_expr(expr: &Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<(*const Expr, usize), usize>) -> usize {
         match expr {
+            Expr::Shared(arc_expr) => {
+                // Use pointer identity of the Arc for caching.
+                let ptr = Arc::as_ptr(arc_expr) as *const Expr;
+                let key = (ptr, current_state);
+                if let Some(&cached) = cache.get(&key) {
+                    return cached;
+                }
+                let end_state = Self::handle_expr(&*arc_expr, nfa, current_state, cache);
+                cache.insert(key, end_state);
+                end_state
+            }
             Expr::U8Seq(u8s) => {
                 let mut next_state = current_state;
-                for c in u8s {
+                for &c in u8s.iter() {
                     let new_state = nfa.add_state();
                     nfa.add_transition(next_state, c, new_state);
                     next_state = new_state;
@@ -647,65 +691,49 @@ impl Expr {
             }
             Expr::U8Class(u8s) => {
                 let new_state = nfa.add_state();
-                for ch in u8s.iter() {
+                for &ch in u8s.iter() {
                     nfa.add_transition(current_state, ch, new_state);
                 }
                 new_state
             }
-            Expr::Quantifier(expr, quantifier_type) => {
+            Expr::Quantifier(inner, quantifier_type) => {
                 match quantifier_type {
                     QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
                         let loop_start_state = nfa.add_state();
-
                         // Epsilon transition from current state to loop start state
                         nfa.add_epsilon_transition(current_state, loop_start_state);
-
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
-
+                        let expr_end_state = Self::handle_expr(&*inner, nfa, loop_start_state, cache);
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
-
                         match quantifier_type {
-                            QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
-                            QuantifierType::OneOrMore => expr_end_state, // The expr end state becomes the new current state
-                            _ => unreachable!()
+                            QuantifierType::ZeroOrMore => loop_start_state,
+                            QuantifierType::OneOrMore => expr_end_state,
+                            _ => unreachable!(),
                         }
                     }
                     QuantifierType::ZeroOrOne => {
-                        // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
-
-                        // Epsilon transition from current state to expr end state
+                        let expr_end_state = Self::handle_expr(&*inner, nfa, current_state, cache);
                         nfa.add_epsilon_transition(current_state, expr_end_state);
-
-                        // The expr end state becomes the new current state
                         expr_end_state
                     }
                 }
             }
             Expr::Choice(exprs) => {
-                // New start state for choice
-                let choice_end_state = nfa.add_state();   // New end state for choice
-
-                for expr in exprs {
-                    // Process the expr and get its end state
-                    let expr_end_state = Self::handle_expr(expr, nfa, current_state);
-
-                    // Connect the end state of the expr to the end state of the choice
+                let choice_end_state = nfa.add_state();
+                for sub in exprs.iter() {
+                    let expr_end_state = Self::handle_expr(sub, nfa, current_state, cache);
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
                 }
-
-                // The end state of the choice becomes the new current state
                 choice_end_state
             }
             Expr::Seq(exprs) => {
-                for expr in exprs {
-                    current_state = Self::handle_expr(expr, nfa, current_state);
+                for sub in exprs.iter() {
+                    current_state = Self::handle_expr(sub, nfa, current_state, cache);
                 }
                 current_state
             }
-            Expr::Epsilon => current_state
+            Expr::Epsilon => current_state,
         }
     }
 }
