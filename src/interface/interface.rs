@@ -795,7 +795,6 @@ impl GrammarDefinition {
                     }
                 }
                 Expr::Epsilon => Nullability::AlwaysNull,
-                Expr::Shared(arc_expr) => get_nullability((*arc_expr).clone()),
             }
         }
 
@@ -1007,21 +1006,10 @@ impl GrammarDefinition {
         let max_group_id = *self.regex_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
         let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
 
-        let ignore_expr_arc = self.ignore_terminal_id.and_then(|id| {
-            self.regex_expr_to_group_id.get_by_right(&id.0)
-        }).map(|expr| Arc::new(Expr::Quantifier(Box::new(expr.clone()), QuantifierType::ZeroOrOne)));
-
         for (expr, group_id) in &self.regex_expr_to_group_id {
-            let final_expr = if Some(TerminalID(*group_id)) == self.ignore_terminal_id {
-                expr.clone()
-            } else if let Some(ignore_arc) = &ignore_expr_arc {
-                Expr::Seq(vec![Expr::Shared(ignore_arc.clone()), expr.clone()])
-            } else {
-                expr.clone()
-            };
-
+            // Ensure the group_id is valid for the vector. This should hold if IDs are contiguous.
             if *group_id < expr_groups_vec.len() {
-                 expr_groups_vec[*group_id] = greedy_group(final_expr);
+                 expr_groups_vec[*group_id] = greedy_group(expr.clone());
             } else {
                 // This case should ideally not happen if group IDs are assigned contiguously starting from 0.
                 // Handle error or resize vector if necessary. For now, log a warning.
