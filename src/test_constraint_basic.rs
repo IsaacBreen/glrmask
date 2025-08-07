@@ -95,7 +95,7 @@ fn test_trivial() {
 
     // Mask should now be empty as we've reached the end of a valid parse
     let mask3 = state.get_mask();
-    assert!(mask3.is_empty());
+    assert_eq!(mask3, HybridBitset::from_iter(vec![]));
 }
 
 #[test]
