@@ -558,7 +558,43 @@ impl Display for GLRParserState<'_> {
     }
 }
 
+// Key is (depth, state_id) to process stacks in a specific order.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct WorkMapKey(usize, StateID);
+
+impl PartialOrd for WorkMapKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WorkMapKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // This ordering is chosen for performance. It processes deeper stacks first.
+        // The idea is that deeper stacks are more constrained and processing them
+        // first might lead to quicker pruning of invalid paths.
+        // Sorting by depth descending, then by state_id ascending.
+        other.0.cmp(&self.0).then_with(|| self.1.cmp(&other.1))
+    }
+}
+
+type WorkMap = BTreeMap<WorkMapKey, ParseState>;
+
 impl<'a> GLRParserState<'a> { // No longer generic
+    fn enqueue(work_map: &mut WorkMap, state: ParseState) {
+        // Peel off the top edges of the GSS in the given state,
+        // and group the resulting isolated paths by their (depth, state_id) key.
+        // This merges paths that are in the same logical state, reducing redundant processing.
+        for peek in GSSNode::peek_iter(&state.stack) {
+            let isolated_state = ParseState { stack: peek.isolated_parent() };
+            let depth = isolated_state.stack.max_depth();
+            let state_id = peek.edge_value().state_id;
+            work_map.entry(WorkMapKey(depth, state_id))
+                .and_modify(|s| s.merge(isolated_state.clone()))
+                .or_insert(isolated_state);
+        }
+    }
+
     fn push_state(
         &self,
         peek: &GSSPeek,
@@ -574,18 +610,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn process_action_queue<F, R>(
         &mut self,
         token_id: TerminalID,
-        work_queue: &mut VecDeque<ParseState>,
-        mut reduce_handler: R,
+        work_map: &mut WorkMap,
+        mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
     ) where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-        R: FnMut(&mut VecDeque<ParseState>, ParseState),
     {
-        while let Some(state) = work_queue.pop_front() {
-            for peek in GSSNode::peek_iter(&state.stack) {
-                let row = &self.parser.table[&peek.edge_value().state_id];
-                if let Some(action) = action_selector(row).get(&token_id) {
+        while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
+            let row = &self.parser.table[&state_id];
+            if let Some(action) = action_selector(row).get(&token_id) {
+                for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
                             crate::debug!(5, "Action: Shift to state {}", to.0);
@@ -601,7 +636,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                             if !s_new_arc.is_empty() {
-                                reduce_handler(work_queue, ParseState { stack: s_new_arc });
+                                let new_parse_state = ParseState { stack: s_new_arc };
+                                if let Some(ref mut r_map) = reduce_map {
+                                    Self::enqueue(r_map, new_parse_state);
+                                } else {
+                                    Self::enqueue(work_map, new_parse_state);
+                                }
                             }
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -617,41 +657,46 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                     let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
                                     if !s_new_arc.is_empty() {
-                                        reduce_handler(work_queue, ParseState { stack: s_new_arc });
+                                        let new_parse_state = ParseState { stack: s_new_arc };
+                                        if let Some(ref mut r_map) = reduce_map {
+                                            Self::enqueue(r_map, new_parse_state);
+                                        } else {
+                                            Self::enqueue(work_map, new_parse_state);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 } else {
-                    crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
+                    crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
                 }
             }
         }
     }
 
-    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut VecDeque<ParseState>, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>) {
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
             self.process_action_queue(
                 token_id,
                 phase1_todo,
-                |_, new_parse_state| phase2_todo.push_back(new_parse_state),
+                Some(phase2_todo),
                 shifted_states_todo,
                 |row| &row.shifts_and_reduces_without_default_reduce,
             );
         });
     }
 
-    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut VecDeque<ParseState>, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
             self.process_action_queue(
                 token_id,
                 phase2_todo,
-                |work_queue, new_parse_state| work_queue.push_back(new_parse_state),
+                None,
                 shifted_states_todo,
                 |row| &row.shifts_and_reduces_full,
             );
@@ -671,12 +716,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
     where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
-        let popped = timeit!(peek.popn(len));
+        let popper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+        crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
 
         let mut out = Vec::new();
-        for popper_item in popped.iter() {
+        for popper_item in popper.iter() {
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
                 let mut current_nt = nt;
@@ -749,19 +794,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         self.log_gss("Phase1/2-start", token_id, false, false);
 
-        let mut phase2_todo: VecDeque<ParseState> = VecDeque::new();
+        let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
         if self.phase == ParserPhase::ReadyForToken {
-            let mut phase1_todo: VecDeque<ParseState> = VecDeque::new();
-            phase1_todo.push_back(self.active_state.clone());
+            let mut phase1_todo: WorkMap = WorkMap::new();
+            Self::enqueue(&mut phase1_todo, self.active_state.clone());
             self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo);
         } else { // ParserPhase::ReadyForDefaultReductions
             // If we are ready for phase 3, it means we have a set of shifted states.
             // Instead of performing default reductions (phase 3), we can process the next token.
             // The user suggests skipping phase 1 and going straight to phase 2.
             // This means we take the current active states and process them with the full action table.
-            phase2_todo.push_back(self.active_state.clone());
+            Self::enqueue(&mut phase2_todo, self.active_state.clone());
         }
 
         // --- Phase 2 ---
@@ -787,41 +832,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
-        // Key is (depth, state_id) to process shortest stacks first.
-        #[derive(Debug, PartialEq, Eq)]
-        struct WorkMapKey(usize, StateID);
-        impl PartialOrd for WorkMapKey {
-            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl Ord for WorkMapKey {
-            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                let WorkMapKey(depth1, state_id1) = self;
-                let WorkMapKey(depth2, state_id2) = other;
-                let (depth2, depth1) = (depth1, depth2);
-                // let (state_id2, state_id1) = (state_id1, state_id2);
-                // state_id1.cmp(&state_id2).then_with(|| depth1.cmp(&depth2))
-                depth1.cmp(&depth2).then_with(|| state_id1.cmp(&state_id2))
-                // state_id1.cmp(&state_id2)
-                // depth1.cmp(&depth2)
-                // std::cmp::Ordering::Equal
-            }
-        }
-        let make_work_map_key = |depth: usize, state_id: StateID| WorkMapKey(depth, state_id);
-        let enqueue = |work_map: &mut BTreeMap<WorkMapKey, ParseState>, isolated_state: &ParseState, peek: &GSSPeek| {
+        let enqueue_local = |work_map: &mut WorkMap, isolated_state: &ParseState, peek: &GSSPeek| {
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
-            work_map.entry(make_work_map_key(depth, state_id))
+            work_map.entry(WorkMapKey(depth, state_id))
                 .and_modify(|s| s.merge(isolated_state.clone()))
                 .or_insert(isolated_state.clone());
         };
-        let mut work_map: BTreeMap<WorkMapKey, ParseState> = BTreeMap::new();
+        let mut work_map: WorkMap = BTreeMap::new();
 
         // Peel off the top edges to populate the initial work map.
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
             let isolated_state = ParseState { stack: peek.isolated_parent() };
-            enqueue(&mut work_map, &isolated_state, &peek);
+            enqueue_local(&mut work_map, &isolated_state, &peek);
         }
 
         let mut next_active_state = ParseState::new();
@@ -958,7 +981,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // Deconstruct the result and put it back into the work map.
                         for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
                             let isolated = ParseState { stack: new_peek.isolated_parent() };
-                                enqueue(&mut work_map, &isolated, &new_peek);
+                                enqueue_local(&mut work_map, &isolated, &new_peek);
                         }
 
                         for (WorkMapKey(new_depth, new_state_id), new_stack) in work_map.iter() {
