@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/datastructures/hybrid_bitset.rs
     - src/datastructures/hybrid_l2_bitset.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/hybrid_bitset.rs: |
@@ -6230,6 +6230,1212 @@ messages:
       This is what I need to generate. The previous diff was incorrect. I will regenerate the `hybrid_l2_bitset.rs` diff.
 
       I've reviewed the changes and they seem correct and complete now. The caching logic is consistently applied, and the necessary trait implementations are updated to handle the `Arc`-based design. This should give you the performance and memory benefits you're looking for. Let me know if you have any other questions
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/hybrid_bitset.rs
+      Applying patch to 'src/datastructures/hybrid_bitset.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/hybrid_bitset.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/datastructures/hybrid_l2_bitset.rs
+      Applying patch to 'src/datastructures/hybrid_l2_bitset.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/hybrid_l2_bitset.rs.
+    metadata:
+  - user: |-
+      Diff of src/datastructures/hybrid_bitset.rs since previous turn:
+      ```diff
+      --- original version of src/datastructures/hybrid_bitset.rs+++ current version of src/datastructures/hybrid_bitset.rs@@ -1,18 +1,62 @@ #![allow(dead_code)] // Allow unused code for the example
+       
+       use range_set_blaze::{RangeSetBlaze}; // Import RangeSetBlaze
+      +use std::sync::{Arc, Mutex, Weak};
+       use std::convert::TryInto;
+       use std::fmt::{Debug, Formatter};
+       use std::hash::{Hash, Hasher}; // Added
+       use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
+       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, RangeInclusive, Sub, SubAssign};
+       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+      +use once_cell::sync::Lazy;
+      +use std::collections::{HashMap, HashSet};
+      +
+      +#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+      +enum Op { And, Or, Xor, Sub, Invert }
+      +
+      +#[derive(PartialEq, Eq, Hash)]
+      +struct BinOpKey(Op, Arc<RangeSetBlaze<usize>>, Arc<RangeSetBlaze<usize>>);
+      +
+      +#[derive(PartialEq, Eq, Hash)]
+      +struct UnaryOpKey(Op, Arc<RangeSetBlaze<usize>>);
+      +
+      +struct Cache {
+      +    values: HashSet<Arc<RangeSetBlaze<usize>>>,
+      +    bin_ops: HashMap<BinOpKey, Weak<RangeSetBlaze<usize>>>,
+      +    unary_ops: HashMap<UnaryOpKey, Weak<RangeSetBlaze<usize>>>,
+      +}
+      +
+      +static GLOBAL_CACHE: Lazy<Mutex<Cache>> = Lazy::new(|| {
+      +    Mutex::new(Cache {
+      +        values: HashSet::new(),
+      +        bin_ops: HashMap::new(),
+      +        unary_ops: HashMap::new(),
+      +    })
+      +});
+      +
+      +fn intern(rs: RangeSetBlaze<usize>) -> HybridBitset {
+      +    let mut cache = GLOBAL_CACHE.lock().unwrap();
+      +    // A simple way to prevent the cache from growing indefinitely with stale weak pointers.
+      +    if cache.bin_ops.len() > 1000 {
+      +        cache.bin_ops.retain(|_, weak| weak.upgrade().is_some());
+      +    }
+      +    if cache.unary_ops.len() > 100 {
+      +        cache.unary_ops.retain(|_, weak| weak.upgrade().is_some());
+      +    }
+      +
+      +    if let Some(arc) = cache.values.get(&rs) {
+      +        return HybridBitset { inner: arc.clone() };
+      +    }
+      +    let new_arc = Arc::new(rs);
+      +    cache.values.insert(new_arc.clone());
+      +    HybridBitset { inner: new_arc }
+      +}
+       
+       // --- The Hybrid Bitset Struct ---
+       // Ord and PartialOrd will now rely on RangeSetBlaze's implementation (lexicographical on ranges)
+      -#[derive(Clone, Ord, PartialOrd, Eq)]
+      +#[derive(Clone)]
+       pub struct HybridBitset {
+      -    inner: RangeSetBlaze<usize>,
+      +    inner: Arc<RangeSetBlaze<usize>>,
+       }
+       
+       impl JSONConvertible for HybridBitset {
+      @@ -35,7 +79,7 @@             let start = range_vec.pop().unwrap();
+                   ranges.push(start..=end);
+               }
+      -        Ok(HybridBitset { inner: RangeSetBlaze::from_iter(ranges) })
+      +        Ok(intern(RangeSetBlaze::from_iter(ranges)))
+           }
+       }
+       
+      @@ -72,7 +116,7 @@ 
+               f.debug_struct("HybridBitset")
+                   .field("inner", &DebugRangesTruncated {
+      -                set: &self.inner,
+      +                set: &self.inner, // Arc derefs to &RangeSetBlaze
+                       limit: MAX_RANGES_IN_DEBUG,
+                       is_alternate: is_alternate_mode,
+                   })
+      @@ -84,9 +128,7 @@ impl HybridBitset {
+           /// Creates a new, empty HybridBitset.
+           pub fn zeros() -> Self {
+      -        HybridBitset {
+      -            inner: RangeSetBlaze::new(),
+      -        }
+      +        intern(RangeSetBlaze::new())
+           }
+       
+           /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
+      @@ -94,23 +136,17 @@         if len == 0 {
+                   HybridBitset::zeros()
+               } else {
+      -            HybridBitset {
+      -                inner: RangeSetBlaze::from_iter([0..=len - 1]),
+      -            }
+      +            intern(RangeSetBlaze::from_iter([0..=len - 1]))
+               }
+           }
+       
+           pub fn max_ones() -> Self {
+      -        HybridBitset {
+      -            inner: RangeSetBlaze::from_iter([0..=usize::MAX]),
+      -        }
+      +        intern(RangeSetBlaze::from_iter([0..=usize::MAX]))
+           }
+       
+           /// Creates a HybridBitset from an iterator of indices.
+           pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+      -        HybridBitset {
+      -            inner: RangeSetBlaze::from_iter(iter),
+      -        }
+      +        intern(RangeSetBlaze::from_iter(iter))
+           }
+       
+           /// Returns the exact number of set bits (cardinality).
+      @@ -144,30 +180,55 @@ 
+           /// Inserts an index into the set. Returns true if the index was not already present.
+           pub fn insert(&mut self, index: usize) -> bool {
+      -        self.inner.insert(index)
+      +        let mut new_set = (*self.inner).clone();
+      +        let inserted = new_set.insert(index);
+      +        if inserted {
+      +            *self = intern(new_set);
+      +        }
+      +        inserted
+           }
+       
+           /// Sets or clears an index.
+           pub fn set(&mut self, index: usize, value: bool) {
+      -        if value {
+      -            self.inner.insert(index);
+      +        let mut new_set = (*self.inner).clone();
+      +        let changed = if value {
+      +            new_set.insert(index)
+               } else {
+      -            self.inner.remove(index);
+      +            new_set.remove(index)
+      +        };
+      +        if changed {
+      +            *self = intern(new_set);
+               }
+           }
+       
+           /// Removes an index from the set. Returns true if the index was present.
+           pub fn remove(&mut self, index: usize) -> bool {
+      -        self.inner.remove(index)
+      +        let mut new_set = (*self.inner).clone();
+      +        let removed = new_set.remove(index);
+      +        if removed {
+      +            *self = intern(new_set);
+      +        }
+      +        removed
+           }
+       
+           /// Removes all elements from the set.
+           pub fn clear(&mut self) {
+      -        self.inner.clear();
+      +        *self = Self::zeros();
+           }
+       
+           pub fn inverted(&self) -> Self {
+      -        &Self::max_ones() - self
+      +        let mut cache = GLOBAL_CACHE.lock().unwrap();
+      +        let key = UnaryOpKey(Op::Invert, self.inner.clone());
+      +
+      +        if let Some(weak) = cache.unary_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridBitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result = &Self::max_ones() - self;
+      +        cache.unary_ops.insert(key, Arc::downgrade(&result.inner));
+      +        result
+           }
+       
+           /// Returns an iterator over the indices of the set bits.
+      @@ -351,11 +412,11 @@ 
+       // Implement IntoIterator for HybridBitset by value
+       impl IntoIterator for HybridBitset {
+      -    type Item = usize;
+      -    type IntoIter = range_set_blaze::IntoIter<usize>; // Use RangeSetBlaze's owning iterator
+      +    type Item = usize; // The iterator will be over the values, not the Arc
+      +    type IntoIter = range_set_blaze::IntoIter<usize>;
+       
+           fn into_iter(self) -> Self::IntoIter {
+      -        self.inner.into_iter()
+      +        Arc::try_unwrap(self.inner).unwrap_or_else(|arc| (*arc).clone()).into_iter()
+           }
+       }
+       
+      @@ -394,9 +455,7 @@ // Implement FromIterator for HybridBitset
+       impl FromIterator<usize> for HybridBitset {
+           fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+      -        HybridBitset {
+      -            inner: RangeSetBlaze::from_iter(iter),
+      -        }
+      +        intern(RangeSetBlaze::from_iter(iter))
+           }
+       }
+       
+      @@ -407,20 +466,55 @@ 
+           // #[time_it]
+           fn bitand(self, rhs: Self) -> Self::Output {
+      -        HybridBitset {
+      -            inner: &self.inner & &rhs.inner,
+      -        }
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return self.clone(); }
+      +
+      +        let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+      +            (self.inner.clone(), rhs.inner.clone())
+      +        } else {
+      +            (rhs.inner.clone(), self.inner.clone())
+      +        };
+      +
+      +        let mut cache = GLOBAL_CACHE.lock().unwrap();
+      +        let key = BinOpKey(Op::And, a, b);
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridBitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result_rs = &*self.inner & &*rhs.inner;
+      +        let result_hbs = intern(result_rs);
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result_hbs.inner));
+      +        result_hbs
+           }
+       }
+       
+       impl BitOr for &HybridBitset {
+           type Output = HybridBitset;
+       
+      -    // #[time_it]
+           fn bitor(self, rhs: Self) -> Self::Output {
+      -        HybridBitset {
+      -            inner: &self.inner | &rhs.inner,
+      -        }
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return self.clone(); }
+      +
+      +        let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+      +            (self.inner.clone(), rhs.inner.clone())
+      +        } else {
+      +            (rhs.inner.clone(), self.inner.clone())
+      +        };
+      +
+      +        let mut cache = GLOBAL_CACHE.lock().unwrap();
+      +        let key = BinOpKey(Op::Or, a, b);
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridBitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result_rs = &*self.inner | &*rhs.inner;
+      +        let result_hbs = intern(result_rs);
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result_hbs.inner));
+      +        result_hbs
+           }
+       }
+       
+      @@ -428,31 +522,50 @@     type Output = HybridBitset;
+       
+           fn bitxor(self, rhs: Self) -> Self::Output {
+      -        HybridBitset {
+      -            inner: &self.inner ^ &rhs.inner,
+      -        }
+      -    }
+      -}
+      -
+      -impl Sub for HybridBitset {
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+      +
+      +        let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+      +            (self.inner.clone(), rhs.inner.clone())
+      +        } else {
+      +            (rhs.inner.clone(), self.inner.clone())
+      +        };
+      +
+      +        let mut cache = GLOBAL_CACHE.lock().unwrap();
+      +        let key = BinOpKey(Op::Xor, a, b);
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridBitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result_rs = &*self.inner ^ &*rhs.inner;
+      +        let result_hbs = intern(result_rs);
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result_hbs.inner));
+      +        result_hbs
+      +    }
+      +}
+      +
+      +impl Sub for &HybridBitset {
+           type Output = HybridBitset;
+       
+           // #[time_it]
+           fn sub(self, rhs: Self) -> Self::Output {
+      -        HybridBitset {
+      -            inner: self.inner - rhs.inner,
+      -        }
+      -    }
+      -}
+      -
+      -impl Sub for &HybridBitset {
+      -    type Output = HybridBitset;
+      -
+      -    // #[time_it]
+      -    fn sub(self, rhs: Self) -> Self::Output {
+      -        HybridBitset {
+      -            inner: &self.inner - &rhs.inner,
+      -        }
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+      +
+      +        let mut cache = GLOBAL_CACHE.lock().unwrap();
+      +        let key = BinOpKey(Op::Sub, self.inner.clone(), rhs.inner.clone());
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridBitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result_rs = &*self.inner - &*rhs.inner;
+      +        let result_hbs = intern(result_rs);
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result_hbs.inner));
+      +        result_hbs
+           }
+       }
+       
+      @@ -461,16 +574,7 @@ impl BitAndAssign for HybridBitset {
+           // #[time_it]
+           fn bitand_assign(&mut self, rhs: Self) {
+      -        // let start_time = std::time::Instant::now();
+      -        // self.inner = &self.inner & &rhs.inner;
+      -        // let duration = start_time.elapsed();
+      -        // if duration.as_millis() > 1 {
+      -        //     println!("HybridBitset::bitand_assign (owned) took {:?}", duration);
+      -        // }
+      -        // if duration.as_millis() > 10 {
+      -        //     // panic!("HybridBitset::bitand_assign (owned) took {:?}", duration);
+      -        // }
+      -        self.inner = std::mem::take(&mut self.inner) & rhs.inner;
+      +        *self = &*self & &rhs;
+           }
+       }
+       
+      @@ -498,21 +602,21 @@         //     scratio = self_compression_ratio,
+               //     rcratio = rhs_compression_ratio
+               // );
+      -        self.inner |= rhs.inner; // RangeSetBlaze has BitOrAssign<RangeSetBlaze>
+      +        *self = &*self | &rhs;
+           }
+       }
+       
+       impl BitXorAssign for HybridBitset {
+           // #[time_it]
+           fn bitxor_assign(&mut self, rhs: Self) {
+      -        self.inner = &self.inner ^ &rhs.inner;
+      +        *self = &*self ^ &rhs;
+           }
+       }
+       
+       impl SubAssign for HybridBitset {
+           // #[time_it]
+           fn sub_assign(&mut self, rhs: Self) {
+      -        self.inner = std::mem::take(&mut self.inner) - rhs.inner;
+      +        *self = &*self - &rhs;
+           }
+       }
+       
+      @@ -521,47 +625,55 @@ impl BitAndAssign<&HybridBitset> for HybridBitset {
+           // #[time_it]
+           fn bitand_assign(&mut self, rhs: &HybridBitset) {
+      -        // let start_time = std::time::Instant::now();
+      -        // self.inner = &self.inner & &rhs.inner;
+      -        // let duration = start_time.elapsed();
+      -        // if duration.as_millis() > 100 {
+      -        //     println!(
+      -        //         "HybridBitset::bitand_assign (ref) took {}ms",
+      -        //         duration.as_millis()
+      -        //     );
+      -        // }
+      -        self.inner = std::mem::take(&mut self.inner) & rhs.inner.clone();
+      +        *self = &*self & rhs;
+           }
+       }
+       
+       impl BitOrAssign<&HybridBitset> for HybridBitset {
+           // #[time_it]
+           fn bitor_assign(&mut self, rhs: &HybridBitset) {
+      -        self.inner |= &rhs.inner; // RangeSetBlaze has BitOrAssign<&RangeSetBlaze>
+      +        *self = &*self | rhs;
+           }
+       }
+       
+       impl BitXorAssign<&HybridBitset> for HybridBitset {
+           // #[time_it]
+           fn bitxor_assign(&mut self, rhs: &HybridBitset) {
+      -        self.inner = &self.inner ^ &rhs.inner;
+      +        *self = &*self ^ rhs;
+           }
+       }
+       
+       impl SubAssign<&HybridBitset> for HybridBitset {
+           // #[time_it]
+           fn sub_assign(&mut self, rhs: &HybridBitset) {
+      -        self.inner = &self.inner - &rhs.inner;
+      -    }
+      -}
+      +        *self = &*self - rhs;
+      +    }
+      +}
+      +
+      +use std::cmp::Ordering;
+       
+       // --- Equality and Hashing ---
+       impl PartialEq for HybridBitset {
+           fn eq(&self, other: &Self) -> bool {
+      -        self.inner == other.inner
+      -    }
+      -}
+      -// Eq is derived.
+      +        Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
+      +    }
+      +}
+      +impl Eq for HybridBitset {}
+      +
+      +impl PartialOrd for HybridBitset {
+      +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+      +        Some(self.cmp(other))
+      +    }
+      +}
+      +
+      +impl Ord for HybridBitset {
+      +    fn cmp(&self, other: &Self) -> Ordering {
+      +        if Arc::ptr_eq(&self.inner, &other.inner) {
+      +            return Ordering::Equal;
+      +        }
+      +        self.inner.cmp(&other.inner)
+      +    }
+      +}
+       
+       impl Hash for HybridBitset {
+           fn hash<H: Hasher>(&self, state: &mut H) {
+      @@ -582,35 +694,36 @@ 
+       impl From<BitVec<usize, Lsb0>> for HybridBitset {
+           fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
+      -        HybridBitset { inner: RangeSetBlaze::from_iter(bitvec.iter_ones()) }
+      +        intern(RangeSetBlaze::from_iter(bitvec.iter_ones()))
+           }
+       }
+       
+       // --- Operations on owned values ---
+      +impl Sub for HybridBitset {
+      +    type Output = HybridBitset;
+      +    fn sub(self, rhs: Self) -> Self::Output {
+      +        &self - &rhs
+      +    }
+      +}
+      +
+       impl<'a> BitAnd<&'a HybridBitset> for HybridBitset {
+           type Output = HybridBitset;
+           fn bitand(self, rhs: &'a HybridBitset) -> Self::Output {
+      -        HybridBitset {
+      -            inner: self.inner & &rhs.inner,
+      -        }
+      +        &self & rhs
+           }
+       }
+       
+       impl<'a> BitOr<&'a HybridBitset> for HybridBitset {
+           type Output = HybridBitset;
+           fn bitor(self, rhs: &'a HybridBitset) -> Self::Output {
+      -        HybridBitset {
+      -            inner: self.inner | &rhs.inner,
+      -        }
+      +        &self | rhs
+           }
+       }
+       
+       impl<'a> Sub<&'a HybridBitset> for HybridBitset {
+           type Output = HybridBitset;
+           fn sub(self, rhs: &'a HybridBitset) -> Self::Output {
+      -        HybridBitset {
+      -            inner: self.inner - &rhs.inner,
+      -        }
+      +        &self - rhs
+           }
+       }
+       
+      @@ -672,7 +785,7 @@     #[test]
+           fn test_into_iteration() {
+               let indices = vec![5, 1, 100, 42];
+      -        let set = HybridBitset::from_iter(indices.clone());
+      +        let set = HybridBitset::from_iter(indices.clone()); // Consumes set
+               let mut collected: Vec<usize> = set.into_iter().collect(); // Consumes set
+               collected.sort_unstable();
+               let mut expected = indices;
+      @@ -933,7 +1046,7 @@         assert_eq!(dense_like_set.iter_bits().len(), expected_sparse_bools.len());
+       
+               let empty_set_from_non_empty = HybridBitset::from_iter(vec![5]);
+      -        let _ = empty_set_from_non_empty.inner.last(); // just to use it
+      +        let _ = empty_set_from_non_empty.inner.last(); // just to use it to avoid unused var warning
+               let mut empty_set_cleared = HybridBitset::from_iter(vec![5]);
+               empty_set_cleared.clear();
+               assert_eq!(empty_set_cleared.iter_bits().collect::<Vec<bool>>(), Vec::<bool>::new());
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/hybrid_l2_bitset.rs since previous turn:
+      ```diff
+      --- original version of src/datastructures/hybrid_l2_bitset.rs+++ current version of src/datastructures/hybrid_l2_bitset.rs@@ -1,13 +1,55 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
+       use range_set_blaze::prelude::*;
+       use range_set_blaze::RangeMapBlaze;
+      -use std::ops::{RangeInclusive, SubAssign};
+      +use std::sync::{Arc, Mutex, Weak};
+       use std::collections::BTreeSet;
+       use std::iter::FromIterator;
+      -use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub};
+      +use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, RangeInclusive, SubAssign};
+       use std::fmt::{Debug, Formatter};
+       use std::hash::{Hash, Hasher};
+       use std::cmp::Ordering;
+      +use once_cell::sync::Lazy;
+      +use std::collections::{HashMap, HashSet};
+      +
+      +#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+      +enum Op { And, Or, Xor, Sub, Complement }
+      +
+      +#[derive(PartialEq, Eq, Hash)]
+      +struct L2BinOpKey(Op, Arc<RangeMapBlaze<usize, HybridBitset>>, Arc<RangeMapBlaze<usize, HybridBitset>>);
+      +
+      +#[derive(PartialEq, Eq, Hash)]
+      +struct L2UnaryOpKey(Op, Arc<RangeMapBlaze<usize, HybridBitset>>);
+      +
+      +struct L2Cache {
+      +    values: HashSet<Arc<RangeMapBlaze<usize, HybridBitset>>>,
+      +    bin_ops: HashMap<L2BinOpKey, Weak<RangeMapBlaze<usize, HybridBitset>>>,
+      +    unary_ops: HashMap<L2UnaryOpKey, Weak<RangeMapBlaze<usize, HybridBitset>>>,
+      +}
+      +
+      +static L2_GLOBAL_CACHE: Lazy<Mutex<L2Cache>> = Lazy::new(|| {
+      +    Mutex::new(L2Cache {
+      +        values: HashSet::new(),
+      +        bin_ops: HashMap::new(),
+      +        unary_ops: HashMap::new(),
+      +    })
+      +});
+      +
+      +fn l2_intern(rm: RangeMapBlaze<usize, HybridBitset>) -> HybridL2Bitset {
+      +    let mut cache = L2_GLOBAL_CACHE.lock().unwrap();
+      +    if cache.bin_ops.len() > 1000 {
+      +        cache.bin_ops.retain(|_, weak| weak.upgrade().is_some());
+      +    }
+      +    if cache.unary_ops.len() > 100 {
+      +        cache.unary_ops.retain(|_, weak| weak.upgrade().is_some());
+      +    }
+      +
+      +    if let Some(arc) = cache.values.get(&rm) {
+      +        return HybridL2Bitset { inner: arc.clone() };
+      +    }
+      +    let new_arc = Arc::new(rm);
+      +    cache.values.insert(new_arc.clone());
+      +    HybridL2Bitset { inner: new_arc }
+      +}
+       
+       /// A two-dimensional bitset, conceptually a map from `usize` to `HybridBitset`.
+       ///
+      @@ -17,10 +59,10 @@ ///
+       /// An empty `HybridBitset` is never stored; if a row becomes empty, it is
+       /// removed from the map.
+      -#[derive(Clone, PartialEq, Eq)]
+      +#[derive(Clone)]
+       pub struct HybridL2Bitset {
+           /// The underlying map from usize (L1 index) to a HybridBitset (L2 indices).
+      -    inner: RangeMapBlaze<usize, HybridBitset>,
+      +    inner: Arc<RangeMapBlaze<usize, HybridBitset>>,
+       }
+       
+       impl Debug for HybridL2Bitset {
+      @@ -46,6 +88,19 @@     }
+       }
+       
+      +impl PartialEq for HybridL2Bitset {
+      +    fn eq(&self, other: &Self) -> bool {
+      +        if Arc::ptr_eq(&self.inner, &other.inner) {
+      +            return true;
+      +        }
+      +        if self.inner.ranges_len() != other.inner.ranges_len() {
+      +            return false;
+      +        }
+      +        self.inner.range_values().eq(other.inner.range_values())
+      +    }
+      +}
+      +impl Eq for HybridL2Bitset {}
+      +
+       impl PartialOrd for HybridL2Bitset {
+           fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+               Some(self.cmp(other))
+      @@ -54,6 +109,9 @@ 
+       impl Ord for HybridL2Bitset {
+           fn cmp(&self, other: &Self) -> Ordering {
+      +        if Arc::ptr_eq(&self.inner, &other.inner) {
+      +            return Ordering::Equal;
+      +        }
+               let mut self_iter = self.inner.range_values();
+               let mut other_iter = other.inner.range_values();
+       
+      @@ -92,19 +150,15 @@ impl HybridL2Bitset {
+           /// Creates a new, empty `HybridL2Bitset`.
+           pub fn new() -> Self {
+      -        HybridL2Bitset {
+      -            inner: RangeMapBlaze::new(),
+      -        }
+      +        l2_intern(RangeMapBlaze::new())
+           }
+       
+           /// Creates a new `HybridL2Bitset` with all entries allowed.
+           pub fn all() -> Self {
+      -        HybridL2Bitset {
+      -            inner: RangeMapBlaze::from_iter(std::iter::once((
+      -                0..=usize::MAX,
+      -                HybridBitset::max_ones(),
+      -            ))),
+      -        }
+      +        l2_intern(RangeMapBlaze::from_iter(std::iter::once((
+      +            0..=usize::MAX,
+      +            HybridBitset::max_ones(),
+      +        ))))
+           }
+       
+           /// Returns `true` if the set contains no elements.
+      @@ -122,42 +176,54 @@ 
+           /// Clears the entire set, removing all points.
+           pub fn clear(&mut self) {
+      -        self.inner.clear();
+      +        *self = Self::new();
+           }
+       
+           /// Inserts a 2D point (l1_index, l2_index) into the set.
+           pub fn insert(&mut self, l1_index: usize, l2_index: usize) {
+      -        let mut bitset = self.inner.remove(l1_index).unwrap_or_else(HybridBitset::zeros);
+      +        let mut new_map = (*self.inner).clone();
+      +        let mut bitset = new_map.remove(l1_index).unwrap_or_else(HybridBitset::zeros);
+               bitset.insert(l2_index);
+      -        self.inner.insert(l1_index, bitset);
+      +        new_map.insert(l1_index, bitset);
+      +        *self = l2_intern(new_map);
+           }
+       
+           pub fn insert_l2_bitset(&mut self, l1_index: usize, bitset: HybridBitset) {
+      +        let mut new_map = (*self.inner).clone();
+               if !bitset.is_empty() {
+      -            self.inner.insert(l1_index, bitset);
+      +            new_map.insert(l1_index, bitset);
+               } else {
+      -            self.inner.remove(l1_index);
+      -        }
+      +            new_map.remove(l1_index);
+      +        }
+      +        *self = l2_intern(new_map);
+           }
+       
+           /// Removes a 2D point (l1_index, l2_index) from the set.
+           ///
+           /// Returns `true` if the point was present in the set.
+           pub fn remove(&mut self, l1_index: usize, l2_index: usize) -> bool {
+      -        if let Some(mut bitset) = self.inner.remove(l1_index) {
+      +        let mut new_map = (*self.inner).clone();
+      +        if let Some(mut bitset) = new_map.remove(l1_index) {
+                   let was_present = bitset.remove(l2_index);
+      -            // If the bitset is not empty after removal, we must insert it back.
+      -            if !bitset.is_empty() {
+      -                self.inner.insert(l1_index, bitset);
+      -            }
+      -            was_present
+      +            if was_present {
+      +                if !bitset.is_empty() {
+      +                    new_map.insert(l1_index, bitset);
+      +                }
+      +                *self = l2_intern(new_map);
+      +            }
+      +            return was_present;
+               } else {
+                   false // No bitset at l1_index.
+               }
+           }
+       
+           pub fn remove_l1(&mut self, l1_index: usize) -> Option<HybridBitset> {
+      -        self.inner.remove(l1_index)
+      +        let mut new_map = (*self.inner).clone();
+      +        let removed = new_map.remove(l1_index);
+      +        if removed.is_some() {
+      +            *self = l2_intern(new_map);
+      +        }
+      +        removed
+           }
+       
+           /// Checks if a 2D point (l1_index, l2_index) is present in the set.
+      @@ -199,14 +265,22 @@     /// First-level indices that are not present in the original set will not be
+           /// present in the complement.
+           pub fn complement(&self) -> Self {
+      +        let mut cache = L2_GLOBAL_CACHE.lock().unwrap();
+      +        let key = L2UnaryOpKey(Op::Complement, self.inner.clone());
+      +        if let Some(weak) = cache.unary_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridL2Bitset { inner: strong };
+      +            }
+      +        }
+      +
+               let complemented_values = self
+                   .inner
+                   .range_values()
+                   .map(|(range, bitset)| (range, bitset.inverted()));
+       
+      -        HybridL2Bitset {
+      -            inner: complemented_values.collect(),
+      -        }
+      +        let result = l2_intern(complemented_values.collect());
+      +        cache.unary_ops.insert(key, Arc::downgrade(&result.inner));
+      +        result
+           }
+       
+           /// A generalized intersection operation.
+      @@ -311,9 +385,7 @@             }
+               }
+       
+      -        HybridL2Bitset {
+      -            inner: RangeMapBlaze::from_iter(new_ranges),
+      -        }
+      +        l2_intern(RangeMapBlaze::from_iter(new_ranges))
+           }
+       }
+       
+      @@ -329,9 +401,26 @@     type Output = HybridL2Bitset;
+       
+           fn bitand(self, rhs: Self) -> Self::Output {
+      -        // Standard intersection excludes keys not present in both sets.
+      -        // This is equivalent to intersection_with a default of None.
+      -        self.intersection_with(rhs, None)
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return self.clone(); }
+      +
+      +        let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+      +            (self.inner.clone(), rhs.inner.clone())
+      +        } else {
+      +            (rhs.inner.clone(), self.inner.clone())
+      +        };
+      +
+      +        let mut cache = L2_GLOBAL_CACHE.lock().unwrap();
+      +        let key = L2BinOpKey(Op::And, a, b);
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridL2Bitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result = self.intersection_with(rhs, None);
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result.inner));
+      +        result
+           }
+       }
+       
+      @@ -339,10 +428,26 @@     type Output = HybridL2Bitset;
+       
+           fn bitor(self, rhs: Self) -> Self::Output {
+      -        // Standard union includes keys from both. If a key is missing from one,
+      -        // it's treated as an empty set. This is equivalent to union_with a
+      -        // default of an empty HybridBitset.
+      -        self.union_with(rhs, Some(HybridBitset::zeros()))
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return self.clone(); }
+      +
+      +        let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+      +            (self.inner.clone(), rhs.inner.clone())
+      +        } else {
+      +            (rhs.inner.clone(), self.inner.clone())
+      +        };
+      +
+      +        let mut cache = L2_GLOBAL_CACHE.lock().unwrap();
+      +        let key = L2BinOpKey(Op::Or, a, b);
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridL2Bitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result = self.union_with(rhs, Some(HybridBitset::zeros()));
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result.inner));
+      +        result
+           }
+       }
+       
+      @@ -350,71 +455,97 @@     type Output = HybridL2Bitset;
+       
+           fn bitxor(self, rhs: Self) -> Self::Output {
+      -        // Standard symmetric difference includes keys from both sets.
+      -        // If a key is missing from one, it's treated as an empty set.
+      -        // This is equivalent to symmetric_difference_with a default of Some(HybridBitset::zeros()).
+      -        self.symmetric_difference_with(rhs, Some(HybridBitset::zeros()))
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return HybridL2Bitset::new(); }
+      +
+      +        let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+      +            (self.inner.clone(), rhs.inner.clone())
+      +        } else {
+      +            (rhs.inner.clone(), self.inner.clone())
+      +        };
+      +
+      +        let mut cache = L2_GLOBAL_CACHE.lock().unwrap();
+      +        let key = L2BinOpKey(Op::Xor, a, b);
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridL2Bitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result = self.symmetric_difference_with(rhs, Some(HybridBitset::zeros()));
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result.inner));
+      +        result
+           }
+       }
+       
+       impl Sub for &HybridL2Bitset {
+           type Output = HybridL2Bitset;
+           fn sub(self, rhs: Self) -> Self::Output {
+      -        self.zip_op(rhs, Some(HybridBitset::zeros()), |a, b| a - b)
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return HybridL2Bitset::new(); }
+      +
+      +        let mut cache = L2_GLOBAL_CACHE.lock().unwrap();
+      +        let key = L2BinOpKey(Op::Sub, self.inner.clone(), rhs.inner.clone());
+      +
+      +        if let Some(weak) = cache.bin_ops.get(&key) {
+      +            if let Some(strong) = weak.upgrade() {
+      +                return HybridL2Bitset { inner: strong };
+      +            }
+      +        }
+      +
+      +        let result = self.zip_op(rhs, Some(HybridBitset::zeros()), |a, b| a - b);
+      +        cache.bin_ops.insert(key, Arc::downgrade(&result.inner));
+      +        result
+           }
+       }
+       
+       // --- In-place Bitwise Operations ---
+       
+       impl BitAndAssign for HybridL2Bitset {
+      -    fn bitand_assign(&mut self, rhs: Self) {
+      -        *self &= &rhs;
+      -    }
+      -}
+      -
+      -impl BitAndAssign<&HybridL2Bitset> for HybridL2Bitset {
+           fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self & rhs;
+           }
+       }
+       
+       impl BitOrAssign for HybridL2Bitset {
+      -    fn bitor_assign(&mut self, rhs: Self) {
+      -        *self |= &rhs;
+      -    }
+      -}
+      -
+      -impl BitOrAssign<&HybridL2Bitset> for HybridL2Bitset {
+           fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self | rhs;
+           }
+       }
+       
+       impl BitXorAssign for HybridL2Bitset {
+      -    fn bitxor_assign(&mut self, rhs: Self) {
+      -        *self ^= &rhs;
+      -    }
+      -}
+      -
+      -impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
+           fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self ^ rhs;
+           }
+       }
+       
+       impl SubAssign for HybridL2Bitset {
+      -    fn sub_assign(&mut self, rhs: Self) {
+      -        *self = &*self - &rhs;
+      -    }
+      -}
+      -
+      -impl SubAssign<&HybridL2Bitset> for HybridL2Bitset {
+           fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self - rhs;
+           }
+       }
+       
+       // --- Operations on owned values ---
+      +impl BitAnd for HybridL2Bitset {
+      +    type Output = HybridL2Bitset;
+      +    fn bitand(self, rhs: Self) -> Self::Output {
+      +        &self & &rhs
+      +    }
+      +}
+      +
+      +impl BitOr for HybridL2Bitset {
+      +    type Output = HybridL2Bitset;
+      +    fn bitor(self, rhs: Self) -> Self::Output {
+      +        &self | &rhs
+      +    }
+      +}
+      +
+      +impl Sub for HybridL2Bitset {
+      +    type Output = HybridL2Bitset;
+      +    fn sub(self, rhs: Self) -> Self::Output {
+      +        &self - &rhs
+      +    }
+      +}
+      +
+       impl<'a> BitAnd<&'a HybridL2Bitset> for HybridL2Bitset {
+           type Output = HybridL2Bitset;
+           fn bitand(self, rhs: &'a HybridL2Bitset) -> Self::Output {
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture 2>&1 | tee .temp2; python analyze_timings.py .temp2
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0053]: method `bitand_assign` has an incompatible type for trait
+         --> src/datastructures/hybrid_l2_bitset.rs:504:38
+          |
+      504 |     fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
+          |                                      ^^^^^^^^^^^^^^^ expected `hybrid_l2_bitset::HybridL2Bitset`, found `&hybrid_l2_bitset::HybridL2Bitset`
+          |
+          = note: expected signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, hybrid_l2_bitset::HybridL2Bitset)`
+                     found signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, &hybrid_l2_bitset::HybridL2Bitset)`
+      help: change the parameter type to match the trait
+          |
+      504 -     fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
+      504 +     fn bitand_assign(&mut self, rhs: hybrid_l2_bitset::HybridL2Bitset) {
+          |
+
+      error[E0053]: method `bitor_assign` has an incompatible type for trait
+         --> src/datastructures/hybrid_l2_bitset.rs:510:37
+          |
+      510 |     fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
+          |                                     ^^^^^^^^^^^^^^^ expected `hybrid_l2_bitset::HybridL2Bitset`, found `&hybrid_l2_bitset::HybridL2Bitset`
+          |
+          = note: expected signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, hybrid_l2_bitset::HybridL2Bitset)`
+                     found signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, &hybrid_l2_bitset::HybridL2Bitset)`
+      help: change the parameter type to match the trait
+          |
+      510 -     fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
+      510 +     fn bitor_assign(&mut self, rhs: hybrid_l2_bitset::HybridL2Bitset) {
+          |
+
+      error[E0053]: method `bitxor_assign` has an incompatible type for trait
+         --> src/datastructures/hybrid_l2_bitset.rs:516:38
+          |
+      516 |     fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
+          |                                      ^^^^^^^^^^^^^^^ expected `hybrid_l2_bitset::HybridL2Bitset`, found `&hybrid_l2_bitset::HybridL2Bitset`
+          |
+          = note: expected signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, hybrid_l2_bitset::HybridL2Bitset)`
+                     found signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, &hybrid_l2_bitset::HybridL2Bitset)`
+      help: change the parameter type to match the trait
+          |
+      516 -     fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
+      516 +     fn bitxor_assign(&mut self, rhs: hybrid_l2_bitset::HybridL2Bitset) {
+          |
+
+      error[E0053]: method `sub_assign` has an incompatible type for trait
+         --> src/datastructures/hybrid_l2_bitset.rs:522:35
+          |
+      522 |     fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
+          |                                   ^^^^^^^^^^^^^^^ expected `hybrid_l2_bitset::HybridL2Bitset`, found `&hybrid_l2_bitset::HybridL2Bitset`
+          |
+          = note: expected signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, hybrid_l2_bitset::HybridL2Bitset)`
+                     found signature `fn(&mut hybrid_l2_bitset::HybridL2Bitset, &hybrid_l2_bitset::HybridL2Bitset)`
+      help: change the parameter type to match the trait
+          |
+      522 -     fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
+      522 +     fn sub_assign(&mut self, rhs: hybrid_l2_bitset::HybridL2Bitset) {
+          |
+
+      error[E0308]: mismatched types
+         --> src/datastructures/gss.rs:839:36
+          |
+      839 |         new_acc.terminals_union -= disallowed_terminals;
+          |                                    ^^^^^^^^^^^^^^^^^^^^ expected `HybridL2Bitset`, found `&HybridL2Bitset`
+          |
+      help: consider using clone here
+          |
+      839 |         new_acc.terminals_union -= disallowed_terminals.clone();
+          |                                                        ++++++++
+
+      error[E0308]: mismatched types
+         --> src/datastructures/gss.rs:840:43
+          |
+      840 |         new_acc.terminals_intersection -= disallowed_terminals;
+          |                                           ^^^^^^^^^^^^^^^^^^^^ expected `HybridL2Bitset`, found `&HybridL2Bitset`
+          |
+      help: consider using clone here
+          |
+      840 |         new_acc.terminals_intersection -= disallowed_terminals.clone();
+          |                                                               ++++++++
+
+      error[E0599]: no function or associated item named `zeros` found for reference `&hybrid_bitset::HybridBitset` in the current scope
+         --> src/datastructures/hybrid_bitset.rs:525:64
+          |
+      525 |         if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+          |                                                                ^^^^^ function or associated item not found in `&HybridBitset`
+          |
+      note: the function `zeros` is implemented on `hybrid_bitset::HybridBitset`
+         --> src/datastructures/hybrid_bitset.rs:525:58
+          |
+      525 |         if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+          |                                                          ^^^^
+
+      error[E0599]: no function or associated item named `zeros` found for reference `&hybrid_bitset::HybridBitset` in the current scope
+         --> src/datastructures/hybrid_bitset.rs:554:64
+          |
+      554 |         if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+          |                                                                ^^^^^ function or associated item not found in `&HybridBitset`
+          |
+      note: the function `zeros` is implemented on `hybrid_bitset::HybridBitset`
+         --> src/datastructures/hybrid_bitset.rs:554:58
+          |
+      554 |         if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+          |                                                          ^^^^
+
+      error[E0308]: mismatched types
+         --> src/datastructures/hybrid_l2_bitset.rs:730:21
+          |
+      730 |         set1_and &= &set2;
+          |                     ^^^^^ expected `HybridL2Bitset`, found `&HybridL2Bitset`
+          |
+      help: consider removing the borrow
+          |
+      730 -         set1_and &= &set2;
+      730 +         set1_and &= set2;
+          |
+
+      error[E0308]: mismatched types
+         --> src/datastructures/hybrid_l2_bitset.rs:737:20
+          |
+      737 |         set1_or |= &set2;
+          |                    ^^^^^ expected `HybridL2Bitset`, found `&HybridL2Bitset`
+          |
+      help: consider removing the borrow
+          |
+      737 -         set1_or |= &set2;
+      737 +         set1_or |= set2;
+          |
+
+      error[E0308]: mismatched types
+         --> src/datastructures/hybrid_l2_bitset.rs:746:21
+          |
+      746 |         set1_xor ^= &set2;
+          |                     ^^^^^ expected `HybridL2Bitset`, found `&HybridL2Bitset`
+          |
+      help: consider removing the borrow
+          |
+      746 -         set1_xor ^= &set2;
+      746 +         set1_xor ^= set2;
+          |
+
+      Some errors have detailed explanations: E0053, E0308, E0599.
+      For more information about an error, try `rustc --explain E0053`.
+      error: could not compile `sep1` (lib test) due to 11 previous errors
+      /Users/isaacbreen/Projects2/grammars2024/analyze_timings.py:270: SyntaxWarning: invalid escape sequence '\/'
+        """
+      Error: Source code block not found in log file.
+      Please ensure the log contains a block like:
+      ---BEGIN-SOURCE-JSON---
+      "...source..."
+      ---END-SOURCE-JSON---
+    metadata:
+  - assistant: |-
+      Of course. It looks like the caching changes introduced a few compilation errors due to incorrect trait implementations and type mismatches. I've analyzed the error log and prepared the necessary fixes.
+
+      The main issues were:
+
+      1.  The `...Assign` traits in `hybrid_l2_bitset.rs` were incorrectly defined. I've restored the separate implementations for owned (`Self`) and borrowed (`&Self`) right-hand sides, which will fix the signature mismatch errors.
+      2.  In `hybrid_bitset.rs`, some binary operations were incorrectly calling `Self::zeros()` from a context where `Self` was a reference (`&HybridBitset`). I've changed this to `HybridBitset::zeros()` to call the associated function on the type itself.
+      3.  The other errors were downstream effects of the incorrect trait implementations and will be resolved by these fixes.
+
+      Here are the patches for the two files.
+
+      ### `src/datastructures/hybrid_bitset.rs`
+
+      I'll correct the calls to `zeros()` inside the `BitXor` and `Sub` implementations.
+
+      ```diff
+      --- a/src/datastructures/hybrid_bitset.rs
+      +++ b/src/datastructures/hybrid_bitset.rs
+      @@ -449,7 +449,7 @@
+           type Output = HybridBitset;
+       
+           fn bitxor(self, rhs: Self) -> Self::Output {
+      -        if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return HybridBitset::zeros(); }
+       
+               let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
+                   (self.inner.clone(), rhs.inner.clone())
+      @@ -476,7 +476,7 @@
+       
+           // #[time_it]
+           fn sub(self, rhs: Self) -> Self::Output {
+      -        if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+      +        if Arc::ptr_eq(&self.inner, &rhs.inner) { return HybridBitset::zeros(); }
+       
+               let mut cache = GLOBAL_CACHE.lock().unwrap();
+               let key = BinOpKey(Op::Sub, self.inner.clone(), rhs.inner.clone());
+
+      ```
+
+      ### `src/datastructures/hybrid_l2_bitset.rs`
+
+      Here, I'll restore the correct implementations for all the in-place bitwise assignment operators (`...Assign`).
+
+      ```diff
+      --- a/src/datastructures/hybrid_l2_bitset.rs
+      +++ b/src/datastructures/hybrid_l2_bitset.rs
+      @@ -499,36 +499,54 @@
+       
+       // --- In-place Bitwise Operations ---
+       
+       impl BitAndAssign for HybridL2Bitset {
+      -    fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
+      +    fn bitand_assign(&mut self, rhs: Self) {
+      +        *self &= &rhs;
+      +    }
+      +}
+      +
+      +impl BitAndAssign<&HybridL2Bitset> for HybridL2Bitset {
+      +    fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self & rhs;
+           }
+       }
+       
+       impl BitOrAssign for HybridL2Bitset {
+      -    fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
+      +    fn bitor_assign(&mut self, rhs: Self) {
+      +        *self |= &rhs;
+      +    }
+      +}
+      +
+      +impl BitOrAssign<&HybridL2Bitset> for HybridL2Bitset {
+      +    fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self | rhs;
+           }
+       }
+       
+       impl BitXorAssign for HybridL2Bitset {
+      -    fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
+      +    fn bitxor_assign(&mut self, rhs: Self) {
+      +        *self ^= &rhs;
+      +    }
+      +}
+      +
+      +impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
+      +    fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self ^ rhs;
+           }
+       }
+       
+       impl SubAssign for HybridL2Bitset {
+      -    fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
+      +    fn sub_assign(&mut self, rhs: Self) {
+      +        *self -= &rhs;
+      +    }
+      +}
+      +
+      +impl SubAssign<&HybridL2Bitset> for HybridL2Bitset {
+      +    fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
+               *self = &*self - rhs;
+           }
+       }
+       
+       // --- Operations on owned values ---
+
+      ```
+
+      These changes should resolve all the compilation errors and get your test suite running again. Let me know if you encounter any other issues
     metadata:
   - user: |
       Apply result (git-llm mode):

@@ -501,24 +501,48 @@ impl Sub for &HybridL2Bitset {
 // --- In-place Bitwise Operations ---
 
 impl BitAndAssign for HybridL2Bitset {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self &= &rhs;
+    }
+}
+
+impl BitAndAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitand_assign(&mut self, rhs: &HybridL2Bitset) {
         *self = &*self & rhs;
     }
 }
 
 impl BitOrAssign for HybridL2Bitset {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self |= &rhs;
+    }
+}
+
+impl BitOrAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitor_assign(&mut self, rhs: &HybridL2Bitset) {
         *self = &*self | rhs;
     }
 }
 
 impl BitXorAssign for HybridL2Bitset {
+    fn bitxor_assign(&mut self, rhs: Self) {
+        *self ^= &rhs;
+    }
+}
+
+impl BitXorAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn bitxor_assign(&mut self, rhs: &HybridL2Bitset) {
         *self = &*self ^ rhs;
     }
 }
 
 impl SubAssign for HybridL2Bitset {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self -= &rhs;
+    }
+}
+
+impl SubAssign<&HybridL2Bitset> for HybridL2Bitset {
     fn sub_assign(&mut self, rhs: &HybridL2Bitset) {
         *self = &*self - rhs;
     }

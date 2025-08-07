@@ -522,7 +522,7 @@ impl BitXor for &HybridBitset {
     type Output = HybridBitset;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
-        if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+        if Arc::ptr_eq(&self.inner, &rhs.inner) { return HybridBitset::zeros(); }
 
         let (a, b) = if Arc::as_ptr(&self.inner) <= Arc::as_ptr(&rhs.inner) {
             (self.inner.clone(), rhs.inner.clone())
@@ -551,7 +551,7 @@ impl Sub for &HybridBitset {
 
     // #[time_it]
     fn sub(self, rhs: Self) -> Self::Output {
-        if Arc::ptr_eq(&self.inner, &rhs.inner) { return Self::zeros(); }
+        if Arc::ptr_eq(&self.inner, &rhs.inner) { return HybridBitset::zeros(); }
 
         let mut cache = GLOBAL_CACHE.lock().unwrap();
         let key = BinOpKey(Op::Sub, self.inner.clone(), rhs.inner.clone());
