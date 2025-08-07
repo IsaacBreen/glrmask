@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -348,7 +347,6 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
@@ -593,148 +591,6 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
-    }
-
-    /// Simplify out `None` edges by shortcutting predecessors to successors.
-    ///
-    /// For every `B -(None; bv2)-> C`, and for every incoming edge `A -(x; bv1)-> B`,
-    /// we:
-    ///   - add/merge an edge `A -(x; bv1 ∩ bv2)-> C`
-    ///   - remove the moved tokens `bv1 ∩ bv2` from `A -(x; ...)-> B`
-    /// After processing all incoming edges to B, we remove all `None` edges from B.
-    ///
-    /// This transformation preserves behavior while eliminating `None` edges and
-    /// allows subsequent pruning and merging passes to operate on a simpler graph.
-    fn simplify_none_edges(&mut self) {
-        crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
-
-        // 1) Collect all unique nodes reachable from any root
-        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
-        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-        for root in self.roots.values() {
-            for arc in Trie::all_nodes(root.clone()) {
-                let ptr = Arc::as_ptr(&arc);
-                if seen.insert(ptr) {
-                    all_nodes.push(arc);
-                }
-            }
-        }
-        // Map pointer -> Arc for quick retrieval
-        let mut arc_by_ptr: HashMap<*const Mutex<PrecomputeNode>, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
-        for n in &all_nodes {
-            arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
-        }
-
-        // 2) Build:
-        //    - incoming[B] = vec of (A, key_x, bv1) for edges A -(x; bv1)-> B
-        //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
-        //    - none_union[B] = union of all bv2 for None edges from B
-        let mut incoming: HashMap<
-            *const Mutex<PrecomputeNode>,
-            Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
-        > = HashMap::new();
-        let mut none_edges_from: HashMap<
-            *const Mutex<PrecomputeNode>,
-            Vec<(Arc<Mutex<PrecomputeNode>>, LLMTokenBV)>
-        > = HashMap::new();
-        let mut none_union: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
-
-        for src_arc in &all_nodes {
-            let src_ptr = Arc::as_ptr(src_arc);
-            let guard = src_arc.lock().expect("poison");
-            // Record all outgoing edges for incoming map
-            for (ek, dest_map) in guard.children().iter() {
-                for (child_wrap, ev_bv) in dest_map.iter() {
-                    let child_arc = child_wrap.as_arc().clone();
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    incoming.entry(child_ptr)
-                        .or_default()
-                        .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
-                }
-            }
-            // Record None edges out of src_arc (B -> C)
-            if let Some(dest_map_none) = guard.children().get(&None) {
-                let list = none_edges_from.entry(src_ptr).or_default();
-                for (child_wrap, ev_bv) in dest_map_none.iter() {
-                    list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
-                    let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
-                    *entry |= ev_bv;
-                }
-            }
-        }
-
-        // 3) For every node B that has None edges to children, rewrite predecessors.
-        for (b_ptr, none_edges) in none_edges_from.into_iter() {
-            let union_mask = match none_union.get(&b_ptr) {
-                Some(bv) if !bv.is_empty() => bv.clone(),
-                _ => continue,
-            };
-            // If no predecessors, still remove None edges later (could help pruning)
-            let in_edges = match incoming.get(&b_ptr) {
-                Some(v) if !v.is_empty() => v.clone(),
-                _ => {
-                    // Remove None edges out of B even if nobody points to B currently.
-                    if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-                        let mut b_guard = b_arc.lock().expect("poison");
-                        b_guard.children_mut().remove(&None);
-                    }
-                    continue;
-                }
-            };
-
-            let b_arc = match arc_by_ptr.get(&b_ptr) {
-                Some(a) => a.clone(),
-                None => continue,
-            };
-            let b_key = ArcPtrWrapper::new(b_arc.clone());
-
-            // For each incoming edge A -(x; bv1)-> B, split tokens:
-            //   move:    to C with mask (bv1 ∩ bv2)
-            //   leftover on A->B: bv1 - union_over_C(bv1 ∩ bv2) = bv1 ∩ (!union_mask)
-            for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
-                let mut total_to_move = bv1_original.clone();
-                total_to_move &= &union_mask; // total tokens to redirect to all C via None edges
-                if total_to_move.is_empty() {
-                    continue;
-                }
-
-                let mut a_guard = a_arc.lock().expect("poison");
-                let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
-
-                // Add/merge edges to each C with per-child mask
-                for (c_arc, bv2) in &none_edges {
-                    let mut to_move_for_c = bv1_original.clone();
-                    to_move_for_c &= bv2;
-                    if to_move_for_c.is_empty() {
-                        continue;
-                    }
-                    let c_key = ArcPtrWrapper::new(c_arc.clone());
-                    if let Some(existing_ev) = dest_map.get_mut(&c_key) {
-                        *existing_ev |= &to_move_for_c;
-                    } else {
-                        dest_map.insert(c_key, to_move_for_c);
-                    }
-                }
-
-                // Reduce/remove the A -> B edge for the moved tokens
-                let mut remove_b_edge = false;
-                if let Some(ev_ab) = dest_map.get_mut(&b_key) {
-                    *ev_ab -= &total_to_move;
-                    remove_b_edge = ev_ab.is_empty();
-                }
-                if remove_b_edge {
-                    dest_map.remove(&b_key);
-                }
-            }
-
-            // Finally, remove all None edges out of B
-            {
-                let mut b_guard = b_arc.lock().expect("poison");
-                b_guard.children_mut().remove(&None);
-            }
-        }
-
-        crate::debug!(2, "Done simplifying None edges.");
     }
     
     fn prune_on_no_terminal_follow(&mut self) {
