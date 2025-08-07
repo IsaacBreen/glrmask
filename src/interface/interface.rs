@@ -760,7 +760,7 @@ impl GrammarDefinition {
             }
         }
 
-        #[derive(PartialEq)]
+        #[derive(Copy, Clone, PartialEq)]
         enum Nullability {
             NeverNull,
             CanBeNull,
@@ -768,34 +768,47 @@ impl GrammarDefinition {
         }
 
         fn get_nullability(expr: Expr) -> Nullability {
-            match expr {
-                Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
-                Expr::U8Class(_u8s) => Nullability::NeverNull,
-                Expr::Quantifier(expr, q_type) => match q_type {
-                    QuantifierType::ZeroOrMore => Nullability::CanBeNull,
-                    QuantifierType::OneOrMore => get_nullability(*expr),
-                    QuantifierType::ZeroOrOne => Nullability::CanBeNull,
-                },
-                Expr::Choice(exprs) => {
-                    let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                    if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                        Nullability::CanBeNull
-                    } else {
-                        Nullability::NeverNull
+            fn _get_nullability(expr: Expr, cache: &mut HashMap<Arc<Expr>, Nullability>) -> Nullability {
+                match expr {
+                    Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
+                    Expr::U8Class(_u8s) => Nullability::NeverNull,
+                    Expr::Quantifier(expr, q_type) => match q_type {
+                        QuantifierType::ZeroOrMore => Nullability::CanBeNull,
+                        QuantifierType::OneOrMore => _get_nullability(*expr, cache),
+                        QuantifierType::ZeroOrOne => Nullability::CanBeNull,
+                    },
+                    Expr::Choice(exprs) => {
+                        let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                        if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                            Nullability::CanBeNull
+                        } else {
+                            Nullability::NeverNull
+                        }
+                    }
+                    Expr::Seq(exprs) => {
+                        let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                        if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                            Nullability::CanBeNull
+                        } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
+                            Nullability::NeverNull
+                        } else {
+                            Nullability::NeverNull
+                        }
+                    }
+                    Expr::Epsilon => Nullability::AlwaysNull,
+                    Expr::Shared(expr) => {
+                        if let Some(&cached_nullability) = cache.get(&expr) {
+                            cached_nullability
+                        } else {
+                            let nullability = _get_nullability(expr.as_ref().clone(), cache);
+                            cache.insert(expr.clone(), nullability);
+                            nullability
+                        }
                     }
                 }
-                Expr::Seq(exprs) => {
-                    let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                    if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                        Nullability::CanBeNull
-                    } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
-                        Nullability::NeverNull
-                    } else {
-                        Nullability::NeverNull
-                    }
-                }
-                Expr::Epsilon => Nullability::AlwaysNull,
             }
+            let mut cache: HashMap<Arc<Expr>, Nullability> = HashMap::new();
+            _get_nullability(expr, &mut cache)
         }
 
         // Transfer nullability to the productions.
