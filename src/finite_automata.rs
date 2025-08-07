@@ -308,20 +308,28 @@ impl PartialOrd for Expr {
 
 impl Ord for Expr {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let self_d = core::mem::discriminant(self);
-        let other_d = core::mem::discriminant(other);
-        let discriminant_cmp = self_d.cmp(&other_d);
-        if discriminant_cmp != std::cmp::Ordering::Equal {
-            return discriminant_cmp;
-        }
+        use std::cmp::Ordering::*;
         match (self, other) {
             (Expr::U8Seq(v1), Expr::U8Seq(v2)) => v1.cmp(v2),
+            (Expr::U8Seq(_), _) => Less,
+            (_, Expr::U8Seq(_)) => Greater,
             (Expr::U8Class(s1), Expr::U8Class(s2)) => s1.cmp(s2),
+            (Expr::U8Class(_), _) => Less,
+            (_, Expr::U8Class(_)) => Greater,
             (Expr::Quantifier(e1, q1), Expr::Quantifier(e2, q2)) => e1.cmp(e2).then_with(|| q1.cmp(q2)),
-            (Expr::Choice(v1), Expr::Choice(v2)) | (Expr::Seq(v1), Expr::Seq(v2)) => v1.cmp(v2),
+            (Expr::Quantifier(_, _), _) => Less,
+            (_, Expr::Quantifier(_, _)) => Greater,
+            (Expr::Choice(v1), Expr::Choice(v2)) => v1.cmp(v2),
+            (Expr::Choice(_), _) => Less,
+            (_, Expr::Choice(_)) => Greater,
+            (Expr::Seq(v1), Expr::Seq(v2)) => v1.cmp(v2),
+            (Expr::Seq(_), _) => Less,
+            (_, Expr::Seq(_)) => Greater,
+            (Expr::Epsilon, Expr::Epsilon) => Equal,
+            (Expr::Epsilon, _) => Less,
+            (_, Expr::Epsilon) => Greater,
             (Expr::Shared(a1), Expr::Shared(a2)) => Arc::as_ptr(a1).cmp(&Arc::as_ptr(a2)),
-            (Expr::Epsilon, Expr::Epsilon) => std::cmp::Ordering::Equal,
-            _ => unreachable!(), // Should be covered by discriminant check
+            // Shared is the last variant, so this match is exhaustive.
         }
     }
 }
