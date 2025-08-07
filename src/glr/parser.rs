@@ -607,7 +607,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     /// Shared inner loop for phase 1 and phase 2.
     /// `action_selector` chooses between the phase-1 or phase-2 action map.
-    fn process_action_queue<F, R>(
+    fn process_action_queue<F>(
         &mut self,
         token_id: TerminalID,
         work_map: &mut WorkMap,
@@ -668,9 +668,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                         }
                     }
-                } else {
-                    crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
                 }
+            } else {
+                crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
             }
         }
     }
@@ -880,12 +880,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                         let len = r.len;
                         let nt = r.nonterminal_id;
-                        let popped = timeit!(peek.popn(len));
+                        let popper = timeit!(peek.popn(len));
                         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-                        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+                        crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
 
                         let mut out = Vec::new();
-                        for popper_item in popped.iter() {
+                        for popper_item in popper.iter() {
                             for peek2 in popper_item.peek_iter() {
                                 timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
                                 let mut goto_state_ids = BTreeSet::new();
@@ -1116,13 +1116,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
-        let make_msg = |print_full_forest, max_nodes_to_print| {
+        let (gss_string, state_ids) = {
+            let print_full_forest = stats.unique_nodes <= MAX;
+            let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
             let config = GSSPrintConfig {
                 max_nodes: max_nodes_to_print,
                 ..Default::default()
             };
             let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
-            let mut final_string = if print_full_forest {
+            let final_string = if print_full_forest {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
             } else {
                 match find_longest_path(&self.active_state.stack) {
@@ -1133,10 +1135,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             .map(|id| id.to_string())
                                             .collect::<Vec<_>>()
                                         .join(" → ")),
-                None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-            }
+                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
+                }
+            };
+            (final_string, state_ids)
         };
 
+        let mut final_string = gss_string;
         if explain_states && !state_ids.is_empty() {
             final_string.push_str("\n\n--- GSS State Explanations ---\n");
                 for state_id in state_ids {
@@ -1145,16 +1150,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
                     final_string.push_str(&explanation);
                 }
-            }
-            final_string
-        };
-
-        if stats.unique_nodes > PANIC_THRESHOLD {
-            let msg = make_msg(true, usize::MAX);
-            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
-        debug!(3, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
+        if stats.unique_nodes > PANIC_THRESHOLD {
+            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
+        }
+
+        debug!(3, "{}", final_string);
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
