@@ -5,8 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
-use std::sync::Arc;
-use std::collections::HashMap;
 
 pub type GroupID = usize;
 
@@ -275,7 +273,6 @@ pub enum Expr {
     Quantifier(Box<Expr>, QuantifierType),
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
-    Shared(Arc<Expr>),
     Epsilon, // Explicit epsilon transition
 }
 
@@ -303,10 +300,6 @@ impl JSONConvertible for Expr {
             Expr::Seq(exprs) => {
                 obj.insert("variant".to_string(), JSONNode::String("Seq".to_string()));
                 obj.insert("exprs".to_string(), exprs.to_json());
-            }
-            Expr::Shared(arc_expr) => {
-                obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
-                obj.insert("expr".to_string(), arc_expr.to_json());
             }
             Expr::Epsilon => {
                 obj.insert("variant".to_string(), JSONNode::String("Epsilon".to_string()));
@@ -347,11 +340,6 @@ impl JSONConvertible for Expr {
                         let exprs = obj.remove("exprs").ok_or_else(|| "Missing field exprs for Seq".to_string())
                                        .and_then(Vec::<Expr>::from_json)?;
                         Ok(Expr::Seq(exprs))
-                    }
-                    "Shared" => {
-                        let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Shared".to_string())?;
-                        let inner = Expr::from_json(expr_node)?;
-                        Ok(Expr::Shared(Arc::new(inner)))
                     }
                     "Epsilon" => Ok(Expr::Epsilon),
                     _ => Err(format!("Unknown variant {} for Expr", variant)),
@@ -646,20 +634,8 @@ impl Expr {
         ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
     }
 
-    // `cache` maps (shared_expr_ptr_as_usize, start_state) -> end_state.
-    // We only consult it for Expr::Shared variants.
-    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<(usize, usize), usize>) -> usize {
+    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
         match expr {
-            Expr::Shared(arc_expr) => {
-                let key = (Arc::as_ptr(&arc_expr) as usize, current_state);
-                if let Some(&cached) = cache.get(&key) {
-                    return cached;
-                }
-                // Recurse into the inner expression, but keep caching active.
-                let end_state = Self::handle_expr((*arc_expr).clone(), nfa, current_state, cache);
-                cache.insert(key, end_state);
-                return end_state;
-            }
             Expr::U8Seq(u8s) => {
                 let mut next_state = current_state;
                 for c in u8s {
@@ -685,7 +661,7 @@ impl Expr {
                         nfa.add_epsilon_transition(current_state, loop_start_state);
 
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state, cache);
+                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
 
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
@@ -698,7 +674,7 @@ impl Expr {
                     }
                     QuantifierType::ZeroOrOne => {
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state, cache);
+                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
 
                         // Epsilon transition from current state to expr end state
                         nfa.add_epsilon_transition(current_state, expr_end_state);
@@ -714,7 +690,7 @@ impl Expr {
 
                 for expr in exprs {
                     // Process the expr and get its end state
-                    let expr_end_state = Self::handle_expr(expr, nfa, current_state, cache);
+                    let expr_end_state = Self::handle_expr(expr, nfa, current_state);
 
                     // Connect the end state of the expr to the end state of the choice
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -725,7 +701,7 @@ impl Expr {
             }
             Expr::Seq(exprs) => {
                 for expr in exprs {
-                    current_state = Self::handle_expr(expr, nfa, current_state, cache);
+                    current_state = Self::handle_expr(expr, nfa, current_state);
                 }
                 current_state
             }
