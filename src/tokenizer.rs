@@ -125,21 +125,5 @@ impl Regex {
     pub(crate) fn iter_states(&self) -> impl Iterator<Item=TokenizerStateID> {
         (0..self.max_state()).map(|id| TokenizerStateID(id))
     }
-
-    /// Return true if *all* token group IDs (0..num_groups) are accessible from `state`.
-    pub(crate) fn all_tokens_accessible_from_state(&self, state: TokenizerStateID) -> bool {
-        let num_groups = self.num_groups();
-        // Vacuously true if no groups exist.
-        if num_groups == 0 {
-            return true;
-        }
-        let possible = self.init_to_state(state.0).possible_future_group_ids();
-        for gid in 0..num_groups {
-            if !possible.contains(&gid) {
-                return false;
-            }
-        }
-        true
-    }
 }
 

@@ -260,7 +260,7 @@ impl JSONConvertible for GrammarDefinition {
 
 impl Display for GrammarDefinition {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "GrammarDefinition:\n")?;
+        writeln!(f, "GrammarDefinition:")?;
         writeln!(f, "  Start Production ID: {}", self.start_production_id)?;
         writeln!(f, "  Productions ({}):", self.productions.len())?;
         for production in &self.productions {
@@ -794,10 +794,6 @@ impl GrammarDefinition {
                         Nullability::NeverNull
                     }
                 }
-                Expr::Shared(inner) => {
-                    // Shared expression: delegate nullability to the wrapped expression.
-                    get_nullability((**inner).clone())
-                }
                 Expr::Epsilon => Nullability::AlwaysNull,
             }
         }
@@ -1020,23 +1016,6 @@ impl GrammarDefinition {
                 debug!(0, "Warning: Group ID {} is out of bounds for tokenizer expressions vector (len {}). Terminal {:?} might be missing.", group_id, expr_groups_vec.len(), expr);
             }
         }
-        // If an ignore terminal is defined, prepend it (shared) to every terminal expression
-        // except the ignore one itself. This makes the tokenizer automatically accept
-        // ignore prefixes for other tokens.
-        if let Some(ignore_tid) = self.ignore_terminal_id {
-            let ignore_gid = ignore_tid.0;
-            if let Some(ignore_expr) = self.regex_expr_to_group_id.get_by_right(&ignore_gid).cloned() {
-                let shared_ignore = Arc::new(ignore_expr);
-                for (idx, eg) in expr_groups_vec.iter_mut().enumerate() {
-                    if idx == ignore_gid {
-                        continue;
-                    }
-                    let original = eg.expr.clone();
-                    eg.expr = Expr::Seq(vec![Expr::Shared(shared_ignore.clone()), original]);
-                }
-            }
-        }
-
         expr_groups_vec
     }
 }
@@ -1121,7 +1100,7 @@ impl CompiledGrammar {
 
 impl Display for CompiledGrammar {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "CompiledGrammar:\n")?;
+        writeln!(f, "CompiledGrammar:")?;
         writeln!(f, "  Definition (Arc<GrammarDefinition>):")?;
         writeln!(f, "    Start Production ID: {}", self.definition.start_production_id)?;
         writeln!(f, "  Productions ({}):", self.definition.productions.len())?;
@@ -1214,7 +1193,7 @@ impl<'a> IncrementalParser<'a> {
             }
 
             if let Some(end_state_id) = results.end_state {
-                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer().tokens_accessible_from_state(TokenizerStateID(end_state_id)).into_iter().collect();
+                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer().tokens_accessible_from_state(TokenizerStateID(end_state_id)); // Use accessor
                 for possible_final_grammar_token in possible_final_grammar_tokens {
                     let mut final_glr_state = current_glr_state.clone();
                     final_glr_state.step(possible_final_grammar_token);
@@ -2016,3 +1995,4 @@ mod tests {
         }
     }
 }
+
