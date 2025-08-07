@@ -1104,7 +1104,7 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
-            if !glr_state.active_state.stack.is_alive() {
+            if glr_state.active_state.stack.is_empty() {
                 continue;
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
