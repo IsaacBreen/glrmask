@@ -308,15 +308,19 @@ impl PartialOrd for Expr {
 
 impl Ord for Expr {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        core::mem::discriminant(self).cmp(&core::mem::discriminant(other)).then_with(|| match (self, other) {
+        let discriminant_cmp = core::mem::discriminant(self).cmp(&core::mem::discriminant(other));
+        if discriminant_cmp != std::cmp::Ordering::Equal {
+            return discriminant_cmp;
+        }
+        match (self, other) {
             (Expr::U8Seq(v1), Expr::U8Seq(v2)) => v1.cmp(v2),
             (Expr::U8Class(s1), Expr::U8Class(s2)) => s1.cmp(s2),
             (Expr::Quantifier(e1, q1), Expr::Quantifier(e2, q2)) => e1.cmp(e2).then_with(|| q1.cmp(q2)),
             (Expr::Choice(v1), Expr::Choice(v2)) | (Expr::Seq(v1), Expr::Seq(v2)) => v1.cmp(v2),
             (Expr::Shared(a1), Expr::Shared(a2)) => Arc::as_ptr(a1).cmp(&Arc::as_ptr(a2)),
             (Expr::Epsilon, Expr::Epsilon) => std::cmp::Ordering::Equal,
-            _ => unreachable!(),
-        })
+            _ => unreachable!(), // Should be covered by discriminant check
+        }
     }
 }
 
@@ -650,9 +654,9 @@ impl NFAState {
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
+        let num_groups = self.groups.len();
         let mut dfa = self.build_nfa().to_dfa();
         dfa.minimize();
-        let num_groups = self.groups.len();
         Regex { dfa, num_groups }
     }
 
@@ -2406,7 +2410,7 @@ mod group_u8set_tests {
         dfa.compute_group_id_to_u8set();
 
         // Create a Regex instance with the constructed DFA
-        let regex = Regex { dfa };
+        let regex = Regex { dfa, num_groups: 2 };
 
         // Test get_u8set_for_group at State 0 (start state)
         let state0 = regex.init_to_state(0);
