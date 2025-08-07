@@ -630,7 +630,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     println!("Processing state {} with {} edges", state_id.0, edge_values.len());
                     for (edge_value, count) in edge_values {
-                        println!("  Edge value {:?} has {} occurrences", edge_value, count);
+                        if count > 1 {
+                            println!("  Edge value {:?} has {} occurrences", edge_value, count);
+                        }
                     }
                 }
                 for peek in GSSNode::peek_iter(&state.stack) {
