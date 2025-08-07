@@ -113,6 +113,15 @@ impl Regex {
         ExecuteResult { matches, end_state: new_state }
     }
 
+    // Returns true if, from the given tokenizer state, all token groups are
+    // still possible in the future (i.e., the state's possible_future_group_ids
+    // covers every group defined in the regex).
+    pub(crate) fn all_tokens_accessible_from_state(&self, state: TokenizerStateID) -> bool {
+        let total_groups = self.num_groups();
+        if total_groups == 0 { return false; }
+        self.init_to_state(state.0).possible_future_group_ids().len() == total_groups
+    }
+
     pub(crate) fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> Vec<GrammarTokenID> {
         let regex_state = self.init_to_state(state.0);
         regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()

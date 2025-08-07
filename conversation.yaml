@@ -1,10 +1,10 @@
 local_system:
   attached_files:
-    - src/constraint.rs
     - src/finite_automata.rs
-    - src/interface/interface.rs
-    - src/interface/mod.rs
     - src/tokenizer.rs
+    - src/interface/mod.rs
+    - src/interface/interface.rs
+    - src/constraint.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -16,6 +16,8 @@ local_system:
       use std::fmt::{Debug, Display, Formatter};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
+      use std::collections::HashMap;
+      use std::sync::Arc;
 
       pub type GroupID = usize;
 
@@ -281,6 +283,7 @@ local_system:
       pub enum Expr {
           U8Seq(Vec<u8>),
           U8Class(U8Set),
+          Shared(Arc<Expr>), // Shared sub-expression
           Quantifier(Box<Expr>, QuantifierType),
           Choice(Vec<Expr>),
           Seq(Vec<Expr>),
@@ -298,6 +301,10 @@ local_system:
                   Expr::U8Class(u8set) => {
                       obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
                       obj.insert("u8set".to_string(), u8set.to_json());
+                  }
+                  Expr::Shared(inner) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
+                      obj.insert("inner".to_string(), inner.to_json());
                   }
                   Expr::Quantifier(expr, q_type) => {
                       obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
@@ -334,6 +341,11 @@ local_system:
                               let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
                                              .and_then(U8Set::from_json)?;
                               Ok(Expr::U8Class(u8set))
+                          }
+                          "Shared" => {
+                              let inner = obj.remove("inner").ok_or_else(|| "Missing field inner for Shared".to_string())?;
+                              let expr = Expr::from_json(inner)?;
+                              Ok(Expr::Shared(Arc::new(expr)))
                           }
                           "Quantifier" => {
                               let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
@@ -491,6 +503,10 @@ local_system:
           Expr::Quantifier(Box::new(expr.into()), QuantifierType::ZeroOrOne)
       }
 
+      pub fn shared<T: Into<Expr>>(expr: T) -> Expr {
+          Expr::Shared(Arc::new(expr.into()))
+      }
+
       pub fn prec<T: Into<Expr>>(_precedence: isize, expr: T) -> ExprGroup {
           ExprGroup { expr: expr.into(), is_non_greedy: false }
       }
@@ -625,8 +641,9 @@ local_system:
                   start_state: 0,
               };
 
+              let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
               for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-                  let end_state = Expr::handle_expr(expr, &mut nfa, 0);
+                  let end_state = Expr::handle_expr_cached(expr, &mut nfa, 0, &mut cache);
                   if is_non_greedy {
                       nfa.states[end_state].finalizers.insert(group);
                       // Additionally, track that this finalizer is non-greedy
@@ -645,7 +662,7 @@ local_system:
               ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
           }
 
-          fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+          fn handle_expr_cached(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<usize, (usize, usize)>) -> usize {
               match expr {
                   Expr::U8Seq(u8s) => {
                       let mut next_state = current_state;
@@ -663,6 +680,21 @@ local_system:
                       }
                       new_state
                   }
+                  Expr::Shared(inner) => {
+                      let key = Arc::as_ptr(&inner) as usize;
+                      if let Some(&(entry, end)) = cache.get(&key) {
+                          // Reuse compiled subgraph by epsilon to entry
+                          nfa.add_epsilon_transition(current_state, entry);
+                          end
+                      } else {
+                          // Create a dedicated entry for this shared fragment
+                          let entry = nfa.add_state();
+                          let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
+                          cache.insert(key, (entry, end));
+                          nfa.add_epsilon_transition(current_state, entry);
+                          end
+                      }
+                  }
                   Expr::Quantifier(expr, quantifier_type) => {
                       match quantifier_type {
                           QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
@@ -672,7 +704,7 @@ local_system:
                               nfa.add_epsilon_transition(current_state, loop_start_state);
 
                               // Process the expr
-                              let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
+                              let expr_end_state = Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
 
                               // Epsilon transition from expr end state back to loop start state for repetition
                               nfa.add_epsilon_transition(expr_end_state, loop_start_state);
@@ -685,7 +717,7 @@ local_system:
                           }
                           QuantifierType::ZeroOrOne => {
                               // Process the expr
-                              let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
+                              let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
 
                               // Epsilon transition from current state to expr end state
                               nfa.add_epsilon_transition(current_state, expr_end_state);
@@ -701,7 +733,7 @@ local_system:
 
                       for expr in exprs {
                           // Process the expr and get its end state
-                          let expr_end_state = Self::handle_expr(expr, nfa, current_state);
+                          let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
 
                           // Connect the end state of the expr to the end state of the choice
                           nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -712,12 +744,17 @@ local_system:
                   }
                   Expr::Seq(exprs) => {
                       for expr in exprs {
-                          current_state = Self::handle_expr(expr, nfa, current_state);
+                          current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
                       }
                       current_state
                   }
                   Expr::Epsilon => current_state
               }
+          }
+
+          fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+              let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
+              Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
           }
       }
 
@@ -1294,6 +1331,16 @@ local_system:
       }
 
       impl Regex {
+          pub fn num_groups(&self) -> usize {
+              let mut max_gid: Option<GroupID> = None;
+              for s in &self.dfa.states {
+                  if let Some(m) = s.finalizers.iter().max() {
+                      max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
+                  }
+              }
+              max_gid.map(|m| m + 1).unwrap_or(0)
+          }
+
           pub fn init_to_state(&self, state: usize) -> RegexState {
               let done = self.dfa.states[state].transitions.is_empty();
               let matches = self.dfa.states[state]
@@ -2071,8 +2118,6 @@ local_system:
               // For simplicity, assuming DFA has merged states, but depending on implementation, adjust accordingly
 
               // Let's assume state 1 and 2 are separate for "ab" and "ac"
-
-              // For this test, we'll iterate through possible transitions
 
               // Verify that in both resulting states, possible_future_group_ids contain their respective groups
               // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
@@ -3468,7 +3513,7 @@ local_system:
                   }
               }
 
-              #[derive(PartialEq)]
+              #[derive(Copy, Clone, PartialEq)]
               enum Nullability {
                   NeverNull,
                   CanBeNull,
@@ -3476,34 +3521,47 @@ local_system:
               }
 
               fn get_nullability(expr: Expr) -> Nullability {
-                  match expr {
-                      Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
-                      Expr::U8Class(_u8s) => Nullability::NeverNull,
-                      Expr::Quantifier(expr, q_type) => match q_type {
-                          QuantifierType::ZeroOrMore => Nullability::CanBeNull,
-                          QuantifierType::OneOrMore => get_nullability(*expr),
-                          QuantifierType::ZeroOrOne => Nullability::CanBeNull,
-                      },
-                      Expr::Choice(exprs) => {
-                          let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                          if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                              Nullability::CanBeNull
-                          } else {
-                              Nullability::NeverNull
+                  fn _get_nullability(expr: Expr, cache: &mut HashMap<Arc<Expr>, Nullability>) -> Nullability {
+                      match expr {
+                          Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
+                          Expr::U8Class(_u8s) => Nullability::NeverNull,
+                          Expr::Quantifier(expr, q_type) => match q_type {
+                              QuantifierType::ZeroOrMore => Nullability::CanBeNull,
+                              QuantifierType::OneOrMore => _get_nullability(*expr, cache),
+                              QuantifierType::ZeroOrOne => Nullability::CanBeNull,
+                          },
+                          Expr::Choice(exprs) => {
+                              let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                              if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                                  Nullability::CanBeNull
+                              } else {
+                                  Nullability::NeverNull
+                              }
+                          }
+                          Expr::Seq(exprs) => {
+                              let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                              if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                                  Nullability::CanBeNull
+                              } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
+                                  Nullability::NeverNull
+                              } else {
+                                  Nullability::NeverNull
+                              }
+                          }
+                          Expr::Epsilon => Nullability::AlwaysNull,
+                          Expr::Shared(expr) => {
+                              if let Some(&cached_nullability) = cache.get(&expr) {
+                                  cached_nullability
+                              } else {
+                                  let nullability = _get_nullability(expr.as_ref().clone(), cache);
+                                  cache.insert(expr.clone(), nullability);
+                                  nullability
+                              }
                           }
                       }
-                      Expr::Seq(exprs) => {
-                          let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                          if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                              Nullability::CanBeNull
-                          } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
-                              Nullability::NeverNull
-                          } else {
-                              Nullability::NeverNull
-                          }
-                      }
-                      Expr::Epsilon => Nullability::AlwaysNull,
                   }
+                  let mut cache: HashMap<Arc<Expr>, Nullability> = HashMap::new();
+                  _get_nullability(expr, &mut cache)
               }
 
               // Transfer nullability to the productions.
@@ -6273,6 +6331,8 @@ local_system:
       use std::fmt::{Debug, Display, Formatter};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
+      use std::collections::HashMap;
+      use std::sync::Arc;
 
       pub type GroupID = usize;
 
@@ -6538,6 +6598,7 @@ local_system:
       pub enum Expr {
           U8Seq(Vec<u8>),
           U8Class(U8Set),
+          Shared(Arc<Expr>), // Shared sub-expression
           Quantifier(Box<Expr>, QuantifierType),
           Choice(Vec<Expr>),
           Seq(Vec<Expr>),
@@ -6555,6 +6616,10 @@ local_system:
                   Expr::U8Class(u8set) => {
                       obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
                       obj.insert("u8set".to_string(), u8set.to_json());
+                  }
+                  Expr::Shared(inner) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
+                      obj.insert("inner".to_string(), inner.to_json());
                   }
                   Expr::Quantifier(expr, q_type) => {
                       obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
@@ -6591,6 +6656,11 @@ local_system:
                               let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
                                              .and_then(U8Set::from_json)?;
                               Ok(Expr::U8Class(u8set))
+                          }
+                          "Shared" => {
+                              let inner = obj.remove("inner").ok_or_else(|| "Missing field inner for Shared".to_string())?;
+                              let expr = Expr::from_json(inner)?;
+                              Ok(Expr::Shared(Arc::new(expr)))
                           }
                           "Quantifier" => {
                               let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
@@ -6748,6 +6818,10 @@ local_system:
           Expr::Quantifier(Box::new(expr.into()), QuantifierType::ZeroOrOne)
       }
 
+      pub fn shared<T: Into<Expr>>(expr: T) -> Expr {
+          Expr::Shared(Arc::new(expr.into()))
+      }
+
       pub fn prec<T: Into<Expr>>(_precedence: isize, expr: T) -> ExprGroup {
           ExprGroup { expr: expr.into(), is_non_greedy: false }
       }
@@ -6882,8 +6956,9 @@ local_system:
                   start_state: 0,
               };
 
+              let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
               for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-                  let end_state = Expr::handle_expr(expr, &mut nfa, 0);
+                  let end_state = Expr::handle_expr_cached(expr, &mut nfa, 0, &mut cache);
                   if is_non_greedy {
                       nfa.states[end_state].finalizers.insert(group);
                       // Additionally, track that this finalizer is non-greedy
@@ -6902,7 +6977,7 @@ local_system:
               ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
           }
 
-          fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+          fn handle_expr_cached(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<usize, (usize, usize)>) -> usize {
               match expr {
                   Expr::U8Seq(u8s) => {
                       let mut next_state = current_state;
@@ -6920,6 +6995,21 @@ local_system:
                       }
                       new_state
                   }
+                  Expr::Shared(inner) => {
+                      let key = Arc::as_ptr(&inner) as usize;
+                      if let Some(&(entry, end)) = cache.get(&key) {
+                          // Reuse compiled subgraph by epsilon to entry
+                          nfa.add_epsilon_transition(current_state, entry);
+                          end
+                      } else {
+                          // Create a dedicated entry for this shared fragment
+                          let entry = nfa.add_state();
+                          let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
+                          cache.insert(key, (entry, end));
+                          nfa.add_epsilon_transition(current_state, entry);
+                          end
+                      }
+                  }
                   Expr::Quantifier(expr, quantifier_type) => {
                       match quantifier_type {
                           QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
@@ -6929,7 +7019,7 @@ local_system:
                               nfa.add_epsilon_transition(current_state, loop_start_state);
 
                               // Process the expr
-                              let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
+                              let expr_end_state = Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
 
                               // Epsilon transition from expr end state back to loop start state for repetition
                               nfa.add_epsilon_transition(expr_end_state, loop_start_state);
@@ -6942,7 +7032,7 @@ local_system:
                           }
                           QuantifierType::ZeroOrOne => {
                               // Process the expr
-                              let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
+                              let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
 
                               // Epsilon transition from current state to expr end state
                               nfa.add_epsilon_transition(current_state, expr_end_state);
@@ -6958,7 +7048,7 @@ local_system:
 
                       for expr in exprs {
                           // Process the expr and get its end state
-                          let expr_end_state = Self::handle_expr(expr, nfa, current_state);
+                          let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
 
                           // Connect the end state of the expr to the end state of the choice
                           nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -6969,12 +7059,17 @@ local_system:
                   }
                   Expr::Seq(exprs) => {
                       for expr in exprs {
-                          current_state = Self::handle_expr(expr, nfa, current_state);
+                          current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
                       }
                       current_state
                   }
                   Expr::Epsilon => current_state
               }
+          }
+
+          fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+              let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
+              Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
           }
       }
 
@@ -7551,6 +7646,16 @@ local_system:
       }
 
       impl Regex {
+          pub fn num_groups(&self) -> usize {
+              let mut max_gid: Option<GroupID> = None;
+              for s in &self.dfa.states {
+                  if let Some(m) = s.finalizers.iter().max() {
+                      max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
+                  }
+              }
+              max_gid.map(|m| m + 1).unwrap_or(0)
+          }
+
           pub fn init_to_state(&self, state: usize) -> RegexState {
               let done = self.dfa.states[state].transitions.is_empty();
               let matches = self.dfa.states[state]
@@ -8328,8 +8433,6 @@ local_system:
               // For simplicity, assuming DFA has merged states, but depending on implementation, adjust accordingly
 
               // Let's assume state 1 and 2 are separate for "ab" and "ac"
-
-              // For this test, we'll iterate through possible transitions
 
               // Verify that in both resulting states, possible_future_group_ids contain their respective groups
               // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
@@ -9725,7 +9828,7 @@ local_system:
                   }
               }
 
-              #[derive(PartialEq)]
+              #[derive(Copy, Clone, PartialEq)]
               enum Nullability {
                   NeverNull,
                   CanBeNull,
@@ -9733,34 +9836,47 @@ local_system:
               }
 
               fn get_nullability(expr: Expr) -> Nullability {
-                  match expr {
-                      Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
-                      Expr::U8Class(_u8s) => Nullability::NeverNull,
-                      Expr::Quantifier(expr, q_type) => match q_type {
-                          QuantifierType::ZeroOrMore => Nullability::CanBeNull,
-                          QuantifierType::OneOrMore => get_nullability(*expr),
-                          QuantifierType::ZeroOrOne => Nullability::CanBeNull,
-                      },
-                      Expr::Choice(exprs) => {
-                          let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                          if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                              Nullability::CanBeNull
-                          } else {
-                              Nullability::NeverNull
+                  fn _get_nullability(expr: Expr, cache: &mut HashMap<Arc<Expr>, Nullability>) -> Nullability {
+                      match expr {
+                          Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
+                          Expr::U8Class(_u8s) => Nullability::NeverNull,
+                          Expr::Quantifier(expr, q_type) => match q_type {
+                              QuantifierType::ZeroOrMore => Nullability::CanBeNull,
+                              QuantifierType::OneOrMore => _get_nullability(*expr, cache),
+                              QuantifierType::ZeroOrOne => Nullability::CanBeNull,
+                          },
+                          Expr::Choice(exprs) => {
+                              let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                              if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                                  Nullability::CanBeNull
+                              } else {
+                                  Nullability::NeverNull
+                              }
+                          }
+                          Expr::Seq(exprs) => {
+                              let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                              if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                                  Nullability::CanBeNull
+                              } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
+                                  Nullability::NeverNull
+                              } else {
+                                  Nullability::NeverNull
+                              }
+                          }
+                          Expr::Epsilon => Nullability::AlwaysNull,
+                          Expr::Shared(expr) => {
+                              if let Some(&cached_nullability) = cache.get(&expr) {
+                                  cached_nullability
+                              } else {
+                                  let nullability = _get_nullability(expr.as_ref().clone(), cache);
+                                  cache.insert(expr.clone(), nullability);
+                                  nullability
+                              }
                           }
                       }
-                      Expr::Seq(exprs) => {
-                          let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                          if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                              Nullability::CanBeNull
-                          } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
-                              Nullability::NeverNull
-                          } else {
-                              Nullability::NeverNull
-                          }
-                      }
-                      Expr::Epsilon => Nullability::AlwaysNull,
                   }
+                  let mut cache: HashMap<Arc<Expr>, Nullability> = HashMap::new();
+                  _get_nullability(expr, &mut cache)
               }
 
               // Transfer nullability to the productions.
@@ -12553,6 +12669,8 @@ messages:
       use std::fmt::{Debug, Display, Formatter};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
       use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
+      use std::collections::HashMap;
+      use std::sync::Arc;
 
       pub type GroupID = usize;
 
@@ -12818,6 +12936,7 @@ messages:
       pub enum Expr {
           U8Seq(Vec<u8>),
           U8Class(U8Set),
+          Shared(Arc<Expr>), // Shared sub-expression
           Quantifier(Box<Expr>, QuantifierType),
           Choice(Vec<Expr>),
           Seq(Vec<Expr>),
@@ -12835,6 +12954,10 @@ messages:
                   Expr::U8Class(u8set) => {
                       obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
                       obj.insert("u8set".to_string(), u8set.to_json());
+                  }
+                  Expr::Shared(inner) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
+                      obj.insert("inner".to_string(), inner.to_json());
                   }
                   Expr::Quantifier(expr, q_type) => {
                       obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
@@ -12871,6 +12994,11 @@ messages:
                               let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
                                              .and_then(U8Set::from_json)?;
                               Ok(Expr::U8Class(u8set))
+                          }
+                          "Shared" => {
+                              let inner = obj.remove("inner").ok_or_else(|| "Missing field inner for Shared".to_string())?;
+                              let expr = Expr::from_json(inner)?;
+                              Ok(Expr::Shared(Arc::new(expr)))
                           }
                           "Quantifier" => {
                               let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
@@ -13028,6 +13156,10 @@ messages:
           Expr::Quantifier(Box::new(expr.into()), QuantifierType::ZeroOrOne)
       }
 
+      pub fn shared<T: Into<Expr>>(expr: T) -> Expr {
+          Expr::Shared(Arc::new(expr.into()))
+      }
+
       pub fn prec<T: Into<Expr>>(_precedence: isize, expr: T) -> ExprGroup {
           ExprGroup { expr: expr.into(), is_non_greedy: false }
       }
@@ -13162,8 +13294,9 @@ messages:
                   start_state: 0,
               };
 
+              let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
               for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-                  let end_state = Expr::handle_expr(expr, &mut nfa, 0);
+                  let end_state = Expr::handle_expr_cached(expr, &mut nfa, 0, &mut cache);
                   if is_non_greedy {
                       nfa.states[end_state].finalizers.insert(group);
                       // Additionally, track that this finalizer is non-greedy
@@ -13182,7 +13315,7 @@ messages:
               ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
           }
 
-          fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+          fn handle_expr_cached(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<usize, (usize, usize)>) -> usize {
               match expr {
                   Expr::U8Seq(u8s) => {
                       let mut next_state = current_state;
@@ -13200,6 +13333,21 @@ messages:
                       }
                       new_state
                   }
+                  Expr::Shared(inner) => {
+                      let key = Arc::as_ptr(&inner) as usize;
+                      if let Some(&(entry, end)) = cache.get(&key) {
+                          // Reuse compiled subgraph by epsilon to entry
+                          nfa.add_epsilon_transition(current_state, entry);
+                          end
+                      } else {
+                          // Create a dedicated entry for this shared fragment
+                          let entry = nfa.add_state();
+                          let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
+                          cache.insert(key, (entry, end));
+                          nfa.add_epsilon_transition(current_state, entry);
+                          end
+                      }
+                  }
                   Expr::Quantifier(expr, quantifier_type) => {
                       match quantifier_type {
                           QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
@@ -13209,7 +13357,7 @@ messages:
                               nfa.add_epsilon_transition(current_state, loop_start_state);
 
                               // Process the expr
-                              let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
+                              let expr_end_state = Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
 
                               // Epsilon transition from expr end state back to loop start state for repetition
                               nfa.add_epsilon_transition(expr_end_state, loop_start_state);
@@ -13222,7 +13370,7 @@ messages:
                           }
                           QuantifierType::ZeroOrOne => {
                               // Process the expr
-                              let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
+                              let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
 
                               // Epsilon transition from current state to expr end state
                               nfa.add_epsilon_transition(current_state, expr_end_state);
@@ -13238,7 +13386,7 @@ messages:
 
                       for expr in exprs {
                           // Process the expr and get its end state
-                          let expr_end_state = Self::handle_expr(expr, nfa, current_state);
+                          let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
 
                           // Connect the end state of the expr to the end state of the choice
                           nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -13249,12 +13397,17 @@ messages:
                   }
                   Expr::Seq(exprs) => {
                       for expr in exprs {
-                          current_state = Self::handle_expr(expr, nfa, current_state);
+                          current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
                       }
                       current_state
                   }
                   Expr::Epsilon => current_state
               }
+          }
+
+          fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+              let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
+              Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
           }
       }
 
@@ -13831,6 +13984,16 @@ messages:
       }
 
       impl Regex {
+          pub fn num_groups(&self) -> usize {
+              let mut max_gid: Option<GroupID> = None;
+              for s in &self.dfa.states {
+                  if let Some(m) = s.finalizers.iter().max() {
+                      max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
+                  }
+              }
+              max_gid.map(|m| m + 1).unwrap_or(0)
+          }
+
           pub fn init_to_state(&self, state: usize) -> RegexState {
               let done = self.dfa.states[state].transitions.is_empty();
               let matches = self.dfa.states[state]
@@ -14608,8 +14771,6 @@ messages:
               // For simplicity, assuming DFA has merged states, but depending on implementation, adjust accordingly
 
               // Let's assume state 1 and 2 are separate for "ab" and "ac"
-
-              // For this test, we'll iterate through possible transitions
 
               // Verify that in both resulting states, possible_future_group_ids contain their respective groups
               // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
@@ -16020,7 +16181,7 @@ messages:
                   }
               }
 
-              #[derive(PartialEq)]
+              #[derive(Copy, Clone, PartialEq)]
               enum Nullability {
                   NeverNull,
                   CanBeNull,
@@ -16028,34 +16189,47 @@ messages:
               }
 
               fn get_nullability(expr: Expr) -> Nullability {
-                  match expr {
-                      Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
-                      Expr::U8Class(_u8s) => Nullability::NeverNull,
-                      Expr::Quantifier(expr, q_type) => match q_type {
-                          QuantifierType::ZeroOrMore => Nullability::CanBeNull,
-                          QuantifierType::OneOrMore => get_nullability(*expr),
-                          QuantifierType::ZeroOrOne => Nullability::CanBeNull,
-                      },
-                      Expr::Choice(exprs) => {
-                          let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                          if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                              Nullability::CanBeNull
-                          } else {
-                              Nullability::NeverNull
+                  fn _get_nullability(expr: Expr, cache: &mut HashMap<Arc<Expr>, Nullability>) -> Nullability {
+                      match expr {
+                          Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
+                          Expr::U8Class(_u8s) => Nullability::NeverNull,
+                          Expr::Quantifier(expr, q_type) => match q_type {
+                              QuantifierType::ZeroOrMore => Nullability::CanBeNull,
+                              QuantifierType::OneOrMore => _get_nullability(*expr, cache),
+                              QuantifierType::ZeroOrOne => Nullability::CanBeNull,
+                          },
+                          Expr::Choice(exprs) => {
+                              let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                              if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                                  Nullability::CanBeNull
+                              } else {
+                                  Nullability::NeverNull
+                              }
+                          }
+                          Expr::Seq(exprs) => {
+                              let nullabilities: Vec<Nullability> = exprs.iter().map(|e| _get_nullability(e.clone(), cache)).collect();
+                              if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                                  Nullability::CanBeNull
+                              } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
+                                  Nullability::NeverNull
+                              } else {
+                                  Nullability::NeverNull
+                              }
+                          }
+                          Expr::Epsilon => Nullability::AlwaysNull,
+                          Expr::Shared(expr) => {
+                              if let Some(&cached_nullability) = cache.get(&expr) {
+                                  cached_nullability
+                              } else {
+                                  let nullability = _get_nullability(expr.as_ref().clone(), cache);
+                                  cache.insert(expr.clone(), nullability);
+                                  nullability
+                              }
                           }
                       }
-                      Expr::Seq(exprs) => {
-                          let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
-                          if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
-                              Nullability::CanBeNull
-                          } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
-                              Nullability::NeverNull
-                          } else {
-                              Nullability::NeverNull
-                          }
-                      }
-                      Expr::Epsilon => Nullability::AlwaysNull,
                   }
+                  let mut cache: HashMap<Arc<Expr>, Nullability> = HashMap::new();
+                  _get_nullability(expr, &mut cache)
               }
 
               // Transfer nullability to the productions.
@@ -18887,349 +19061,41 @@ messages:
       And of course we'll need to update src/finite_automata.rs and src/tokenizer.rs.
 
       Make all these changes at once.
+      I've already made some of the updates to src.finite_automata.rs.
+      Do everything else.
+      Do it in one response.
     metadata:
   - assistant: |-
       ```diff
-      *** Begin Patch
-      *** Update File: src/finite_automata.rs
-      @@
-       use crate::datastructures::u8set::U8Set;
-       use std::collections::{BTreeMap, BTreeSet};
-       use std::fmt::{Debug, Display, Formatter};
-       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-       use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
-      +use std::collections::HashMap;
-      +use std::sync::Arc;
-       
-       pub type GroupID = usize;
-       
-       #[derive(Debug, Clone)]
-       pub struct NFAState {
-      @@
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       pub enum Expr {
-           U8Seq(Vec<u8>),
-           U8Class(U8Set),
-      +    Shared(Arc<Expr>), // Shared sub-expression
-           Quantifier(Box<Expr>, QuantifierType),
-           Choice(Vec<Expr>),
-           Seq(Vec<Expr>),
-           Epsilon, // Explicit epsilon transition
-       }
-      @@
-                   Expr::U8Class(u8set) => {
-                       obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
-                       obj.insert("u8set".to_string(), u8set.to_json());
-                   }
-      +            Expr::Shared(inner) => {
-      +                obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
-      +                obj.insert("inner".to_string(), inner.to_json());
-      +            }
-                   Expr::Quantifier(expr, q_type) => {
-                       obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
-                       obj.insert("expr".to_string(), expr.to_json());
-                       obj.insert("q_type".to_string(), q_type.to_json());
-                   }
-      @@
-                               let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
-                                              .and_then(U8Set::from_json)?;
-                               Ok(Expr::U8Class(u8set))
-                           }
-      +                    "Shared" => {
-      +                        let inner = obj.remove("inner").ok_or_else(|| "Missing field inner for Shared".to_string())?;
-      +                        let expr = Expr::from_json(inner)?;
-      +                        Ok(Expr::Shared(Arc::new(expr)))
-      +                    }
-                           "Quantifier" => {
-                               let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
-                               let expr = Box::new(Expr::from_json(expr_node)?);
-                               let q_type = obj.remove("q_type").ok_or_else(|| "Missing field q_type for Quantifier".to_string())
-                                                 .and_then(QuantifierType::from_json)?;
-      @@
-       pub fn rep1<T: Into<Expr>>(expr: T) -> Expr {
-           Expr::Quantifier(Box::new(expr.into()), QuantifierType::OneOrMore)
-       }
-       
-       pub fn opt<T: Into<Expr>>(expr: T) -> Expr {
-           Expr::Quantifier(Box::new(expr.into()), QuantifierType::ZeroOrOne)
-       }
-       
-      +pub fn shared<T: Into<Expr>>(expr: T) -> Expr {
-      +    Expr::Shared(Arc::new(expr.into()))
-      +}
-      +
-       pub fn prec<T: Into<Expr>>(_precedence: isize, expr: T) -> ExprGroup {
-           ExprGroup { expr: expr.into(), is_non_greedy: false }
-       }
-       
-       pub fn eps() -> Expr {
-      @@
-               let mut nfa = NFA {
-                   states: vec![NFAState::new()],
-                   start_state: 0,
-               };
-       
-      +        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-               for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-      -            let end_state = Expr::handle_expr(expr, &mut nfa, 0);
-      +            let end_state = Expr::handle_expr_cached(expr, &mut nfa, 0, &mut cache);
-                   if is_non_greedy {
-                       nfa.states[end_state].finalizers.insert(group);
-                       // Additionally, track that this finalizer is non-greedy
-                       nfa.states[end_state].non_greedy_finalizers.insert(group);
-                   } else {
-      @@
-       impl Expr {
-           pub fn build(self) -> Regex {
-               ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
+      diff --git a/src/tokenizer.rs b/src/tokenizer.rs
+      index 8f3d353..6fc45d3 100644
+      --- a/src/tokenizer.rs
+      +++ b/src/tokenizer.rs
+      @@ -109,6 +109,15 @@ impl Regex {
+               ExecuteResult { matches, end_state: new_state }
            }
        
-      +    fn handle_expr_cached(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<usize, (usize, usize)>) -> usize {
-      +        match expr {
-      +            Expr::U8Seq(u8s) => {
-      +                let mut next_state = current_state;
-      +                for c in u8s {
-      +                    let new_state = nfa.add_state();
-      +                    nfa.add_transition(next_state, c, new_state);
-      +                    next_state = new_state;
-      +                }
-      +                next_state
-      +            }
-      +            Expr::U8Class(u8s) => {
-      +                let new_state = nfa.add_state();
-      +                for ch in u8s.iter() {
-      +                    nfa.add_transition(current_state, ch, new_state);
-      +                }
-      +                new_state
-      +            }
-      +            Expr::Shared(inner) => {
-      +                let key = Arc::as_ptr(&inner) as usize;
-      +                if let Some(&(entry, end)) = cache.get(&key) {
-      +                    // Reuse compiled subgraph by epsilon to entry
-      +                    nfa.add_epsilon_transition(current_state, entry);
-      +                    end
-      +                } else {
-      +                    // Create a dedicated entry for this shared fragment
-      +                    let entry = nfa.add_state();
-      +                    let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
-      +                    cache.insert(key, (entry, end));
-      +                    nfa.add_epsilon_transition(current_state, entry);
-      +                    end
-      +                }
-      +            }
-      +            Expr::Quantifier(expr, quantifier_type) => {
-      +                match quantifier_type {
-      +                    QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
-      +                        let loop_start_state = nfa.add_state();
-      +
-      +                        // Epsilon transition from current state to loop start state
-      +                        nfa.add_epsilon_transition(current_state, loop_start_state);
-      +
-      +                        // Process the expr
-      +                        let expr_end_state = Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
-      +
-      +                        // Epsilon transition from expr end state back to loop start state for repetition
-      +                        nfa.add_epsilon_transition(expr_end_state, loop_start_state);
-      +
-      +                        match quantifier_type {
-      +                            QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
-      +                            QuantifierType::OneOrMore => expr_end_state, // The expr end state becomes the new current state
-      +                            _ => unreachable!()
-      +                        }
-      +                    }
-      +                    QuantifierType::ZeroOrOne => {
-      +                        // Process the expr
-      +                        let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
-      +
-      +                        // Epsilon transition from current state to expr end state
-      +                        nfa.add_epsilon_transition(current_state, expr_end_state);
-      +
-      +                        // The expr end state becomes the new current state
-      +                        expr_end_state
-      +                    }
-      +                }
-      +            }
-      +            Expr::Choice(exprs) => {
-      +                // New start state for choice
-      +                let choice_end_state = nfa.add_state();   // New end state for choice
-      +
-      +                for expr in exprs {
-      +                    // Process the expr and get its end state
-      +                    let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
-      +
-      +                    // Connect the end state of the expr to the end state of the choice
-      +                    nfa.add_epsilon_transition(expr_end_state, choice_end_state);
-      +                }
-      +
-      +                // The end state of the choice becomes the new current state
-      +                choice_end_state
-      +            }
-      +            Expr::Seq(exprs) => {
-      +                for expr in exprs {
-      +                    current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
-      +                }
-      +                current_state
-      +            }
-      +            Expr::Epsilon => current_state
-      +        }
+      +    // Returns true if, from the given tokenizer state, all token groups are
+      +    // still possible in the future (i.e., the state's possible_future_group_ids
+      +    // covers every group defined in the regex).
+      +    pub(crate) fn all_tokens_accessible_from_state(&self, state: TokenizerStateID) -> bool {
+      +        let total_groups = self.num_groups();
+      +        if total_groups == 0 { return false; }
+      +        self.init_to_state(state.0).possible_future_group_ids().len() == total_groups
       +    }
       +
-           fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
-      -        match expr {
-      -            Expr::U8Seq(u8s) => {
-      -                let mut next_state = current_state;
-      -                for c in u8s {
-      -                    let new_state = nfa.add_state();
-      -                    nfa.add_transition(next_state, c, new_state);
-      -                    next_state = new_state;
-      -                }
-      -                next_state
-      -            }
-      -            Expr::U8Class(u8s) => {
-      -                let new_state = nfa.add_state();
-      -                for ch in u8s.iter() {
-      -                    nfa.add_transition(current_state, ch, new_state);
-      -                }
-      -                new_state
-      -            }
-      -            Expr::Quantifier(expr, quantifier_type) => {
-      -                match quantifier_type {
-      -                    QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
-      -                        let loop_start_state = nfa.add_state();
-      -
-      -                        // Epsilon transition from current state to loop start state
-      -                        nfa.add_epsilon_transition(current_state, loop_start_state);
-      -
-      -                        // Process the expr
-      -                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
-      -
-      -                        // Epsilon transition from expr end state back to loop start state for repetition
-      -                        nfa.add_epsilon_transition(expr_end_state, loop_start_state);
-      -
-      -                        match quantifier_type {
-      -                            QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
-      -                            QuantifierType::OneOrMore => expr_end_state, // The expr end state becomes the new current state
-      -                            _ => unreachable!()
-      -                        }
-      -                    }
-      -                    QuantifierType::ZeroOrOne => {
-      -                        // Process the expr
-      -                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
-      -
-      -                        // Epsilon transition from current state to expr end state
-      -                        nfa.add_epsilon_transition(current_state, expr_end_state);
-      -
-      -                        // The expr end state becomes the new current state
-      -                        expr_end_state
-      -                    }
-      -                }
-      -            }
-      -            Expr::Choice(exprs) => {
-      -                // New start state for choice
-      -                let choice_end_state = nfa.add_state();   // New end state for choice
-      -
-      -                for expr in exprs {
-      -                    // Process the expr and get its end state
-      -                    let expr_end_state = Self::handle_expr(expr, nfa, current_state);
-      -
-      -                    // Connect the end state of the expr to the end state of the choice
-      -                    nfa.add_epsilon_transition(expr_end_state, choice_end_state);
-      -                }
-      -
-      -                // The end state of the choice becomes the new current state
-      -                choice_end_state
-      -            }
-      -            Expr::Seq(exprs) => {
-      -                for expr in exprs {
-      -                    current_state = Self::handle_expr(expr, nfa, current_state);
-      -                }
-      -                current_state
-      -            }
-      -            Expr::Epsilon => current_state
-      -        }
-      +        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-      +        Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
-           }
-       }
-       
-       impl NFA {
-           pub fn add_state(&mut self) -> usize {
-      @@
-           }
-       }
-       
-       impl Regex {
-      +    pub fn num_groups(&self) -> usize {
-      +        let mut max_gid: Option<GroupID> = None;
-      +        for s in &self.dfa.states {
-      +            if let Some(m) = s.finalizers.iter().max() {
-      +                max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
-      +            }
-      +        }
-      +        max_gid.map(|m| m + 1).unwrap_or(0)
-      +    }
-      +
-           pub fn init_to_state(&self, state: usize) -> RegexState {
-               let done = self.dfa.states[state].transitions.is_empty();
-               let matches = self.dfa.states[state]
-                   .finalizers
-                   .iter()
-      *** End Patch
+           pub(crate) fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> Vec<GrammarTokenID> {
+               let regex_state = self.init_to_state(state.0);
+               regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
       ```
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Error: Could not determine filename for diff block 1. Skipping.
-      Diff content start:
-      *** Begin Patch
-      *** Update File: src/finite_automata.rs
-      @@
-       use crate::datastructures::u8set::U8Set;
-       use std::collections::{BTreeMap, BTreeSet};
-       use std::fmt::{Debug, Display, Formatter};
-       use crate...
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Error: Could not determine filename for diff block 1. Skipping.
-      Diff content start:
-      *** Begin Patch
-      *** Update File: src/finite_automata.rs
-      @@
-       use crate::datastructures::u8set::U8Set;
-       use std::collections::{BTreeMap, BTreeSet};
-       use std::fmt::{Debug, Display, Formatter};
-       use crate...
-
-
-      LLM apply output:
-      Using model 'gf' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/finite_automata.rs"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/finite_automata.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/finite_automata.rs
+      Identified target file: src/tokenizer.rs
+      Applying patch to 'src/tokenizer.rs' using custom patcher...
+      Successfully applied patch and wrote to src/tokenizer.rs.
     metadata:
 ...
