@@ -719,8 +719,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let popper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-        // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+        // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
         let mut out = Vec::new();
         for popper_item in popper.iter() {
