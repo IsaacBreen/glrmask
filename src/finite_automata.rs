@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub type GroupID = usize;
 
@@ -270,6 +272,7 @@ impl<'a> JSONConvertible for RegexState<'a> {
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
+    Shared(Arc<Expr>), // Shared sub-expression
     Quantifier(Box<Expr>, QuantifierType),
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
@@ -287,6 +290,10 @@ impl JSONConvertible for Expr {
             Expr::U8Class(u8set) => {
                 obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
                 obj.insert("u8set".to_string(), u8set.to_json());
+            }
+            Expr::Shared(inner) => {
+                obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
+                obj.insert("inner".to_string(), inner.to_json());
             }
             Expr::Quantifier(expr, q_type) => {
                 obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
@@ -323,6 +330,11 @@ impl JSONConvertible for Expr {
                         let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
                                        .and_then(U8Set::from_json)?;
                         Ok(Expr::U8Class(u8set))
+                    }
+                    "Shared" => {
+                        let inner = obj.remove("inner").ok_or_else(|| "Missing field inner for Shared".to_string())?;
+                        let expr = Expr::from_json(inner)?;
+                        Ok(Expr::Shared(Arc::new(expr)))
                     }
                     "Quantifier" => {
                         let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
@@ -480,6 +492,10 @@ pub fn opt<T: Into<Expr>>(expr: T) -> Expr {
     Expr::Quantifier(Box::new(expr.into()), QuantifierType::ZeroOrOne)
 }
 
+pub fn shared<T: Into<Expr>>(expr: T) -> Expr {
+    Expr::Shared(Arc::new(expr.into()))
+}
+
 pub fn prec<T: Into<Expr>>(_precedence: isize, expr: T) -> ExprGroup {
     ExprGroup { expr: expr.into(), is_non_greedy: false }
 }
@@ -614,8 +630,9 @@ impl ExprGroups {
             start_state: 0,
         };
 
+        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
         for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-            let end_state = Expr::handle_expr(expr, &mut nfa, 0);
+            let end_state = Expr::handle_expr_cached(expr, &mut nfa, 0, &mut cache);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 // Additionally, track that this finalizer is non-greedy
@@ -634,7 +651,7 @@ impl Expr {
         ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
     }
 
-    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+    fn handle_expr_cached(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<usize, (usize, usize)>) -> usize {
         match expr {
             Expr::U8Seq(u8s) => {
                 let mut next_state = current_state;
@@ -652,6 +669,21 @@ impl Expr {
                 }
                 new_state
             }
+            Expr::Shared(inner) => {
+                let key = Arc::as_ptr(&inner) as usize;
+                if let Some(&(entry, end)) = cache.get(&key) {
+                    // Reuse compiled subgraph by epsilon to entry
+                    nfa.add_epsilon_transition(current_state, entry);
+                    end
+                } else {
+                    // Create a dedicated entry for this shared fragment
+                    let entry = nfa.add_state();
+                    let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
+                    cache.insert(key, (entry, end));
+                    nfa.add_epsilon_transition(current_state, entry);
+                    end
+                }
+            }
             Expr::Quantifier(expr, quantifier_type) => {
                 match quantifier_type {
                     QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
@@ -661,7 +693,7 @@ impl Expr {
                         nfa.add_epsilon_transition(current_state, loop_start_state);
 
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
+                        let expr_end_state = Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
 
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
@@ -674,7 +706,7 @@ impl Expr {
                     }
                     QuantifierType::ZeroOrOne => {
                         // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
+                        let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
 
                         // Epsilon transition from current state to expr end state
                         nfa.add_epsilon_transition(current_state, expr_end_state);
@@ -690,7 +722,7 @@ impl Expr {
 
                 for expr in exprs {
                     // Process the expr and get its end state
-                    let expr_end_state = Self::handle_expr(expr, nfa, current_state);
+                    let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
 
                     // Connect the end state of the expr to the end state of the choice
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -701,12 +733,17 @@ impl Expr {
             }
             Expr::Seq(exprs) => {
                 for expr in exprs {
-                    current_state = Self::handle_expr(expr, nfa, current_state);
+                    current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
                 }
                 current_state
             }
             Expr::Epsilon => current_state
         }
+    }
+
+    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
+        Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
     }
 }
 
@@ -1283,6 +1320,16 @@ impl RegexState<'_> {
 }
 
 impl Regex {
+    pub fn num_groups(&self) -> usize {
+        let mut max_gid: Option<GroupID> = None;
+        for s in &self.dfa.states {
+            if let Some(m) = s.finalizers.iter().max() {
+                max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
+            }
+        }
+        max_gid.map(|m| m + 1).unwrap_or(0)
+    }
+
     pub fn init_to_state(&self, state: usize) -> RegexState {
         let done = self.dfa.states[state].transitions.is_empty();
         let matches = self.dfa.states[state]
@@ -2060,8 +2107,6 @@ mod group_id_to_u8set_tests {
         // For simplicity, assuming DFA has merged states, but depending on implementation, adjust accordingly
 
         // Let's assume state 1 and 2 are separate for "ab" and "ac"
-
-        // For this test, we'll iterate through possible transitions
 
         // Verify that in both resulting states, possible_future_group_ids contain their respective groups
         // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
