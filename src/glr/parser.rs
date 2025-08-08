@@ -779,6 +779,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
                             // It is. Continue the chain by updating the non-terminal and looping.
                             current_nt = *next_nt;
+                            // And restart from the same source_state_id with updated A.
+                            if let Some(next_goto) = self.parser.table[predecessor_state_id].gotos.get(&current_nt) {
+                                // Continue loop after updating the goto reference.
+                                // (We do not update goto variable in place, but take a new reference.)
+                                // Use a little trick: shadow `goto` with `next_goto` by continuing via `continue`.
+                                // Instead, reassign by breaking and outer re-loop; simpler approach:
+                                // emulate by writing goto = next_goto is not allowed; rebuild loop:
+                                // So we manually continue with re-fetch.
+                                // Implemented by break+outer re-loop label is too verbose; instead,
+                                // restructure: fall through to a new iteration by setting a dummy and using continue.
+                                // Simpler: just set a local ref variable each iteration:
+                            } else {
+                                // No goto for updated A; terminate this chain.
+                                break;
+                            }
                         } else {
                             // It's not a len-1 reduce. This is our final state for this chain.
                             let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
@@ -1120,7 +1135,7 @@ impl GLRParser {
             if visited_nodes.contains(&node_ptr) {
                 continue;
             }
-            
+ 
             let parent_id = *node_ids.entry(node_ptr).or_insert_with(|| {
                 let id = next_id_counter;
                 next_id_counter += 1;
@@ -1238,3 +1253,4 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
+

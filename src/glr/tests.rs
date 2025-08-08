@@ -531,11 +531,9 @@ fn test_ambiguous_arithmetic() {
 
 #[test]
 fn test_reduce_reduce_conflict() {
-    // Grammar: S -> A | B
-    //          A -> x
-    //          B -> x
+    // Grammar: S -> A | B, A -> x, B -> x
     // Input: x
-    // This grammar has a reduce/reduce conflict on 'x'. // This is fine, it's a comment
+    // This grammar has a reduce/reduce conflict on 'x'.
     // GLR should handle this by performing both reductions.
     let productions = vec![
         prod("S'", vec![nt("S"), t("$")]), // Start
@@ -1231,7 +1229,7 @@ fn test_lr1_not_lalr1_grammar() {
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
 //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
-//    implementation for T would be needed to show this.
+//    imlementation for T would be needed to show this.
 // 2. Performance: While `test_highly_ambiguous_potentially_slow` uses a grammar known for
 //    exponential ambiguity, verifying performance limits requires benchmarking, not just correctness checks.
 // 3. Error Reporting: The current tests check `is_ok()`. A limitation could be the quality/detail
@@ -1239,3 +1237,4 @@ fn test_lr1_not_lalr1_grammar() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
