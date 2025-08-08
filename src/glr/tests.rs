@@ -799,6 +799,35 @@ fn test_nullable_nonterminal_before_terminal() {
 }
 
 #[test]
+fn test_substring_parser_simple() {
+    // Grammar: S -> a S b | c
+    // Language: a^n c b^n
+    let productions = vec![
+        prod("S", vec![t("a"), nt("S"), t("b")]),
+        prod("S", vec![t("c")]),
+    ];
+    let parser = generate_glr_parser(&productions, None);
+    let a = *parser.terminal_map.get_by_left(&regex_name("a")).unwrap();
+    let b = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
+    let c = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
+
+    // Test case 1: "c" is a valid sentence.
+    let mut state1 = parser.init_glr_substring_parser(None);
+    state1.parse(&[c]);
+    assert!(state1.is_ok(), "Substring parser should succeed on 'c'");
+
+    // Test case 2: "acb" is a valid sentence.
+    let mut state2 = parser.init_glr_substring_parser(None);
+    state2.parse(&[a, c, b]);
+    assert!(state2.is_ok(), "Substring parser should succeed on 'acb'");
+
+    // Test case 3: "S" is a valid substring (e.g., from "aSb").
+    let mut state3 = parser.init_glr_substring_parser(None);
+    state3.parse(&[c]); // "c" can be reduced to S
+    assert!(state3.is_ok(), "Substring parser should recognize 'c' as a valid substring 'S'");
+}
+
+#[test]
 fn test_filter_productions_selectivity() {
     // Grammar:
     // S -> X

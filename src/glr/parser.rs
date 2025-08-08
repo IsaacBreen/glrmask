@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, TerminalInfo};
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -99,7 +99,7 @@ impl Hash for ParseStateEdgeContent {
 impl JSONConvertible for ParseStateEdgeContent {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("state_id".to_string(), self.state_id.to_json());
+        obj.insert("state_id".to_string(), JSONNode::from(self.state_id));
         // Handle user_data serialization:
         // Option 1: Panic if not default.
         JSONNode::Object(obj)
@@ -128,7 +128,7 @@ impl ParseState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
@@ -153,7 +153,7 @@ impl JSONConvertible for StopReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ParserPhase {
     /// The parser has completed all reductions for the current state and is ready for a new token.
     ReadyForToken,
@@ -304,6 +304,7 @@ impl GLRParser {
         };
         parser_state
     }
+
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
         let mut parser_state = GLRParserState {
             parser: self,
@@ -749,16 +750,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let popper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-        let mut any_below_bottom = !popper.below_bottom.is_empty();
+        let any_below_bottom = !popper.below_bottom.is_empty();
         timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
-
+ 
         let mut out = Vec::new();
         for popper_item in popper.iter() {
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
                 let mut current_nt = nt;
-
+ 
                 // Fast loop for unit reduction chains based on the current lookahead token.
                 let mut i = 0;
                 loop {
@@ -766,12 +767,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let goto = self.parser.table.get(&predecessor_state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
                         format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id)
                     });
-
+ 
                     if goto.accept {
                         crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
                         self.accepted = true;
                     }
-
+ 
                     if let Some(goto_state_id) = goto.state_id {
                         let next_row = &self.parser.table[&goto_state_id];
                         // Check if the action in the new state for the current token is a len-1 reduce.
@@ -787,7 +788,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     } else {
                         // No further state to go to. This path terminates here.
-                        timeit!(format!("Exiting fast loop. Reason: No goto state found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id), {});
+                        timeit!(format!("Excluding fast loop. Reason: No goto state found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id), {});
                         break; // Exit the fast loop for this path
                     }
                 }
@@ -797,11 +798,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 } else {
                     1 << (32 - (i as u32 - 1).leading_zeros())
                 };
-
+ 
                 timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
             }
         }
-
+ 
         // Handle “popped below bottom” cases:
         //
         // If the reduction pops below the bottom, we have recognized only the
@@ -810,7 +811,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
-            // Merge all Accs from “below bottom” (depths do not matter).
             let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
                 merged_acc_opt = Some(match merged_acc_opt.take() {
@@ -818,69 +818,35 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(prev) => Acc::merge(&prev, acc_arc),
                 });
             }
-
+ 
             if let Some(merged_acc) = merged_acc_opt {
-                // Gather all source states that have a goto on this NT (A).
-                // For each such source, we compute the goto state and then apply
-                // the “fast” unit-reduction chain with respect to the current token.
                 let mut final_goto_state_ids: BTreeSet<StateID> = BTreeSet::new();
-
                 for (source_state_id, row) in &self.parser.table {
-                    if let Some(goto) = row.gotos.get(&nt) {
-                        let mut current_nt_local = nt;
-                        // Traditional substring parsing: continue via A from any possible source.
-                        // We retain the same “source_state_id” for the whole chain iteration,
-                        // mirroring the fast loop used in the “in-stack” path above.
-                        loop {
+                    let mut current_nt_local = nt;
+                    loop {
+                        if let Some(goto) = row.gotos.get(&current_nt_local) {
                             if goto.accept {
                                 crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
                                 self.accepted = true;
                             }
                             if let Some(goto_state_id) = goto.state_id {
                                 let next_row = &self.parser.table[&goto_state_id];
-                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                                    nonterminal_id: next_nt,
-                                    len: 1,
-                                    ..
-                                }) = action_selector(next_row).get(&token_id)
-                                {
-                                    // Chain another unit reduction on next_nt.
+                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
                                     current_nt_local = *next_nt;
-                                    // And restart from the same source_state_id with updated A.
-                                    if let Some(next_goto) = self.parser.table[source_state_id].gotos.get(&current_nt_local) {
-                                        // Continue loop after updating the goto reference.
-                                        // (We do not update goto variable in place, but take a new reference.)
-                                        // Use a little trick: shadow `goto` with `next_goto` by continuing via `continue`.
-                                        // Instead, reassign by breaking and outer re-loop; simpler approach:
-                                        // emulate by writing goto = next_goto is not allowed; rebuild loop:
-                                        // So we manually continue with re-fetch.
-                                        // Implemented by break+outer re-loop label is too verbose; instead,
-                                        // restructure: fall through to a new iteration by setting a dummy and using continue.
-                                        // Simpler: just set a local ref variable each iteration:
-                                    } else {
-                                        // No goto for updated A; terminate this chain.
-                                        break;
-                                    }
+                                    continue;
                                 } else {
-                                    // No unit-reduce; we finish with this goto_state_id.
                                     final_goto_state_ids.insert(goto_state_id);
                                     break;
                                 }
                             } else {
                                 break;
                             }
-                            // Re-fetch goto for current_nt_local from the same source_state_id and iterate.
-                            if let Some(new_goto) = self.parser.table[source_state_id].gotos.get(&current_nt_local) {
-                                // Replace `goto` reference by re-binding it via this pattern:
-                                // Use a small inner scope to keep borrow checker happy.
-                                let _ = new_goto;
-                            } else {
-                                break;
-                            }
+                        } else {
+                            break;
                         }
                     }
                 }
-
+ 
                 if !final_goto_state_ids.is_empty() {
                     let base = GSSNode::new(merged_acc);
                     let new_gss_node = base.push_many(final_goto_state_ids.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
@@ -888,7 +854,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
-
+ 
         if out.is_empty() {
             Arc::new(GSSNode::new_fresh())
         } else if out.len() == 1 {
@@ -902,23 +868,22 @@ impl<'a> GLRParserState<'a> { // No longer generic
             Arc::new(out_node)
         }
     }
-
-    #[time_it("GLRParserState::process_token")]
+ 
     pub fn process_token(&mut self, token_id: TerminalID) {
         // Reset acceptance flag for the new token
         self.accepted = false;
-
+ 
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
             self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
             return;
         }
-
+ 
         self.log_gss("Phase1/2-start", token_id, false, false);
-
+ 
         let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
-
+ 
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, self.active_state.clone());
@@ -930,10 +895,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             // This means we take the current active states and process them with the full action table.
             Self::enqueue(&mut phase2_todo, self.active_state.clone());
         }
-
+ 
         // --- Phase 2 ---
         self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo);
-
+ 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState::new();
@@ -943,194 +908,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state = next_active;
         self.log_gss("Phase1/2-end", token_id, false, false);
     }
-
-    #[time_it("GLRParserState::process_default_reductions")]
-    pub fn process_default_reductions(&mut self) {
-        return;
-        self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
-        if self.phase == ParserPhase::ReadyForToken {
-            crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
-            return;
-        }
-        assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
-
-        let enqueue_local = |work_map: &mut WorkMap, isolated_state: &ParseState, peek: &GSSPeek| {
-            let depth = isolated_state.stack.max_depth();
-            let state_id = peek.edge_value().state_id;
-            work_map.entry(WorkMapKey(depth, state_id))
-                .and_modify(|s| s.merge(isolated_state.clone()))
-                .or_insert(isolated_state.clone());
-        };
-        let mut work_map: WorkMap = BTreeMap::new();
-
-        // Peel off the top edges to populate the initial work map.
-        for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let isolated_state = ParseState { stack: peek.isolated_parent() };
-            enqueue_local(&mut work_map, &isolated_state, &peek);
-        }
-
-        let mut next_active_state = ParseState::new();
-
-        let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
-        crate::debug!(5, "GLRParserState::process_default_reductions: Stats: {:?}", stats);
-
-        crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
-        timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
-        // timeit!("GLRParserState::step::phase3", {
-            while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
-                // let stats = gather_gss_stats(&[&state.stack]);
-                // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
-
-                let row = &self.parser.table[&state_id];
-
-                if let Some(ref r) = row.default_reduce.reduce {
-                    crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
-                                  self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                  r.len, state_id.0, state.stack.num_predecessors());
-                    timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
-                                    self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
-                                    r.len, state_id.0), {
-                    // timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
-                        // For each peek in the current state, reduce and goto.
-                        // This is the core of phase 3: reducing all stacks with the same state_id.
-                        // We will merge the results into a new stack part.
-                    let mut reduced_stack = GSSNode::new_fresh();
-                    for peek in GSSNode::peek_iter(&state.stack) {
-                        // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
-                        //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
-
-
-                        let len = r.len;
-                        let nt = r.nonterminal_id;
-                        let popper = timeit!(peek.popn(len));
-                        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-                        crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-
-                        let mut out = Vec::new();
-                        for popper_item in popper.iter() {
-                            for peek2 in popper_item.peek_iter() {
-                                timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
-                                let mut goto_state_ids = BTreeSet::new();
-                                let state_id = peek2.edge_value().state_id;
-                                let mut current_nt = nt;
-                                // println!("loop start");
-                                let mut i = 0;
-                                loop {
-                                    i += 1;
-                                    // println!("loop current_nt: {:?}", current_nt);
-                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
-                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
-                                    });
-
-                                    if goto.accept {
-                                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
-                                        self.accepted = true;
-                                    }
-
-                                    if let Some(goto_state_id) = goto.state_id {
-                                        timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
-                                        let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
-                                        let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
-                                        // let continue_fast_reduce = false;
-                                        if continue_fast_reduce {
-                                            if *clone_and_merge {
-                                                goto_state_ids.insert(goto_state_id);
-                                            }
-                                            current_nt = reduce.clone().unwrap().nonterminal_id;
-                                        } else {
-                                            goto_state_ids.insert(goto_state_id);
-                                            // println!("break reason: continue_fast_reduce is false");
-                                            break;
-                                        }
-                                    } else {
-                                        // println!("break reason: goto.state_id is None");
-                                        break;
-                                    }
-                                }
-                                // if i > 1 {
-                                //     println!("number of loops: {:5}, number of goto_state_ids: {}", i, goto_state_ids.len());
-
-                                    // Round to nearest power of 2
-                                    let i_rounded_to_nearest_pow = if i == 0 {
-                                        1
-                                    } else {
-                                        1 << (32 - (i as u32 - 1).leading_zeros())
-                                    };
-
-                                    let goto_state_ids_rounded_to_nearest_pow = if goto_state_ids.len() == 0 {
-                                        1
-                                    } else {
-                                        1 << (32 - (goto_state_ids.len() as u32 - 1).leading_zeros())
-                                    };
-
-                                    timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2), number of goto_state_ids (rounded to nearest pow): {:5}, {:5}", i_rounded_to_nearest_pow, goto_state_ids_rounded_to_nearest_pow), {});
-                                // }
-                                crate::debug!(4, "Pushing {} goto states to new GSS node", goto_state_ids.len());
-                                let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
-
-                                // let stats = gather_gss_stats(&[&new_gss_node]);
-                                // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
-
-                                out.push(new_gss_node);
-                            }
-                        }
-
-                        let new_stack_part = if out.is_empty() {
-                            Arc::new(GSSNode::new_fresh())
-                        } else if out.len() == 1 {
-                            Arc::new(out.into_iter().next().unwrap())
-                        } else {
-                            let mut out_iter = out.into_iter();
-                            let mut out_node = out_iter.next().unwrap();
-                            for next_node in out_iter {
-                                out_node.merge_with_depth(1, &next_node);
-                            }
-                            Arc::new(out_node)
-                        };
-                        // let stats = gather_gss_stats(&[&new_stack_part]);
-                        // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
-
-                        // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
-                        if !new_stack_part.is_empty() {
-                            reduced_stack.merge_with_depth(1, &new_stack_part);
-
-                            // let stats = gather_gss_stats(&[&reduced_stack]);
-                            // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
-                        }
-                    }
-
-                    if !reduced_stack.is_empty() {
-                        // Deconstruct the result and put it back into the work map.
-                        for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
-                            let isolated = ParseState { stack: new_peek.isolated_parent() };
-                                enqueue_local(&mut work_map, &isolated, &new_peek);
-                        }
-
-                        for (WorkMapKey(new_depth, new_state_id), new_stack) in work_map.iter() {
-                            // let stats = gather_gss_stats(&[&new_stack.stack]);
-                            // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
-                        }
-                    }
-                    });
-                }
-
-                if row.default_reduce.clone_and_merge {
-                    // println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
-                    // println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
-                    next_active_state.merge(state);
-                    // println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
-                    // let stats = gather_gss_stats(&[&next_active_state.stack]);
-                    // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
-                }
-            }
-        });
-
-        crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
-        self.active_state = next_active_state;
-        self.phase = ParserPhase::ReadyForToken;
-        self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
-    }
-
+ 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
         match LR_MODE {
             LRMode::LR1 | LRMode::LALR_EX_GOTO => {
@@ -1173,57 +951,57 @@ impl<'a> GLRParserState<'a> { // No longer generic
             LRMode::LALR => None,
         }
     }
-
+ 
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         self.process_token(token_id);
     }
-
+ 
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
     }
-
+ 
     pub fn parse_part(&mut self, input: &[TerminalID]) {
         for &token_id in input {
             self.step(token_id);
         }
     }
-
+ 
     pub fn and_step(mut self, token_id: TerminalID) -> Self {
         self.step(token_id);
         self
     }
-
+ 
     pub fn and_parse(mut self, input: &[TerminalID]) -> Self {
         self.parse(input);
         self
     }
-
+ 
     pub fn merge_active_states(&mut self) {
         // No longer strictly necessary due to BTreeMap merge-on-insert, but GSS merge is explicit.
         // This method could be used if multiple GLRParserStates are combined.
     }
-
+ 
     pub fn merge_with(&mut self, mut other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
-        match (self.phase, other.phase) {
-            (ParserPhase::ReadyForToken, ParserPhase::ReadyForDefaultReductions) => self.process_default_reductions(),
-            (ParserPhase::ReadyForDefaultReductions, ParserPhase::ReadyForToken) => other.process_default_reductions(),
-            _ => {},
-        }
+        // match (self.phase, other.phase) {
+        //     (ParserPhase::ReadyForToken, ParserPhase::ReadyForDefaultReductions) => self.process_default_reductions(),
+        //     (ParserPhase::ReadyForDefaultReductions, ParserPhase::ReadyForToken) => other.process_default_reductions(),
+        //     _ => {},
+        // }
         self.active_state.merge(other.active_state);
         self.accepted |= other.accepted;
     }
-
+ 
     pub fn is_ok(&self) -> bool {
         self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
     }
-
+ 
     /// Returns true if the previous step lead to an `accept` action.
     pub fn has_accepted(&self) -> bool {
         self.accepted
     }
-
+ 
     // #[time_it("GLRParserState::log_gss")]
     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         if !GSS_LOGGING_ENABLED {
@@ -1232,12 +1010,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         const MAX: usize = 150;
         const PANIC_THRESHOLD: usize = 10000;
-
+ 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
         crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
-
+ 
         let (gss_string, state_ids) = {
             let print_full_forest = stats.unique_nodes <= MAX;
             let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
@@ -1262,7 +1040,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             };
             (final_string, state_ids)
         };
-
+ 
         let mut final_string = gss_string;
         if explain_states && !state_ids.is_empty() {
             final_string.push_str("\n\n--- GSS State Explanations ---\n");
@@ -1273,13 +1051,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     final_string.push_str(&explanation);
                 }
         }
-
+ 
         if stats.unique_nodes > PANIC_THRESHOLD {
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
         }
-
+ 
         debug!(3, "{}", final_string);
-
+ 
         if generate_dot {
             let dot_string = self.gss_to_dot();
             // Log the DOT string. It can be copied into a .dot file and rendered with Graphviz.
@@ -1287,13 +1065,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
             crate::debug!(1, "GSS DOT graph:\n{}", dot_string);
         }
     }
-
+ 
     /// Generates a Graphviz DOT representation of the GSS state graph.
     pub fn gss_to_dot(&self) -> String {
         self.parser.gss_to_dot(&self.active_state.stack, None, None)
     }
 }
-
+ 
 impl GLRParser {
     /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
     /// This visualizes the portion of the state machine explored by the parser.
@@ -1308,14 +1086,14 @@ impl GLRParser {
         writeln!(&mut dot, "  rankdir=LR;").unwrap();
         writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
         writeln!(&mut dot, "  edge [arrowhead=vee];").unwrap();
-
+ 
         let mut visited_nodes = HashSet::new();
         let mut node_ids = HashMap::new();
         let mut edge_node_ids = HashMap::new();
         let mut next_id_counter = 0;
-
+ 
         let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
-
+ 
         // Define root labels and connect them
         for (i, (label, root)) in roots.iter().enumerate() {
             let root_ptr = *root as *const GSSNode;
@@ -1324,18 +1102,18 @@ impl GLRParser {
                 next_id_counter += 1;
                 id
             });
-
+ 
             writeln!(&mut dot, "  subgraph cluster_{} {{", i).unwrap();
             writeln!(&mut dot, "    label=\"{}\";", label).unwrap();
             writeln!(&mut dot, "    style=filled;").unwrap();
             writeln!(&mut dot, "    color=lightgrey;").unwrap();
             writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
             let root_node_name = format!("Root_{}", i);
-            writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
+            writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, root_id).unwrap();
             writeln!(&mut dot, "  }}").unwrap();
             writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
         }
-
+ 
         // Traverse and define all nodes and edges
         while let Some(node_arc) = queue.pop_front() {
             let node_ptr = Arc::as_ptr(&node_arc);
@@ -1348,7 +1126,7 @@ impl GLRParser {
                 next_id_counter += 1;
                 id
             });
-
+ 
             // Define the GSS node if it hasn't been visited yet
             if visited_nodes.insert(node_ptr) {
                 let acc_str = crate::datastructures::gss::format_acc(
@@ -1365,10 +1143,10 @@ impl GLRParser {
                     .replace('}', "\\}")
                     .replace('<', "\\<")
                     .replace('>', "\\>");
-
+ 
                 writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", parent_id, parent_id, node_arc.max_depth(), escaped_acc).unwrap();
             }
-
+ 
             for (edge_val, preds_by_depth) in &node_arc.predecessors {
                 let state_id = edge_val.state_id;
                 let edge_key = (node_ptr, edge_val.clone());
@@ -1392,10 +1170,10 @@ impl GLRParser {
                     writeln!(&mut dot, "  E{} [label=\"State {}\\l{}\", shape=plaintext, fontname=\"Courier New\"];", id, state_id.0, escaped_explanation).unwrap();
                     id
                 });
-
+ 
                 // Connect parent to edge node
                 writeln!(&mut dot, "  N{} -> E{};", parent_id, edge_node_id).unwrap();
-
+ 
                 for pred_vec in preds_by_depth.values() {
                     for pred_arc in pred_vec {
                         let pred_ptr = Arc::as_ptr(pred_arc);
@@ -1412,11 +1190,11 @@ impl GLRParser {
                 }
             }
         }
-
+ 
         writeln!(&mut dot, "}}").unwrap();
         dot
     }
-
+ 
     /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
     /// This visualizes the portion of the state machine explored by the parser.
     pub fn gss_to_dot(
@@ -1428,12 +1206,12 @@ impl GLRParser {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
     }
 }
-
+ 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
 }
-
+ 
 impl ParseState { // No longer generic
     pub fn merge(&mut self, mut other: ParseState) {
         // if self.stack.max_depth() > other.stack.max_depth() {
@@ -1442,11 +1220,11 @@ impl ParseState { // No longer generic
         Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
     }
 }
-
+ 
 pub trait InsertWith<K, V> {
     fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
 }
-
+ 
 impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
     fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
         match self.entry(k) {
