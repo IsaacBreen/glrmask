@@ -128,6 +128,11 @@ pub struct GSSPopper {
     /// A map where the key is a node, and the value is the accumulated `Acc` for all paths leading to it.
     /// and the value is the accumulated `Acc` for that path.
     pub(crate) paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
+    /// Tracks how far below the bottom of the stack we've popped.
+    /// Key is the number of extra pops beyond reaching the bottom (0 means exactly at bottom),
+    /// and the value is the combined Acc for all paths that resulted in that depth.
+    /// Multiple contributions to the same depth are merged via Acc::merge.
+    pub(crate) below_bottom: BTreeMap<usize, Arc<Acc>>,
 }
 
 /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
@@ -147,8 +152,17 @@ pub struct GSSPopperItemPeek<'a> {
 
 impl GSSPopper {
     pub fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
-        let mut popper = Self::default();
-        popper.paths.insert(node, acc);
+        let mut popper = Self {
+            paths: BTreeMap::new(),
+            below_bottom: BTreeMap::new(),
+        };
+        if node.is_root() {
+            // Do not store root nodes in paths. Register as "at bottom" instead.
+            let combined = Arc::new(Acc::narrow(&acc, &node.acc));
+            popper.merge_below(0, combined);
+        } else {
+            popper.paths.insert(node, acc);
+        }
         popper
     }
 
@@ -166,22 +180,59 @@ impl GSSPopper {
 
     pub fn popn(&mut self, n: usize) {
         for _ in 0..n {
+            // Shift existing "below bottom" entries down by 1, since we're popping one more time.
+            let mut new_below: BTreeMap<usize, Arc<Acc>> = BTreeMap::new();
+            for (k, acc) in std::mem::take(&mut self.below_bottom) {
+                Self::merge_below_into(&mut new_below, k + 1, acc);
+            }
+
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
                 let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
                 for preds_by_depth in parent.predecessors.values() {
                     for pred_vec in preds_by_depth.values() {
                         for child in pred_vec {
-                            if let Some(existing_acc) = new_paths.get_mut(child) {
-                                *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
+                            if child.is_root() {
+                                // Reached the bottom on this pop. Do not keep root in paths.
+                                // Register as "at bottom" (depth 0) and merge accs.
+                                let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
+                                if let Some(existing) = new_below.get_mut(&0) {
+                                    let merged = Arc::new(Acc::merge(existing, &combined));
+                                    *existing = merged;
+                                } else {
+                                    new_below.insert(0, combined);
+                                }
                             } else {
-                                new_paths.insert(child.clone(), new_path_acc.clone());
+                                if let Some(existing_acc) = new_paths.get_mut(child) {
+                                    *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
+                                } else {
+                                    new_paths.insert(child.clone(), new_path_acc.clone());
+                                }
                             }
                         }
                     }
                 }
             }
             self.paths = new_paths;
+            self.below_bottom = new_below;
+        }
+    }
+
+    fn merge_below(&mut self, depth: usize, acc: Arc<Acc>) {
+        if let Some(existing) = self.below_bottom.get_mut(&depth) {
+            let merged = Arc::new(Acc::merge(existing, &acc));
+            *existing = merged;
+        } else {
+            self.below_bottom.insert(depth, acc);
+        }
+    }
+
+    fn merge_below_into(map: &mut BTreeMap<usize, Arc<Acc>>, depth: usize, acc: Arc<Acc>) {
+        if let Some(existing) = map.get_mut(&depth) {
+            let merged = Arc::new(Acc::merge(existing, &acc));
+            *existing = merged;
+        } else {
+            map.insert(depth, acc);
         }
     }
 }
@@ -1484,28 +1535,18 @@ mod tests {
 
         // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path.
         let pop_result = pushed.popn(1);
-        assert_eq!(pop_result.paths.len(), 1);
-
-        // The result of the pop is one path, ending at `root`.
-        let (popped_node_arc, path_acc) = pop_result.paths.iter().next().unwrap();
-
-        // The node we landed on is the original root.
-        assert!(Arc::ptr_eq(popped_node_arc, &root));
-        
-        // The `path_acc` is the `acc` from the node we popped from (`pushed`).
-        assert_eq!(*path_acc, pushed.acc);
-
-        // The `resolved_acc` for this path is the intersection of the path's constraints
-        // and the destination node's own constraints.
-        let popper_item = pop_result.iter().next().unwrap();
-        let resolved_acc = popper_item.resolved_acc();
+        // We should not keep root nodes in paths.
+        assert_eq!(pop_result.paths.len(), 0);
+        assert_eq!(pop_result.below_bottom.len(), 1);
+        // We reached the bottom exactly (depth 0).
+        let combined_acc = pop_result.below_bottom.get(&0).unwrap();
 
         // `pushed.acc` (same as `root.acc`) allows all but 1.
         // The intersection should allow all but 1.
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
         let expected_allowed = HybridBitset::max_ones() - disallowed;
-        assert_eq!(resolved_acc.llm_tokens_union, expected_allowed);
+        assert_eq!(combined_acc.llm_tokens_union, expected_allowed);
     }
 
     #[test]
@@ -1520,6 +1561,68 @@ mod tests {
         assert_eq!(merged.acc.llm_tokens_union, HybridBitset::max_ones());
 
         assert_eq!(merged.num_predecessors(), 1);
+    }
+
+    #[test]
+    fn test_popper_new_from_root_and_shift() {
+        let root = Arc::new(GSSNode::new(mock_acc(1)));
+        let mut popper = GSSPopper::new_from_node(root.clone(), Arc::new(Acc::new_fresh()));
+        // Should not store roots in paths.
+        assert!(popper.paths.is_empty());
+        assert_eq!(popper.below_bottom.len(), 1);
+        // At bottom with depth 0 entry.
+        let acc0 = popper.below_bottom.get(&0).unwrap();
+        assert_eq!(**acc0, *root.acc);
+        // Pop again; entry should shift from 0 -> 1.
+        popper.popn(1);
+        assert!(popper.below_bottom.get(&0).is_none());
+        let acc1 = popper.below_bottom.get(&1).unwrap();
+        assert_eq!(**acc1, *root.acc);
+        // Pop two more steps; now it should be at 3
+        popper.popn(2);
+        assert!(popper.below_bottom.get(&1).is_none());
+        let acc3 = popper.below_bottom.get(&3).unwrap();
+        assert_eq!(**acc3, *root.acc);
+    }
+
+    #[test]
+    fn test_popper_below_bottom_shifts_from_non_root() {
+        let root = Arc::new(GSSNode::new(mock_acc(1)));
+        let pushed = Arc::new(root.push(mock_edge(10)));
+        let mut popper = pushed.popn(1); // Reaches bottom (depth 0)
+        assert!(popper.paths.is_empty());
+        assert!(popper.below_bottom.get(&0).is_some());
+        let acc0 = popper.below_bottom.get(&0).unwrap().clone();
+        // Shift down by 2 more pops.
+        popper.popn(2);
+        assert!(popper.below_bottom.get(&0).is_none());
+        let acc2 = popper.below_bottom.get(&2).unwrap().clone();
+        assert_eq!(*acc0, *acc2);
+    }
+
+    #[test]
+    fn test_popper_merges_below_bottom_accs() {
+        // Build a node that has two root predecessors with different disallowed tokens.
+        let root1 = Arc::new(GSSNode::new(mock_acc(1))); // disallow token 1
+        let root2 = Arc::new(GSSNode::new(mock_acc(2))); // disallow token 2
+        let mut preds = NodeSet::new();
+        preds.insert((root1.clone(), mock_edge(100)));
+        preds.insert((root2.clone(), mock_edge(200)));
+        let preds_map = process_predecessors(&preds);
+        let parent = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), preds_map));
+
+        let popper = parent.popn(1);
+        assert!(popper.paths.is_empty());
+        assert_eq!(popper.below_bottom.len(), 1);
+        let acc_below = popper.below_bottom.get(&0).unwrap();
+        // Union should be all tokens allowed (since each root disallows a different single token).
+        assert_eq!(acc_below.llm_tokens_union, HybridBitset::max_ones());
+        // Intersection should disallow both 1 and 2.
+        let mut disallowed = HybridBitset::zeros();
+        disallowed.insert(1);
+        disallowed.insert(2);
+        let expected_intersection = HybridBitset::max_ones() - disallowed;
+        assert_eq!(acc_below.llm_tokens_intersection, expected_intersection);
     }
 
     #[test]
