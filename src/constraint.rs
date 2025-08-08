@@ -619,149 +619,164 @@ impl<'r> Precomputer<'r> {
             return;
         }
 
-        // For each tokenizer-state root, traverse all nodes and process every grammar edge.
-        for (_sid, root_arc) in &self.roots {
-            // Collect all unique nodes reachable from this root (BFS).
-            let all_nodes = Trie::all_nodes(root_arc.clone());
-
-            // Try to find an existing end node in this connected component to reuse.
-            let mut existing_end_node: Option<Arc<Mutex<PrecomputeNode>>> = None;
-            for n in &all_nodes {
-                if n.lock().unwrap().value.end {
-                    existing_end_node = Some(n.clone());
-                    break;
+        // Collect all unique nodes from all roots to process each node only once.
+        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        let mut seen_nodes = HashSet::new();
+        for root_arc in self.roots.values() {
+            for node in Trie::all_nodes(root_arc.clone()) {
+                if seen_nodes.insert(Arc::as_ptr(&node)) {
+                    all_nodes.push(node);
                 }
             }
+        }
 
-            // Process each node independently.
-            for node_arc in &all_nodes {
-                // Snapshot the outgoing edges so we can run analyses without holding the lock.
-                let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>)> = {
-                    let guard = node_arc.lock().expect("poison");
-                    guard.children()
-                        .iter()
-                        .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
-                        .collect()
+        let pb = ProgressBar::new(all_nodes.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [optimizing precomputed trie] [{elapsed_precise}] \
+                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+                .expect("progress-bar"),
+        );
+
+        // Try to find an existing end node in the whole graph to reuse.
+        let mut existing_end_node: Option<Arc<Mutex<PrecomputeNode>>> = None;
+        for n in &all_nodes {
+            if n.lock().unwrap().value.end {
+                existing_end_node = Some(n.clone());
+                break;
+            }
+        }
+
+        // Process each node independently.
+        for node_arc in &all_nodes {
+            pb.inc(1);
+            // Snapshot the outgoing edges so we can run analyses without holding the lock.
+            let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>)> = {
+                let guard = node_arc.lock().expect("poison");
+                guard.children()
+                    .iter()
+                    .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                    .collect()
+            };
+
+            // For each grammar edge (Some(gt)), compute can/must masks and mutate the trie.
+            for (edge_key_opt, dest_map_snapshot) in edges {
+                let gtid = match edge_key_opt {
+                    Some(gt) => gt,
+                    None => continue, // Skip None-edges here.
                 };
 
-                // For each grammar edge (Some(gt)), compute can/must masks and mutate the trie.
-                for (edge_key_opt, dest_map_snapshot) in edges {
-                    let gtid = match edge_key_opt {
-                        Some(gt) => gt,
-                        None => continue, // Skip None-edges here.
+                if dest_map_snapshot.is_empty() {
+                    continue;
+                }
+
+                // Build initial values: for each child under this edge, create a GLR
+                // substring state, step with `gtid`, restrict tokens by child's BV.
+                let mut initial_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
+                for (child_wrapper, edge_bv) in dest_map_snapshot.iter() {
+                    let mut glr = self.parser.unwrap().init_glr_substring_parser(self.llm_vocab.clone());
+                    glr.process_token(gtid); // GrammarTokenID is the same underlying type
+                    // Restrict this path to the LLM tokens permitted on this edge.
+                    {
+                        let mut memo = HashMap::new();
+                        allow_only_llm_tokens_and_prune_arc(&mut glr.active_state.stack, edge_bv, &mut memo);
+                    }
+                    if glr.is_ok() {
+                        initial_values.push((child_wrapper.as_arc().clone(), glr));
+                    }
+                }
+
+                if initial_values.is_empty() {
+                    // All paths died immediately; we will remove this edge entirely below.
+                    // Continue to clean-up phase.
+                }
+
+                // Pass 1: tokens that CAN reach an end (using normal merges).
+                let can_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/false);
+
+                // Pass 2: tokens that MUST reach an end (using intersection-based merges).
+                // let must_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/true);
+                let must_mask = LLMTokenBV::zeros();
+
+                // Mutate this node's children: intersect start-edge LLM tokens with `can_mask`.
+                // Also, if `must_mask` is non-empty and the start-edge does not already have
+                // an end-node destination, add a None-edge to an end node with `must_mask`,
+                // and subtract `must_mask` from the start-edge tokens.
+                {
+                    let mut node_guard = node_arc.lock().expect("poison");
+
+                    // Get the mutable destination map for this grammar edge; it may have been
+                    // removed by earlier iterations, so recheck existence.
+                    let dest_map_mut = match node_guard.children_mut().get_mut(&Some(gtid)) {
+                        Some(dm) => dm,
+                        None => continue,
                     };
 
-                    if dest_map_snapshot.is_empty() {
+                    // 1) Intersect each child's BV with `can_mask`. Collect empties to remove.
+                    let mut to_remove: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = Vec::new();
+                    for (child_w, bv) in dest_map_mut.iter_mut() {
+                        *bv &= &can_mask;
+                        if bv.is_empty() {
+                            to_remove.push(child_w.clone());
+                        }
+                    }
+                    for k in to_remove {
+                        dest_map_mut.remove(&k);
+                    }
+
+                    // If the edge is completely dead now, remove it.
+                    if dest_map_mut.is_empty() {
+                        node_guard.children_mut().remove(&Some(gtid));
                         continue;
                     }
 
-                    // Build initial values: for each child under this edge, create a GLR
-                    // substring state, step with `gtid`, restrict tokens by child's BV.
-                    let mut initial_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
-                    for (child_wrapper, edge_bv) in dest_map_snapshot.iter() {
-                        let mut glr = self.parser.unwrap().init_glr_substring_parser(self.llm_vocab.clone());
-                        glr.process_token(gtid); // GrammarTokenID is the same underlying type
-                        // Restrict this path to the LLM tokens permitted on this edge.
-                        {
-                            let mut memo = HashMap::new();
-                            allow_only_llm_tokens_and_prune_arc(&mut glr.active_state.stack, edge_bv, &mut memo);
-                        }
-                        if glr.is_ok() {
-                            initial_values.push((child_wrapper.as_arc().clone(), glr));
+                    // 2) If this edge already goes to an end node, do not add a None shortcut.
+                    let mut has_end_dest = false;
+                    for (child_w, _bv) in dest_map_mut.iter() {
+                        if child_w.as_arc().lock().unwrap().value.end {
+                            has_end_dest = true;
+                            break;
                         }
                     }
 
-                    if initial_values.is_empty() {
-                        // All paths died immediately; we will remove this edge entirely below.
-                        // Continue to clean-up phase.
-                    }
-
-                    // Pass 1: tokens that CAN reach an end (using normal merges).
-                    let can_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/false);
-
-                    // Pass 2: tokens that MUST reach an end (using intersection-based merges).
-                    // let must_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/true);
-                    let must_mask = LLMTokenBV::zeros();
-
-                    // Mutate this node's children: intersect start-edge LLM tokens with `can_mask`.
-                    // Also, if `must_mask` is non-empty and the start-edge does not already have
-                    // an end-node destination, add a None-edge to an end node with `must_mask`,
-                    // and subtract `must_mask` from the start-edge tokens.
-                    {
-                        let mut node_guard = node_arc.lock().expect("poison");
-
-                        // Get the mutable destination map for this grammar edge; it may have been
-                        // removed by earlier iterations, so recheck existence.
-                        let dest_map_mut = match node_guard.children_mut().get_mut(&Some(gtid)) {
-                            Some(dm) => dm,
-                            None => continue,
-                        };
-
-                        // 1) Intersect each child's BV with `can_mask`. Collect empties to remove.
-                        let mut to_remove: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = Vec::new();
+                    if !has_end_dest && !must_mask.is_empty() {
+                        // Subtract must_mask from the start-edge BVs.
+                        let mut to_remove2: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = Vec::new();
                         for (child_w, bv) in dest_map_mut.iter_mut() {
-                            *bv &= &can_mask;
+                            *bv -= &must_mask;
                             if bv.is_empty() {
-                                to_remove.push(child_w.clone());
+                                to_remove2.push(child_w.clone());
                             }
                         }
-                        for k in to_remove {
+                        for k in to_remove2 {
                             dest_map_mut.remove(&k);
                         }
-
-                        // If the edge is completely dead now, remove it.
                         if dest_map_mut.is_empty() {
                             node_guard.children_mut().remove(&Some(gtid));
-                            continue;
                         }
 
-                        // 2) If this edge already goes to an end node, do not add a None shortcut.
-                        let mut has_end_dest = false;
-                        for (child_w, _bv) in dest_map_mut.iter() {
-                            if child_w.as_arc().lock().unwrap().value.end {
-                                has_end_dest = true;
-                                break;
-                            }
-                        }
+                        // Add (None; must_mask) -> end node
+                        // Reuse an existing end node if possible; otherwise, create one.
+                        let end_arc: Arc<Mutex<PrecomputeNode>> = if let Some(ref existing) = existing_end_node {
+                            existing.clone()
+                        } else {
+                            let new_end = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())));
+                            existing_end_node = Some(new_end.clone());
+                            new_end
+                        };
 
-                        if !has_end_dest && !must_mask.is_empty() {
-                            // Subtract must_mask from the start-edge BVs.
-                            let mut to_remove2: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = Vec::new();
-                            for (child_w, bv) in dest_map_mut.iter_mut() {
-                                *bv -= &must_mask;
-                                if bv.is_empty() {
-                                    to_remove2.push(child_w.clone());
-                                }
-                            }
-                            for k in to_remove2 {
-                                dest_map_mut.remove(&k);
-                            }
-                            if dest_map_mut.is_empty() {
-                                node_guard.children_mut().remove(&Some(gtid));
-                            }
-
-                            // Add (None; must_mask) -> end node
-                            // Reuse an existing end node if possible; otherwise, create one.
-                            let end_arc: Arc<Mutex<PrecomputeNode>> = if let Some(ref existing) = existing_end_node {
-                                existing.clone()
-                            } else {
-                                let new_end = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())));
-                                existing_end_node = Some(new_end.clone());
-                                new_end
-                            };
-
-                            let dest_none = node_guard.children_mut().entry(None).or_default();
-                            let end_key = ArcPtrWrapper::new(end_arc);
-                            if let Some(existing_bv) = dest_none.get_mut(&end_key) {
-                                *existing_bv |= &must_mask;
-                            } else {
-                                dest_none.insert(end_key, must_mask.clone());
-                            }
+                        let dest_none = node_guard.children_mut().entry(None).or_default();
+                        let end_key = ArcPtrWrapper::new(end_arc);
+                        if let Some(existing_bv) = dest_none.get_mut(&end_key) {
+                            *existing_bv |= &must_mask;
+                        } else {
+                            dest_none.insert(end_key, must_mask.clone());
                         }
                     }
                 }
             }
         }
+        pb.finish_with_message("Optimization complete");
     }
 
     // Walk a trie subtree starting from the provided initial (node, GLRState) pairs.
