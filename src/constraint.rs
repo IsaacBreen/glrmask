@@ -35,7 +35,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
-use crate::glr::analyze::{compute_terminal_follow_sets, compute_always_allowed_terminal_follows};
+use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
@@ -302,27 +302,7 @@ impl GrammarConstraint {
             }
         }
 
-        let always_allowed_terminal_follows_named = compute_always_allowed_terminal_follows(grammar_productions);
-        crate::debug!(5, "always_allowed_terminal_follows_named:");
-        for (terminal, following_terminals) in &always_allowed_terminal_follows_named {
-            crate::debug!(4, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-        }
-
-        let mut always_allowed_terminal_follows_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
-        for (terminal1, following_terminals) in always_allowed_terminal_follows_named {
-            let t1_id = *grammar_term_map.get_by_left(&terminal1).unwrap();
-            let mut following_ids = BTreeSet::new();
-            for t2 in following_terminals {
-                let t2_id = *grammar_term_map.get_by_left(&t2).unwrap();
-                following_ids.insert(t2_id);
-            }
-            if !following_ids.is_empty() {
-                always_allowed_terminal_follows_map.insert(t1_id, following_ids);
-            }
-        }
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
-        crate::debug!(2, "Computed always_allowed_terminal_follows_map with {} entries.", always_allowed_terminal_follows_map.len());
-
 
         let precomputed = Self::precompute(
             &tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -330,7 +310,6 @@ impl GrammarConstraint {
             &token_name_map,
             internal_max_llm_token,
             &terminal_follow_map, // Pass the new map
-            &always_allowed_terminal_follows_map, // Pass the new map
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
@@ -356,7 +335,6 @@ impl GrammarConstraint {
         token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-        always_allowed_terminal_follows_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
@@ -366,7 +344,6 @@ impl GrammarConstraint {
             internal_max_llm_token,
             MERGE_THRESHOLD,
             terminal_follow_map, // Pass to Precomputer::new
-            always_allowed_terminal_follows_map, // Pass to Precomputer::new
             ignore_terminal_id,
         );
 
@@ -375,7 +352,6 @@ impl GrammarConstraint {
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
-        helper.shortcut_always_allowed_follows(); // New call
         helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
@@ -501,7 +477,6 @@ struct Precomputer<'r> {
     pb:               ProgressBar,
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-    always_allowed_terminal_follows_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New field
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
     tags:             RefCell<HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
@@ -515,7 +490,6 @@ impl<'r> Precomputer<'r> {
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
-        always_allowed_terminal_follows_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
@@ -556,7 +530,6 @@ impl<'r> Precomputer<'r> {
             pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
-            always_allowed_terminal_follows_map, // Store the map
             ignore_terminal_id,
             tags: RefCell::new(Default::default()),
             end_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
@@ -881,10 +854,6 @@ impl<'r> Precomputer<'r> {
             },
         );
         crate::debug!(2, "Finished pruning based on terminal follow sets.");
-    }
-
-    fn shortcut_always_allowed_follows(&mut self) {
-        todo!()
     }
 
     fn prune_dead_paths(&mut self) {
