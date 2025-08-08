@@ -458,14 +458,14 @@ fn test_ambiguous_dangling_else() {
     //                | if Expr then Stmt else Stmt
     //                | other
     //          Expr -> id
-    // Input: if id then if id then other else other // This is fine, it's a comment
+    // Input: if id then if id then other else other
     // This is ambiguous: the 'else' can attach to the inner or outer 'if'.
     // GLR should *accept* this input by exploring both possibilities.
     let productions = vec![
         prod("S'", vec![nt("Stmt"), t("$")]), // Start
         prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
         prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-        prod("Stmt", vec![t("other")]), // This is fine, it's a comment
+        prod("Stmt", vec![t("other")]),
         prod("Expr", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, None);
@@ -906,7 +906,7 @@ fn test_standard_expression_grammar_parse() {
 
     // Helper to tokenize space-separated terminal names
     fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
-        input_str.split_whitespace() // This is fine, it's a comment
+        input_str.split_whitespace()
             .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
             .collect()
     }
@@ -1229,7 +1229,7 @@ fn test_lr1_not_lalr1_grammar() {
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
 //    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
-//    imlementation for T would be needed to show this.
+//    implementation for T would be needed to show this.
 // 2. Performance: While `test_highly_ambiguous_potentially_slow` uses a grammar known for
 //    exponential ambiguity, verifying performance limits requires benchmarking, not just correctness checks.
 // 3. Error Reporting: The current tests check `is_ok()`. A limitation could be the quality/detail
