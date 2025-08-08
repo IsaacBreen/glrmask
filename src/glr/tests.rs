@@ -821,10 +821,15 @@ fn test_substring_parser_simple() {
     state2.parse(&[a, c, b]);
     assert!(state2.is_ok(), "Substring parser should succeed on 'acb'");
 
-    // Test case 3: "S" is a valid substring (e.g., from "aSb").
+    // Test case 3: ...
     let mut state3 = parser.init_glr_substring_parser(None);
-    state3.parse(&[c]); // "c" can be reduced to S
-    assert!(state3.is_ok(), "Substring parser should recognize 'c' as a valid substring 'S'");
+    state3.parse(&[c, b]);
+    assert!(state3.is_ok(), "Substring parser should succeed on 'cb' (c followed by b)");
+
+    // Test case 4: "cbbb"
+    let mut state4 = parser.init_glr_substring_parser(None);
+    state4.parse(&[c, b, b, b]);
+    assert!(state4.is_ok(), "Substring parser should succeed on 'cbbb' (c followed by multiple b's)");
 }
 
 #[test]
