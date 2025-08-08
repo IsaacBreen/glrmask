@@ -680,7 +680,8 @@ impl<'r> Precomputer<'r> {
                     let can_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/false);
 
                     // Pass 2: tokens that MUST reach an end (using intersection-based merges).
-                    let must_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/true);
+                    // let must_mask = self.walk_subtree_and_collect_mask(&initial_values, /*merge_intersection=*/true);
+                    let must_mask = LLMTokenBV::zeros();
 
                     // Mutate this node's children: intersect start-edge LLM tokens with `can_mask`.
                     // Also, if `must_mask` is non-empty and the start-edge does not already have
