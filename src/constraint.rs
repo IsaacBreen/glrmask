@@ -884,73 +884,7 @@ impl<'r> Precomputer<'r> {
     }
 
     fn shortcut_always_allowed_follows(&mut self) {
-        crate::debug!(2, "Shortcutting always allowed terminal follows...");
-
-        let always_allowed_map = self.always_allowed_terminal_follows_map;
-
-        // 1. Collect all unique nodes.
-        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
-        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-        for root in self.roots.values() {
-            for arc in Trie::all_nodes(root.clone()) {
-                let ptr = Arc::as_ptr(&arc);
-                if seen.insert(ptr) {
-                    all_nodes.push(arc);
-                }
-            }
-        }
-
-        // 2. Iterate over each node and modify its children map.
-        for node_arc in all_nodes {
-            let mut node_guard = node_arc.lock().expect("poison");
-            
-            let mut terminals_to_convert_to_none: Vec<GrammarTokenID> = Vec::new();
-
-            // Identify which terminal edges should be converted to None
-            for (edge_terminal_opt, dest_map) in node_guard.children().iter() {
-                if let Some(edge_terminal_id) = edge_terminal_opt {
-                    if let Some(always_allowed_follows) = always_allowed_map.get(edge_terminal_id) {
-                        // Check if all destinations from this edge_terminal_id lead to states
-                        // where the next possible grammar tokens are a subset of always_allowed_follows.
-                        // This is a simplification. A more precise check would be:
-                        // For each (dest_node, edge_bv) pair under edge_terminal_id:
-                        //   If all LLM tokens in edge_bv, when followed by any LLM token
-                        //   that matches a terminal in `always_allowed_follows`,
-                        //   still lead to a valid parse, then this edge can be shortcut.
-                        //
-                        // For now, a simpler heuristic: if the edge_terminal_id itself is in the
-                        // `always_allowed_follows` set of some other terminal, and its own
-                        // `always_allowed_follows` set is non-empty, we can consider it.
-                        //
-                        // The current interpretation is: if `edge_terminal_id` is always followed
-                        // by a specific set of terminals, we can "absorb" it.
-                        // This means if `edge_terminal_id` is in `always_allowed_map` and its
-                        // corresponding set is non-empty, we can shortcut it.
-                        // This is a very strong condition.
-                        if !always_allowed_follows.is_empty() {
-                            terminals_to_convert_to_none.push(*edge_terminal_id);
-                        }
-                    }
-                }
-            }
-
-            // Perform the conversion
-            for terminal_id_to_convert in terminals_to_convert_to_none {
-                let old_key = Some(terminal_id_to_convert);
-                if let Some(dest_map_for_old_key) = node_guard.children_mut().remove(&old_key) {
-                    let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
-                    for (dest_wrapper, edge_bv) in dest_map_for_old_key {
-                        if let Some(existing_bv) = dest_map_for_none.get_mut(&dest_wrapper) {
-                            *existing_bv |= &edge_bv;
-                        } else {
-                            dest_map_for_none.insert(dest_wrapper, edge_bv);
-                        }
-                    }
-                }
-            }
-        }
-
-        crate::debug!(2, "Done shortcutting always allowed terminal follows.");
+        todo!()
     }
 
     fn prune_dead_paths(&mut self) {
