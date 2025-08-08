@@ -470,6 +470,10 @@ impl GSSNode {
     
     /// A path is alive if it allows at least one LLM token.
     pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+
+    pub fn is_root(&self) -> bool {
+        self.predecessors.is_empty()
+    }
 }
 
 // Core GSS operations
