@@ -1399,7 +1399,7 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-        for (tokenizer_state_id, glr_state) in self.state.iter() {
+        for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
@@ -1531,7 +1531,7 @@ impl<'a> GrammarConstraintState<'a> {
                         glr_s.process_token(*gtid);
                         // });
 
-                        crate::debug!(4, "glr_s.is_ok()_after_process_token: {}", glr_s.is_ok());
+                        crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
 
                         if glr_s.is_ok() {
                             entry.successful += 1;
@@ -1648,7 +1648,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(2, "Done main part of get_mask");
         let t1 = std::time::Instant::now();
-        println!("get_mask took: {:>15?}", t1.duration_since(t0));
+        println!("after special_map: {:>15?}", t1.duration_since(t0));
 
         crate::profiler::print_summary_flat();
         
