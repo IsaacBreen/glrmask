@@ -458,14 +458,14 @@ fn test_ambiguous_dangling_else() {
     //                | if Expr then Stmt else Stmt
     //                | other
     //          Expr -> id
-    // Input: if id then if id then other else other
+    // Input: if id then if id then other else other // This is fine, it's a comment
     // This is ambiguous: the 'else' can attach to the inner or outer 'if'.
     // GLR should *accept* this input by exploring both possibilities.
     let productions = vec![
         prod("S'", vec![nt("Stmt"), t("$")]), // Start
         prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
         prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-        prod("Stmt", vec![t("other")]),
+        prod("Stmt", vec![t("other")]), // This is fine, it's a comment
         prod("Expr", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, None);
@@ -531,9 +531,11 @@ fn test_ambiguous_arithmetic() {
 
 #[test]
 fn test_reduce_reduce_conflict() {
-    // Grammar: S -> A | B, A -> x, B -> x
+    // Grammar: S -> A | B
+    //          A -> x
+    //          B -> x
     // Input: x
-    // This grammar has a reduce/reduce conflict on 'x'.
+    // This grammar has a reduce/reduce conflict on 'x'. // This is fine, it's a comment
     // GLR should handle this by performing both reductions.
     let productions = vec![
         prod("S'", vec![nt("S"), t("$")]), // Start
@@ -906,7 +908,7 @@ fn test_standard_expression_grammar_parse() {
 
     // Helper to tokenize space-separated terminal names
     fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
-        input_str.split_whitespace()
+        input_str.split_whitespace() // This is fine, it's a comment
             .filter_map(|s| parser.terminal_map.get_by_left(&regex_name(s)).copied())
             .collect()
     }
@@ -1237,4 +1239,3 @@ fn test_lr1_not_lalr1_grammar() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-
