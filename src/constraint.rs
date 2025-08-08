@@ -313,8 +313,8 @@ impl GrammarConstraint {
 
         let precomputed = Self::precompute(
             &tokenizer,
-            &parser,
-            llm_vocab.clone(),
+            Some(&parser),
+            Some(llm_vocab.clone()),
             &internal_llm_token_map_for_precompute,
             &token_name_map,
             internal_max_llm_token,
@@ -337,8 +337,8 @@ impl GrammarConstraint {
 
     pub fn precompute(
         tokenizer:        &Regex,
-        parser:           &GLRParser,
-        llm_vocab:        Arc<LLMVocab>,
+        parser:           Option<&GLRParser>,
+        llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
@@ -480,8 +480,8 @@ impl GrammarConstraint {
 
 struct Precomputer<'r> {
     tokenizer:        &'r Regex,
-    parser:           &'r GLRParser,
-    llm_vocab:        Arc<LLMVocab>,
+    parser:           Option<&'r GLRParser>,
+    llm_vocab:        Option<Arc<LLMVocab>>,
     vocab:            VocabPrefixTree,
     roots:            BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
@@ -499,9 +499,9 @@ struct Precomputer<'r> {
 impl<'r> Precomputer<'r> {
     fn new(
         tokenizer:        &'r Regex,
-        parser:           &'r GLRParser,
-        llm_vocab:        Arc<LLMVocab>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, 
+        parser:           Option<&'r GLRParser>,
+        llm_vocab:        Option<Arc<LLMVocab>>,
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
@@ -614,6 +614,11 @@ impl<'r> Precomputer<'r> {
     }
 
     fn optimize_precomputed_via_substring_parser(&mut self) {
+        if self.parser.is_none() {
+            crate::debug!(2, "Skipping optimization via substring parser as parser is None");
+            return;
+        }
+
         // For each tokenizer-state root, traverse all nodes and process every grammar edge.
         for (_sid, root_arc) in &self.roots {
             // Collect all unique nodes reachable from this root (BFS).
@@ -654,7 +659,7 @@ impl<'r> Precomputer<'r> {
                     // substring state, step with `gtid`, restrict tokens by child's BV.
                     let mut initial_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
                     for (child_wrapper, edge_bv) in dest_map_snapshot.iter() {
-                        let mut glr = self.parser.init_glr_substring_parser(Some(self.llm_vocab.clone()));
+                        let mut glr = self.parser.unwrap().init_glr_substring_parser(self.llm_vocab.clone());
                         glr.process_token(gtid); // GrammarTokenID is the same underlying type
                         // Restrict this path to the LLM tokens permitted on this edge.
                         {

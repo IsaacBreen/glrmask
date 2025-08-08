@@ -359,6 +359,8 @@ fn test_precompute_for_python_name_token() {
 
     let _precomputed = GrammarConstraint::precompute(
         &tokenizer,
+        None,
+        None,
         &internal_llm_token_map_for_precompute, // Use the manually created internal map
         &BiBTreeMap::new(), // empty name‐map
         internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
@@ -391,6 +393,8 @@ fn test_precompute_explosion() {
 
     let _precomputed = GrammarConstraint::precompute(
         &tokenizer,
+        None,
+        None,
         &internal_llm_token_map_for_precompute, // Use the manually created internal map
         &BiBTreeMap::new(), // empty name‐map
         internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
