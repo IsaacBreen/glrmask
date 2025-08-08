@@ -923,7 +923,194 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state = next_active;
         self.log_gss("Phase1/2-end", token_id, false, false);
     }
- 
+
+    #[time_it("GLRParserState::process_default_reductions")]
+    pub fn process_default_reductions(&mut self) {
+        return;
+        self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
+        if self.phase == ParserPhase::ReadyForToken {
+            crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
+            return;
+        }
+        assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
+
+        let enqueue_local = |work_map: &mut WorkMap, isolated_state: &ParseState, peek: &GSSPeek| {
+            let depth = isolated_state.stack.max_depth();
+            let state_id = peek.edge_value().state_id;
+            work_map.entry(WorkMapKey(depth, state_id))
+                .and_modify(|s| s.merge(isolated_state.clone()))
+                .or_insert(isolated_state.clone());
+        };
+        let mut work_map: WorkMap = BTreeMap::new();
+
+        // Peel off the top edges to populate the initial work map.
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
+            let isolated_state = ParseState { stack: peek.isolated_parent() };
+            enqueue_local(&mut work_map, &isolated_state, &peek);
+        }
+
+        let mut next_active_state = ParseState::new();
+
+        let stats = gather_gss_stats(&[self.active_state.stack.as_ref()]);
+        crate::debug!(5, "GLRParserState::process_default_reductions: Stats: {:?}", stats);
+
+        crate::debug!(4, "Phase 3: Processing {} states", work_map.len());
+        timeit!(format!("GLRParserState::step::phase3 - unique_nodes: {}", stats.unique_nodes), {
+        // timeit!("GLRParserState::step::phase3", {
+            while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
+                // let stats = gather_gss_stats(&[&state.stack]);
+                // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+
+                let row = &self.parser.table[&state_id];
+
+                if let Some(ref r) = row.default_reduce.reduce {
+                    crate::debug!(5, "Action (Phase 3): Default Reduce by NT '{}' (len {}) in state {}, num_predecessors: {}",
+                                  self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                                  r.len, state_id.0, state.stack.num_predecessors());
+                    timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
+                                    self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
+                                    r.len, state_id.0), {
+                    // timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
+                        // For each peek in the current state, reduce and goto.
+                        // This is the core of phase 3: reducing all stacks with the same state_id.
+                        // We will merge the results into a new stack part.
+                    let mut reduced_stack = GSSNode::new_fresh();
+                    for peek in GSSNode::peek_iter(&state.stack) {
+                        // println!("GLRParserState::do_phase3: Reducing with state_id: {}, len: {}, nonterminal: {}, production_ids: {:?}",
+                        //          state_id.0, r.len, self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(), r.production_ids);
+
+
+                        let len = r.len;
+                        let nt = r.nonterminal_id;
+                        let popper = timeit!(peek.popn(len));
+                        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                        crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
+
+                        let mut out = Vec::new();
+                        for popper_item in popper.iter() {
+                            for peek2 in popper_item.peek_iter() {
+                                timeit!(format!("GLRParserState::step::phase3::reduce::fast NT (len {})", len), {});
+                                let mut goto_state_ids = BTreeSet::new();
+                                let state_id = peek2.edge_value().state_id;
+                                let mut current_nt = nt;
+                                // println!("loop start");
+                                let mut i = 0;
+                                loop {
+                                    i += 1;
+                                    // println!("loop current_nt: {:?}", current_nt);
+                                    let goto = self.parser.table.get(&state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
+                                        format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id)
+                                    });
+
+                                    if goto.accept {
+                                        crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), state_id);
+                                        self.accepted = true;
+                                    }
+
+                                    if let Some(goto_state_id) = goto.state_id {
+                                        timeit!(format!("GLRParserState::step::phase3::reduce::fast::loop NT (len {})", len), {});
+                                        let DefaultReduce { clone_and_merge, reduce } = &self.parser.table[&goto_state_id].default_reduce;
+                                        let continue_fast_reduce = matches!(reduce, Some(r) if r.len == 1);
+                                        // let continue_fast_reduce = false;
+                                        if continue_fast_reduce {
+                                            if *clone_and_merge {
+                                                goto_state_ids.insert(goto_state_id);
+                                            }
+                                            current_nt = reduce.clone().unwrap().nonterminal_id;
+                                        } else {
+                                            goto_state_ids.insert(goto_state_id);
+                                            // println!("break reason: continue_fast_reduce is false");
+                                            break;
+                                        }
+                                    } else {
+                                        // println!("break reason: goto.state_id is None");
+                                        break;
+                                    }
+                                }
+                                // if i > 1 {
+                                //     println!("number of loops: {:5}, number of goto_state_ids: {}", i, goto_state_ids.len());
+
+                                    // Round to nearest power of 2
+                                    let i_rounded_to_nearest_pow = if i == 0 {
+                                        1
+                                    } else {
+                                        1 << (32 - (i as u32 - 1).leading_zeros())
+                                    };
+
+                                    let goto_state_ids_rounded_to_nearest_pow = if goto_state_ids.len() == 0 {
+                                        1
+                                    } else {
+                                        1 << (32 - (goto_state_ids.len() as u32 - 1).leading_zeros())
+                                    };
+
+                                    timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2), number of goto_state_ids (rounded to nearest pow): {:5}, {:5}", i_rounded_to_nearest_pow, goto_state_ids_rounded_to_nearest_pow), {});
+                                // }
+                                crate::debug!(4, "Pushing {} goto states to new GSS node", goto_state_ids.len());
+                                let new_gss_node = peek2.isolated_parent().push_many(goto_state_ids.into_iter().map(|state_id| ParseStateEdgeContent { state_id }).collect());
+
+                                // let stats = gather_gss_stats(&[&new_gss_node]);
+                                // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+
+                                out.push(new_gss_node);
+                            }
+                        }
+
+                        let new_stack_part = if out.is_empty() {
+                            Arc::new(GSSNode::new_fresh())
+                        } else if out.len() == 1 {
+                            Arc::new(out.into_iter().next().unwrap())
+                        } else {
+                            let mut out_iter = out.into_iter();
+                            let mut out_node = out_iter.next().unwrap();
+                            for next_node in out_iter {
+                                out_node.merge_with_depth(1, &next_node);
+                            }
+                            Arc::new(out_node)
+                        };
+                        // let stats = gather_gss_stats(&[&new_stack_part]);
+                        // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+
+                        // let new_stack_part = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                        if !new_stack_part.is_empty() {
+                            reduced_stack.merge_with_depth(1, &new_stack_part);
+
+                            // let stats = gather_gss_stats(&[&reduced_stack]);
+                            // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                        }
+                    }
+
+                    if !reduced_stack.is_empty() {
+                        // Deconstruct the result and put it back into the work map.
+                        for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
+                            let isolated = ParseState { stack: new_peek.isolated_parent() };
+                                enqueue_local(&mut work_map, &isolated, &new_peek);
+                        }
+
+                        for (WorkMapKey(new_depth, new_state_id), new_stack) in work_map.iter() {
+                            // let stats = gather_gss_stats(&[&new_stack.stack]);
+                            // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                        }
+                    }
+                    });
+                }
+
+                if row.default_reduce.clone_and_merge {
+                    // println!("next_active_state.stack: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
+                    // println!("state.stack: {}", print_gss_forest(&[state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
+                    next_active_state.merge(state);
+                    // println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
+                    // let stats = gather_gss_stats(&[&next_active_state.stack]);
+                    // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
+                }
+            }
+        });
+
+        crate::debug!(4, "Phase 3 completed, merging {} states into next active state", next_active_state.stack.num_predecessors());
+        self.active_state = next_active_state;
+        self.phase = ParserPhase::ReadyForToken;
+        self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
+    }
+
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
         match LR_MODE {
             LRMode::LR1 | LRMode::LALR_EX_GOTO => {
