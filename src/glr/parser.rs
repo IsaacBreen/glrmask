@@ -971,9 +971,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let popper = timeit!(peek.popn(len));
                         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
                         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
- 
+
                         let mut out_nodes_for_this_peek = Vec::new();
- 
+
                         // --- Handle paths that remained on the stack ---
                         for popper_item in popper.iter() {
                             for peek2 in popper_item.peek_iter() {
@@ -983,7 +983,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 out_nodes_for_this_peek.push(new_gss_node);
                             }
                         }
- 
+
                         // --- Handle paths that popped below the bottom (substring parsing) ---
                         if !popper.below_bottom.is_empty() {
                             let mut merged_acc_opt: Option<Acc> = None;
@@ -993,7 +993,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     Some(prev) => Acc::merge(&prev, acc_arc),
                                 });
                             }
- 
+
                             if let Some(merged_acc) = merged_acc_opt {
                                 let mut final_goto_state_ids = BTreeSet::new();
                                 // For substring parsing, when popping below bottom, we can transition
@@ -1008,7 +1008,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
                         }
- 
+
                         // --- Merge results for this peek ---
                         if !out_nodes_for_this_peek.is_empty() {
                             let mut iter = out_nodes_for_this_peek.into_iter();
@@ -1019,7 +1019,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             reduced_stack.merge_with_depth(1, &merged);
                         }
                     }
- 
+
                     if !reduced_stack.is_empty() {
                         // Deconstruct the result and put it back into the work map.
                         for new_peek in GSSNode::peek_iter(&Arc::new(reduced_stack)) {
@@ -1027,6 +1027,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             enqueue_local(&mut work_map, &isolated, &new_peek);
                         }
                     }
+                    });
                 }
  
                 if row.default_reduce.clone_and_merge {
