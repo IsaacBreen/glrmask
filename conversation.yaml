@@ -1,5 +1,6 @@
 local_system:
   attached_files:
+    - src/constraint.rs
     - src/glr/analyze.rs
     - src/glr/automaton.rs
     - src/glr/grammar.rs
@@ -10,8 +11,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-    - src/constraint.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |
@@ -14397,22 +14397,24 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
-    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
-    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
+    If asked for full code, provide it.
+    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
+    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
+    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
 messages:
   - user: |-
       ```rust 'src/glr/analyze.rs'
@@ -21781,5 +21783,651 @@ messages:
       Identified target file: src/glr/analyze.rs
       Applying patch to 'src/glr/analyze.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/analyze.rs.
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+      --- original version of src/glr/analyze.rs+++ current version of src/glr/analyze.rs@@ -556,6 +556,190 @@     }
+       
+           terminal_follows
+      +}
+      +
+      +/// Computes, for each terminal T, the set of terminals that are ALWAYS allowed to
+      +/// follow T regardless of context.
+      +///
+      +/// This is stricter than a normal FOLLOW set: for a terminal t, we look at each
+      +/// occurrence of t in every production and compute the set of terminals that can
+      +/// follow t at that specific occurrence (using FIRST/FOLLOW of the suffix).
+      +/// The "always-allowed" set for t is the intersection across all of its occurrences.
+      +///
+      +/// Intuition:
+      +/// - If x is in this set for terminal t, it means that whenever t appears in the
+      +///   grammar, x can immediately follow it in every possible context.
+      +/// - This lets downstream consumers "shortcut" t-edges when they are followed by
+      +///   x (e.g. replace t by None and let a subsequent pass shortcut the edge).
+      +pub fn compute_always_allowed_terminal_follows(
+      +    productions: &[Production],
+      +) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      +    let first_sets = compute_first_sets_for_nonterminals(productions);
+      +    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nonterminal_follow_sets =
+      +        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +
+      +    // We keep an Option to accumulate intersections across occurrences.
+      +    // None means "no occurrences yet". Some(set) is the running intersection.
+      +    let mut always_map: BTreeMap<Terminal, Option<BTreeSet<Terminal>>> = BTreeMap::new();
+      +
+      +    for production in productions {
+      +        let lhs = &production.lhs;
+      +        let rhs = &production.rhs;
+      +
+      +        for (i, symbol) in rhs.iter().enumerate() {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+      +                let mut suffix_is_nullable = true;
+      +
+      +                // Compute FIRST of the suffix after this occurrence.
+      +                for next_symbol in &rhs[i + 1..] {
+      +                    match next_symbol {
+      +                        Symbol::Terminal(next_t) => {
+      +                            occ_follows.insert(next_t.clone());
+      +                            suffix_is_nullable = false;
+      +                            break;
+      +                        }
+      +                        Symbol::NonTerminal(next_nt) => {
+      +                            if let Some(first_next) = first_sets.get(next_nt) {
+      +                                occ_follows.extend(first_next.iter().cloned());
+      +                            }
+      +                            if !nullable_nonterminals.contains(next_nt) {
+      +                                suffix_is_nullable = false;
+      +                                break;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // If suffix is nullable (or empty), include FOLLOW(lhs) terminals.
+      +                if suffix_is_nullable {
+      +                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+      +                        for opt_t in follow_lhs {
+      +                            if let Some(tt) = opt_t.clone() {
+      +                                occ_follows.insert(tt);
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Intersect with the running set for t.
+      +                always_map
+      +                    .entry(t.clone())
+      +                    .and_modify(|maybe_set| {
+      +                        match maybe_set {
+      +                            Some(existing) => {
+      +                                let inter: BTreeSet<_> = existing.intersection(&occ_follows).cloned().collect();
+      +                                *existing = inter;
+      +                            }
+      +                            None => *maybe_set = Some(occ_follows.clone()),
+      +                        }
+      +                    })
+      +                    .or_insert_with(|| Some(occ_follows));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Convert Option<_> to concrete sets (skip terminals with no occurrences).
+      +    let mut result = BTreeMap::new();
+      +    for (t, maybe_set) in always_map {
+      +        if let Some(set) = maybe_set {
+      +            result.insert(t, set);
+      +        }
+      +    }
+      +    result
+      +}
+      +
+      +/// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
+      +/// follow T regardless of context.
+      +///
+      +/// This is stricter than a normal FOLLOW set: for a terminal t, we look at each
+      +/// occurrence of t in every production and compute the set of terminals that can
+      +/// follow t at that specific occurrence (using FIRST/FOLLOW of the suffix).
+      +/// The "always-allowed" set for t is the intersection across all of its occurrences.
+      +///
+      +/// Intuition:
+      +/// - If x is in this set for terminal t, it means that whenever t appears in the
+      +///   grammar, x can immediately follow it in every possible context.
+      +/// - This lets downstream consumers "shortcut" t-edges when they are followed by
+      +///   x (e.g. replace t by None and let a subsequent pass shortcut the edge).
+      +pub fn compute_always_allowed_terminal_follows(
+      +    productions: &[Production],
+      +) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      +    let first_sets = compute_first_sets_for_nonterminals(productions);
+      +    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nonterminal_follow_sets =
+      +        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +
+      +    // We keep an Option to accumulate intersections across occurrences.
+      +    // None means "no occurrences yet". Some(set) is the running intersection.
+      +    let mut always_map: BTreeMap<Terminal, Option<BTreeSet<Terminal>>> = BTreeMap::new();
+      +
+      +    for production in productions {
+      +        let lhs = &production.lhs;
+      +        let rhs = &production.rhs;
+      +
+      +        for (i, symbol) in rhs.iter().enumerate() {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+      +                let mut suffix_is_nullable = true;
+      +
+      +                // Compute FIRST of the suffix after this occurrence.
+      +                for next_symbol in &rhs[i + 1..] {
+      +                    match next_symbol {
+      +                        Symbol::Terminal(next_t) => {
+      +                            occ_follows.insert(next_t.clone());
+      +                            suffix_is_nullable = false;
+      +                            break;
+      +                        }
+      +                        Symbol::NonTerminal(next_nt) => {
+      +                            if let Some(first_next) = first_sets.get(next_nt) {
+      +                                occ_follows.extend(first_next.iter().cloned());
+      +                            }
+      +                            if !nullable_nonterminals.contains(next_nt) {
+      +                                suffix_is_nullable = false;
+      +                                break;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // If suffix is nullable (or empty), include FOLLOW(lhs) terminals.
+      +                if suffix_is_nullable {
+      +                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+      +                        for opt_t in follow_lhs {
+      +                            if let Some(tt) = opt_t.clone() {
+      +                                occ_follows.insert(tt);
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Intersect with the running set for t.
+      +                always_map
+      +                    .entry(t.clone())
+      +                    .and_modify(|maybe_set| {
+      +                        match maybe_set {
+      +                            Some(existing) => {
+      +                                let inter: BTreeSet<_> = existing.intersection(&occ_follows).cloned().collect();
+      +                                *existing = inter;
+      +                            }
+      +                            None => *maybe_set = Some(occ_follows.clone()),
+      +                        }
+      +                    })
+      +                    .or_insert_with(|| Some(occ_follows));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Convert Option<_> to concrete sets (skip terminals with no occurrences).
+      +    let mut result = BTreeMap::new();
+      +    for (t, maybe_set) in always_map {
+      +        if let Some(set) = maybe_set {
+      +            result.insert(t, set);
+      +        }
+      +    }
+      +    result
+       }
+       
+       /// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Now complete the rest of the changes. Do it all in one response.
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+      --- original version of src/glr/analyze.rs+++ current version of src/glr/analyze.rs@@ -556,6 +556,190 @@     }
+       
+           terminal_follows
+      +}
+      +
+      +/// Computes, for each terminal T, the set of terminals that are ALWAYS allowed to
+      +/// follow T regardless of context.
+      +///
+      +/// This is stricter than a normal FOLLOW set: for a terminal t, we look at each
+      +/// occurrence of t in every production and compute the set of terminals that can
+      +/// follow t at that specific occurrence (using FIRST/FOLLOW of the suffix).
+      +/// The "always-allowed" set for t is the intersection across all of its occurrences.
+      +///
+      +/// Intuition:
+      +/// - If x is in this set for terminal t, it means that whenever t appears in the
+      +///   grammar, x can immediately follow it in every possible context.
+      +/// - This lets downstream consumers "shortcut" t-edges when they are followed by
+      +///   x (e.g. replace t by None and let a subsequent pass shortcut the edge).
+      +pub fn compute_always_allowed_terminal_follows(
+      +    productions: &[Production],
+      +) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      +    let first_sets = compute_first_sets_for_nonterminals(productions);
+      +    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nonterminal_follow_sets =
+      +        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +
+      +    // We keep an Option to accumulate intersections across occurrences.
+      +    // None means "no occurrences yet". Some(set) is the running intersection.
+      +    let mut always_map: BTreeMap<Terminal, Option<BTreeSet<Terminal>>> = BTreeMap::new();
+      +
+      +    for production in productions {
+      +        let lhs = &production.lhs;
+      +        let rhs = &production.rhs;
+      +
+      +        for (i, symbol) in rhs.iter().enumerate() {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+      +                let mut suffix_is_nullable = true;
+      +
+      +                // Compute FIRST of the suffix after this occurrence.
+      +                for next_symbol in &rhs[i + 1..] {
+      +                    match next_symbol {
+      +                        Symbol::Terminal(next_t) => {
+      +                            occ_follows.insert(next_t.clone());
+      +                            suffix_is_nullable = false;
+      +                            break;
+      +                        }
+      +                        Symbol::NonTerminal(next_nt) => {
+      +                            if let Some(first_next) = first_sets.get(next_nt) {
+      +                                occ_follows.extend(first_next.iter().cloned());
+      +                            }
+      +                            if !nullable_nonterminals.contains(next_nt) {
+      +                                suffix_is_nullable = false;
+      +                                break;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // If suffix is nullable (or empty), include FOLLOW(lhs) terminals.
+      +                if suffix_is_nullable {
+      +                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+      +                        for opt_t in follow_lhs {
+      +                            if let Some(tt) = opt_t.clone() {
+      +                                occ_follows.insert(tt);
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Intersect with the running set for t.
+      +                always_map
+      +                    .entry(t.clone())
+      +                    .and_modify(|maybe_set| {
+      +                        match maybe_set {
+      +                            Some(existing) => {
+      +                                let inter: BTreeSet<_> = existing.intersection(&occ_follows).cloned().collect();
+      +                                *existing = inter;
+      +                            }
+      +                            None => *maybe_set = Some(occ_follows.clone()),
+      +                        }
+      +                    })
+      +                    .or_insert_with(|| Some(occ_follows));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Convert Option<_> to concrete sets (skip terminals with no occurrences).
+      +    let mut result = BTreeMap::new();
+      +    for (t, maybe_set) in always_map {
+      +        if let Some(set) = maybe_set {
+      +            result.insert(t, set);
+      +        }
+      +    }
+      +    result
+      +}
+      +
+      +/// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
+      +/// follow T regardless of context.
+      +///
+      +/// This is stricter than a normal FOLLOW set: for a terminal t, we look at each
+      +/// occurrence of t in every production and compute the set of terminals that can
+      +/// follow t at that specific occurrence (using FIRST/FOLLOW of the suffix).
+      +/// The "always-allowed" set for t is the intersection across all of its occurrences.
+      +///
+      +/// Intuition:
+      +/// - If x is in this set for terminal t, it means that whenever t appears in the
+      +///   grammar, x can immediately follow it in every possible context.
+      +/// - This lets downstream consumers "shortcut" t-edges when they are followed by
+      +///   x (e.g. replace t by None and let a subsequent pass shortcut the edge).
+      +pub fn compute_always_allowed_terminal_follows(
+      +    productions: &[Production],
+      +) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      +    let first_sets = compute_first_sets_for_nonterminals(productions);
+      +    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nonterminal_follow_sets =
+      +        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +
+      +    // We keep an Option to accumulate intersections across occurrences.
+      +    // None means "no occurrences yet". Some(set) is the running intersection.
+      +    let mut always_map: BTreeMap<Terminal, Option<BTreeSet<Terminal>>> = BTreeMap::new();
+      +
+      +    for production in productions {
+      +        let lhs = &production.lhs;
+      +        let rhs = &production.rhs;
+      +
+      +        for (i, symbol) in rhs.iter().enumerate() {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+      +                let mut suffix_is_nullable = true;
+      +
+      +                // Compute FIRST of the suffix after this occurrence.
+      +                for next_symbol in &rhs[i + 1..] {
+      +                    match next_symbol {
+      +                        Symbol::Terminal(next_t) => {
+      +                            occ_follows.insert(next_t.clone());
+      +                            suffix_is_nullable = false;
+      +                            break;
+      +                        }
+      +                        Symbol::NonTerminal(next_nt) => {
+      +                            if let Some(first_next) = first_sets.get(next_nt) {
+      +                                occ_follows.extend(first_next.iter().cloned());
+      +                            }
+      +                            if !nullable_nonterminals.contains(next_nt) {
+      +                                suffix_is_nullable = false;
+      +                                break;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // If suffix is nullable (or empty), include FOLLOW(lhs) terminals.
+      +                if suffix_is_nullable {
+      +                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+      +                        for opt_t in follow_lhs {
+      +                            if let Some(tt) = opt_t.clone() {
+      +                                occ_follows.insert(tt);
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Intersect with the running set for t.
+      +                always_map
+      +                    .entry(t.clone())
+      +                    .and_modify(|maybe_set| {
+      +                        match maybe_set {
+      +                            Some(existing) => {
+      +                                let inter: BTreeSet<_> = existing.intersection(&occ_follows).cloned().collect();
+      +                                *existing = inter;
+      +                            }
+      +                            None => *maybe_set = Some(occ_follows.clone()),
+      +                        }
+      +                    })
+      +                    .or_insert_with(|| Some(occ_follows));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Convert Option<_> to concrete sets (skip terminals with no occurrences).
+      +    let mut result = BTreeMap::new();
+      +    for (t, maybe_set) in always_map {
+      +        if let Some(set) = maybe_set {
+      +            result.insert(t, set);
+      +        }
+      +    }
+      +    result
+       }
+       
+       /// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Now complete the rest of the changes. Do it all in one response.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/glr/analyze.rs b/src/glr/analyze.rs
+      index 5b1f0e2..ae02f5e 100644
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -556,6 +556,98 @@ pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Term
+           }
+       
+           terminal_follows
+      +}
+      +
+      +/// Computes, for each terminal T, the set of terminals that are ALWAYS allowed to
+      +/// follow T regardless of context.
+      +///
+      +/// This is stricter than a normal FOLLOW set: for a terminal t, we look at each
+      +/// occurrence of t in every production and compute the set of terminals that can
+      +/// follow t at that specific occurrence (using FIRST/FOLLOW of the suffix).
+      +/// The "always-allowed" set for t is the intersection across all of its occurrences.
+      +///
+      +/// Intuition:
+      +/// - If x is in this set for terminal t, it means that whenever t appears in the
+      +///   grammar, x can immediately follow it in every possible context.
+      +/// - This lets downstream consumers "shortcut" t-edges when they are followed by
+      +///   x (e.g. replace t by None and let a subsequent pass shortcut the edge).
+      +pub fn compute_always_allowed_terminal_follows(
+      +    productions: &[Production],
+      +) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+      +    let first_sets = compute_first_sets_for_nonterminals(productions);
+      +    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+      +    let nonterminal_follow_sets =
+      +        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+      +
+      +    // We keep an Option to accumulate intersections across occurrences.
+      +    // None means "no occurrences yet". Some(set) is the running intersection.
+      +    let mut always_map: BTreeMap<Terminal, Option<BTreeSet<Terminal>>> = BTreeMap::new();
+      +
+      +    for production in productions {
+      +        let lhs = &production.lhs;
+      +        let rhs = &production.rhs;
+      +
+      +        for (i, symbol) in rhs.iter().enumerate() {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+      +                let mut suffix_is_nullable = true;
+      +
+      +                // Compute FIRST of the suffix after this occurrence.
+      +                for next_symbol in &rhs[i + 1..] {
+      +                    match next_symbol {
+      +                        Symbol::Terminal(next_t) => {
+      +                            occ_follows.insert(next_t.clone());
+      +                            suffix_is_nullable = false;
+      +                            break;
+      +                        }
+      +                        Symbol::NonTerminal(next_nt) => {
+      +                            if let Some(first_next) = first_sets.get(next_nt) {
+      +                                occ_follows.extend(first_next.iter().cloned());
+      +                            }
+      +                            if !nullable_nonterminals.contains(next_nt) {
+      +                                suffix_is_nullable = false;
+      +                                break;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // If suffix is nullable (or empty), include FOLLOW(lhs) terminals.
+      +                if suffix_is_nullable {
+      +                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+      +                        for opt_t in follow_lhs {
+      +                            if let Some(tt) = opt_t.clone() {
+      +                                occ_follows.insert(tt);
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Intersect with the running set for t.
+      +                always_map
+      +                    .entry(t.clone())
+      +                    .and_modify(|maybe_set| {
+      +                        match maybe_set {
+      +                            Some(existing) => {
+      +                                let inter: BTreeSet<_> = existing.intersection(&occ_follows).cloned().collect();
+      +                                *existing = inter;
+      +                            }
+      +                            None => *maybe_set = Some(occ_follows.clone()),
+      +                        }
+      +                    })
+      +                    .or_insert_with(|| Some(occ_follows));
+      +            }
+      +        }
+      +    }
+      +
+      +    // Convert Option<_> to concrete sets (skip terminals with no occurrences).
+      +    let mut result = BTreeMap::new();
+      +    for (t, maybe_set) in always_map {
+      +        if let Some(set) = maybe_set {
+      +            result.insert(t, set);
+      +        }
+      +    }
+      +    result
+       }
+       
+       /// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
+      ```
+    metadata:
+  - user: |
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/analyze.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        }
+      ]
+      Found 2 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/analyze.rs
+      Received code for required file: src/constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/analyze.rs
+      Successfully replaced file: src/constraint.rs
     metadata:
 ...

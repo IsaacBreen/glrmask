@@ -35,7 +35,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
-use crate::glr::analyze::compute_terminal_follow_sets;
+use crate::glr::analyze::{compute_terminal_follow_sets, compute_always_allowed_terminal_follows};
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
@@ -302,7 +302,27 @@ impl GrammarConstraint {
             }
         }
 
+        let always_allowed_terminal_follows_named = compute_always_allowed_terminal_follows(grammar_productions);
+        crate::debug!(5, "always_allowed_terminal_follows_named:");
+        for (terminal, following_terminals) in &always_allowed_terminal_follows_named {
+            crate::debug!(4, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
+        }
+
+        let mut always_allowed_terminal_follows_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+        for (terminal1, following_terminals) in always_allowed_terminal_follows_named {
+            let t1_id = *grammar_term_map.get_by_left(&terminal1).unwrap();
+            let mut following_ids = BTreeSet::new();
+            for t2 in following_terminals {
+                let t2_id = *grammar_term_map.get_by_left(&t2).unwrap();
+                following_ids.insert(t2_id);
+            }
+            if !following_ids.is_empty() {
+                always_allowed_terminal_follows_map.insert(t1_id, following_ids);
+            }
+        }
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
+        crate::debug!(2, "Computed always_allowed_terminal_follows_map with {} entries.", always_allowed_terminal_follows_map.len());
+
 
         let precomputed = Self::precompute(
             &tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -310,6 +330,7 @@ impl GrammarConstraint {
             &token_name_map,
             internal_max_llm_token,
             &terminal_follow_map, // Pass the new map
+            &always_allowed_terminal_follows_map, // Pass the new map
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
@@ -335,6 +356,7 @@ impl GrammarConstraint {
         token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        always_allowed_terminal_follows_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
@@ -344,6 +366,7 @@ impl GrammarConstraint {
             internal_max_llm_token,
             MERGE_THRESHOLD,
             terminal_follow_map, // Pass to Precomputer::new
+            always_allowed_terminal_follows_map, // Pass to Precomputer::new
             ignore_terminal_id,
         );
 
@@ -352,6 +375,7 @@ impl GrammarConstraint {
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
+        helper.shortcut_always_allowed_follows(); // New call
         helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
@@ -477,6 +501,7 @@ struct Precomputer<'r> {
     pb:               ProgressBar,
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+    always_allowed_terminal_follows_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New field
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
     tags:             RefCell<HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
@@ -490,6 +515,7 @@ impl<'r> Precomputer<'r> {
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
+        always_allowed_terminal_follows_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
@@ -530,6 +556,7 @@ impl<'r> Precomputer<'r> {
             pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
+            always_allowed_terminal_follows_map, // Store the map
             ignore_terminal_id,
             tags: RefCell::new(Default::default()),
             end_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
@@ -854,6 +881,76 @@ impl<'r> Precomputer<'r> {
             },
         );
         crate::debug!(2, "Finished pruning based on terminal follow sets.");
+    }
+
+    fn shortcut_always_allowed_follows(&mut self) {
+        crate::debug!(2, "Shortcutting always allowed terminal follows...");
+
+        let always_allowed_map = self.always_allowed_terminal_follows_map;
+
+        // 1. Collect all unique nodes.
+        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        for root in self.roots.values() {
+            for arc in Trie::all_nodes(root.clone()) {
+                let ptr = Arc::as_ptr(&arc);
+                if seen.insert(ptr) {
+                    all_nodes.push(arc);
+                }
+            }
+        }
+
+        // 2. Iterate over each node and modify its children map.
+        for node_arc in all_nodes {
+            let mut node_guard = node_arc.lock().expect("poison");
+            
+            let mut terminals_to_convert_to_none: Vec<GrammarTokenID> = Vec::new();
+
+            // Identify which terminal edges should be converted to None
+            for (edge_terminal_opt, dest_map) in node_guard.children().iter() {
+                if let Some(edge_terminal_id) = edge_terminal_opt {
+                    if let Some(always_allowed_follows) = always_allowed_map.get(edge_terminal_id) {
+                        // Check if all destinations from this edge_terminal_id lead to states
+                        // where the next possible grammar tokens are a subset of always_allowed_follows.
+                        // This is a simplification. A more precise check would be:
+                        // For each (dest_node, edge_bv) pair under edge_terminal_id:
+                        //   If all LLM tokens in edge_bv, when followed by any LLM token
+                        //   that matches a terminal in `always_allowed_follows`,
+                        //   still lead to a valid parse, then this edge can be shortcut.
+                        //
+                        // For now, a simpler heuristic: if the edge_terminal_id itself is in the
+                        // `always_allowed_follows` set of some other terminal, and its own
+                        // `always_allowed_follows` set is non-empty, we can consider it.
+                        //
+                        // The current interpretation is: if `edge_terminal_id` is always followed
+                        // by a specific set of terminals, we can "absorb" it.
+                        // This means if `edge_terminal_id` is in `always_allowed_map` and its
+                        // corresponding set is non-empty, we can shortcut it.
+                        // This is a very strong condition.
+                        if !always_allowed_follows.is_empty() {
+                            terminals_to_convert_to_none.push(*edge_terminal_id);
+                        }
+                    }
+                }
+            }
+
+            // Perform the conversion
+            for terminal_id_to_convert in terminals_to_convert_to_none {
+                let old_key = Some(terminal_id_to_convert);
+                if let Some(dest_map_for_old_key) = node_guard.children_mut().remove(&old_key) {
+                    let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
+                    for (dest_wrapper, edge_bv) in dest_map_for_old_key {
+                        if let Some(existing_bv) = dest_map_for_none.get_mut(&dest_wrapper) {
+                            *existing_bv |= &edge_bv;
+                        } else {
+                            dest_map_for_none.insert(dest_wrapper, edge_bv);
+                        }
+                    }
+                }
+            }
+        }
+
+        crate::debug!(2, "Done shortcutting always allowed terminal follows.");
     }
 
     fn prune_dead_paths(&mut self) {
@@ -1302,7 +1399,7 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-        for (tokenizer_state_id, glr_state) in &self.state {
+        for (tokenizer_state_id, glr_state) in self.state.iter() {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
@@ -1434,7 +1531,7 @@ impl<'a> GrammarConstraintState<'a> {
                         glr_s.process_token(*gtid);
                         // });
 
-                        crate::debug!(4, "glr_s.is_ok(): {}", glr_s.is_ok());
+                        crate::debug!(4, "glr_s.is_ok()_after_process_token: {}", glr_s.is_ok());
 
                         if glr_s.is_ok() {
                             entry.successful += 1;
@@ -1551,7 +1648,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(2, "Done main part of get_mask");
         let t1 = std::time::Instant::now();
-        println!("after special_map: {:>15?}", t1.duration_since(t0));
+        println!("get_mask took: {:>15?}", t1.duration_since(t0));
 
         crate::profiler::print_summary_flat();
         
