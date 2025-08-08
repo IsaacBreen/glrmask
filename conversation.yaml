@@ -3293,7 +3293,7 @@ local_system:
               assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -4975,5 +4975,171 @@ messages:
       Implement this.
       Ensure this is tested.
       Try to keep the code compatible with external code.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
+      index 9f5f6a7..b3140e3 100644
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -66,12 +66,18 @@ pub struct GSSPeek<'a> {
+       /// Represents the result of a `pop` operation, containing a map of resulting nodes
+       /// and the accumulated constraints (`Acc`) for each path leading to them.
+       #[derive(Debug, Clone, Default)]
+       pub struct GSSPopper {
+           /// A map where the key is a node, and the value is the accumulated `Acc` for all paths leading to it.
+           /// and the value is the accumulated `Acc` for that path.
+           pub(crate) paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
+      +    /// Tracks the accumulated Acc when popping goes below the bottom of the stack.
+      +    /// The key is how many levels below the bottom we went (>= 1).
+      +    /// The value is the combined Acc for all paths that went this far below.
+      +    /// This is populated whenever a pop is attempted on a root node (no predecessors).
+      +    /// There should never be an entry with key 0.
+      +    pub(crate) below_bottom: BTreeMap<usize, Arc<Acc>>,
+       }
+       
+       /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
+       #[derive(Clone, Copy)]
+       pub struct GSSPopperItem<'a> {
+           node: &'a Arc<GSSNode>,
+      @@ -93,6 +99,7 @@ impl GSSPopper {
+           pub fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
+               let mut popper = Self::default();
+               popper.paths.insert(node, acc);
+      +        // below_bottom starts empty by default
+               popper
+           }
+       
+      @@ -111,23 +118,52 @@ impl GSSPopper {
+               self.paths.len()
+           }
+       
+           pub fn popn(&mut self, n: usize) {
+               for _ in 0..n {
+                   let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
+      +            // Shift existing "below bottom" entries one level deeper since we're popping again.
+      +            let mut new_below: BTreeMap<usize, Arc<Acc>> = BTreeMap::new();
+      +            for (depth, acc) in self.below_bottom.iter() {
+      +                let new_depth = depth + 1;
+      +                if let Some(existing) = new_below.get_mut(&new_depth) {
+      +                    *existing = Arc::new(Acc::merge(existing, acc));
+      +                } else {
+      +                    new_below.insert(new_depth, acc.clone());
+      +                }
+      +            }
+      +
+                   for (parent, path_acc) in std::mem::take(&mut self.paths) {
+                       let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
+      -                for preds_by_depth in parent.predecessors.values() {
+      -                    for pred_vec in preds_by_depth.values() {
+      -                        for child in pred_vec {
+      -                            if let Some(existing_acc) = new_paths.get_mut(child) {
+      -                                *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
+      -                            } else {
+      -                                new_paths.insert(child.clone(), new_path_acc.clone());
+      +                if parent.predecessors.is_empty() {
+      +                    // Attempted to pop on a root node: register as going 1 below the bottom.
+      +                    if let Some(existing) = new_below.get_mut(&1) {
+      +                        *existing = Arc::new(Acc::merge(existing, &new_path_acc));
+      +                    } else {
+      +                        new_below.insert(1, new_path_acc.clone());
+      +                    }
+      +                } else {
+      +                    for preds_by_depth in parent.predecessors.values() {
+      +                        for pred_vec in preds_by_depth.values() {
+      +                            for child in pred_vec {
+      +                                if let Some(existing_acc) = new_paths.get_mut(child) {
+      +                                    *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
+      +                                } else {
+      +                                    new_paths.insert(child.clone(), new_path_acc.clone());
+      +                                }
+                                   }
+                               }
+                           }
+                       }
+                   }
+                   self.paths = new_paths;
+      +            self.below_bottom = new_below;
+               }
+           }
+       }
+      @@ -986,6 +1022,73 @@ mod tests {
+               assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+           }
+      +
+      +    #[test]
+      +    fn test_gss_pop_below_bottom_from_root() {
+      +        // Popping once on a root node should go 1 below bottom and accumulate that Acc.
+      +        let root = Arc::new(GSSNode::new(mock_acc(1))); // Allows all but 1
+      +        let popper = root.popn(1);
+      +
+      +        // No paths left, we went below the bottom.
+      +        assert!(popper.paths.is_empty(), "Expected no paths after popping root");
+      +        // There should be no key 0.
+      +        assert!(popper.below_bottom.get(&0).is_none(), "There must be no entry at depth 0");
+      +        // Exactly one entry at depth 1.
+      +        assert_eq!(popper.below_bottom.len(), 1, "Expected exactly one below-bottom entry");
+      +        let acc = popper.below_bottom.get(&1).expect("Expected below-bottom at depth 1");
+      +        assert_eq!(**acc, *root.acc, "Below-bottom Acc should equal the root's Acc");
+      +    }
+      +
+      +    #[test]
+      +    fn test_gss_pop_below_bottom_distance() {
+      +        // Popping thrice on a root node should put us 3 below bottom.
+      +        let root = Arc::new(GSSNode::new(mock_acc(1)));
+      +        let popper = root.popn(3);
+      +        assert!(popper.paths.is_empty());
+      +        assert!(popper.below_bottom.get(&1).is_none(), "Should not have entry at depth 1");
+      +        assert!(popper.below_bottom.get(&2).is_none(), "Should not have entry at depth 2");
+      +        let acc = popper.below_bottom.get(&3).expect("Expected depth 3 below-bottom entry");
+      +        assert_eq!(**acc, *root.acc);
+      +    }
+      +
+      +    #[test]
+      +    fn test_gss_pop_below_bottom_after_reaching_root() {
+      +        // Starting one above root, pop twice:
+      +        //   1st pop reaches root (still at bottom, not below)
+      +        //   2nd pop goes 1 below bottom
+      +        let root = Arc::new(GSSNode::new(mock_acc(1)));
+      +        let top = Arc::new(root.push(mock_edge(42)));
+      +        let popper = top.popn(2);
+      +
+      +        assert!(popper.paths.is_empty(), "After 2 pops from depth-1, should be below bottom");
+      +        let acc = popper.below_bottom.get(&1).expect("Expected below-bottom at depth 1");
+      +        // The below-bottom Acc equals the Acc of the root (after narrowing).
+      +        assert_eq!(**acc, *root.acc);
+      +    }
+      +
+      +    #[test]
+      +    fn test_gss_pop_below_bottom_merge() {
+      +        // Two different roots (different Accs), one step above them.
+      +        // Popping twice should accumulate both paths below bottom at depth 1 and merge their Accs.
+      +        let r1 = Arc::new(GSSNode::new(mock_acc(1))); // disallow token 1
+      +        let r2 = Arc::new(GSSNode::new(mock_acc(2))); // disallow token 2
+      +
+      +        // Create a top node with two predecessors: r1 via edge 10, r2 via edge 20.
+      +        let mut preds = NodeSet::new();
+      +        preds.insert((r1.clone(), mock_edge(10)));
+      +        preds.insert((r2.clone(), mock_edge(20)));
+      +        let preds_map = process_predecessors(&preds);
+      +        let top = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), preds_map);
+      +
+      +        // Pop twice: first to reach each root, second to go below bottom.
+      +        let popper = top.popn(2);
+      +        assert!(popper.paths.is_empty());
+      +
+      +        let acc = popper.below_bottom.get(&1).expect("Expected below-bottom at depth 1");
+      +        // The merged union should be all tokens (union of all-but-1 and all-but-2 is all).
+      +        assert_eq!(acc.llm_tokens_union, HybridBitset::max_ones());
+      +        // Ensure there are no entries at invalid depth.
+      +        assert!(popper.below_bottom.get(&0).is_none());
+      +    }
+       }
+       
+       ```
+    metadata:
+  - user: |-
+      Apply result (git-llm mode):
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
 ...
