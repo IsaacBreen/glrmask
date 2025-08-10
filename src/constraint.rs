@@ -1577,8 +1577,13 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    #[time_it]
     pub fn get_mask(&self) -> LLMTokenBV {
+        // self.get_mask1()
+        self.get_mask2()
+    }
+
+    #[time_it]
+    pub fn get_mask1(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
