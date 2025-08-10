@@ -298,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
+        let precomputed2 = Self::precompute2();
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -347,96 +347,9 @@ impl GrammarConstraint {
     }
 
     /// Build the "Trie 2" precomputation.
-    ///
-    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
-    /// of tokens that can produce any terminal which is actionable from that state with
-    /// a first-step action that requires `pop_len` pops (0 for shift).
-    ///
-    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
-    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
     pub fn precompute2(
-        parser: &GLRParser,
-        precomputed1: &Precomputed,
-        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
-        let mut out: Precomputed2 = BTreeMap::new();
-
-        // For determinism, iterate tokenizer states in order of precomputed1
-        for (tok_sid, _root1_arc) in precomputed1 {
-            // Root for this tokenizer state in trie-2
-            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
-                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            // Single end node to unify all terminal edges
-            let end_arc: Arc<Mutex<PrecomputeNode2>> =
-                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-
-            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
-            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
-
-            // Map of grammar terminals -> LLM tokens for this tokenizer state
-            let tid_to_tokens_map = possible_matches.get(tok_sid)
-                .cloned()
-                .unwrap_or_else(BTreeMap::new);
-
-            // For every LR parse state, look at the full action map for next token
-            for (state_id, row) in &parser.table {
-                // Use the "full" action set to include splits/combined behaviors
-                for (tid_table, action) in &row.shifts_and_reduces_full {
-                    // Convert table TerminalID to the general TerminalID used by possible_matches
-                    let tid_for_pm = TerminalID(tid_table.0);
-                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
-                        match action {
-                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
-                                let key = (0usize, Some(*state_id));
-                                aggregated
-                                    .entry(key)
-                                    .and_modify(|bv| *bv |= token_bv)
-                                    .or_insert(token_bv.clone());
-                            }
-                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
-                                let key = (*len, Some(*state_id));
-                                aggregated
-                                    .entry(key)
-                                    .and_modify(|bv| *bv |= token_bv)
-                                    .or_insert(token_bv.clone());
-                            }
-                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                if shift.is_some() {
-                                    let key = (0usize, Some(*state_id));
-                                    aggregated
-                                        .entry(key)
-                                        .and_modify(|bv| *bv |= token_bv)
-                                        .or_insert(token_bv.clone());
-                                }
-                                for (len, nts) in reduces {
-                                    if !nts.is_empty() {
-                                        let key = (*len, Some(*state_id));
-                                        aggregated
-                                            .entry(key)
-                                            .and_modify(|bv| *bv |= token_bv)
-                                            .or_insert(token_bv.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Materialize edges on root2 pointing to a shared end node
-            {
-                let mut root_guard = root2_arc.lock().expect("poison");
-                for (ek, bv) in aggregated {
-                    let mut ev_opt = Some(bv);
-                    // No cycles expected; if any are detected, it's a logic error
-                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
-                }
-            }
-
-            out.insert(*tok_sid, root2_arc);
-        }
-
-        out
+        todo!()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
