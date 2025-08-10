@@ -8,7 +8,7 @@ use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use crate::constraint::PrecomputeNode2;
+
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -18,8 +18,6 @@ use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use std::ops::{BitAnd, BitOr};
-use std::sync::Mutex;
-use crate::datastructures::ArcPtrWrapper;
 use crate::profiler::GSS_LOGGING_ENABLED;
 use profiler_macro::{time_it, timeit};
 
@@ -46,7 +44,6 @@ pub struct Acc {
     pub llm_tokens_intersection: HybridBitset,
     pub terminals_union: HybridL2Bitset,
     pub terminals_intersection: HybridL2Bitset,
-    pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
     pub needs_push_down: bool,
 }
 
@@ -58,7 +55,6 @@ impl Acc {
             llm_tokens_intersection: HybridBitset::max_ones(),
             terminals_union: HybridL2Bitset::all(),
             terminals_intersection: HybridL2Bitset::all(),
-            trie2_nodes: BTreeSet::new(),
             needs_push_down: false,
         }
     }
@@ -70,7 +66,6 @@ impl Acc {
             llm_tokens_intersection: llm_tokens,
             terminals_union: terminals.clone(),
             terminals_intersection: terminals,
-            trie2_nodes: BTreeSet::new(),
             needs_push_down: false,
         }
     }
@@ -81,7 +76,6 @@ impl Acc {
             llm_tokens_intersection: &from.llm_tokens_union & &to.llm_tokens_intersection,
             terminals_union: &from.terminals_union & &to.terminals_union,
             terminals_intersection: &from.terminals_union & &to.terminals_intersection,
-            trie2_nodes: from.trie2_nodes.intersection(&to.trie2_nodes).cloned().collect(),
             needs_push_down: false,
         }
         // Acc {
@@ -98,7 +92,6 @@ impl Acc {
             llm_tokens_intersection: &lhs.llm_tokens_intersection & &rhs.llm_tokens_intersection,
             terminals_union: &lhs.terminals_union | &rhs.terminals_union,
             terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
-            trie2_nodes: lhs.trie2_nodes.union(&rhs.trie2_nodes).cloned().collect(),
             needs_push_down: false,
         }
     }
