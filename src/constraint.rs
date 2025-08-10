@@ -86,6 +86,8 @@ impl PrecomputedNodeContents {
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
+pub type PrecomputeNode2 = Trie<(usize, Option<crate::glr::table::StateID>), LLMTokenBV, PrecomputedNodeContents>;
+
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

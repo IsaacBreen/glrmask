@@ -6,12 +6,14 @@ use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, G
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
+use crate::constraint::{PrecomputedNodeContents, PrecomputeNode2};
+use crate::datastructures::trie::{EdgeInserter, Trie};
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use crate::debug;
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -20,6 +22,7 @@ use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
+use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 
@@ -811,6 +814,37 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
+            for (depth, acc_arc) in &popper.below_bottom {
+                let acc = &**acc_arc;
+                if acc.trie2_nodes.is_empty() { continue; }
+
+                let edge_bv = acc.llm_tokens_union.clone();
+                if edge_bv.is_empty() { continue; }
+
+                for (source_state_id, row) in &self.parser.table {
+                    if row.gotos.contains_key(&nt) {
+                        let trie2_edge_key = (*depth, Some(*source_state_id));
+                        
+                        let mut dest_node: Option<Arc<Mutex<Trie<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>>>> = None;
+                        for trie2_node_wrapper in &acc.trie2_nodes {
+                            let inserter = EdgeInserter::new(
+                                trie2_node_wrapper.as_arc().clone(),
+                                trie2_edge_key,
+                                edge_bv.clone(),
+                                |existing, new| *existing |= new
+                            );
+
+                            if let Some(ref dest) = dest_node {
+                                inserter.try_destination(dest.clone()).unwrap();
+                            } else {
+                                let new_dest = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
+                                dest_node = Some(new_dest);
+                            }
+                        }
+                    }
+                }
+            }
+
             let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
                 merged_acc_opt = Some(match merged_acc_opt.take() {
