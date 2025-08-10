@@ -6,6 +6,7 @@ local_system:
     - src/glr/parser.rs
     - src/datastructures/trie.rs
     - src/constraint.rs
+    - src/constraint_extra.rs
   conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
@@ -8081,6 +8082,659 @@ local_system:
           }
       }
 
+    src/constraint_extra.rs: |-
+      use std::collections::HashMap;
+      use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+      use crate::types::{TerminalID as GrammarTokenID};
+      use crate::datastructures::trie::Trie;
+      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
+      use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
+      use std::sync::{Arc, Mutex};
+      use bitvec::prelude::BitVec;
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use bimap::BiBTreeMap;
+      use crate::datastructures::ArcPtrWrapper;
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use crate::datastructures::gss::LLMTokenBV;
+      use crate::glr::grammar::Terminal;
+
+      /// Creates a neat string representation of a HybridBitset, showing values as ranges.
+      fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
+          if bv.is_empty() {
+              return "[]".to_string();
+          }
+
+          let mut ranges = vec![];
+          let mut iter = bv.iter();
+
+          if let Some(mut start) = iter.next() {
+              let mut end = start;
+              for val in iter {
+                  if val == end + 1 {
+                      end = val;
+                  } else {
+                      if start == end {
+                          ranges.push(format!("{}", start));
+                      } else {
+                          ranges.push(format!("{}..={}", start, end));
+                      }
+                      start = val;
+                      end = val;
+                  }
+              }
+              if start == end {
+                  ranges.push(format!("{}", start));
+              } else {
+                  ranges.push(format!("{}..={}", start, end));
+              }
+          }
+
+          const MAX_RANGES_TO_SHOW: usize = 5;
+          let ellipsis = if ranges.len() > MAX_RANGES_TO_SHOW { ", ..." } else { "" };
+          let ranges_to_show = ranges.iter().take(MAX_RANGES_TO_SHOW).cloned().collect::<Vec<_>>().join(", ");
+
+          format!("[{}{}]", ranges_to_show, ellipsis)
+      }
+
+      /// Helper function to format a HybridBitset for display, showing its debug representation
+      /// and a sample of the corresponding LLM tokens.
+      fn format_bv_with_tokens(
+          bv: &LLMTokenBV,
+          original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          limit: usize,
+      ) -> String {
+          let bv_neat_str = format_hybrid_bitset_neatly(bv);
+
+          let (bimap, token_map) = match (original_internal_bimap, llm_token_map) {
+              (Some(b), Some(t)) => (b, t),
+              _ => return bv_neat_str, // If we don't have maps, just return the neat string.
+          };
+
+          let mut token_samples = Vec::new();
+          for internal_id in bv.iter().take(limit) {
+              if let Some(original_id) = bimap.get_by_right(&internal_id) {
+                  if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(*original_id)) {
+                      token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
+                  }
+              }
+          }
+
+          if token_samples.is_empty() {
+              return bv_neat_str;
+          }
+
+          let samples_str = token_samples.join(", ");
+          let ellipsis = if bv.len() > limit { ", ..." } else { "" };
+
+          format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
+      }
+
+      /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
+      pub fn dump_precompute_trie_recursive(
+          node_arc: &Arc<Mutex<PrecomputeNode>>,
+          prefix: String,
+          visited: &mut HashSet<*const PrecomputeNode>,
+          original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+          token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      ) {
+          let children_to_visit;
+
+          {
+              let node = node_arc.lock().expect("Mutex poisoned during dump");
+              // Collect children information while holding the lock
+              children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
+                  dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                      (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+                  })
+              }).collect::<Vec<_>>();
+          }
+
+          let num_children = children_to_visit.len();
+          for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+              let is_last = i == num_children - 1;
+              let connector = if is_last { "└──" } else { "├──" };
+
+              let edge_key_display = match edge_key {
+                  Some(gtid) => {
+                      if let Some(name_map) = token_name_map {
+                          name_map.get_by_right(&gtid.0)
+                              .map(|name| format!("'{}'", name))
+                              .unwrap_or_else(|| format!("ID:{}", gtid.0))
+                      } else {
+                          format!("ID:{}", gtid.0)
+                      }
+                  },
+                  None => "ε".to_string(),
+              };
+
+              let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
+
+              let child_ptr;
+              let child_info;
+              let is_visited;
+              let is_end_node;
+              {
+                  let child_node = child_arc.lock().unwrap();
+                  child_ptr = &*child_node as *const PrecomputeNode;
+                  is_visited = visited.contains(&child_ptr);
+                  is_end_node = child_node.value.end;
+                  child_info = format!("Node {:p} (MaxDepth: {}){}", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" });
+              }
+
+              // Don't shortcut the display for end nodes, even if they are visited.
+              if is_visited && !is_end_node {
+                  println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+              } else {
+                  // Print full info for unvisited nodes or for any end node.
+                  println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+
+                  // Only recurse if the node has not been visited before.
+                  // This prevents re-printing the children of a shared node and avoids cycles.
+                  // End nodes are leaves, so they won't recurse anyway.
+                  if !is_visited {
+                      visited.insert(child_ptr);
+                      let child_prefix = if is_last {
+                          format!("{}   ", prefix)
+                      } else {
+                          format!("{}│  ", prefix)
+                      };
+                      dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
+                  }
+              }
+          }
+      }
+
+      impl GrammarConstraint { // This is in constraint_extra.rs
+          /// Dumps the structure of the precomputed Trie map for visualization.
+          pub fn dump_precomputed(&self) {
+              println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
+              println!("===================================");
+
+              let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+              for (tokenizer_state_id, root_node_trie) in &self.precomputed {
+                  println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+                  
+                  let root_ptr;
+                  let root_info;
+                  {
+                      let root_node = root_node_trie.lock().unwrap();
+                      root_ptr = &*root_node as *const PrecomputeNode;
+                      root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+                  }
+                  println!("{}", root_info);
+
+                  if visited.contains(&root_ptr) {
+                      println!("  (Root already visited)");
+                  } else {
+                      visited.insert(root_ptr);
+                      dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.llm_vocab.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_vocab.llm_token_map));
+                  }
+              }
+              println!("\n===================================");
+              println!("Dump Complete.");
+          }
+      }
+
+
+      // Add this struct definition before impl GrammarConstraint
+      #[derive(Default, Debug)]
+      pub struct PrecomputeStats {
+          // Gross counts (before sharing/merging reduces them in the final structure)
+          pub initial_root_nodes_created: usize,
+
+          // Final structure stats (net counts, after all processing and sharing)
+          pub final_unique_nodes_count: usize,
+          pub final_root_nodes_count: usize,
+          pub final_non_root_internal_nodes_count: usize, // Renamed from final_internal_nodes_count
+          pub final_leaf_nodes_count: usize,             // New field
+          pub final_edges_count: usize,
+          pub final_edges_with_none_key: usize,
+          pub final_edges_with_some_key: usize,
+          pub final_nodes_with_clean_end: usize,
+
+          // For average edge occupancy per key type
+          pub final_total_occupancy_sum_for_some_keys: usize,
+          pub final_num_occupied_some_edge_keys: usize,
+          pub final_total_occupancy_sum_for_none_keys: usize,
+          pub final_num_occupied_none_edge_keys: usize,
+
+          // New fields for grammar token edge key statistics
+          pub final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+          pub final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+          pub final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+
+          // New fields for edge pruning statistics
+          pub final_edges_pruned_total: usize,
+          pub final_edges_pruned_by_token: BTreeMap<GrammarTokenID, usize>,
+
+          pub edges_pruned_by_terminal_sequence: usize,
+          pub final_total_ranges_in_bvs: usize,
+      }
+
+      // Manual impl for PrecomputeStats
+      impl JSONConvertible for PrecomputeStats {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("initial_root_nodes_created".to_string(), self.initial_root_nodes_created.to_json());
+              obj.insert("final_unique_nodes_count".to_string(), self.final_unique_nodes_count.to_json());
+              obj.insert("final_root_nodes_count".to_string(), self.final_root_nodes_count.to_json());
+              obj.insert("final_non_root_internal_nodes_count".to_string(), self.final_non_root_internal_nodes_count.to_json());
+              obj.insert("final_leaf_nodes_count".to_string(), self.final_leaf_nodes_count.to_json());
+              obj.insert("final_edges_count".to_string(), self.final_edges_count.to_json());
+              obj.insert("final_edges_with_none_key".to_string(), self.final_edges_with_none_key.to_json());
+              obj.insert("final_edges_with_some_key".to_string(), self.final_edges_with_some_key.to_json());
+              obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
+              obj.insert("final_total_occupancy_sum_for_some_keys".to_string(), self.final_total_occupancy_sum_for_some_keys.to_json());
+              obj.insert("final_num_occupied_some_edge_keys".to_string(), self.final_num_occupied_some_edge_keys.to_json());
+              obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_total_occupancy_sum_for_none_keys.to_json());
+              obj.insert("final_num_occupied_none_edge_keys".to_string(), self.final_num_occupied_none_edge_keys.to_json());
+              obj.insert("final_grammar_token_edge_key_counts".to_string(), self.final_grammar_token_edge_key_counts.to_json());
+              obj.insert("final_grammar_token_edge_fanouts_dist".to_string(), self.final_grammar_token_edge_fanouts_dist.to_json());
+              obj.insert("final_grammar_token_edge_token_set_sizes_dist".to_string(), self.final_grammar_token_edge_token_set_sizes_dist.to_json());
+              obj.insert("final_edges_pruned_total".to_string(), self.final_edges_pruned_total.to_json());
+              obj.insert("final_edges_pruned_by_token".to_string(), self.final_edges_pruned_by_token.to_json());
+              obj.insert("edges_pruned_by_terminal_sequence".to_string(), self.edges_pruned_by_terminal_sequence.to_json());
+              obj.insert("final_total_ranges_in_bvs".to_string(), self.final_total_ranges_in_bvs.to_json());
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let initial_root_nodes_created = obj.remove("initial_root_nodes_created").ok_or_else(|| "Missing field initial_root_nodes_created for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_unique_nodes_count = obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_root_nodes_count = obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_non_root_internal_nodes_count = obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_leaf_nodes_count = obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_count = obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_with_none_key = obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_with_some_key = obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_nodes_with_clean_end = obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_occupancy_sum_for_some_keys = obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_num_occupied_some_edge_keys = obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_occupancy_sum_for_none_keys = obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_num_occupied_none_edge_keys = obj.remove("final_num_occupied_none_edge_keys").ok_or_else(|| "Missing field final_num_occupied_none_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_grammar_token_edge_key_counts = obj.remove("final_grammar_token_edge_key_counts").ok_or_else(|| "Missing field final_grammar_token_edge_key_counts for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                      let final_grammar_token_edge_fanouts_dist = obj.remove("final_grammar_token_edge_fanouts_dist").ok_or_else(|| "Missing field final_grammar_token_edge_fanouts_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                      let final_grammar_token_edge_token_set_sizes_dist = obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                      let final_edges_pruned_total = obj.remove("final_edges_pruned_total").ok_or_else(|| "Missing field final_edges_pruned_total for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_pruned_by_token = obj.remove("final_edges_pruned_by_token").ok_or_else(|| "Missing field final_edges_pruned_by_token for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                      let edges_pruned_by_terminal_sequence = obj.remove("edges_pruned_by_terminal_sequence").ok_or_else(|| "Missing field edges_pruned_by_terminal_sequence for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_ranges_in_bvs = obj.remove("final_total_ranges_in_bvs").ok_or_else(|| "Missing field final_total_ranges_in_bvs for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      Ok(PrecomputeStats {
+                          initial_root_nodes_created,
+                          final_unique_nodes_count,
+                          final_root_nodes_count,
+                          final_non_root_internal_nodes_count,
+                          final_leaf_nodes_count,
+                          final_edges_count,
+                          final_edges_with_none_key,
+                          final_edges_with_some_key,
+                          final_nodes_with_clean_end,
+                          final_total_occupancy_sum_for_some_keys,
+                          final_num_occupied_some_edge_keys,
+                          final_total_occupancy_sum_for_none_keys,
+                          final_num_occupied_none_edge_keys,
+                          final_grammar_token_edge_key_counts,
+                          final_grammar_token_edge_fanouts_dist,
+                          final_grammar_token_edge_token_set_sizes_dist,
+                          final_edges_pruned_total,
+                          final_edges_pruned_by_token,
+                          edges_pruned_by_terminal_sequence,
+                          final_total_ranges_in_bvs,
+                      })
+                  }
+                  _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
+              }
+          }   
+      }
+
+
+      /// Helper function to calculate sum, mean, and median from Vec<usize>
+      fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
+          if numbers.is_empty() {
+              return (0, None, None);
+          }
+          let sum: usize = numbers.iter().sum();
+          let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
+
+          let mut sorted_numbers = numbers.clone();
+          sorted_numbers.sort_unstable();
+          let len = sorted_numbers.len();
+          let mid = len / 2;
+          let median: Option<f64> = if len == 0 {
+              None
+          } else if len % 2 == 0 {
+              Some((sorted_numbers[mid - 1] as f64 + sorted_numbers[mid] as f64) / 2.0)
+          } else {
+              Some(sorted_numbers[mid] as f64)
+          };
+          (sum, mean, median)
+      }
+
+      pub fn calculate_final_stats(
+          precomputed_roots: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+          stats: &mut PrecomputeStats,
+      ) {
+          crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
+
+          // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+          let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+          let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+          let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
+
+          while let Some(node_arc) = queue.pop_front() {
+              let (children_to_queue, node_ptr) = {
+                  let node_guard = node_arc.lock().unwrap();
+                  let ptr = &*node_guard as *const PrecomputeNode;
+                  let children = node_guard.children()
+                      .values()
+                      .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
+                      .collect::<Vec<_>>();
+                  (children, ptr)
+              };
+
+              if visited_data_ptrs.insert(node_ptr) {
+                  all_reachable_nodes.insert(node_ptr, node_arc.clone());
+                  for child_arc in children_to_queue {
+                      queue.push_back(child_arc);
+                  }
+              }
+          }
+
+          stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+          let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
+              .values()
+              .map(|arc| {
+                  let guard = arc.lock().unwrap();
+                  &*guard as *const PrecomputeNode
+              })
+              .collect();
+          stats.final_root_nodes_count = root_node_pointers.len();
+
+          // Initialize stats fields
+          stats.final_total_occupancy_sum_for_some_keys = 0;
+          stats.final_num_occupied_some_edge_keys = 0;
+          stats.final_total_occupancy_sum_for_none_keys = 0;
+          stats.final_num_occupied_none_edge_keys = 0;
+          stats.final_edges_count = 0;
+          stats.final_edges_with_none_key = 0;
+          stats.final_edges_with_some_key = 0;
+          stats.final_nodes_with_clean_end = 0;
+          stats.final_grammar_token_edge_key_counts.clear();
+          stats.final_grammar_token_edge_fanouts_dist.clear();
+          stats.final_grammar_token_edge_token_set_sizes_dist.clear();
+          // stats.final_root_nodes_count = 0; // Already set above
+          stats.final_non_root_internal_nodes_count = 0;
+          stats.final_leaf_nodes_count = 0;
+          stats.edges_pruned_by_terminal_sequence = 0;
+          stats.final_total_ranges_in_bvs = 0;
+
+          for (node_ptr, node_arc) in &all_reachable_nodes {
+              let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+
+              // New logic for non-root internal and leaf nodes
+              if !root_node_pointers.contains(node_ptr) {
+                  if node_guard.children().is_empty() {
+                      stats.final_leaf_nodes_count += 1;
+                  } else {
+                      stats.final_non_root_internal_nodes_count += 1;
+                  }
+              }
+
+              // Existing logic for edges
+              for (edge_key_opt, dest_map) in node_guard.children() {
+                  let num_edges_for_this_key_to_distinct_children = dest_map.len();
+                  stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+
+                  if let Some(gtid) = edge_key_opt {
+                      stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                      *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children; // Corrected: sum edges not occurrences of key
+
+                      stats.final_grammar_token_edge_fanouts_dist
+                          .entry(*gtid)
+                          .or_default()
+                          .push(num_edges_for_this_key_to_distinct_children);
+                      for llm_token_bv_on_edge in dest_map.values() {
+                          stats.final_grammar_token_edge_token_set_sizes_dist
+                              .entry(*gtid)
+                              .or_default()
+                              .push(llm_token_bv_on_edge.len());
+                          stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+                      }
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                          stats.final_num_occupied_some_edge_keys += 1;
+                      }
+                  } else {
+                      stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                          stats.final_num_occupied_none_edge_keys += 1;
+                      }
+                  }
+              }
+
+              // Existing logic for clean_end
+              // if let Some(clean_end_bv) = &node_guard.value.clean_end {
+              //     stats.final_nodes_with_clean_end += 1;
+              //     stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
+              // }
+              if node_guard.value.end {
+                  stats.final_nodes_with_clean_end += 1;
+              }
+          }
+          crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
+      }
+
+
+      pub fn print_precompute_stats(
+          stats: &PrecomputeStats,
+          token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
+      ) {
+          let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+              stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+          } else { 0.0 };
+          let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+              stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
+          } else { 0.0 };
+
+          println!("--- Precomputation Statistics ---");
+          println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+
+          println!("\nNode Counts Breakdown:");
+          println!("  There are:");
+          println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+          println!("    - {} are roots", stats.final_root_nodes_count);
+          let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
+          println!("    - {} are non-roots, of which", non_root_count);
+          println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+          println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+          println!("\nFinal Graph Structure (after sharing and deduplication):");
+          println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+          println!("  Total Edges: {}", stats.final_edges_count);
+          println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+          println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+          println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+          println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+          println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+          println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
+
+          let mut grammar_token_stats_new: Vec<(
+              GrammarTokenID,
+              usize, // key_usages (KeyUse)
+              (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
+              (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
+          )> = Vec::new();
+
+          for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
+              let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                          .get(gtid)
+                                          .cloned()
+                                          .unwrap_or_else(Vec::new);
+              let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
+
+              let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+                                                  .get(gtid)
+                                                  .cloned()
+                                                  .unwrap_or_else(Vec::new);
+              let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
+
+              grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
+          }
+
+          grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
+
+          println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+          println!(
+              "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+              "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+              "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+          );
+          println!(
+              "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+              "", "", "", "", "", "", "", "", "", ""
+          );
+
+          for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+              let name = token_name_map
+                  .get_by_right(&gtid.0) // gtid is GrammarTokenID
+                  .cloned()
+                  .map_or(
+                      format!("ID:{}", gtid.0),
+                      |t| t.to_string()
+                  );
+
+              let (sum_child, avg_child, med_child) = child_stats;
+              let (sum_toks, avg_toks, med_toks) = toks_stats;
+              let avg_key_toks = if key_usages > 0 {
+                  Some(sum_toks as f64 / key_usages as f64)
+              } else {
+                  None
+              };
+
+
+              let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+
+              println!(
+                  "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+                  name,
+                  gtid.0,
+                  key_usages,
+                  sum_child,
+                  format_opt_f64(avg_child),
+                  format_opt_f64(med_child),
+                  format_opt_f64(avg_key_toks),
+                  sum_toks,
+                  format_opt_f64(avg_toks),
+                  format_opt_f64(med_toks)
+              );
+          }
+          println!("---------------------------------");
+      }
+
+
+      #[cfg(test)]
+      mod tests {
+          use std::collections::BTreeMap;
+          use crate::finite_automata::{eat_u8, Regex};
+          use crate::glr::grammar::{nt, prod, t, regex_name, Terminal};
+          use crate::glr::parser::GLRParser;
+          use crate::glr::table::generate_glr_parser_with_terminal_map;
+          use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+          use crate::types::TerminalID;
+          use bimap::BiBTreeMap;
+          use super::*;
+          use bitvec::prelude::*;
+          use crate::seq;
+          use crate::datastructures::hybrid_bitset::HybridBitset;
+
+          #[test]
+          fn test_format_bv_with_tokens_no_maps() {
+              let bv = HybridBitset::from_iter(vec![1, 2]);
+              assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "[1..=2]");
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_with_maps() {
+              let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+              let mut bimap = BiBTreeMap::new();
+              bimap.insert(10, 0); // original 10 -> internal 0
+              bimap.insert(20, 1); // original 20 -> internal 1
+              let mut llm_map = BiBTreeMap::new();
+              llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+              llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+
+              let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_limit_and_ellipsis() {
+              let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+              let mut bimap = BiBTreeMap::new();
+              let mut llm_map = BiBTreeMap::new();
+              for i in 0..10 {
+                  bimap.insert(100 + i, i);
+                  llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+              }
+
+              let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+          }
+
+          // Helper function to create a minimal constraint for testing dump
+          fn create_minimal_constraint() -> GrammarConstraint {
+              // Tokenizer: Matches "a" (token 0) or "$" (token 1)
+              let expr = crate::groups![
+                  eat_u8(b'a'), // Grammar Token 0
+                  seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
+                  eat_u8(b'$')  // Grammar Token 2 (EOF)
+              ];
+              let tokenizer = expr.build();
+
+              // LLM Token Map: "aaaa" -> 0, "$" -> 1
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+              let max_llm_token_id = 1;
+
+              // Grammar: S -> A $
+              let productions = vec![
+                  prod("S", vec![nt("A"), nt("AA"), t("EOF")]), // S' -> S EOF is implicit
+              ];
+
+              // Map grammar terminals to the tokenizer's token IDs
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(regex_name("A"), TerminalID(0)); // "a" from tokenizer
+              grammar_token_map.insert(regex_name("AA"), TerminalID(1)); // "aa" from tokenizer
+              grammar_token_map.insert(regex_name("EOF"), TerminalID(2)); // "$" from tokenizer
+
+              // Generate parser
+              let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map, None);
+
+              let mut terminal_name_map = BiBTreeMap::new();
+              terminal_name_map.insert(regex_name("A"), 0);
+              terminal_name_map.insert(regex_name("AA"), 1);
+              terminal_name_map.insert(regex_name("EOF"), 2);
+
+              // Create constraint (this runs precomputation)
+              GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)
+          }
+
+          #[test]
+          fn test_dump_precomputed_runs() {
+              let constraint = create_minimal_constraint();
+              println!("--- Starting dump_precomputed test output ---");
+              constraint.dump_precomputed(); // Just ensure it runs without panic
+              println!("--- Finished dump_precomputed test output ---");
+          }
+      }
   prev_file_contents:
     src/datastructures/mod.rs: |
       pub mod charmap;
@@ -16154,6 +16808,659 @@ local_system:
           }
       }
 
+    src/constraint_extra.rs: |-
+      use std::collections::HashMap;
+      use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+      use crate::types::{TerminalID as GrammarTokenID};
+      use crate::datastructures::trie::Trie;
+      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
+      use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
+      use std::sync::{Arc, Mutex};
+      use bitvec::prelude::BitVec;
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use bimap::BiBTreeMap;
+      use crate::datastructures::ArcPtrWrapper;
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use crate::datastructures::gss::LLMTokenBV;
+      use crate::glr::grammar::Terminal;
+
+      /// Creates a neat string representation of a HybridBitset, showing values as ranges.
+      fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
+          if bv.is_empty() {
+              return "[]".to_string();
+          }
+
+          let mut ranges = vec![];
+          let mut iter = bv.iter();
+
+          if let Some(mut start) = iter.next() {
+              let mut end = start;
+              for val in iter {
+                  if val == end + 1 {
+                      end = val;
+                  } else {
+                      if start == end {
+                          ranges.push(format!("{}", start));
+                      } else {
+                          ranges.push(format!("{}..={}", start, end));
+                      }
+                      start = val;
+                      end = val;
+                  }
+              }
+              if start == end {
+                  ranges.push(format!("{}", start));
+              } else {
+                  ranges.push(format!("{}..={}", start, end));
+              }
+          }
+
+          const MAX_RANGES_TO_SHOW: usize = 5;
+          let ellipsis = if ranges.len() > MAX_RANGES_TO_SHOW { ", ..." } else { "" };
+          let ranges_to_show = ranges.iter().take(MAX_RANGES_TO_SHOW).cloned().collect::<Vec<_>>().join(", ");
+
+          format!("[{}{}]", ranges_to_show, ellipsis)
+      }
+
+      /// Helper function to format a HybridBitset for display, showing its debug representation
+      /// and a sample of the corresponding LLM tokens.
+      fn format_bv_with_tokens(
+          bv: &LLMTokenBV,
+          original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          limit: usize,
+      ) -> String {
+          let bv_neat_str = format_hybrid_bitset_neatly(bv);
+
+          let (bimap, token_map) = match (original_internal_bimap, llm_token_map) {
+              (Some(b), Some(t)) => (b, t),
+              _ => return bv_neat_str, // If we don't have maps, just return the neat string.
+          };
+
+          let mut token_samples = Vec::new();
+          for internal_id in bv.iter().take(limit) {
+              if let Some(original_id) = bimap.get_by_right(&internal_id) {
+                  if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(*original_id)) {
+                      token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
+                  }
+              }
+          }
+
+          if token_samples.is_empty() {
+              return bv_neat_str;
+          }
+
+          let samples_str = token_samples.join(", ");
+          let ellipsis = if bv.len() > limit { ", ..." } else { "" };
+
+          format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
+      }
+
+      /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
+      pub fn dump_precompute_trie_recursive(
+          node_arc: &Arc<Mutex<PrecomputeNode>>,
+          prefix: String,
+          visited: &mut HashSet<*const PrecomputeNode>,
+          original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+          token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      ) {
+          let children_to_visit;
+
+          {
+              let node = node_arc.lock().expect("Mutex poisoned during dump");
+              // Collect children information while holding the lock
+              children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
+                  dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                      (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+                  })
+              }).collect::<Vec<_>>();
+          }
+
+          let num_children = children_to_visit.len();
+          for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+              let is_last = i == num_children - 1;
+              let connector = if is_last { "└──" } else { "├──" };
+
+              let edge_key_display = match edge_key {
+                  Some(gtid) => {
+                      if let Some(name_map) = token_name_map {
+                          name_map.get_by_right(&gtid.0)
+                              .map(|name| format!("'{}'", name))
+                              .unwrap_or_else(|| format!("ID:{}", gtid.0))
+                      } else {
+                          format!("ID:{}", gtid.0)
+                      }
+                  },
+                  None => "ε".to_string(),
+              };
+
+              let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
+
+              let child_ptr;
+              let child_info;
+              let is_visited;
+              let is_end_node;
+              {
+                  let child_node = child_arc.lock().unwrap();
+                  child_ptr = &*child_node as *const PrecomputeNode;
+                  is_visited = visited.contains(&child_ptr);
+                  is_end_node = child_node.value.end;
+                  child_info = format!("Node {:p} (MaxDepth: {}){}", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" });
+              }
+
+              // Don't shortcut the display for end nodes, even if they are visited.
+              if is_visited && !is_end_node {
+                  println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+              } else {
+                  // Print full info for unvisited nodes or for any end node.
+                  println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+
+                  // Only recurse if the node has not been visited before.
+                  // This prevents re-printing the children of a shared node and avoids cycles.
+                  // End nodes are leaves, so they won't recurse anyway.
+                  if !is_visited {
+                      visited.insert(child_ptr);
+                      let child_prefix = if is_last {
+                          format!("{}   ", prefix)
+                      } else {
+                          format!("{}│  ", prefix)
+                      };
+                      dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
+                  }
+              }
+          }
+      }
+
+      impl GrammarConstraint { // This is in constraint_extra.rs
+          /// Dumps the structure of the precomputed Trie map for visualization.
+          pub fn dump_precomputed(&self) {
+              println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
+              println!("===================================");
+
+              let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+              for (tokenizer_state_id, root_node_trie) in &self.precomputed {
+                  println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+                  
+                  let root_ptr;
+                  let root_info;
+                  {
+                      let root_node = root_node_trie.lock().unwrap();
+                      root_ptr = &*root_node as *const PrecomputeNode;
+                      root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+                  }
+                  println!("{}", root_info);
+
+                  if visited.contains(&root_ptr) {
+                      println!("  (Root already visited)");
+                  } else {
+                      visited.insert(root_ptr);
+                      dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.llm_vocab.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_vocab.llm_token_map));
+                  }
+              }
+              println!("\n===================================");
+              println!("Dump Complete.");
+          }
+      }
+
+
+      // Add this struct definition before impl GrammarConstraint
+      #[derive(Default, Debug)]
+      pub struct PrecomputeStats {
+          // Gross counts (before sharing/merging reduces them in the final structure)
+          pub initial_root_nodes_created: usize,
+
+          // Final structure stats (net counts, after all processing and sharing)
+          pub final_unique_nodes_count: usize,
+          pub final_root_nodes_count: usize,
+          pub final_non_root_internal_nodes_count: usize, // Renamed from final_internal_nodes_count
+          pub final_leaf_nodes_count: usize,             // New field
+          pub final_edges_count: usize,
+          pub final_edges_with_none_key: usize,
+          pub final_edges_with_some_key: usize,
+          pub final_nodes_with_clean_end: usize,
+
+          // For average edge occupancy per key type
+          pub final_total_occupancy_sum_for_some_keys: usize,
+          pub final_num_occupied_some_edge_keys: usize,
+          pub final_total_occupancy_sum_for_none_keys: usize,
+          pub final_num_occupied_none_edge_keys: usize,
+
+          // New fields for grammar token edge key statistics
+          pub final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+          pub final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+          pub final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+
+          // New fields for edge pruning statistics
+          pub final_edges_pruned_total: usize,
+          pub final_edges_pruned_by_token: BTreeMap<GrammarTokenID, usize>,
+
+          pub edges_pruned_by_terminal_sequence: usize,
+          pub final_total_ranges_in_bvs: usize,
+      }
+
+      // Manual impl for PrecomputeStats
+      impl JSONConvertible for PrecomputeStats {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("initial_root_nodes_created".to_string(), self.initial_root_nodes_created.to_json());
+              obj.insert("final_unique_nodes_count".to_string(), self.final_unique_nodes_count.to_json());
+              obj.insert("final_root_nodes_count".to_string(), self.final_root_nodes_count.to_json());
+              obj.insert("final_non_root_internal_nodes_count".to_string(), self.final_non_root_internal_nodes_count.to_json());
+              obj.insert("final_leaf_nodes_count".to_string(), self.final_leaf_nodes_count.to_json());
+              obj.insert("final_edges_count".to_string(), self.final_edges_count.to_json());
+              obj.insert("final_edges_with_none_key".to_string(), self.final_edges_with_none_key.to_json());
+              obj.insert("final_edges_with_some_key".to_string(), self.final_edges_with_some_key.to_json());
+              obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
+              obj.insert("final_total_occupancy_sum_for_some_keys".to_string(), self.final_total_occupancy_sum_for_some_keys.to_json());
+              obj.insert("final_num_occupied_some_edge_keys".to_string(), self.final_num_occupied_some_edge_keys.to_json());
+              obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_total_occupancy_sum_for_none_keys.to_json());
+              obj.insert("final_num_occupied_none_edge_keys".to_string(), self.final_num_occupied_none_edge_keys.to_json());
+              obj.insert("final_grammar_token_edge_key_counts".to_string(), self.final_grammar_token_edge_key_counts.to_json());
+              obj.insert("final_grammar_token_edge_fanouts_dist".to_string(), self.final_grammar_token_edge_fanouts_dist.to_json());
+              obj.insert("final_grammar_token_edge_token_set_sizes_dist".to_string(), self.final_grammar_token_edge_token_set_sizes_dist.to_json());
+              obj.insert("final_edges_pruned_total".to_string(), self.final_edges_pruned_total.to_json());
+              obj.insert("final_edges_pruned_by_token".to_string(), self.final_edges_pruned_by_token.to_json());
+              obj.insert("edges_pruned_by_terminal_sequence".to_string(), self.edges_pruned_by_terminal_sequence.to_json());
+              obj.insert("final_total_ranges_in_bvs".to_string(), self.final_total_ranges_in_bvs.to_json());
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let initial_root_nodes_created = obj.remove("initial_root_nodes_created").ok_or_else(|| "Missing field initial_root_nodes_created for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_unique_nodes_count = obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_root_nodes_count = obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_non_root_internal_nodes_count = obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_leaf_nodes_count = obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_count = obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_with_none_key = obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_with_some_key = obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_nodes_with_clean_end = obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_occupancy_sum_for_some_keys = obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_num_occupied_some_edge_keys = obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_occupancy_sum_for_none_keys = obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_num_occupied_none_edge_keys = obj.remove("final_num_occupied_none_edge_keys").ok_or_else(|| "Missing field final_num_occupied_none_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_grammar_token_edge_key_counts = obj.remove("final_grammar_token_edge_key_counts").ok_or_else(|| "Missing field final_grammar_token_edge_key_counts for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                      let final_grammar_token_edge_fanouts_dist = obj.remove("final_grammar_token_edge_fanouts_dist").ok_or_else(|| "Missing field final_grammar_token_edge_fanouts_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                      let final_grammar_token_edge_token_set_sizes_dist = obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                      let final_edges_pruned_total = obj.remove("final_edges_pruned_total").ok_or_else(|| "Missing field final_edges_pruned_total for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_pruned_by_token = obj.remove("final_edges_pruned_by_token").ok_or_else(|| "Missing field final_edges_pruned_by_token for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                      let edges_pruned_by_terminal_sequence = obj.remove("edges_pruned_by_terminal_sequence").ok_or_else(|| "Missing field edges_pruned_by_terminal_sequence for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_ranges_in_bvs = obj.remove("final_total_ranges_in_bvs").ok_or_else(|| "Missing field final_total_ranges_in_bvs for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      Ok(PrecomputeStats {
+                          initial_root_nodes_created,
+                          final_unique_nodes_count,
+                          final_root_nodes_count,
+                          final_non_root_internal_nodes_count,
+                          final_leaf_nodes_count,
+                          final_edges_count,
+                          final_edges_with_none_key,
+                          final_edges_with_some_key,
+                          final_nodes_with_clean_end,
+                          final_total_occupancy_sum_for_some_keys,
+                          final_num_occupied_some_edge_keys,
+                          final_total_occupancy_sum_for_none_keys,
+                          final_num_occupied_none_edge_keys,
+                          final_grammar_token_edge_key_counts,
+                          final_grammar_token_edge_fanouts_dist,
+                          final_grammar_token_edge_token_set_sizes_dist,
+                          final_edges_pruned_total,
+                          final_edges_pruned_by_token,
+                          edges_pruned_by_terminal_sequence,
+                          final_total_ranges_in_bvs,
+                      })
+                  }
+                  _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
+              }
+          }   
+      }
+
+
+      /// Helper function to calculate sum, mean, and median from Vec<usize>
+      fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
+          if numbers.is_empty() {
+              return (0, None, None);
+          }
+          let sum: usize = numbers.iter().sum();
+          let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
+
+          let mut sorted_numbers = numbers.clone();
+          sorted_numbers.sort_unstable();
+          let len = sorted_numbers.len();
+          let mid = len / 2;
+          let median: Option<f64> = if len == 0 {
+              None
+          } else if len % 2 == 0 {
+              Some((sorted_numbers[mid - 1] as f64 + sorted_numbers[mid] as f64) / 2.0)
+          } else {
+              Some(sorted_numbers[mid] as f64)
+          };
+          (sum, mean, median)
+      }
+
+      pub fn calculate_final_stats(
+          precomputed_roots: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+          stats: &mut PrecomputeStats,
+      ) {
+          crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
+
+          // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+          let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+          let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+          let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
+
+          while let Some(node_arc) = queue.pop_front() {
+              let (children_to_queue, node_ptr) = {
+                  let node_guard = node_arc.lock().unwrap();
+                  let ptr = &*node_guard as *const PrecomputeNode;
+                  let children = node_guard.children()
+                      .values()
+                      .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
+                      .collect::<Vec<_>>();
+                  (children, ptr)
+              };
+
+              if visited_data_ptrs.insert(node_ptr) {
+                  all_reachable_nodes.insert(node_ptr, node_arc.clone());
+                  for child_arc in children_to_queue {
+                      queue.push_back(child_arc);
+                  }
+              }
+          }
+
+          stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+          let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
+              .values()
+              .map(|arc| {
+                  let guard = arc.lock().unwrap();
+                  &*guard as *const PrecomputeNode
+              })
+              .collect();
+          stats.final_root_nodes_count = root_node_pointers.len();
+
+          // Initialize stats fields
+          stats.final_total_occupancy_sum_for_some_keys = 0;
+          stats.final_num_occupied_some_edge_keys = 0;
+          stats.final_total_occupancy_sum_for_none_keys = 0;
+          stats.final_num_occupied_none_edge_keys = 0;
+          stats.final_edges_count = 0;
+          stats.final_edges_with_none_key = 0;
+          stats.final_edges_with_some_key = 0;
+          stats.final_nodes_with_clean_end = 0;
+          stats.final_grammar_token_edge_key_counts.clear();
+          stats.final_grammar_token_edge_fanouts_dist.clear();
+          stats.final_grammar_token_edge_token_set_sizes_dist.clear();
+          // stats.final_root_nodes_count = 0; // Already set above
+          stats.final_non_root_internal_nodes_count = 0;
+          stats.final_leaf_nodes_count = 0;
+          stats.edges_pruned_by_terminal_sequence = 0;
+          stats.final_total_ranges_in_bvs = 0;
+
+          for (node_ptr, node_arc) in &all_reachable_nodes {
+              let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+
+              // New logic for non-root internal and leaf nodes
+              if !root_node_pointers.contains(node_ptr) {
+                  if node_guard.children().is_empty() {
+                      stats.final_leaf_nodes_count += 1;
+                  } else {
+                      stats.final_non_root_internal_nodes_count += 1;
+                  }
+              }
+
+              // Existing logic for edges
+              for (edge_key_opt, dest_map) in node_guard.children() {
+                  let num_edges_for_this_key_to_distinct_children = dest_map.len();
+                  stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+
+                  if let Some(gtid) = edge_key_opt {
+                      stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                      *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children; // Corrected: sum edges not occurrences of key
+
+                      stats.final_grammar_token_edge_fanouts_dist
+                          .entry(*gtid)
+                          .or_default()
+                          .push(num_edges_for_this_key_to_distinct_children);
+                      for llm_token_bv_on_edge in dest_map.values() {
+                          stats.final_grammar_token_edge_token_set_sizes_dist
+                              .entry(*gtid)
+                              .or_default()
+                              .push(llm_token_bv_on_edge.len());
+                          stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+                      }
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                          stats.final_num_occupied_some_edge_keys += 1;
+                      }
+                  } else {
+                      stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                          stats.final_num_occupied_none_edge_keys += 1;
+                      }
+                  }
+              }
+
+              // Existing logic for clean_end
+              // if let Some(clean_end_bv) = &node_guard.value.clean_end {
+              //     stats.final_nodes_with_clean_end += 1;
+              //     stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
+              // }
+              if node_guard.value.end {
+                  stats.final_nodes_with_clean_end += 1;
+              }
+          }
+          crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
+      }
+
+
+      pub fn print_precompute_stats(
+          stats: &PrecomputeStats,
+          token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
+      ) {
+          let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+              stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+          } else { 0.0 };
+          let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+              stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
+          } else { 0.0 };
+
+          println!("--- Precomputation Statistics ---");
+          println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+
+          println!("\nNode Counts Breakdown:");
+          println!("  There are:");
+          println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+          println!("    - {} are roots", stats.final_root_nodes_count);
+          let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
+          println!("    - {} are non-roots, of which", non_root_count);
+          println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+          println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+          println!("\nFinal Graph Structure (after sharing and deduplication):");
+          println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+          println!("  Total Edges: {}", stats.final_edges_count);
+          println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+          println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+          println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+          println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+          println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+          println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
+
+          let mut grammar_token_stats_new: Vec<(
+              GrammarTokenID,
+              usize, // key_usages (KeyUse)
+              (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
+              (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
+          )> = Vec::new();
+
+          for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
+              let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                          .get(gtid)
+                                          .cloned()
+                                          .unwrap_or_else(Vec::new);
+              let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
+
+              let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+                                                  .get(gtid)
+                                                  .cloned()
+                                                  .unwrap_or_else(Vec::new);
+              let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
+
+              grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
+          }
+
+          grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
+
+          println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+          println!(
+              "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+              "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+              "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+          );
+          println!(
+              "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+              "", "", "", "", "", "", "", "", "", ""
+          );
+
+          for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+              let name = token_name_map
+                  .get_by_right(&gtid.0) // gtid is GrammarTokenID
+                  .cloned()
+                  .map_or(
+                      format!("ID:{}", gtid.0),
+                      |t| t.to_string()
+                  );
+
+              let (sum_child, avg_child, med_child) = child_stats;
+              let (sum_toks, avg_toks, med_toks) = toks_stats;
+              let avg_key_toks = if key_usages > 0 {
+                  Some(sum_toks as f64 / key_usages as f64)
+              } else {
+                  None
+              };
+
+
+              let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+
+              println!(
+                  "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+                  name,
+                  gtid.0,
+                  key_usages,
+                  sum_child,
+                  format_opt_f64(avg_child),
+                  format_opt_f64(med_child),
+                  format_opt_f64(avg_key_toks),
+                  sum_toks,
+                  format_opt_f64(avg_toks),
+                  format_opt_f64(med_toks)
+              );
+          }
+          println!("---------------------------------");
+      }
+
+
+      #[cfg(test)]
+      mod tests {
+          use std::collections::BTreeMap;
+          use crate::finite_automata::{eat_u8, Regex};
+          use crate::glr::grammar::{nt, prod, t, regex_name, Terminal};
+          use crate::glr::parser::GLRParser;
+          use crate::glr::table::generate_glr_parser_with_terminal_map;
+          use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+          use crate::types::TerminalID;
+          use bimap::BiBTreeMap;
+          use super::*;
+          use bitvec::prelude::*;
+          use crate::seq;
+          use crate::datastructures::hybrid_bitset::HybridBitset;
+
+          #[test]
+          fn test_format_bv_with_tokens_no_maps() {
+              let bv = HybridBitset::from_iter(vec![1, 2]);
+              assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "[1..=2]");
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_with_maps() {
+              let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+              let mut bimap = BiBTreeMap::new();
+              bimap.insert(10, 0); // original 10 -> internal 0
+              bimap.insert(20, 1); // original 20 -> internal 1
+              let mut llm_map = BiBTreeMap::new();
+              llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+              llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+
+              let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_limit_and_ellipsis() {
+              let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+              let mut bimap = BiBTreeMap::new();
+              let mut llm_map = BiBTreeMap::new();
+              for i in 0..10 {
+                  bimap.insert(100 + i, i);
+                  llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+              }
+
+              let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+          }
+
+          // Helper function to create a minimal constraint for testing dump
+          fn create_minimal_constraint() -> GrammarConstraint {
+              // Tokenizer: Matches "a" (token 0) or "$" (token 1)
+              let expr = crate::groups![
+                  eat_u8(b'a'), // Grammar Token 0
+                  seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
+                  eat_u8(b'$')  // Grammar Token 2 (EOF)
+              ];
+              let tokenizer = expr.build();
+
+              // LLM Token Map: "aaaa" -> 0, "$" -> 1
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+              let max_llm_token_id = 1;
+
+              // Grammar: S -> A $
+              let productions = vec![
+                  prod("S", vec![nt("A"), nt("AA"), t("EOF")]), // S' -> S EOF is implicit
+              ];
+
+              // Map grammar terminals to the tokenizer's token IDs
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(regex_name("A"), TerminalID(0)); // "a" from tokenizer
+              grammar_token_map.insert(regex_name("AA"), TerminalID(1)); // "aa" from tokenizer
+              grammar_token_map.insert(regex_name("EOF"), TerminalID(2)); // "$" from tokenizer
+
+              // Generate parser
+              let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map, None);
+
+              let mut terminal_name_map = BiBTreeMap::new();
+              terminal_name_map.insert(regex_name("A"), 0);
+              terminal_name_map.insert(regex_name("AA"), 1);
+              terminal_name_map.insert(regex_name("EOF"), 2);
+
+              // Create constraint (this runs precomputation)
+              GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)
+          }
+
+          #[test]
+          fn test_dump_precomputed_runs() {
+              let constraint = create_minimal_constraint();
+              println!("--- Starting dump_precomputed test output ---");
+              constraint.dump_precomputed(); // Just ensure it runs without panic
+              println!("--- Finished dump_precomputed test output ---");
+          }
+      }
   diffs_applied_this_send: true
 system:
   message: |2
@@ -25132,5 +26439,1108 @@ messages:
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
+    metadata:
+  - user: |-
+      Diff of src/datastructures/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -1,6 +1,8 @@+use std::sync::Mutex;
+      +use crate::datastructures::ArcPtrWrapper;
+       use std::any::Any;
+       use std::cmp::Ordering;
+      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+       use crate::tokenizer::LLMTokenID;
+       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      @@ -806,12 +808,70 @@  
+               // Handle “popped below bottom” cases:
+               //
+      -        // If the reduction pops below the bottom, we have recognized only the
+      -        // suffix β of a rule A ::= α β. Per substring parsing semantics,
+      -        // α lies before the substring start and must be considered unknown (but derivable),
+      -        // so we continue in every state that has a GOTO on A. We also merge the Acc
+      -        // accumulated along these paths to create a new virtual root to push onto.
+               if any_below_bottom {
+      +            // Create one new shared trie2 node. It will be the single trie2 node
+      +            // for the new GSS paths created from these "below bottom" pops.
+      +            let new_shared_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            let mut found_accept = false;
+      +
+      +            // Compute all possible "hallucinated" source states and their GOTO chains.
+      +            // A state is a possible source if it has a GOTO on the current non-terminal.
+      +            let mut source_and_goto_states: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+      +            for (source_state_id, row) in &self.parser.table {
+      +                let mut final_goto_state_ids_for_source = BTreeSet::new();
+      +                let mut current_nt_local = nt;
+      +                loop {
+      +                    if let Some(goto) = row.gotos.get(&current_nt_local) {
+      +                        if goto.accept {
+      +                            found_accept = true;
+      +                        }
+      +                        if let Some(goto_state_id) = goto.state_id {
+      +                            let next_row = &self.parser.table[&goto_state_id];
+      +                            if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                                current_nt_local = *next_nt;
+      +                                continue;
+      +                            } else {
+      +                                final_goto_state_ids_for_source.insert(goto_state_id);
+      +                                break;
+      +                            }
+      +                        } else {
+      +                            break;
+      +                        }
+      +                    } else {
+      +                        break;
+      +                    }
+      +                }
+      +                if !final_goto_state_ids_for_source.is_empty() {
+      +                    source_and_goto_states.insert(*source_state_id, final_goto_state_ids_for_source);
+      +                }
+      +            }
+      +
+      +            // If any path led to acceptance, mark the new trie2 node as an end node.
+      +            if found_accept {
+      +                new_shared_trie2_node.lock().unwrap().value.end = true;
+      +            }
+      +
+      +            // For each path that popped below bottom, update its trie2 nodes.
+      +            for (pops_remaining, acc_arc) in &popper.below_bottom {
+      +                let edge_bv = &acc_arc.llm_tokens_union;
+      +                if edge_bv.is_empty() { continue; }
+      +
+      +                for old_trie2_node_wrapper in &acc_arc.trie2_nodes {
+      +                    for source_state_id in source_and_goto_states.keys() {
+      +                        let edge_key = (*pops_remaining, Some(*source_state_id));
+      +                        let inserter = EdgeInserter::new(
+      +                            old_trie2_node_wrapper.as_arc().clone(),
+      +                            edge_key,
+      +                            edge_bv.clone(),
+      +                            |existing, new| *existing |= new,
+      +                        );
+      +                        // This unwrap is safe because new_shared_trie2_node is new, so no cycles.
+      +                        inserter.try_destination(new_shared_trie2_node.clone()).unwrap();
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Create a new merged Acc for the new GSS paths.
+                   let mut merged_acc_opt: Option<Acc> = None;
+                   for acc_arc in popper.below_bottom.values() {
+                       merged_acc_opt = Some(match merged_acc_opt.take() {
+      @@ -819,40 +879,16 @@                     Some(prev) => Acc::merge(&prev, acc_arc),
+                       });
+                   }
+      - 
+      -            if let Some(merged_acc) = merged_acc_opt {
+      -                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      -                for (source_state_id, row) in &self.parser.table {
+      -                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      -                    let mut current_nt_local = nt;
+      -                    loop {
+      -                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      -                            if goto.accept {
+      -                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      -                                self.accepted = true;
+      -                            }
+      -                            if let Some(goto_state_id) = goto.state_id {
+      -                                let next_row = &self.parser.table[&goto_state_id];
+      -                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      -                                    current_nt_local = *next_nt;
+      -                                    continue;
+      -                                } else {
+      -                                    final_goto_state_ids_for_source.insert(goto_state_id);
+      -                                    break;
+      -                                }
+      -                            } else {
+      -                                break;
+      -                            }
+      -                        } else {
+      -                            break;
+      -                        }
+      -                    }
+      -                    if !final_goto_state_ids_for_source.is_empty() {
+      -                        states_to_push.insert(*source_state_id);
+      -                        states_to_push.extend(final_goto_state_ids_for_source);
+      -                    }
+      -                }
+      - 
+      +
+      +            if let Some(mut merged_acc) = merged_acc_opt {
+      +                // The new GSS paths will only have the new shared trie2 node.
+      +                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_shared_trie2_node)]);
+      +
+      +                let states_to_push: BTreeSet<StateID> = source_and_goto_states
+      +                    .iter()
+      +                    .flat_map(|(source, gotos)| std::iter::once(*source).chain(gotos.iter().cloned()))
+      +                    .collect();
+      +
+                       if !states_to_push.is_empty() {
+                           let base = GSSNode::new(merged_acc);
+                           let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+      @@ -860,7 +896,7 @@                 }
+                   }
+               }
+      - 
+      +
+               if out.is_empty() {
+                   Arc::new(GSSNode::new_fresh())
+               } else if out.len() == 1 {
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -20,6 +20,7 @@ use indicatif::{ProgressBar, ProgressStyle};
+       
+       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+      +use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+       use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
+       use crate::datastructures::hybrid_bitset::HybridBitset;
+       use crate::datastructures::trie::{EdgeInserter, Trie};
+      @@ -35,6 +36,7 @@ use std::collections::BTreeMap as StdMap;
+       use profiler_macro::{time_it, timeit};
+       use crate::datastructures::gss::Acc;
+      +use crate::glr::table::StateID;
+       use crate::glr::analyze::compute_terminal_follow_sets;
+       use crate::glr::grammar::Terminal;
+       use crate::glr::items::{LRMode, LR_MODE};
+      @@ -296,7 +298,7 @@             &mut computed_possible_matches,
+               );
+       
+      -        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
+       
+               let mut gc = Self {
+                   tokenizer, // This is the tokenizer parameter being moved into the struct
+      @@ -344,9 +346,97 @@         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+           }
+       
+      +    /// Build the "Trie 2" precomputation.
+      +    ///
+      +    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
+      +    /// of tokens that can produce any terminal which is actionable from that state with
+      +    /// a first-step action that requires `pop_len` pops (0 for shift).
+      +    ///
+      +    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
+      +    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
+           pub fn precompute2(
+      +        parser: &GLRParser,
+      +        precomputed1: &Precomputed,
+      +        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+           ) -> Precomputed2 {
+      -        todo!()
+      +        let mut out: Precomputed2 = BTreeMap::new();
+      +
+      +        // For determinism, iterate tokenizer states in order of precomputed1
+      +        for (tok_sid, _root1_arc) in precomputed1 {
+      +            // Root for this tokenizer state in trie-2
+      +            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            // Single end node to unify all terminal edges
+      +            let end_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
+      +            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
+      +
+      +            // Map of grammar terminals -> LLM tokens for this tokenizer state
+      +            let tid_to_tokens_map = possible_matches.get(tok_sid)
+      +                .cloned()
+      +                .unwrap_or_else(BTreeMap::new);
+      +
+      +            // For every LR parse state, look at the full action map for next token
+      +            for (state_id, row) in &parser.table {
+      +                // Use the "full" action set to include splits/combined behaviors
+      +                for (tid_table, action) in &row.shifts_and_reduces_full {
+      +                    // Convert table TerminalID to the general TerminalID used by possible_matches
+      +                    let tid_for_pm = TerminalID(tid_table.0);
+      +                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
+      +                                let key = (0usize, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+      +                                let key = (*len, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if shift.is_some() {
+      +                                    let key = (0usize, Some(*state_id));
+      +                                    aggregated
+      +                                        .entry(key)
+      +                                        .and_modify(|bv| *bv |= token_bv)
+      +                                        .or_insert(token_bv.clone());
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    if !nts.is_empty() {
+      +                                        let key = (*len, Some(*state_id));
+      +                                        aggregated
+      +                                            .entry(key)
+      +                                            .and_modify(|bv| *bv |= token_bv)
+      +                                            .or_insert(token_bv.clone());
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Materialize edges on root2 pointing to a shared end node
+      +            {
+      +                let mut root_guard = root2_arc.lock().expect("poison");
+      +                for (ek, bv) in aggregated {
+      +                    let mut ev_opt = Some(bv);
+      +                    // No cycles expected; if any are detected, it's a logic error
+      +                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
+      +                }
+      +            }
+      +
+      +            out.insert(*tok_sid, root2_arc);
+      +        }
+      +
+      +        out
+           }
+       
+           pub fn init(&self) -> GrammarConstraintState<'_> {
+      @@ -1520,8 +1610,8 @@ 
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask(&self) -> LLMTokenBV {
+      -        self.get_mask1()
+      -        // self.get_mask2()
+      +        // self.get_mask1()
+      +        self.get_mask2()
+           }
+       
+           #[time_it]
+
+      ```
+    metadata:
+  - user: |-
+      ```rust 'src/constraint_extra.rs'
+      use std::collections::HashMap;
+      use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+      use crate::types::{TerminalID as GrammarTokenID};
+      use crate::datastructures::trie::Trie;
+      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
+      use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
+      use std::sync::{Arc, Mutex};
+      use bitvec::prelude::BitVec;
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use bimap::BiBTreeMap;
+      use crate::datastructures::ArcPtrWrapper;
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use crate::datastructures::gss::LLMTokenBV;
+      use crate::glr::grammar::Terminal;
+
+      /// Creates a neat string representation of a HybridBitset, showing values as ranges.
+      fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
+          if bv.is_empty() {
+              return "[]".to_string();
+          }
+
+          let mut ranges = vec![];
+          let mut iter = bv.iter();
+
+          if let Some(mut start) = iter.next() {
+              let mut end = start;
+              for val in iter {
+                  if val == end + 1 {
+                      end = val;
+                  } else {
+                      if start == end {
+                          ranges.push(format!("{}", start));
+                      } else {
+                          ranges.push(format!("{}..={}", start, end));
+                      }
+                      start = val;
+                      end = val;
+                  }
+              }
+              if start == end {
+                  ranges.push(format!("{}", start));
+              } else {
+                  ranges.push(format!("{}..={}", start, end));
+              }
+          }
+
+          const MAX_RANGES_TO_SHOW: usize = 5;
+          let ellipsis = if ranges.len() > MAX_RANGES_TO_SHOW { ", ..." } else { "" };
+          let ranges_to_show = ranges.iter().take(MAX_RANGES_TO_SHOW).cloned().collect::<Vec<_>>().join(", ");
+
+          format!("[{}{}]", ranges_to_show, ellipsis)
+      }
+
+      /// Helper function to format a HybridBitset for display, showing its debug representation
+      /// and a sample of the corresponding LLM tokens.
+      fn format_bv_with_tokens(
+          bv: &LLMTokenBV,
+          original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          limit: usize,
+      ) -> String {
+          let bv_neat_str = format_hybrid_bitset_neatly(bv);
+
+          let (bimap, token_map) = match (original_internal_bimap, llm_token_map) {
+              (Some(b), Some(t)) => (b, t),
+              _ => return bv_neat_str, // If we don't have maps, just return the neat string.
+          };
+
+          let mut token_samples = Vec::new();
+          for internal_id in bv.iter().take(limit) {
+              if let Some(original_id) = bimap.get_by_right(&internal_id) {
+                  if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(*original_id)) {
+                      token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
+                  }
+              }
+          }
+
+          if token_samples.is_empty() {
+              return bv_neat_str;
+          }
+
+          let samples_str = token_samples.join(", ");
+          let ellipsis = if bv.len() > limit { ", ..." } else { "" };
+
+          format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
+      }
+
+      /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
+      pub fn dump_precompute_trie_recursive(
+          node_arc: &Arc<Mutex<PrecomputeNode>>,
+          prefix: String,
+          visited: &mut HashSet<*const PrecomputeNode>,
+          original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+          token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      ) {
+          let children_to_visit;
+
+          {
+              let node = node_arc.lock().expect("Mutex poisoned during dump");
+              // Collect children information while holding the lock
+              children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
+                  dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                      (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+                  })
+              }).collect::<Vec<_>>();
+          }
+
+          let num_children = children_to_visit.len();
+          for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+              let is_last = i == num_children - 1;
+              let connector = if is_last { "└──" } else { "├──" };
+
+              let edge_key_display = match edge_key {
+                  Some(gtid) => {
+                      if let Some(name_map) = token_name_map {
+                          name_map.get_by_right(&gtid.0)
+                              .map(|name| format!("'{}'", name))
+                              .unwrap_or_else(|| format!("ID:{}", gtid.0))
+                      } else {
+                          format!("ID:{}", gtid.0)
+                      }
+                  },
+                  None => "ε".to_string(),
+              };
+
+              let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
+
+              let child_ptr;
+              let child_info;
+              let is_visited;
+              let is_end_node;
+              {
+                  let child_node = child_arc.lock().unwrap();
+                  child_ptr = &*child_node as *const PrecomputeNode;
+                  is_visited = visited.contains(&child_ptr);
+                  is_end_node = child_node.value.end;
+                  child_info = format!("Node {:p} (MaxDepth: {}){}", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" });
+              }
+
+              // Don't shortcut the display for end nodes, even if they are visited.
+              if is_visited && !is_end_node {
+                  println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+              } else {
+                  // Print full info for unvisited nodes or for any end node.
+                  println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+
+                  // Only recurse if the node has not been visited before.
+                  // This prevents re-printing the children of a shared node and avoids cycles.
+                  // End nodes are leaves, so they won't recurse anyway.
+                  if !is_visited {
+                      visited.insert(child_ptr);
+                      let child_prefix = if is_last {
+                          format!("{}   ", prefix)
+                      } else {
+                          format!("{}│  ", prefix)
+                      };
+                      dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
+                  }
+              }
+          }
+      }
+
+      impl GrammarConstraint { // This is in constraint_extra.rs
+          /// Dumps the structure of the precomputed Trie map for visualization.
+          pub fn dump_precomputed(&self) {
+              println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
+              println!("===================================");
+
+              let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+              for (tokenizer_state_id, root_node_trie) in &self.precomputed {
+                  println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+                  
+                  let root_ptr;
+                  let root_info;
+                  {
+                      let root_node = root_node_trie.lock().unwrap();
+                      root_ptr = &*root_node as *const PrecomputeNode;
+                      root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+                  }
+                  println!("{}", root_info);
+
+                  if visited.contains(&root_ptr) {
+                      println!("  (Root already visited)");
+                  } else {
+                      visited.insert(root_ptr);
+                      dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.llm_vocab.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_vocab.llm_token_map));
+                  }
+              }
+              println!("\n===================================");
+              println!("Dump Complete.");
+          }
+      }
+
+
+      // Add this struct definition before impl GrammarConstraint
+      #[derive(Default, Debug)]
+      pub struct PrecomputeStats {
+          // Gross counts (before sharing/merging reduces them in the final structure)
+          pub initial_root_nodes_created: usize,
+
+          // Final structure stats (net counts, after all processing and sharing)
+          pub final_unique_nodes_count: usize,
+          pub final_root_nodes_count: usize,
+          pub final_non_root_internal_nodes_count: usize, // Renamed from final_internal_nodes_count
+          pub final_leaf_nodes_count: usize,             // New field
+          pub final_edges_count: usize,
+          pub final_edges_with_none_key: usize,
+          pub final_edges_with_some_key: usize,
+          pub final_nodes_with_clean_end: usize,
+
+          // For average edge occupancy per key type
+          pub final_total_occupancy_sum_for_some_keys: usize,
+          pub final_num_occupied_some_edge_keys: usize,
+          pub final_total_occupancy_sum_for_none_keys: usize,
+          pub final_num_occupied_none_edge_keys: usize,
+
+          // New fields for grammar token edge key statistics
+          pub final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+          pub final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+          pub final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+
+          // New fields for edge pruning statistics
+          pub final_edges_pruned_total: usize,
+          pub final_edges_pruned_by_token: BTreeMap<GrammarTokenID, usize>,
+
+          pub edges_pruned_by_terminal_sequence: usize,
+          pub final_total_ranges_in_bvs: usize,
+      }
+
+      // Manual impl for PrecomputeStats
+      impl JSONConvertible for PrecomputeStats {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("initial_root_nodes_created".to_string(), self.initial_root_nodes_created.to_json());
+              obj.insert("final_unique_nodes_count".to_string(), self.final_unique_nodes_count.to_json());
+              obj.insert("final_root_nodes_count".to_string(), self.final_root_nodes_count.to_json());
+              obj.insert("final_non_root_internal_nodes_count".to_string(), self.final_non_root_internal_nodes_count.to_json());
+              obj.insert("final_leaf_nodes_count".to_string(), self.final_leaf_nodes_count.to_json());
+              obj.insert("final_edges_count".to_string(), self.final_edges_count.to_json());
+              obj.insert("final_edges_with_none_key".to_string(), self.final_edges_with_none_key.to_json());
+              obj.insert("final_edges_with_some_key".to_string(), self.final_edges_with_some_key.to_json());
+              obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
+              obj.insert("final_total_occupancy_sum_for_some_keys".to_string(), self.final_total_occupancy_sum_for_some_keys.to_json());
+              obj.insert("final_num_occupied_some_edge_keys".to_string(), self.final_num_occupied_some_edge_keys.to_json());
+              obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_total_occupancy_sum_for_none_keys.to_json());
+              obj.insert("final_num_occupied_none_edge_keys".to_string(), self.final_num_occupied_none_edge_keys.to_json());
+              obj.insert("final_grammar_token_edge_key_counts".to_string(), self.final_grammar_token_edge_key_counts.to_json());
+              obj.insert("final_grammar_token_edge_fanouts_dist".to_string(), self.final_grammar_token_edge_fanouts_dist.to_json());
+              obj.insert("final_grammar_token_edge_token_set_sizes_dist".to_string(), self.final_grammar_token_edge_token_set_sizes_dist.to_json());
+              obj.insert("final_edges_pruned_total".to_string(), self.final_edges_pruned_total.to_json());
+              obj.insert("final_edges_pruned_by_token".to_string(), self.final_edges_pruned_by_token.to_json());
+              obj.insert("edges_pruned_by_terminal_sequence".to_string(), self.edges_pruned_by_terminal_sequence.to_json());
+              obj.insert("final_total_ranges_in_bvs".to_string(), self.final_total_ranges_in_bvs.to_json());
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let initial_root_nodes_created = obj.remove("initial_root_nodes_created").ok_or_else(|| "Missing field initial_root_nodes_created for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_unique_nodes_count = obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_root_nodes_count = obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_non_root_internal_nodes_count = obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_leaf_nodes_count = obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_count = obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_with_none_key = obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_with_some_key = obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_nodes_with_clean_end = obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_occupancy_sum_for_some_keys = obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_num_occupied_some_edge_keys = obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_occupancy_sum_for_none_keys = obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_num_occupied_none_edge_keys = obj.remove("final_num_occupied_none_edge_keys").ok_or_else(|| "Missing field final_num_occupied_none_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_grammar_token_edge_key_counts = obj.remove("final_grammar_token_edge_key_counts").ok_or_else(|| "Missing field final_grammar_token_edge_key_counts for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                      let final_grammar_token_edge_fanouts_dist = obj.remove("final_grammar_token_edge_fanouts_dist").ok_or_else(|| "Missing field final_grammar_token_edge_fanouts_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                      let final_grammar_token_edge_token_set_sizes_dist = obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                      let final_edges_pruned_total = obj.remove("final_edges_pruned_total").ok_or_else(|| "Missing field final_edges_pruned_total for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_edges_pruned_by_token = obj.remove("final_edges_pruned_by_token").ok_or_else(|| "Missing field final_edges_pruned_by_token for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                      let edges_pruned_by_terminal_sequence = obj.remove("edges_pruned_by_terminal_sequence").ok_or_else(|| "Missing field edges_pruned_by_terminal_sequence for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      let final_total_ranges_in_bvs = obj.remove("final_total_ranges_in_bvs").ok_or_else(|| "Missing field final_total_ranges_in_bvs for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                      Ok(PrecomputeStats {
+                          initial_root_nodes_created,
+                          final_unique_nodes_count,
+                          final_root_nodes_count,
+                          final_non_root_internal_nodes_count,
+                          final_leaf_nodes_count,
+                          final_edges_count,
+                          final_edges_with_none_key,
+                          final_edges_with_some_key,
+                          final_nodes_with_clean_end,
+                          final_total_occupancy_sum_for_some_keys,
+                          final_num_occupied_some_edge_keys,
+                          final_total_occupancy_sum_for_none_keys,
+                          final_num_occupied_none_edge_keys,
+                          final_grammar_token_edge_key_counts,
+                          final_grammar_token_edge_fanouts_dist,
+                          final_grammar_token_edge_token_set_sizes_dist,
+                          final_edges_pruned_total,
+                          final_edges_pruned_by_token,
+                          edges_pruned_by_terminal_sequence,
+                          final_total_ranges_in_bvs,
+                      })
+                  }
+                  _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
+              }
+          }   
+      }
+
+
+      /// Helper function to calculate sum, mean, and median from Vec<usize>
+      fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
+          if numbers.is_empty() {
+              return (0, None, None);
+          }
+          let sum: usize = numbers.iter().sum();
+          let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
+
+          let mut sorted_numbers = numbers.clone();
+          sorted_numbers.sort_unstable();
+          let len = sorted_numbers.len();
+          let mid = len / 2;
+          let median: Option<f64> = if len == 0 {
+              None
+          } else if len % 2 == 0 {
+              Some((sorted_numbers[mid - 1] as f64 + sorted_numbers[mid] as f64) / 2.0)
+          } else {
+              Some(sorted_numbers[mid] as f64)
+          };
+          (sum, mean, median)
+      }
+
+      pub fn calculate_final_stats(
+          precomputed_roots: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+          stats: &mut PrecomputeStats,
+      ) {
+          crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
+
+          // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+          let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+          let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+          let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
+
+          while let Some(node_arc) = queue.pop_front() {
+              let (children_to_queue, node_ptr) = {
+                  let node_guard = node_arc.lock().unwrap();
+                  let ptr = &*node_guard as *const PrecomputeNode;
+                  let children = node_guard.children()
+                      .values()
+                      .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
+                      .collect::<Vec<_>>();
+                  (children, ptr)
+              };
+
+              if visited_data_ptrs.insert(node_ptr) {
+                  all_reachable_nodes.insert(node_ptr, node_arc.clone());
+                  for child_arc in children_to_queue {
+                      queue.push_back(child_arc);
+                  }
+              }
+          }
+
+          stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+          let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
+              .values()
+              .map(|arc| {
+                  let guard = arc.lock().unwrap();
+                  &*guard as *const PrecomputeNode
+              })
+              .collect();
+          stats.final_root_nodes_count = root_node_pointers.len();
+
+          // Initialize stats fields
+          stats.final_total_occupancy_sum_for_some_keys = 0;
+          stats.final_num_occupied_some_edge_keys = 0;
+          stats.final_total_occupancy_sum_for_none_keys = 0;
+          stats.final_num_occupied_none_edge_keys = 0;
+          stats.final_edges_count = 0;
+          stats.final_edges_with_none_key = 0;
+          stats.final_edges_with_some_key = 0;
+          stats.final_nodes_with_clean_end = 0;
+          stats.final_grammar_token_edge_key_counts.clear();
+          stats.final_grammar_token_edge_fanouts_dist.clear();
+          stats.final_grammar_token_edge_token_set_sizes_dist.clear();
+          // stats.final_root_nodes_count = 0; // Already set above
+          stats.final_non_root_internal_nodes_count = 0;
+          stats.final_leaf_nodes_count = 0;
+          stats.edges_pruned_by_terminal_sequence = 0;
+          stats.final_total_ranges_in_bvs = 0;
+
+          for (node_ptr, node_arc) in &all_reachable_nodes {
+              let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+
+              // New logic for non-root internal and leaf nodes
+              if !root_node_pointers.contains(node_ptr) {
+                  if node_guard.children().is_empty() {
+                      stats.final_leaf_nodes_count += 1;
+                  } else {
+                      stats.final_non_root_internal_nodes_count += 1;
+                  }
+              }
+
+              // Existing logic for edges
+              for (edge_key_opt, dest_map) in node_guard.children() {
+                  let num_edges_for_this_key_to_distinct_children = dest_map.len();
+                  stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+
+                  if let Some(gtid) = edge_key_opt {
+                      stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                      *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children; // Corrected: sum edges not occurrences of key
+
+                      stats.final_grammar_token_edge_fanouts_dist
+                          .entry(*gtid)
+                          .or_default()
+                          .push(num_edges_for_this_key_to_distinct_children);
+                      for llm_token_bv_on_edge in dest_map.values() {
+                          stats.final_grammar_token_edge_token_set_sizes_dist
+                              .entry(*gtid)
+                              .or_default()
+                              .push(llm_token_bv_on_edge.len());
+                          stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+                      }
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                          stats.final_num_occupied_some_edge_keys += 1;
+                      }
+                  } else {
+                      stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                          stats.final_num_occupied_none_edge_keys += 1;
+                      }
+                  }
+              }
+
+              // Existing logic for clean_end
+              // if let Some(clean_end_bv) = &node_guard.value.clean_end {
+              //     stats.final_nodes_with_clean_end += 1;
+              //     stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
+              // }
+              if node_guard.value.end {
+                  stats.final_nodes_with_clean_end += 1;
+              }
+          }
+          crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
+      }
+
+
+      pub fn print_precompute_stats(
+          stats: &PrecomputeStats,
+          token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
+      ) {
+          let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+              stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+          } else { 0.0 };
+          let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+              stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
+          } else { 0.0 };
+
+          println!("--- Precomputation Statistics ---");
+          println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+
+          println!("\nNode Counts Breakdown:");
+          println!("  There are:");
+          println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+          println!("    - {} are roots", stats.final_root_nodes_count);
+          let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
+          println!("    - {} are non-roots, of which", non_root_count);
+          println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+          println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+          println!("\nFinal Graph Structure (after sharing and deduplication):");
+          println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+          println!("  Total Edges: {}", stats.final_edges_count);
+          println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+          println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+          println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+          println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+          println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+          println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
+
+          let mut grammar_token_stats_new: Vec<(
+              GrammarTokenID,
+              usize, // key_usages (KeyUse)
+              (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
+              (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
+          )> = Vec::new();
+
+          for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
+              let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                          .get(gtid)
+                                          .cloned()
+                                          .unwrap_or_else(Vec::new);
+              let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
+
+              let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+                                                  .get(gtid)
+                                                  .cloned()
+                                                  .unwrap_or_else(Vec::new);
+              let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
+
+              grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
+          }
+
+          grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
+
+          println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+          println!(
+              "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+              "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+              "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+          );
+          println!(
+              "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+              "", "", "", "", "", "", "", "", "", ""
+          );
+
+          for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+              let name = token_name_map
+                  .get_by_right(&gtid.0) // gtid is GrammarTokenID
+                  .cloned()
+                  .map_or(
+                      format!("ID:{}", gtid.0),
+                      |t| t.to_string()
+                  );
+
+              let (sum_child, avg_child, med_child) = child_stats;
+              let (sum_toks, avg_toks, med_toks) = toks_stats;
+              let avg_key_toks = if key_usages > 0 {
+                  Some(sum_toks as f64 / key_usages as f64)
+              } else {
+                  None
+              };
+
+
+              let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+
+              println!(
+                  "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+                  name,
+                  gtid.0,
+                  key_usages,
+                  sum_child,
+                  format_opt_f64(avg_child),
+                  format_opt_f64(med_child),
+                  format_opt_f64(avg_key_toks),
+                  sum_toks,
+                  format_opt_f64(avg_toks),
+                  format_opt_f64(med_toks)
+              );
+          }
+          println!("---------------------------------");
+      }
+
+
+      #[cfg(test)]
+      mod tests {
+          use std::collections::BTreeMap;
+          use crate::finite_automata::{eat_u8, Regex};
+          use crate::glr::grammar::{nt, prod, t, regex_name, Terminal};
+          use crate::glr::parser::GLRParser;
+          use crate::glr::table::generate_glr_parser_with_terminal_map;
+          use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+          use crate::types::TerminalID;
+          use bimap::BiBTreeMap;
+          use super::*;
+          use bitvec::prelude::*;
+          use crate::seq;
+          use crate::datastructures::hybrid_bitset::HybridBitset;
+
+          #[test]
+          fn test_format_bv_with_tokens_no_maps() {
+              let bv = HybridBitset::from_iter(vec![1, 2]);
+              assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "[1..=2]");
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_with_maps() {
+              let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+              let mut bimap = BiBTreeMap::new();
+              bimap.insert(10, 0); // original 10 -> internal 0
+              bimap.insert(20, 1); // original 20 -> internal 1
+              let mut llm_map = BiBTreeMap::new();
+              llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+              llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+
+              let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_limit_and_ellipsis() {
+              let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+              let mut bimap = BiBTreeMap::new();
+              let mut llm_map = BiBTreeMap::new();
+              for i in 0..10 {
+                  bimap.insert(100 + i, i);
+                  llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+              }
+
+              let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+          }
+
+          // Helper function to create a minimal constraint for testing dump
+          fn create_minimal_constraint() -> GrammarConstraint {
+              // Tokenizer: Matches "a" (token 0) or "$" (token 1)
+              let expr = crate::groups![
+                  eat_u8(b'a'), // Grammar Token 0
+                  seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
+                  eat_u8(b'$')  // Grammar Token 2 (EOF)
+              ];
+              let tokenizer = expr.build();
+
+              // LLM Token Map: "aaaa" -> 0, "$" -> 1
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+              let max_llm_token_id = 1;
+
+              // Grammar: S -> A $
+              let productions = vec![
+                  prod("S", vec![nt("A"), nt("AA"), t("EOF")]), // S' -> S EOF is implicit
+              ];
+
+              // Map grammar terminals to the tokenizer's token IDs
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(regex_name("A"), TerminalID(0)); // "a" from tokenizer
+              grammar_token_map.insert(regex_name("AA"), TerminalID(1)); // "aa" from tokenizer
+              grammar_token_map.insert(regex_name("EOF"), TerminalID(2)); // "$" from tokenizer
+
+              // Generate parser
+              let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map, None);
+
+              let mut terminal_name_map = BiBTreeMap::new();
+              terminal_name_map.insert(regex_name("A"), 0);
+              terminal_name_map.insert(regex_name("AA"), 1);
+              terminal_name_map.insert(regex_name("EOF"), 2);
+
+              // Create constraint (this runs precomputation)
+              GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)
+          }
+
+          #[test]
+          fn test_dump_precomputed_runs() {
+              let constraint = create_minimal_constraint();
+              println!("--- Starting dump_precomputed test output ---");
+              constraint.dump_precomputed(); // Just ensure it runs without panic
+              println!("--- Finished dump_precomputed test output ---");
+          }
+      }
+      ```
+    metadata:
+      filename: src/constraint_extra.rs
+  - user: Add a function `dump_precomputed2`.
+    metadata:
+  - assistant: |-
+      Of course. Here are the requested changes to implement `dump_precomputed2`. I've added the function to `src/constraint_extra.rs` along with a recursive helper to traverse and print the `trie2` structure. I've also included a test to ensure it runs without panicking.
+
+      Here is the git diff for the modified file:
+
+      ```diff
+      diff --git a/src/constraint_extra.rs b/src/constraint_extra.rs
+      index 2411111..e12118c 100644
+      --- a/src/constraint_extra.rs
+      +++ b/src/constraint_extra.rs
+      @@ -1,5 +1,6 @@
+       use std::collections::HashMap;
+       use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+      +use crate::datastructures::gss::PrecomputeNode2;
+       use crate::types::{TerminalID as GrammarTokenID};
+       use crate::datastructures::trie::Trie;
+       use crate::tokenizer::{TokenizerStateID, LLMTokenID};
+      @@ -11,6 +12,7 @@
+       use std::collections::BTreeMap as StdMap;
+       use crate::datastructures::gss::LLMTokenBV;
+       use crate::glr::grammar::Terminal;
+      +use crate::glr::table::StateID;
+       
+       /// Creates a neat string representation of a HybridBitset, showing values as ranges.
+       fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
+      @@ -163,6 +165,81 @@
+               println!("\n===================================");
+               println!("Dump Complete.");
+           }
+      +
+      +    /// Dumps the structure of the precomputed Trie 2 map for visualization.
+      +    pub fn dump_precomputed2(&self) {
+      +        println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
+      +        println!("===================================");
+      +
+      +        let mut visited: HashSet<*const PrecomputeNode2> = HashSet::new();
+      +        for (tokenizer_state_id, root_node_trie) in &self.precomputed2 {
+      +            println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+      +
+      +            let root_ptr;
+      +            let root_info;
+      +            {
+      +                let root_node = root_node_trie.lock().unwrap();
+      +                root_ptr = &*root_node as *const PrecomputeNode2;
+      +                root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+      +            }
+      +            println!("{}", root_info);
+      +
+      +            if visited.contains(&root_ptr) {
+      +                println!("  (Root already visited)");
+      +            } else {
+      +                visited.insert(root_ptr);
+      +                dump_precompute_trie2_recursive(
+      +                    root_node_trie,
+      +                    "".to_string(),
+      +                    &mut visited,
+      +                    Some(&self.llm_vocab.original_to_internal_id_bimap),
+      +                    Some(&self.llm_vocab.llm_token_map),
+      +                );
+      +            }
+      +        }
+      +        println!("\n===================================");
+      +        println!("Dump Complete.");
+      +    }
+      +}
+      +
+      +pub fn dump_precompute_trie2_recursive(
+      +    node_arc: &Arc<Mutex<PrecomputeNode2>>,
+      +    prefix: String,
+      +    visited: &mut HashSet<*const PrecomputeNode2>,
+      +    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+      +    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      +) {
+      +    let children_to_visit = {
+      +        let node = node_arc.lock().expect("Mutex poisoned during dump");
+      +        node.children().iter().flat_map(|(edge_key, dest_map)| {
+      +            dest_map.iter().map(move |(child_wrapper, edge_val)| {
+      +                (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+      +            })
+      +        }).collect::<Vec<_>>()
+      +    };
+      +
+      +    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+      +        let is_last = i == children_to_visit.len() - 1;
+      +        let connector = if is_last { "└──" } else { "├──" };
+      +
+      +        let (pop_len, state_id_opt) = edge_key;
+      +        let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string()));
+      +        let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
+      +
+      +        let (child_ptr, child_info, is_visited, is_end_node) = {
+      +            let child_node = child_arc.lock().unwrap();
+      +            let ptr = &*child_node as *const PrecomputeNode2;
+      +            (ptr, format!("Node {:p} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
+      +        };
+      +
+      +        if is_visited && !is_end_node {
+      +            println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+      +        } else {
+      +            println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+      +            if !is_visited {
+      +                visited.insert(child_ptr);
+      +                let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
+      +                dump_precompute_trie2_recursive(child_arc, child_prefix, visited, original_internal_bimap, llm_token_map);
+      +            }
+      +        }
+      +    }
+       }
+       
+       
+      @@ -461,4 +538,12 @@
+               constraint.dump_precomputed(); // Just ensure it runs without panic
+               println!("--- Finished dump_precomputed test output ---");
+           }
+      -}
+      +
+      +    #[test]
+      +    fn test_dump_precomputed2_runs() {
+      +        let constraint = create_minimal_constraint();
+      +        println!("--- Starting dump_precomputed2 test output ---");
+      +        constraint.dump_precomputed2(); // Just ensure it runs without panic
+      +        println!("--- Finished dump_precomputed2 test output ---");
+      +    }
+      +}
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_extra.rs
+      Applying patch to 'src/constraint_extra.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_extra.rs.
     metadata:
 ...

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+use crate::datastructures::gss::PrecomputeNode2;
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
@@ -13,6 +14,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::glr::grammar::Terminal;
+use crate::glr::table::StateID;
 
 /// Creates a neat string representation of a HybridBitset, showing values as ranges.
 fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
@@ -190,6 +192,84 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         }
         println!("\n===================================");
         println!("Dump Complete.");
+    }
+
+    /// Dumps the structure of the precomputed Trie 2 map for visualization.
+    pub fn dump_precomputed2(&self) {
+        println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
+        println!("===================================");
+
+        let mut visited: HashSet<*const PrecomputeNode2> = HashSet::new();
+        for (tokenizer_state_id, root_node_trie) in &self.precomputed2 {
+            println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+
+            let root_ptr;
+            let root_info;
+            {
+                let root_node = root_node_trie.lock().unwrap();
+                root_ptr = &*root_node as *const PrecomputeNode2;
+                root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+            }
+            println!("{}", root_info);
+
+            if visited.contains(&root_ptr) {
+                println!("  (Root already visited)");
+            } else {
+                visited.insert(root_ptr);
+                dump_precompute_trie2_recursive(
+                    root_node_trie,
+                    "".to_string(),
+                    &mut visited,
+                    Some(&self.llm_vocab.original_to_internal_id_bimap),
+                    Some(&self.llm_vocab.llm_token_map),
+                );
+            }
+        }
+        println!("\n===================================");
+        println!("Dump Complete.");
+    }
+}
+
+pub fn dump_precompute_trie2_recursive(
+    node_arc: &Arc<Mutex<PrecomputeNode2>>,
+    prefix: String,
+    visited: &mut HashSet<*const PrecomputeNode2>,
+    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+) {
+    let children_to_visit = {
+        let node = node_arc.lock().expect("Mutex poisoned during dump");
+        node.children().iter().flat_map(|(edge_key, dest_map)| {
+            dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+            })
+        }).collect::<Vec<_>>()
+    };
+
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+        let is_last = i == children_to_visit.len() - 1;
+        let connector = if is_last { "└──" } else { "├──" };
+
+        let (pop_len, state_id_opt) = edge_key;
+        let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string()));
+        let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
+
+        let (child_ptr, child_info, is_visited, is_end_node) = {
+            let child_node = child_arc.lock().unwrap();
+            let ptr = &*child_node as *const PrecomputeNode2;
+            (ptr, format!("Node {:p} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
+        };
+
+        if is_visited && !is_end_node {
+            println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+        } else {
+            println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+            if !is_visited {
+                visited.insert(child_ptr);
+                let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
+                dump_precompute_trie2_recursive(child_arc, child_prefix, visited, original_internal_bimap, llm_token_map);
+            }
+        }
     }
 }
 
@@ -648,5 +728,13 @@ mod tests {
         println!("--- Starting dump_precomputed test output ---");
         constraint.dump_precomputed(); // Just ensure it runs without panic
         println!("--- Finished dump_precomputed test output ---");
+    }
+
+    #[test]
+    fn test_dump_precomputed2_runs() {
+        let constraint = create_minimal_constraint();
+        println!("--- Starting dump_precomputed2 test output ---");
+        constraint.dump_precomputed2(); // Just ensure it runs without panic
+        println!("--- Finished dump_precomputed2 test output ---");
     }
 }
