@@ -1610,8 +1610,8 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        self.get_mask1()
-        // self.get_mask2()
+        // self.get_mask1()
+        self.get_mask2()
     }
 
     #[time_it]
