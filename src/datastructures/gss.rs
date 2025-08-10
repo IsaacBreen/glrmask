@@ -32,7 +32,7 @@ pub type TerminalBV = HybridBitset;
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-type NodeMap = BTreeMap<ParseStateEdgeEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
+type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.

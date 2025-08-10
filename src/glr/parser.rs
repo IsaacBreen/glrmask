@@ -117,29 +117,6 @@ impl JSONConvertible for ParseStateEdgeContent {
     }
 }
 
-impl JSONConvertible for (usize, Option<StateID>) {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("pops".to_string(), self.0.to_json());
-        obj.insert("state_id".to_string(), self.1.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let pops = obj.remove("pops")
-                    .ok_or_else(|| "Missing field pops for (usize, Option<StateID>)".to_string())
-                    .and_then(usize::from_json)?;
-                let state_id_opt = obj.remove("state_id")
-                    .ok_or_else(|| "Missing field state_id for (usize, Option<StateID>)".to_string())
-                    .and_then(Option::<StateID>::from_json)?;
-                Ok((pops, state_id_opt))
-            }
-            _ => Err("Expected JSONNode::Object for (usize, Option<StateID>)".to_string()),
-        }
-    }
-}
-
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState { // No longer generic
@@ -1195,9 +1172,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
+        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
         crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 

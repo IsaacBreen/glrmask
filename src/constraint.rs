@@ -38,6 +38,7 @@ use crate::datastructures::gss::Acc;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
+use crate::glr::table::StateID;
 use crate::interface::CompiledGrammar;
 use crate::profiler::GSS_LOGGING_ENABLED;
 
@@ -1593,7 +1594,7 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-        for (tokenizer_state_id, glr_state) in self.state.iter() {
+        for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
