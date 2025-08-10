@@ -22,7 +22,7 @@ use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
-use crate::glr::items::{Item, LRMode, LR_MODE, self};
+use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 use crate::datastructures::trie::EdgeInserter;
 
@@ -813,65 +813,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // α lies before the substring start and must be considered unknown (but derivable),
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
-        // and update the trie2 nodes.
         if any_below_bottom {
-            // Create one shared new trie2 node and one shared end node for this whole "below bottom" event.
-            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            let new_trie2_end_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-            
-            // Compute possible 'hallucinated' source states. This is just all states in the table.
-            let all_source_states: Vec<StateID> = self.parser.table.keys().cloned().collect();
-
-            let mut final_merged_acc_opt: Option<Acc> = None;
-
-            // First, merge all Accs from below_bottom to get the final token sets.
+            let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
-                final_merged_acc_opt = Some(match final_merged_acc_opt.take() {
+                merged_acc_opt = Some(match merged_acc_opt.take() {
                     None => (**acc_arc).clone(),
                     Some(prev) => Acc::merge(&prev, acc_arc),
                 });
             }
-            
-            // Now, iterate again to update the trie2 nodes.
-            for (pops_below, acc_arc) in &popper.below_bottom {
-                // Loop over the acc's trie2 node set
-                for trie2_node_wrapper in &acc_arc.trie2_nodes {
-                    let trie2_node_arc = trie2_node_wrapper.as_arc();
-                    // Loop over source states
-                    for source_state_id in &all_source_states {
-                        let row = &self.parser.table[source_state_id];
-                        let edge_key = (*pops_below, Some(*source_state_id));
-                        let edge_bv = &acc_arc.llm_tokens_union;
-
-                        if edge_bv.is_empty() { continue; }
-
-                        // Push an edge to the new trie2 node
-                        EdgeInserter::new(
-                            trie2_node_arc.clone(),
-                            edge_key,
-                            edge_bv.clone(),
-                            |e, n| *e |= n,
-                        ).try_destination(new_trie2_node.clone()).unwrap(); // Should not fail
-
-                        // Check for accept and push to end node
-                        if let Some(goto) = row.gotos.get(&nt) {
-                            if goto.accept {
-                                EdgeInserter::new(
-                                    trie2_node_arc.clone(),
-                                    edge_key,
-                                    edge_bv.clone(),
-                                    |e, n| *e |= n,
-                                ).try_destination(new_trie2_end_node.clone()).unwrap();
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(mut merged_acc) = final_merged_acc_opt {
-                // Replace its trie2 node set with just the new shared trie2 node
-                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node.clone())]);
-
+ 
+            if let Some(merged_acc) = merged_acc_opt {
                 let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {
                     let mut final_goto_state_ids_for_source = BTreeSet::new();
