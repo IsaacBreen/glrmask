@@ -133,6 +133,37 @@ impl JSONConvertible for () {
     }
 }
 
+impl<T0: JSONConvertible> JSONConvertible for (T0,) {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::Array(vec![self.0.to_json()])
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Array(arr) if arr.len() == 1 => {
+                let item = T0::from_json(arr.into_iter().next().unwrap())?;
+                Ok((item,))
+            }
+            _ => Err("Expected JSONNode::Array with one element for tuple (T0,)".to_string()),
+        }
+    }
+}
+
+impl<T0: JSONConvertible, T1: JSONConvertible> JSONConvertible for (T0, T1) {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::Array(vec![self.0.to_json(), self.1.to_json()])
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Array(arr) if arr.len() == 2 => {
+                let item0 = T0::from_json(arr[0].clone())?;
+                let item1 = T1::from_json(arr[1].clone())?;
+                Ok((item0, item1))
+            }
+            _ => Err("Expected JSONNode::Array with two elements for tuple (T0, T1)".to_string()),
+        }
+    }
+}
+
 impl JSONConvertible for bool {
     fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
     fn from_json(node: JSONNode) -> Result<Self, String> {
