@@ -20,6 +20,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
 use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
@@ -35,6 +36,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
+use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
@@ -296,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -344,9 +346,97 @@ impl GrammarConstraint {
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
+    /// Build the "Trie 2" precomputation.
+    ///
+    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
+    /// of tokens that can produce any terminal which is actionable from that state with
+    /// a first-step action that requires `pop_len` pops (0 for shift).
+    ///
+    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
+    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
     pub fn precompute2(
+        parser: &GLRParser,
+        precomputed1: &Precomputed,
+        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
-        todo!()
+        let mut out: Precomputed2 = BTreeMap::new();
+
+        // For determinism, iterate tokenizer states in order of precomputed1
+        for (tok_sid, _root1_arc) in precomputed1 {
+            // Root for this tokenizer state in trie-2
+            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
+                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+            // Single end node to unify all terminal edges
+            let end_arc: Arc<Mutex<PrecomputeNode2>> =
+                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+
+            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
+            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
+
+            // Map of grammar terminals -> LLM tokens for this tokenizer state
+            let tid_to_tokens_map = possible_matches.get(tok_sid)
+                .cloned()
+                .unwrap_or_else(BTreeMap::new);
+
+            // For every LR parse state, look at the full action map for next token
+            for (state_id, row) in &parser.table {
+                // Use the "full" action set to include splits/combined behaviors
+                for (tid_table, action) in &row.shifts_and_reduces_full {
+                    // Convert table TerminalID to the general TerminalID used by possible_matches
+                    let tid_for_pm = TerminalID(tid_table.0);
+                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
+                                let key = (0usize, Some(*state_id));
+                                aggregated
+                                    .entry(key)
+                                    .and_modify(|bv| *bv |= token_bv)
+                                    .or_insert(token_bv.clone());
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+                                let key = (*len, Some(*state_id));
+                                aggregated
+                                    .entry(key)
+                                    .and_modify(|bv| *bv |= token_bv)
+                                    .or_insert(token_bv.clone());
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                if shift.is_some() {
+                                    let key = (0usize, Some(*state_id));
+                                    aggregated
+                                        .entry(key)
+                                        .and_modify(|bv| *bv |= token_bv)
+                                        .or_insert(token_bv.clone());
+                                }
+                                for (len, nts) in reduces {
+                                    if !nts.is_empty() {
+                                        let key = (*len, Some(*state_id));
+                                        aggregated
+                                            .entry(key)
+                                            .and_modify(|bv| *bv |= token_bv)
+                                            .or_insert(token_bv.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Materialize edges on root2 pointing to a shared end node
+            {
+                let mut root_guard = root2_arc.lock().expect("poison");
+                for (ek, bv) in aggregated {
+                    let mut ev_opt = Some(bv);
+                    // No cycles expected; if any are detected, it's a logic error
+                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
+                }
+            }
+
+            out.insert(*tok_sid, root2_arc);
+        }
+
+        out
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -2039,7 +2129,78 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        todo!()
+        // Final mask of original token IDs
+        if self.state.is_empty() {
+            return HybridBitset::zeros();
+        }
+
+        // Accumulate in internal ID space; convert at the end
+        let mut final_internal = HybridBitset::zeros();
+
+        for (tok_sid, glr_state) in &self.state {
+            // Find trie-2 root for this tokenizer state
+            let root2_arc = match self.parent.precomputed2.get(tok_sid) {
+                Some(a) => a.clone(),
+                None => continue,
+            };
+
+            // Snapshot children by (pop_len, Some(state_id)) -> unioned EV across all dests
+            let (by_state_map, has_any) = {
+                let root_guard = root2_arc.lock().expect("poison");
+                let mut tmp: BTreeMap<StateID, Vec<(usize, LLMTokenBV)>> = BTreeMap::new();
+                let mut any = false;
+                for (ek, dest_map) in root_guard.children().iter() {
+                    let (pop_len, opt_sid) = ek;
+                    if let Some(sid) = opt_sid {
+                        // Union all EVs for this edge key to get the total token set
+                        let mut union_bv = HybridBitset::zeros();
+                        for (_dst, ev_bv) in dest_map.iter() {
+                            union_bv |= ev_bv;
+                        }
+                        if !union_bv.is_empty() {
+                            tmp.entry(*sid).or_default().push((*pop_len, union_bv));
+                            any = true;
+                        }
+                    }
+                }
+                (tmp, any)
+            };
+
+            if !has_any {
+                continue;
+            }
+
+            // For each top-of-stack path in the GLR GSS, see if it matches trie-2's (state_id, pop_len).
+            for peek in GSSNode::peek_iter(&glr_state.active_state.stack) {
+                let top_state = peek.edge_value().state_id;
+                let path_allowed_tokens = peek.resolved_llm_tokens_union();
+
+                if let Some(entries) = by_state_map.get(&top_state) {
+                    for (pop_len, edge_bv) in entries {
+                        if *pop_len == 0 {
+                            // No pop required – applicable immediately on this path.
+                            let mut contrib = edge_bv.clone();
+                            contrib &= &path_allowed_tokens;
+                            final_internal |= contrib;
+                        } else {
+                            // Pop 'pop_len' on this isolated path and check if the path remains above bottom.
+                            let popper = peek.popn(*pop_len);
+                            // Consider successful if we have at least one predecessor path remaining,
+                            // or we ended exactly at bottom (depth 0 below bottom).
+                            let ok = popper.num_predecessors() > 0 || popper.below_bottom.get(&0).is_some();
+                            if ok {
+                                let mut contrib = edge_bv.clone();
+                                contrib &= &path_allowed_tokens;
+                                final_internal |= contrib;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert to original IDs bitset
+        self.parent.internal_bv_to_original(&final_internal)
     }
 }
 
