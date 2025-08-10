@@ -1,8 +1,8 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
 use crate::tokenizer::LLMTokenID;
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
@@ -22,6 +22,7 @@ use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+use crate::datastructures::trie::EdgeInserter;
 
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
@@ -819,6 +820,35 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 });
             }
  
+            if let Some(merged_acc) = merged_acc_opt.as_ref() {
+                if !merged_acc.trie2_nodes.is_empty() {
+                    let mut new_dest_node = None;
+
+                    for (extra_pops, acc_arc) in &popper.below_bottom {
+                        for (source_state_id, row) in &self.parser.table {
+                            if row.gotos.contains_key(&nt) {
+                                // This is a "hallucinated" state.
+                                for trie2_node_wrapper in &merged_acc.trie2_nodes {
+                                    let dest_node = new_dest_node.get_or_insert_with(|| {
+                                        Arc::new(std::sync::Mutex::new(PrecomputeNode2::new(
+                                            crate::datastructures::gss::PrecomputedNodeContents::no_end()
+                                        )))
+                                    });
+
+                                    let inserter = EdgeInserter::new(
+                                        trie2_node_wrapper.as_arc().clone(),
+                                        (*extra_pops, Some(*source_state_id)),
+                                        acc_arc.llm_tokens_union.clone(),
+                                        |e, n| *e |= n,
+                                    );
+                                    inserter.try_destination(dest_node.clone()).unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(merged_acc) = merged_acc_opt {
                 let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {

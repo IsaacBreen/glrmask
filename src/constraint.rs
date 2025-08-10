@@ -20,7 +20,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -41,52 +41,13 @@ use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::GSS_LOGGING_ENABLED;
 
-pub type LLMTokenBV = HybridBitset;
-pub type TerminalBV = HybridBitset;
-
 const MERGE_THRESHOLD: usize = 20;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNodeContents {
-    pub end: bool,
-}
-
-impl PrecomputedNodeContents {
-    pub fn no_end() -> Self {
-        Self { end: false }
-    }
-
-    pub fn end() -> Self {
-        Self { end: true }
-    }
-}
-
-impl JSONConvertible for PrecomputedNodeContents {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("clean_end".to_string(), self.end.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                   .and_then(bool::from_json)?;
-                Ok(PrecomputedNodeContents { end })
-            }
-            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-        }
-    }
-}
-
-
-impl PrecomputedNodeContents {
-}
 
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
+pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
@@ -101,6 +62,7 @@ pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
+    pub(crate) precomputed2:     Precomputed2,
     pub(crate) llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -112,6 +74,13 @@ impl GrammarConstraint {
         assert_eq!(self.parser, other.parser);
         assert_eq!(self.precomputed.len(), other.precomputed.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
+            assert_eq!(sid1, sid2);
+            let node1 = arc1.lock().unwrap();
+            let node2 = arc2.lock().unwrap();
+            assert_eq!(*node1, *node2);
+        }
+        assert_eq!(self.precomputed2.len(), other.precomputed2.len());
+        for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
             assert_eq!(sid1, sid2);
             let node1 = arc1.lock().unwrap();
             let node2 = arc2.lock().unwrap();
@@ -132,6 +101,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
         obj.insert("parser".to_string(), self.parser.to_json());
         obj.insert("precomputed".to_string(), self.precomputed.to_json());
+        obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
@@ -150,6 +120,8 @@ impl JSONConvertible for GrammarConstraint {
                                 .and_then(GLRParser::from_json)?;
                 let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
                                      .and_then(|n| Precomputed::from_json(n))?;
+                let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
+                                     .and_then(|n| Precomputed2::from_json(n))?;
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -167,6 +139,7 @@ impl JSONConvertible for GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed,
+                    precomputed2,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
@@ -323,10 +296,13 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
+        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
             precomputed,
+            precomputed2,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches, // Add this line
@@ -366,6 +342,69 @@ impl GrammarConstraint {
         helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+    }
+
+    pub fn precompute2(
+        parser: &GLRParser,
+        precomputed1: &Precomputed,
+        llm_vocab: &Arc<LLMVocab>,
+    ) -> Precomputed2 {
+        let mut precomputed2 = BTreeMap::new();
+
+        for (tokenizer_state_id, trie1_root) in precomputed1 {
+            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
+                PrecomputedNodeContents::no_end(),
+            )));
+            precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
+
+            let mut initial_trie2_nodes = BTreeSet::new();
+            for state_id in parser.table.keys() {
+                let dest_node = Arc::new(Mutex::new(PrecomputeNode2::new(
+                    PrecomputedNodeContents::no_end()
+                )));
+
+                let inserter = EdgeInserter::new(
+                    trie2_root.clone(),
+                    (0, Some(*state_id)),
+                    LLMTokenBV::max_ones(),
+                    |e, n| *e |= n,
+                );
+                let pushed_trie2_node = inserter.try_destination(dest_node).unwrap();
+                initial_trie2_nodes.insert(ArcPtrWrapper::new(pushed_trie2_node));
+            }
+
+            let mut initial_glr_state = parser.init_glr_substring_parser(Some(llm_vocab.clone()));
+            Arc::make_mut(&mut initial_glr_state.active_state.stack).acc = Arc::new(Acc {
+                trie2_nodes: initial_trie2_nodes,
+                ..Acc::new_fresh()
+            });
+
+            let initial_values = vec![(trie1_root.clone(), initial_glr_state)];
+
+            Trie::special_map_grouped(
+                initial_values,
+                // step
+                |glr_s, grammar_token_opt, dest_map| {
+                    let mut out = Vec::new();
+                    let mut stepped = glr_s.clone();
+                    if let Some(gtid) = grammar_token_opt {
+                        stepped.process_token(*gtid);
+                    }
+                    if stepped.is_ok() {
+                        for (child_w, _edge_bv) in dest_map.iter() {
+                            out.push((child_w.clone(), stepped.clone()));
+                        }
+                    }
+                    out
+                },
+                // merge
+                |glr_s1, glr_s2| glr_s1.merge_with(glr_s2),
+                // process
+                |_precomputed_node_data, _glr_s| true,
+            );
+        }
+
+        precomputed2
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -2048,6 +2087,13 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
         &self.state
+    }
+}
+
+impl<'a> GrammarConstraintState<'a> {
+    pub fn get_mask2(&self) -> LLMTokenBV {
+        // TODO: Implement get_mask using Trie 2.
+        LLMTokenBV::zeros()
     }
 }
 
