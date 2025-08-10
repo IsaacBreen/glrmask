@@ -808,70 +808,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
  
         // Handle “popped below bottom” cases:
         //
+        // If the reduction pops below the bottom, we have recognized only the
+        // suffix β of a rule A ::= α β. Per substring parsing semantics,
+        // α lies before the substring start and must be considered unknown (but derivable),
+        // so we continue in every state that has a GOTO on A. We also merge the Acc
+        // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
-            // Create one new shared trie2 node. It will be the single trie2 node
-            // for the new GSS paths created from these "below bottom" pops.
-            let new_shared_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            let mut found_accept = false;
-
-            // Compute all possible "hallucinated" source states and their GOTO chains.
-            // A state is a possible source if it has a GOTO on the current non-terminal.
-            let mut source_and_goto_states: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-            for (source_state_id, row) in &self.parser.table {
-                let mut final_goto_state_ids_for_source = BTreeSet::new();
-                let mut current_nt_local = nt;
-                loop {
-                    if let Some(goto) = row.gotos.get(&current_nt_local) {
-                        if goto.accept {
-                            found_accept = true;
-                        }
-                        if let Some(goto_state_id) = goto.state_id {
-                            let next_row = &self.parser.table[&goto_state_id];
-                            if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
-                                current_nt_local = *next_nt;
-                                continue;
-                            } else {
-                                final_goto_state_ids_for_source.insert(goto_state_id);
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                if !final_goto_state_ids_for_source.is_empty() {
-                    source_and_goto_states.insert(*source_state_id, final_goto_state_ids_for_source);
-                }
-            }
-
-            // If any path led to acceptance, mark the new trie2 node as an end node.
-            if found_accept {
-                new_shared_trie2_node.lock().unwrap().value.end = true;
-            }
-
-            // For each path that popped below bottom, update its trie2 nodes.
-            for (pops_remaining, acc_arc) in &popper.below_bottom {
-                let edge_bv = &acc_arc.llm_tokens_union;
-                if edge_bv.is_empty() { continue; }
-
-                for old_trie2_node_wrapper in &acc_arc.trie2_nodes {
-                    for source_state_id in source_and_goto_states.keys() {
-                        let edge_key = (*pops_remaining, Some(*source_state_id));
-                        let inserter = EdgeInserter::new(
-                            old_trie2_node_wrapper.as_arc().clone(),
-                            edge_key,
-                            edge_bv.clone(),
-                            |existing, new| *existing |= new,
-                        );
-                        // This unwrap is safe because new_shared_trie2_node is new, so no cycles.
-                        inserter.try_destination(new_shared_trie2_node.clone()).unwrap();
-                    }
-                }
-            }
-
-            // Create a new merged Acc for the new GSS paths.
             let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
                 merged_acc_opt = Some(match merged_acc_opt.take() {
@@ -879,16 +821,40 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(prev) => Acc::merge(&prev, acc_arc),
                 });
             }
-
-            if let Some(mut merged_acc) = merged_acc_opt {
-                // The new GSS paths will only have the new shared trie2 node.
-                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_shared_trie2_node)]);
-
-                let states_to_push: BTreeSet<StateID> = source_and_goto_states
-                    .iter()
-                    .flat_map(|(source, gotos)| std::iter::once(*source).chain(gotos.iter().cloned()))
-                    .collect();
-
+ 
+            if let Some(merged_acc) = merged_acc_opt {
+                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+                for (source_state_id, row) in &self.parser.table {
+                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+                    let mut current_nt_local = nt;
+                    loop {
+                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+                            if goto.accept {
+                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+                                self.accepted = true;
+                            }
+                            if let Some(goto_state_id) = goto.state_id {
+                                let next_row = &self.parser.table[&goto_state_id];
+                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+                                    current_nt_local = *next_nt;
+                                    continue;
+                                } else {
+                                    final_goto_state_ids_for_source.insert(goto_state_id);
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    if !final_goto_state_ids_for_source.is_empty() {
+                        states_to_push.insert(*source_state_id);
+                        states_to_push.extend(final_goto_state_ids_for_source);
+                    }
+                }
+ 
                 if !states_to_push.is_empty() {
                     let base = GSSNode::new(merged_acc);
                     let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
@@ -896,7 +862,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
-
+ 
         if out.is_empty() {
             Arc::new(GSSNode::new_fresh())
         } else if out.len() == 1 {
