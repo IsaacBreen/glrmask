@@ -1211,37 +1211,51 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        crate::debug!(3, "GSS stats: {:#?}", stats);
-        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        if GSS_LOGGING_ENABLED {
-            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
-            println!("{}", s);
-            println!("\n\n--- GSS State Explanations ---\n");
-            for state_id in state_ids {
-                let mut explanation = String::new();
-                println!("\n--- State {} ---", state_id.0);
-                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-                println!("{}", explanation);
-            }
+        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
+        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
+                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
-            println!("\n\n--- Begin GSS Graphviz ---");
-            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
-                .map(|s| s.as_str())
-                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-                .collect();
-            println!("{}", self.parent.parser.gss_forest_to_dot(
-                &roots_with_labels,
-                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-                Some(&self.parent.llm_vocab.llm_token_map),
-            ));
-            println!("\n\n--- End GSS Graphviz ---");
+        let (gss_string, state_ids) = {
+            let print_full_forest = stats.unique_nodes <= MAX;
+            let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
+            let config = GSSPrintConfig {
+                max_nodes: max_nodes_to_print,
+                ..Default::default()
+            };
+            let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
+            let final_string = if print_full_forest {
+                format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
+            } else {
+                match find_longest_path(&self.active_state.stack) {
+                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+                                       stats.unique_nodes,
+                                       p.len(),
+                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
+                                            .map(|id| id.to_string())
+                                            .collect::<Vec<_>>()
+                                        .join(" → ")),
+                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
+                }
+            };
+            (final_string, state_ids)
+        };
+
+        let mut final_string = gss_string;
+        if explain_states && !state_ids.is_empty() {
+            final_string.push_str("\n\n--- GSS State Explanations ---\n");
+                for state_id in state_ids {
+                    let mut explanation = String::new();
+                    writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
+                    self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                    final_string.push_str(&explanation);
+                }
         }
 
-        // debug!(3, "{}", final_string);
+        if stats.unique_nodes > PANIC_THRESHOLD {
+            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
+        }
+
+        debug!(3, "{}", final_string);
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
