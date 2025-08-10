@@ -22,7 +22,6 @@ use crate::types::TerminalID;
 use std::ops::{BitAnd, BitOr};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use profiler_macro::{time_it, timeit};
-use crate::datastructures::trie::EdgeInserter;
 
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
@@ -148,33 +147,6 @@ impl Acc {
     // --- Accessors for final computed sets ---
     pub fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens_union.clone() }
     pub fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals_intersection.clone() }
-
-    pub fn push_trie2_sequence(&mut self, seq: &[(usize, StateID)], mask: &HybridBitset) {
-        if seq.is_empty() || self.trie2_nodes.is_empty() { return; }
-        let merge_ev = |existing: &mut HybridBitset, new_bv: HybridBitset| { *existing |= new_bv; };
-
-        let mut current_frontier = self.trie2_nodes.clone();
-        for (pops, sid) in seq {
-            let mut new_frontier = BTreeSet::new();
-
-            // Common destination node to promote sharing across parents.
-            let common_child = Arc::new(Mutex::new(Trie::new(PrecomputedNodeContents::no_end())));
-
-            for parent in &current_frontier {
-                let parent_arc = parent.as_arc().clone();
-                let inserter = EdgeInserter::new(parent_arc, (*pops, Some(*sid)), mask.clone(), merge_ev)
-                    .try_children()
-                    .try_destination(common_child.clone())
-                    .else_create_destination();
-                let dest = inserter.unwrap();
-                new_frontier.insert(ArcPtrWrapper::new(dest));
-            }
-            current_frontier = new_frontier;
-        }
-
-        // Replace the frontier
-        self.trie2_nodes = current_frontier;
-    }
 }
 
 
@@ -1823,4 +1795,3 @@ mod tests {
         assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
     }
 }
-

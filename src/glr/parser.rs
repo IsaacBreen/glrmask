@@ -820,9 +820,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 });
             }
  
-            if let Some(mut merged_acc) = merged_acc_opt {
+            if let Some(merged_acc) = merged_acc_opt {
                 let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
-                let mut source_states_that_work: BTreeSet<StateID> = BTreeSet::new(); // NEW
                 for (source_state_id, row) in &self.parser.table {
                     let mut final_goto_state_ids_for_source = BTreeSet::new();
                     let mut current_nt_local = nt;
@@ -851,17 +850,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !final_goto_state_ids_for_source.is_empty() {
                         states_to_push.insert(*source_state_id);
                         states_to_push.extend(final_goto_state_ids_for_source);
-                        source_states_that_work.insert(*source_state_id); // NEW
-                    }
-                }
-                // Advance trie2 frontier for "below-bottom" events
-                // Use the union LLM mask at this point (as per design).
-                let mask_for_trie2 = merged_acc.union_llm_tokens();
-                let depths: Vec<usize> = popper.below_bottom.keys().cloned().collect();
-
-                for d in depths {
-                    for sid in &source_states_that_work {
-                        merged_acc.push_trie2_sequence(&[(d, *sid)], &mask_for_trie2);
                     }
                 }
  
