@@ -22,8 +22,6 @@ use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
-use crate::datastructures::precomputed2_registry as precomputed2;
-use crate::datastructures::trie::EdgeInserter;
 
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
@@ -753,9 +751,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
         let mut any_below_bottom = !popper.below_bottom.is_empty();
-        // We'll also accumulate the set of “source states” that can reduce by `nt`.
-        // We re-compute this once for pushing into Trie-2.
-        let mut sources_that_reduce: BTreeSet<StateID> = BTreeSet::new();
         timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
@@ -854,7 +849,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !final_goto_state_ids_for_source.is_empty() {
                         states_to_push.insert(*source_state_id);
                         states_to_push.extend(final_goto_state_ids_for_source);
-                        sources_that_reduce.insert(*source_state_id);
                     }
                 }
  
@@ -862,37 +856,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let base = GSSNode::new(merged_acc);
                     let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
                     out.push(new_gss_node);
-                }
-
-                // Record below-bottom reduces into Trie-2 (pop-then-read model).
-                // For each (depth, acc) path that popped below the bottom, we attach edges
-                // (depth, Some(source_state_id)) carrying the allowed token mask at that bottom.
-                for (depth, acc_arc) in &popper.below_bottom {
-                    let acc_ref = acc_arc.as_ref();
-                    if acc_ref.trie2_node_ids.is_empty() || acc_ref.llm_tokens_union.is_empty() {
-                        continue;
-                    }
-                    let edge_mask = acc_ref.llm_tokens_union.clone();
-                    for &id in &acc_ref.trie2_node_ids {
-                        if let Some(node2_arc) = precomputed2::resolve(id) {
-                            // For every reducing source state, add/merge an edge on (depth, Some(state))
-                            for source_state_id in &sources_that_reduce {
-                                // Key is (depth, Some(state-id))
-                                let key = (*depth, Some(*source_state_id));
-                                let inserter = EdgeInserter::new(
-                                    node2_arc.clone(),
-                                    key,
-                                    edge_mask.clone(),
-                                    |existing: &mut LLMTokenBV, new_bv: LLMTokenBV| { *existing |= new_bv; }
-                                );
-                                // Merge with existing children for same key if present; otherwise create end-node
-                                let _ = inserter
-                                    .try_children()
-                                    .else_create_destination_with_value(crate::constraint::PrecomputedNodeContents::end())
-                                    .clone_into_option();
-                            }
-                        }
-                    }
                 }
             }
         }

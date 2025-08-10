@@ -9,7 +9,6 @@ pub mod hybrid_l2_bitset;
 pub mod arc_wrapper;
 pub mod ordered_hash_map;
 pub mod cache;
-pub mod precomputed2_registry;
 
 // Added
 pub use arc_wrapper::ArcPtrWrapper; // Added
