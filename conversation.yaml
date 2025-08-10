@@ -1,12 +1,12 @@
 local_system:
   attached_files:
-    - src/datastructures/mod.rs
-    - src/lib.rs
-    - src/datastructures/gss.rs
-    - src/glr/parser.rs
-    - src/datastructures/trie.rs
     - src/constraint.rs
-  conversation_file:
+    - src/datastructures/gss.rs
+    - src/datastructures/mod.rs
+    - src/datastructures/trie.rs
+    - src/glr/parser.rs
+    - src/lib.rs
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/mod.rs: |
@@ -16169,7 +16169,7 @@ system:
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -24694,5 +24694,1573 @@ messages:
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
+    metadata:
+  - user: |-
+      Diff of src/datastructures/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -1,6 +1,8 @@+use std::sync::Mutex;
+      +use crate::datastructures::ArcPtrWrapper;
+       use std::any::Any;
+       use std::cmp::Ordering;
+      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+       use crate::tokenizer::LLMTokenID;
+       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -20,6 +20,7 @@ use indicatif::{ProgressBar, ProgressStyle};
+       
+       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+      +use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+       use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
+       use crate::datastructures::hybrid_bitset::HybridBitset;
+       use crate::datastructures::trie::{EdgeInserter, Trie};
+      @@ -35,6 +36,7 @@ use std::collections::BTreeMap as StdMap;
+       use profiler_macro::{time_it, timeit};
+       use crate::datastructures::gss::Acc;
+      +use crate::glr::table::StateID;
+       use crate::glr::analyze::compute_terminal_follow_sets;
+       use crate::glr::grammar::Terminal;
+       use crate::glr::items::{LRMode, LR_MODE};
+      @@ -296,7 +298,7 @@             &mut computed_possible_matches,
+               );
+       
+      -        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
+       
+               let mut gc = Self {
+                   tokenizer, // This is the tokenizer parameter being moved into the struct
+      @@ -344,9 +346,97 @@         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+           }
+       
+      +    /// Build the "Trie 2" precomputation.
+      +    ///
+      +    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
+      +    /// of tokens that can produce any terminal which is actionable from that state with
+      +    /// a first-step action that requires `pop_len` pops (0 for shift).
+      +    ///
+      +    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
+      +    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
+           pub fn precompute2(
+      +        parser: &GLRParser,
+      +        precomputed1: &Precomputed,
+      +        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+           ) -> Precomputed2 {
+      -        todo!()
+      +        let mut out: Precomputed2 = BTreeMap::new();
+      +
+      +        // For determinism, iterate tokenizer states in order of precomputed1
+      +        for (tok_sid, _root1_arc) in precomputed1 {
+      +            // Root for this tokenizer state in trie-2
+      +            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            // Single end node to unify all terminal edges
+      +            let end_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
+      +            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
+      +
+      +            // Map of grammar terminals -> LLM tokens for this tokenizer state
+      +            let tid_to_tokens_map = possible_matches.get(tok_sid)
+      +                .cloned()
+      +                .unwrap_or_else(BTreeMap::new);
+      +
+      +            // For every LR parse state, look at the full action map for next token
+      +            for (state_id, row) in &parser.table {
+      +                // Use the "full" action set to include splits/combined behaviors
+      +                for (tid_table, action) in &row.shifts_and_reduces_full {
+      +                    // Convert table TerminalID to the general TerminalID used by possible_matches
+      +                    let tid_for_pm = TerminalID(tid_table.0);
+      +                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
+      +                                let key = (0usize, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+      +                                let key = (*len, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if shift.is_some() {
+      +                                    let key = (0usize, Some(*state_id));
+      +                                    aggregated
+      +                                        .entry(key)
+      +                                        .and_modify(|bv| *bv |= token_bv)
+      +                                        .or_insert(token_bv.clone());
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    if !nts.is_empty() {
+      +                                        let key = (*len, Some(*state_id));
+      +                                        aggregated
+      +                                            .entry(key)
+      +                                            .and_modify(|bv| *bv |= token_bv)
+      +                                            .or_insert(token_bv.clone());
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Materialize edges on root2 pointing to a shared end node
+      +            {
+      +                let mut root_guard = root2_arc.lock().expect("poison");
+      +                for (ek, bv) in aggregated {
+      +                    let mut ev_opt = Some(bv);
+      +                    // No cycles expected; if any are detected, it's a logic error
+      +                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
+      +                }
+      +            }
+      +
+      +            out.insert(*tok_sid, root2_arc);
+      +        }
+      +
+      +        out
+           }
+       
+           pub fn init(&self) -> GrammarConstraintState<'_> {
+      @@ -1520,8 +1610,8 @@ 
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask(&self) -> LLMTokenBV {
+      -        self.get_mask1()
+      -        // self.get_mask2()
+      +        // self.get_mask1()
+      +        self.get_mask2()
+           }
+       
+           #[time_it]
+
+      ```
+    metadata:
+  - user: |-
+      We have to modify the code around `if any_below_bottom {` in gss.rs to push to the trie 2 nodes as well.
+      - We'll push to one single shared new trie 2 node. First, create it.
+      - AND create one single shared END trie 2 node.
+      - Then compute the possible 'hallucinated' source states. Do this.
+      - Then loop over popper.below_bottom keys (usize num to pop) and values (acc).
+          - Then loop over the acc's trie 2 node set
+              - Then loop over the source states.
+                  - Push an edge to the new trie 2 node with the edge data (num to pop, source state) with edge bv just that acc's active LLM tokens. Use trie inserter.
+                  - Look up the goto for the source state. If there's an accept in it, we need to also push an edge to the new END trie 2 node with the same edge data/bv.
+      - Now we need the merged acc, merged over all popper.below_bottom. But replace its trie 2 node set with just the new shared trie 2 node (not the end).
+      - Then we just make one new GSS root with that new merged acc.
+      - Finally, we push each source state and gotos. Loop over source states:
+          - Push to the new GSS root with the source state id.
+          - Then push again with the goto state (after looking it up on source state) (if it exists).
+          - The GSS after pushing the goto state is now ready to continue parsing with.
+    metadata:
+  - assistant: |-
+      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary code changes. Here are the patches for the files you've provided.
+
+      I've implemented the `precompute2` and `get_mask2` functions in `src/constraint.rs` to create and utilize a new precomputation trie based on parser states and pop lengths. This new approach avoids stepping the GLR parser during mask generation, which should improve performance.
+
+      I've also updated the `reduce_and_goto` function in `src/glr/parser.rs` to handle cases where a reduction pops below the GSS root. This logic now correctly updates the `trie2` nodes in the accumulator (`Acc`), ensuring that the state of the new precomputation trie is maintained during substring parsing.
+
+      Here are the detailed changes:
+
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index 3e471b5..e0b3f60 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1,6 +1,7 @@
+       // src/constraint.rs
+       #![allow(clippy::too_many_arguments)]
+       
+      +use std::mem;
+       use std::mem;
+       use crate::datastructures::ordered_hash_map::Retain;
+       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
+      @@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex};
+       use std::cell::RefCell;
+       
+       use bimap::BiBTreeMap;
+      +use bitvec::macros::internal::funty::Fundamental;
+       use bitvec::prelude::*;
+       use indicatif::{ProgressBar, ProgressStyle};
+       
+      @@ -27,6 +29,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID
+       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use std::collections::BTreeMap as StdMap;
+      +use crate::glr::table::{StateID, Stage7ShiftsAndReducesLookaheadValue};
+       use profiler_macro::{time_it, timeit};
+       use crate::datastructures::gss::Acc;
+       use crate::glr::analyze::compute_terminal_follow_sets;
+      @@ -271,7 +274,7 @@ impl GrammarConstraint {
+               let precomputed = Self::precompute(
+                   &tokenizer,
+                   Some(&parser),
+      -            Some(llm_vocab.clone()),
+      +            Some(llm_vocab.clone()),
+                   &internal_llm_token_map_for_precompute,
+                   &token_name_map,
+                   internal_max_llm_token,
+      @@ -280,7 +283,7 @@ impl GrammarConstraint {
+                   &mut computed_possible_matches,
+               );
+       
+      -        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
+       
+               let mut gc = Self {
+                   tokenizer, // This is the tokenizer parameter being moved into the struct
+      @@ -343,9 +346,97 @@ impl GrammarConstraint {
+               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+           }
+       
+      -    pub fn precompute2(
+      -    ) -> Precomputed2 {
+      -        todo!()
+      +    /// Build the "Trie 2" precomputation.
+      +    ///
+      +    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
+      +    /// of tokens that can produce any terminal which is actionable from that state with
+      +    /// a first-step action that requires `pop_len` pops (0 for shift).
+      +    ///
+      +    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
+      +    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
+      +    pub fn precompute2(
+      +        parser: &GLRParser,
+      +        precomputed1: &Precomputed,
+      +        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+      +    ) -> Precomputed2 {
+      +        let mut out: Precomputed2 = BTreeMap::new();
+      +
+      +        // For determinism, iterate tokenizer states in order of precomputed1
+      +        for (tok_sid, _root1_arc) in precomputed1 {
+      +            // Root for this tokenizer state in trie-2
+      +            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            // Single end node to unify all terminal edges
+      +            let end_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
+      +            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
+      +
+      +            // Map of grammar terminals -> LLM tokens for this tokenizer state
+      +            let tid_to_tokens_map = possible_matches.get(tok_sid)
+      +                .cloned()
+      +                .unwrap_or_else(BTreeMap::new);
+      +
+      +            // For every LR parse state, look at the full action map for next token
+      +            for (state_id, row) in &parser.table {
+      +                // Use the "full" action set to include splits/combined behaviors
+      +                for (tid_table, action) in &row.shifts_and_reduces_full {
+      +                    // Convert table TerminalID to the general TerminalID used by possible_matches
+      +                    let tid_for_pm = TerminalID(tid_table.0);
+      +                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
+      +                                let key = (0usize, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+      +                                let key = (*len, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if shift.is_some() {
+      +                                    let key = (0usize, Some(*state_id));
+      +                                    aggregated
+      +                                        .entry(key)
+      +                                        .and_modify(|bv| *bv |= token_bv)
+      +                                        .or_insert(token_bv.clone());
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    if !nts.is_empty() {
+      +                                        let key = (*len, Some(*state_id));
+      +                                        aggregated
+      +                                            .entry(key)
+      +                                            .and_modify(|bv| *bv |= token_bv)
+      +                                            .or_insert(token_bv.clone());
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Materialize edges on root2 pointing to a shared end node
+      +            {
+      +                let mut root_guard = root2_arc.lock().expect("poison");
+      +                for (ek, bv) in aggregated {
+      +                    let mut ev_opt = Some(bv);
+      +                    // No cycles expected; if any are detected, it's a logic error
+      +                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
+      +                }
+      +            }
+      +
+      +            out.insert(*tok_sid, root2_arc);
+      +        }
+      +
+      +        out
+           }
+       
+           pub fn init(&self) -> GrammarConstraintState<'_> {
+      @@ -1520,8 +1610,8 @@
+       
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask(&self) -> LLMTokenBV {
+      -        self.get_mask1()
+      -        // self.get_mask2()
+      +        // self.get_mask1()
+      +        self.get_mask2()
+           }
+       
+           #[time_it]
+      @@ -1976,8 +2066,93 @@ impl<'a> GrammarConstraintState<'a> {
+               &self.state
+           }
+       }
+       
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask2(&self) -> LLMTokenBV {
+      -        todo!()
+      +        // Final mask of original token IDs
+      +        if self.state.is_empty() {
+      +            return HybridBitset::zeros();
+      +        }
+      +
+      +        // Accumulate in internal ID space; convert at the end
+      +        let mut final_internal = HybridBitset::zeros();
+      +
+      +        for (tok_sid, glr_state) in &self.state {
+      +            // Find trie-2 root for this tokenizer state
+      +            let root2_arc = match self.parent.precomputed2.get(tok_sid) {
+      +                Some(a) => a.clone(),
+      +                None => continue,
+      +            };
+      +
+      +            // Snapshot children by (pop_len, Some(state_id)) -> unioned EV across all dests
+      +            let (by_state_map, has_any) = {
+      +                let root_guard = root2_arc.lock().expect("poison");
+      +                let mut tmp: BTreeMap<StateID, Vec<(usize, LLMTokenBV)>> = BTreeMap::new();
+      +                let mut any = false;
+      +                for (ek, dest_map) in root_guard.children().iter() {
+      +                    let (pop_len, opt_sid) = ek;
+      +                    if let Some(sid) = opt_sid {
+      +                        // Union all EVs for this edge key to get the total token set
+      +                        let mut union_bv = HybridBitset::zeros();
+      +                        for (_dst, ev_bv) in dest_map.iter() {
+      +                            union_bv |= ev_bv;
+      +                        }
+      +                        if !union_bv.is_empty() {
+      +                            tmp.entry(*sid).or_default().push((*pop_len, union_bv));
+      +                            any = true;
+      +                        }
+      +                    }
+      +                }
+      +                (tmp, any)
+      +            };
+      +
+      +            if !has_any {
+      +                continue;
+      +            }
+      +
+      +            // For each top-of-stack path in the GLR GSS, see if it matches trie-2's (state_id, pop_len).
+      +            for peek in GSSNode::peek_iter(&glr_state.active_state.stack) {
+      +                let top_state = peek.edge_value().state_id;
+      +                let path_allowed_tokens = peek.resolved_llm_tokens_union();
+      +
+      +                if let Some(entries) = by_state_map.get(&top_state) {
+      +                    for (pop_len, edge_bv) in entries {
+      +                        if *pop_len == 0 {
+      +                            // No pop required – applicable immediately on this path.
+      +                            let mut contrib = edge_bv.clone();
+      +                            contrib &= &path_allowed_tokens;
+      +                            final_internal |= contrib;
+      +                        } else {
+      +                            // Pop 'pop_len' on this isolated path and check if the path remains above bottom.
+      +                            let popper = peek.popn(*pop_len);
+      +                            // Consider successful if we have at least one predecessor path remaining,
+      +                            // or we ended exactly at bottom (depth 0 below bottom).
+      +                            let ok = popper.num_predecessors() > 0 || popper.below_bottom.get(&0).is_some();
+      +                            if ok {
+      +                                let mut contrib = edge_bv.clone();
+      +                                contrib &= &path_allowed_tokens;
+      +                                final_internal |= contrib;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        // Convert to original IDs bitset
+      +        self.parent.internal_bv_to_original(&final_internal)
+           }
+       }
+       
+      ``````diff
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index 831113a..1111111 100644
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -1,6 +1,8 @@
+      +use std::sync::Mutex;
+      +use crate::datastructures::ArcPtrWrapper;
+       use std::any::Any;
+       use std::cmp::Ordering;
+      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+       use crate::tokenizer::LLMTokenID;
+       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      @@ -16,7 +18,7 @@ use deterministic_hash::DeterministicHasher;
+       use profiler_macro::{time_it, timeit};
+       use crate::glr::automaton::compute_closure;
+       use std::collections::HashMap;
+      -use crate::glr::items::{Item, LRMode, LR_MODE};
+      +use crate::glr::items::{Item, LRMode, LR_MODE, self};
+       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+       use crate::datastructures::trie::EdgeInserter;
+       
+      @@ -871,49 +873,78 @@         // If the reduction pops below the bottom, we have recognized only the
+               // suffix β of a rule A ::= α β. Per substring parsing semantics,
+               // α lies before the substring start and must be considered unknown (but derivable),
+               // so we continue in every state that has a GOTO on A. We also merge the Acc
+      -        // accumulated along these paths to create a new virtual root to push onto.
+      +        // accumulated along these paths to create a new virtual root to push onto,
+      +        // and update the trie2 nodes.
+               if any_below_bottom {
+      -            let mut merged_acc_opt: Option<Acc> = None;
+      -            for acc_arc in popper.below_bottom.values() {
+      -                merged_acc_opt = Some(match merged_acc_opt.take() {
+      +            // Create one shared new trie2 node and one shared end node for this whole "below bottom" event.
+      +            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            let new_trie2_end_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Compute possible 'hallucinated' source states. This is just all states in the table.
+      +            let all_source_states: Vec<StateID> = self.parser.table.keys().cloned().collect();
+      +
+      +            let mut final_merged_acc_opt: Option<Acc> = None;
+      +
+      +            // First, merge all Accs from below_bottom to get the final token sets.
+      +            for acc_arc in popper.below_bottom.values() {
+      +                final_merged_acc_opt = Some(match final_merged_acc_opt.take() {
+                           None => (**acc_arc).clone(),
+                           Some(prev) => Acc::merge(&prev, acc_arc),
+                       });
+                   }
+      - 
+      -            if let Some(merged_acc) = merged_acc_opt {
+      -                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      -                for (source_state_id, row) in &self.parser.table {
+      -                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      -                    let mut current_nt_local = nt;
+      -                    loop {
+      -                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      -                            if goto.accept {
+      -                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      -                                self.accepted = true;
+      -                            }
+      -                            if let Some(goto_state_id) = goto.state_id {
+      -                                let next_row = &self.parser.table[&goto_state_id];
+      -                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      -                                    current_nt_local = *next_nt;
+      -                                    continue;
+      +
+      +            // Now, iterate again to update the trie2 nodes.
+      +            for (pops_below, acc_arc) in &popper.below_bottom {
+      +                // Loop over the acc's trie2 node set
+      +                for trie2_node_wrapper in &acc_arc.trie2_nodes {
+      +                    let trie2_node_arc = trie2_node_wrapper.as_arc();
+      +                    // Loop over source states
+      +                    for source_state_id in &all_source_states {
+      +                        let row = &self.parser.table[source_state_id];
+      +                        let edge_key = (*pops_below, Some(*source_state_id));
+      +                        let edge_bv = &acc_arc.llm_tokens_union;
+      +
+      +                        if edge_bv.is_empty() { continue; }
+      +
+      +                        // Push an edge to the new trie2 node
+      +                        EdgeInserter::new(
+      +                            trie2_node_arc.clone(),
+      +                            edge_key,
+      +                            edge_bv.clone(),
+      +                            |e, n| *e |= n,
+      +                        ).try_destination(new_trie2_node.clone()).unwrap(); // Should not fail
+      +
+      +                        // Check for accept and push to end node
+      +                        if let Some(goto) = row.gotos.get(&nt) {
+      +                            if goto.accept {
+      +                                EdgeInserter::new(
+      +                                    trie2_node_arc.clone(),
+      +                                    edge_key,
+      +                                    edge_bv.clone(),
+      +                                    |e, n| *e |= n,
+      +                                ).try_destination(new_trie2_end_node.clone()).unwrap();
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            if let Some(mut merged_acc) = final_merged_acc_opt {
+      +                // Replace its trie2 node set with just the new shared trie2 node
+      +                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node.clone())]);
+      +
+      +                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      +                for (source_state_id, row) in &self.parser.table {
+      +                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      +                    let mut current_nt_local = nt;
+      +                    loop {
+      +                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      +                            if goto.accept {
+      +                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      +                                self.accepted = true;
+      +                            }
+      +                            if let Some(goto_state_id) = goto.state_id {
+      +                                let next_row = &self.parser.table[&goto_state_id];
+      +                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                                    current_nt_local = *next_nt;
+      +                                    continue;
+                                       } else {
+                                           final_goto_state_ids_for_source.insert(goto_state_id);
+                                           break;
+                                       }
+                                   } else {
+                                       break;
+                                   }
+                               } else {
+                                   break;
+                               }
+                           }
+      -                    if !final_goto_state_ids_for_source.is_empty() {
+      +                    if !final_goto_state_ids_for_source.is_empty() {
+                               states_to_push.insert(*source_state_id);
+                               states_to_push.extend(final_goto_state_ids_for_source);
+                           }
+                       }
+      - 
+      +
+                       if !states_to_push.is_empty() {
+                           let base = GSSNode::new(merged_acc);
+                           let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+
+      ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Error applying patch to src/constraint.rs:
+      Hunk #3 (header: @@ -27,6 +29,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use profiler_macro::{time_it, timeit};
+      use crate::datastructures::gss::Acc;
+      use crate::glr::analyze::compute_terminal_follow_sets;
+      --- Expected Context (from patch, after normalization): ---
+      use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use profiler_macro::{time_it, timeit};
+      use crate::datastructures::gss::Acc;
+      use crate::glr::analyze::compute_terminal_follow_sets;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 35 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
+        use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+        use crate::json_serialization::{JSONConvertible, JSONNode};
+        use std::collections::BTreeMap as StdMap;
+        use profiler_macro::{time_it, timeit};
+        use crate::datastructures::gss::Acc;
+      - use crate::glr::analyze::compute_terminal_follow_sets;
+      Problematic diff content:
+      ---
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index 3e471b5..e0b3f60 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1,6 +1,7 @@
+       // src/constraint.rs
+       #![allow(clippy::too_many_arguments)]
+       
+      +use std::mem;
+       use std::mem;
+       use crate::datastructures::ordered_hash_map::Retain;
+       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
+      @@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex};
+       use std::cell::RefCell;
+       
+       use bimap::BiBTreeMap;
+      +use bitvec::macros::internal::funty::Fundamental;
+       use bitvec::prelude::*;
+       use indicatif::{ProgressBar, ProgressStyle};
+       
+      @@ -27,6 +29,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID
+       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use std::collections::BTreeMap as StdMap;
+      +use crate::glr::table::{StateID, Stage7ShiftsAndReducesLookaheadValue};
+       use profiler_macro::{time_it, timeit};
+       use crate::datastructures::gss::Acc;
+       use crate::glr::analyze::compute_terminal_follow_sets;
+      @@ -271,7 +274,7 @@ impl GrammarConstraint {
+               let precomputed = Self::precompute(
+                   &tokenizer,
+                   Some(&parser),
+      -            Some(llm_vocab.clone()),
+      +            Some(llm_vocab.clone()),
+                   &internal_llm_token_map_for_precompute,
+                   &token_name_map,
+                   internal_max_llm_token,
+      @@ -280,7 +283,7 @@ impl GrammarConstraint {
+                   &mut computed_possible_matches,
+               );
+       
+      -        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
+       
+               let mut gc = Self {
+                   tokenizer, // This is the tokenizer parameter being moved into the struct
+      @@ -343,9 +346,97 @@ impl GrammarConstraint {
+               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+           }
+       
+      -    pub fn precompute2(
+      -    ) -> Precomputed2 {
+      -        todo!()
+      +    /// Build the "Trie 2" precomputation.
+      +    ///
+      +    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
+      +    /// of tokens that can produce any terminal which is actionable from that state with
+      +    /// a first-step action that requires `pop_len` pops (0 for shift).
+      +    ///
+      +    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
+      +    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
+      +    pub fn precompute2(
+      +        parser: &GLRParser,
+      +        precomputed1: &Precomputed,
+      +        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+      +    ) -> Precomputed2 {
+      +        let mut out: Precomputed2 = BTreeMap::new();
+      +
+      +        // For determinism, iterate tokenizer states in order of precomputed1
+      +        for (tok_sid, _root1_arc) in precomputed1 {
+      +            // Root for this tokenizer state in trie-2
+      +            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            // Single end node to unify all terminal edges
+      +            let end_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
+      +            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
+      +
+      +            // Map of grammar terminals -> LLM tokens for this tokenizer state
+      +            let tid_to_tokens_map = possible_matches.get(tok_sid)
+      +                .cloned()
+      +                .unwrap_or_else(BTreeMap::new);
+      +
+      +            // For every LR parse state, look at the full action map for next token
+      +            for (state_id, row) in &parser.table {
+      +                // Use the "full" action set to include splits/combined behaviors
+      +                for (tid_table, action) in &row.shifts_and_reduces_full {
+      +                    // Convert table TerminalID to the general TerminalID used by possible_matches
+      +                    let tid_for_pm = TerminalID(tid_table.0);
+      +                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
+      +                                let key = (0usize, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+      +                                let key = (*len, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if shift.is_some() {
+      +                                    let key = (0usize, Some(*state_id));
+      +                                    aggregated
+      +                                        .entry(key)
+      +                                        .and_modify(|bv| *bv |= token_bv)
+      +                                        .or_insert(token_bv.clone());
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    if !nts.is_empty() {
+      +                                        let key = (*len, Some(*state_id));
+      +                                        aggregated
+      +                                            .entry(key)
+      +                                            .and_modify(|bv| *bv |= token_bv)
+      +                                            .or_insert(token_bv.clone());
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Materialize edges on root2 pointing to a shared end node
+      +            {
+      +                let mut root_guard = root2_arc.lock().expect("poison");
+      +                for (ek, bv) in aggregated {
+      +                    let mut ev_opt = Some(bv);
+      +                    // No cycles expected; if any are detected, it's a logic error
+      +                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
+      +                }
+      +            }
+      +
+      +            out.insert(*tok_sid, root2_arc);
+      +        }
+      +
+      +        out
+           }
+       
+           pub fn init(&self) -> GrammarConstraintState<'_> {
+      @@ -1520,8 +1610,8 @@
+       
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask(&self) -> LLMTokenBV {
+      -        self.get_mask1()
+      -        // self.get_mask2()
+      +        // self.get_mask1()
+      +        self.get_mask2()
+           }
+       
+           #[time_it]
+      @@ -1976,8 +2066,93 @@ impl<'a> GrammarConstraintState<'a> {
+               &self.state
+           }
+       }
+       
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask2(&self) -> LLMTokenBV {
+      -        todo!()
+      +        // Final mask of original token IDs
+      +        if self.state.is_empty() {
+      +            return HybridBitset::zeros();
+      +        }
+      +
+      +        // Accumulate in internal ID space; convert at the end
+      +        let mut final_internal = HybridBitset::zeros();
+      +
+      +        for (tok_sid, glr_state) in &self.state {
+      +            // Find trie-2 root for this tokenizer state
+      +            let root2_arc = match self.parent.precomputed2.get(tok_sid) {
+      +                Some(a) => a.clone(),
+      +                None => continue,
+      +            };
+      +
+      +            // Snapshot children by (pop_len, Some(state_id)) -> unioned EV across all dests
+      +            let (by_state_map, has_any) = {
+      +                let root_guard = root2_arc.lock().expect("poison");
+      +                let mut tmp: BTreeMap<StateID, Vec<(usize, LLMTokenBV)>> = BTreeMap::new();
+      +                let mut any = false;
+      +                for (ek, dest_map) in root_guard.children().iter() {
+      +                    let (pop_len, opt_sid) = ek;
+      +                    if let Some(sid) = opt_sid {
+      +                        // Union all EVs for this edge key to get the total token set
+      +                        let mut union_bv = HybridBitset::zeros();
+      +                        for (_dst, ev_bv) in dest_map.iter() {
+      +                            union_bv |= ev_bv;
+      +                        }
+      +                        if !union_bv.is_empty() {
+      +                            tmp.entry(*sid).or_default().push((*pop_len, union_bv));
+      +                            any = true;
+      +                        }
+      +                    }
+      +                }
+      +                (tmp, any)
+      +            };
+      +
+      +            if !has_any {
+      +                continue;
+      +            }
+      +
+      +            // For each top-of-stack path in the GLR GSS, see if it matches trie-2's (state_id, pop_len).
+      +            for peek in GSSNode::peek_iter(&glr_state.active_state.stack) {
+      +                let top_state = peek.edge_value().state_id;
+      +                let path_allowed_tokens = peek.resolved_llm_tokens_union();
+      +
+      +                if let Some(entries) = by_state_map.get(&top_state) {
+      +                    for (pop_len, edge_bv) in entries {
+      +                        if *pop_len == 0 {
+      +                            // No pop required – applicable immediately on this path.
+      +                            let mut contrib = edge_bv.clone();
+      +                            contrib &= &path_allowed_tokens;
+      +                            final_internal |= contrib;
+      +                        } else {
+      +                            // Pop 'pop_len' on this isolated path and check if the path remains above bottom.
+      +                            let popper = peek.popn(*pop_len);
+      +                            // Consider successful if we have at least one predecessor path remaining,
+      +                            // or we ended exactly at bottom (depth 0 below bottom).
+      +                            let ok = popper.num_predecessors() > 0 || popper.below_bottom.get(&0).is_some();
+      +                            if ok {
+      +                                let mut contrib = edge_bv.clone();
+      +                                contrib &= &path_allowed_tokens;
+      +                                final_internal |= contrib;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        // Convert to original IDs bitset
+      +        self.parent.internal_bv_to_original(&final_internal)
+           }
+       }
+       
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Error applying patch to src/glr/parser.rs:
+      Hunk #1 (header: @@ -1,6 +1,8 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      use crate::tokenizer::LLMTokenID;
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      --- Expected Context (from patch, after normalization): ---
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      use crate::tokenizer::LLMTokenID;
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 3 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        use std::any::Any;
+        use std::cmp::Ordering;
+      - use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      + use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+      ?                                                                                                                  +++++++++++++++++++++++++
+
+        use crate::tokenizer::LLMTokenID;
+        use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+        use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      Problematic diff content:
+      ---
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index 831113a..1111111 100644
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -1,6 +1,8 @@
+      +use std::sync::Mutex;
+      +use crate::datastructures::ArcPtrWrapper;
+       use std::any::Any;
+       use std::cmp::Ordering;
+      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+       use crate::tokenizer::LLMTokenID;
+       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      @@ -16,7 +18,7 @@ use deterministic_hash::DeterministicHasher;
+       use profiler_macro::{time_it, timeit};
+       use crate::glr::automaton::compute_closure;
+       use std::collections::HashMap;
+      -use crate::glr::items::{Item, LRMode, LR_MODE};
+      +use crate::glr::items::{Item, LRMode, LR_MODE, self};
+       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+       use crate::datastructures::trie::EdgeInserter;
+       
+      @@ -871,49 +873,78 @@         // If the reduction pops below the bottom, we have recognized only the
+               // suffix β of a rule A ::= α β. Per substring parsing semantics,
+               // α lies before the substring start and must be considered unknown (but derivable),
+               // so we continue in every state that has a GOTO on A. We also merge the Acc
+      -        // accumulated along these paths to create a new virtual root to push onto.
+      +        // accumulated along these paths to create a new virtual root to push onto,
+      +        // and update the trie2 nodes.
+               if any_below_bottom {
+      -            let mut merged_acc_opt: Option<Acc> = None;
+      -            for acc_arc in popper.below_bottom.values() {
+      -                merged_acc_opt = Some(match merged_acc_opt.take() {
+      +            // Create one shared new trie2 node and one shared end node for this whole "below bottom" event.
+      +            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            let new_trie2_end_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Compute possible 'hallucinated' source states. This is just all states in the table.
+      +            let all_source_states: Vec<StateID> = self.parser.table.keys().cloned().collect();
+      +
+      +            let mut final_merged_acc_opt: Option<Acc> = None;
+      +
+      +            // First, merge all Accs from below_bottom to get the final token sets.
+      +            for acc_arc in popper.below_bottom.values() {
+      +                final_merged_acc_opt = Some(match final_merged_acc_opt.take() {
+                           None => (**acc_arc).clone(),
+                           Some(prev) => Acc::merge(&prev, acc_arc),
+                       });
+                   }
+      - 
+      -            if let Some(merged_acc) = merged_acc_opt {
+      -                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      -                for (source_state_id, row) in &self.parser.table {
+      -                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      -                    let mut current_nt_local = nt;
+      -                    loop {
+      -                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      -                            if goto.accept {
+      -                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      -                                self.accepted = true;
+      -                            }
+      -                            if let Some(goto_state_id) = goto.state_id {
+      -                                let next_row = &self.parser.table[&goto_state_id];
+      -                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      -                                    current_nt_local = *next_nt;
+      -                                    continue;
+      +
+      +            // Now, iterate again to update the trie2 nodes.
+      +            for (pops_below, acc_arc) in &popper.below_bottom {
+      +                // Loop over the acc's trie2 node set
+      +                for trie2_node_wrapper in &acc_arc.trie2_nodes {
+      +                    let trie2_node_arc = trie2_node_wrapper.as_arc();
+      +                    // Loop over source states
+      +                    for source_state_id in &all_source_states {
+      +                        let row = &self.parser.table[source_state_id];
+      +                        let edge_key = (*pops_below, Some(*source_state_id));
+      +                        let edge_bv = &acc_arc.llm_tokens_union;
+      +
+      +                        if edge_bv.is_empty() { continue; }
+      +
+      +                        // Push an edge to the new trie2 node
+      +                        EdgeInserter::new(
+      +                            trie2_node_arc.clone(),
+      +                            edge_key,
+      +                            edge_bv.clone(),
+      +                            |e, n| *e |= n,
+      +                        ).try_destination(new_trie2_node.clone()).unwrap(); // Should not fail
+      +
+      +                        // Check for accept and push to end node
+      +                        if let Some(goto) = row.gotos.get(&nt) {
+      +                            if goto.accept {
+      +                                EdgeInserter::new(
+      +                                    trie2_node_arc.clone(),
+      +                                    edge_key,
+      +                                    edge_bv.clone(),
+      +                                    |e, n| *e |= n,
+      +                                ).try_destination(new_trie2_end_node.clone()).unwrap();
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            if let Some(mut merged_acc) = final_merged_acc_opt {
+      +                // Replace its trie2 node set with just the new shared trie2 node
+      +                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node.clone())]);
+      +
+      +                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      +                for (source_state_id, row) in &self.parser.table {
+      +                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      +                    let mut current_nt_local = nt;
+      +                    loop {
+      +                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      +                            if goto.accept {
+      +                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      +                                self.accepted = true;
+      +                            }
+      +                            if let Some(goto_state_id) = goto.state_id {
+      +                                let next_row = &self.parser.table[&goto_state_id];
+      +                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                                    current_nt_local = *next_nt;
+      +                                    continue;
+                                       } else {
+                                           final_goto_state_ids_for_source.insert(goto_state_id);
+                                           break;
+                                       }
+                                   } else {
+                                       break;
+                                   }
+                               } else {
+                                   break;
+                               }
+                           }
+      -                    if !final_goto_state_ids_for_source.is_empty() {
+      +                    if !final_goto_state_ids_for_source.is_empty() {
+                               states_to_push.insert(*source_state_id);
+                               states_to_push.extend(final_goto_state_ids_for_source);
+                           }
+                       }
+      - 
+      +
+                       if !states_to_push.is_empty() {
+                           let base = GSSNode::new(merged_acc);
+                           let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Error applying patch to src/constraint.rs:
+      Hunk #3 (header: @@ -27,6 +29,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use profiler_macro::{time_it, timeit};
+      use crate::datastructures::gss::Acc;
+      use crate::glr::analyze::compute_terminal_follow_sets;
+      --- Expected Context (from patch, after normalization): ---
+      use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use profiler_macro::{time_it, timeit};
+      use crate::datastructures::gss::Acc;
+      use crate::glr::analyze::compute_terminal_follow_sets;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 35 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
+        use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+        use crate::json_serialization::{JSONConvertible, JSONNode};
+        use std::collections::BTreeMap as StdMap;
+        use profiler_macro::{time_it, timeit};
+        use crate::datastructures::gss::Acc;
+      - use crate::glr::analyze::compute_terminal_follow_sets;
+      Problematic diff content:
+      ---
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index 3e471b5..e0b3f60 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1,6 +1,7 @@
+       // src/constraint.rs
+       #![allow(clippy::too_many_arguments)]
+       
+      +use std::mem;
+       use std::mem;
+       use crate::datastructures::ordered_hash_map::Retain;
+       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
+      @@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex};
+       use std::cell::RefCell;
+       
+       use bimap::BiBTreeMap;
+      +use bitvec::macros::internal::funty::Fundamental;
+       use bitvec::prelude::*;
+       use indicatif::{ProgressBar, ProgressStyle};
+       
+      @@ -27,6 +29,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID
+       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use std::collections::BTreeMap as StdMap;
+      +use crate::glr::table::{StateID, Stage7ShiftsAndReducesLookaheadValue};
+       use profiler_macro::{time_it, timeit};
+       use crate::datastructures::gss::Acc;
+       use crate::glr::analyze::compute_terminal_follow_sets;
+      @@ -271,7 +274,7 @@ impl GrammarConstraint {
+               let precomputed = Self::precompute(
+                   &tokenizer,
+                   Some(&parser),
+      -            Some(llm_vocab.clone()),
+      +            Some(llm_vocab.clone()),
+                   &internal_llm_token_map_for_precompute,
+                   &token_name_map,
+                   internal_max_llm_token,
+      @@ -280,7 +283,7 @@ impl GrammarConstraint {
+                   &mut computed_possible_matches,
+               );
+       
+      -        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &computed_possible_matches);
+       
+               let mut gc = Self {
+                   tokenizer, // This is the tokenizer parameter being moved into the struct
+      @@ -343,9 +346,97 @@ impl GrammarConstraint {
+               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+           }
+       
+      -    pub fn precompute2(
+      -    ) -> Precomputed2 {
+      -        todo!()
+      +    /// Build the "Trie 2" precomputation.
+      +    ///
+      +    /// Keys are (pop_len, Some(state_id)), and values (edge EV) are the unioned LLMTokenBV
+      +    /// of tokens that can produce any terminal which is actionable from that state with
+      +    /// a first-step action that requires `pop_len` pops (0 for shift).
+      +    ///
+      +    /// We build one root node per tokenizer state ID (mirroring the structure of precompute 1 roots)
+      +    /// so that get_mask2 can be evaluated per-tokenizer-state using the GLR stack without stepping.
+      +    pub fn precompute2(
+      +        parser: &GLRParser,
+      +        precomputed1: &Precomputed,
+      +        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+      +    ) -> Precomputed2 {
+      +        let mut out: Precomputed2 = BTreeMap::new();
+      +
+      +        // For determinism, iterate tokenizer states in order of precomputed1
+      +        for (tok_sid, _root1_arc) in precomputed1 {
+      +            // Root for this tokenizer state in trie-2
+      +            let root2_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            // Single end node to unify all terminal edges
+      +            let end_arc: Arc<Mutex<PrecomputeNode2>> =
+      +                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Aggregate by (pop_len, Some(state_id)) -> LLMTokenBV
+      +            let mut aggregated: BTreeMap<(usize, Option<StateID>), LLMTokenBV> = BTreeMap::new();
+      +
+      +            // Map of grammar terminals -> LLM tokens for this tokenizer state
+      +            let tid_to_tokens_map = possible_matches.get(tok_sid)
+      +                .cloned()
+      +                .unwrap_or_else(BTreeMap::new);
+      +
+      +            // For every LR parse state, look at the full action map for next token
+      +            for (state_id, row) in &parser.table {
+      +                // Use the "full" action set to include splits/combined behaviors
+      +                for (tid_table, action) in &row.shifts_and_reduces_full {
+      +                    // Convert table TerminalID to the general TerminalID used by possible_matches
+      +                    let tid_for_pm = TerminalID(tid_table.0);
+      +                    if let Some(token_bv) = tid_to_tokens_map.get(&tid_for_pm) {
+      +                        match action {
+      +                            Stage7ShiftsAndReducesLookaheadValue::Shift(_to) => {
+      +                                let key = (0usize, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+      +                                let key = (*len, Some(*state_id));
+      +                                aggregated
+      +                                    .entry(key)
+      +                                    .and_modify(|bv| *bv |= token_bv)
+      +                                    .or_insert(token_bv.clone());
+      +                            }
+      +                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+      +                                if shift.is_some() {
+      +                                    let key = (0usize, Some(*state_id));
+      +                                    aggregated
+      +                                        .entry(key)
+      +                                        .and_modify(|bv| *bv |= token_bv)
+      +                                        .or_insert(token_bv.clone());
+      +                                }
+      +                                for (len, nts) in reduces {
+      +                                    if !nts.is_empty() {
+      +                                        let key = (*len, Some(*state_id));
+      +                                        aggregated
+      +                                            .entry(key)
+      +                                            .and_modify(|bv| *bv |= token_bv)
+      +                                            .or_insert(token_bv.clone());
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Materialize edges on root2 pointing to a shared end node
+      +            {
+      +                let mut root_guard = root2_arc.lock().expect("poison");
+      +                for (ek, bv) in aggregated {
+      +                    let mut ev_opt = Some(bv);
+      +                    // No cycles expected; if any are detected, it's a logic error
+      +                    let _ = root_guard.try_insert(ek, &mut ev_opt, end_arc.clone());
+      +                }
+      +            }
+      +
+      +            out.insert(*tok_sid, root2_arc);
+      +        }
+      +
+      +        out
+           }
+       
+           pub fn init(&self) -> GrammarConstraintState<'_> {
+      @@ -1520,8 +1610,8 @@
+       
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask(&self) -> LLMTokenBV {
+      -        self.get_mask1()
+      -        // self.get_mask2()
+      +        // self.get_mask1()
+      +        self.get_mask2()
+           }
+       
+           #[time_it]
+      @@ -1976,8 +2066,93 @@ impl<'a> GrammarConstraintState<'a> {
+               &self.state
+           }
+       }
+       
+       impl<'a> GrammarConstraintState<'a> {
+           pub fn get_mask2(&self) -> LLMTokenBV {
+      -        todo!()
+      +        // Final mask of original token IDs
+      +        if self.state.is_empty() {
+      +            return HybridBitset::zeros();
+      +        }
+      +
+      +        // Accumulate in internal ID space; convert at the end
+      +        let mut final_internal = HybridBitset::zeros();
+      +
+      +        for (tok_sid, glr_state) in &self.state {
+      +            // Find trie-2 root for this tokenizer state
+      +            let root2_arc = match self.parent.precomputed2.get(tok_sid) {
+      +                Some(a) => a.clone(),
+      +                None => continue,
+      +            };
+      +
+      +            // Snapshot children by (pop_len, Some(state_id)) -> unioned EV across all dests
+      +            let (by_state_map, has_any) = {
+      +                let root_guard = root2_arc.lock().expect("poison");
+      +                let mut tmp: BTreeMap<StateID, Vec<(usize, LLMTokenBV)>> = BTreeMap::new();
+      +                let mut any = false;
+      +                for (ek, dest_map) in root_guard.children().iter() {
+      +                    let (pop_len, opt_sid) = ek;
+      +                    if let Some(sid) = opt_sid {
+      +                        // Union all EVs for this edge key to get the total token set
+      +                        let mut union_bv = HybridBitset::zeros();
+      +                        for (_dst, ev_bv) in dest_map.iter() {
+      +                            union_bv |= ev_bv;
+      +                        }
+      +                        if !union_bv.is_empty() {
+      +                            tmp.entry(*sid).or_default().push((*pop_len, union_bv));
+      +                            any = true;
+      +                        }
+      +                    }
+      +                }
+      +                (tmp, any)
+      +            };
+      +
+      +            if !has_any {
+      +                continue;
+      +            }
+      +
+      +            // For each top-of-stack path in the GLR GSS, see if it matches trie-2's (state_id, pop_len).
+      +            for peek in GSSNode::peek_iter(&glr_state.active_state.stack) {
+      +                let top_state = peek.edge_value().state_id;
+      +                let path_allowed_tokens = peek.resolved_llm_tokens_union();
+      +
+      +                if let Some(entries) = by_state_map.get(&top_state) {
+      +                    for (pop_len, edge_bv) in entries {
+      +                        if *pop_len == 0 {
+      +                            // No pop required – applicable immediately on this path.
+      +                            let mut contrib = edge_bv.clone();
+      +                            contrib &= &path_allowed_tokens;
+      +                            final_internal |= contrib;
+      +                        } else {
+      +                            // Pop 'pop_len' on this isolated path and check if the path remains above bottom.
+      +                            let popper = peek.popn(*pop_len);
+      +                            // Consider successful if we have at least one predecessor path remaining,
+      +                            // or we ended exactly at bottom (depth 0 below bottom).
+      +                            let ok = popper.num_predecessors() > 0 || popper.below_bottom.get(&0).is_some();
+      +                            if ok {
+      +                                let mut contrib = edge_bv.clone();
+      +                                contrib &= &path_allowed_tokens;
+      +                                final_internal |= contrib;
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        // Convert to original IDs bitset
+      +        self.parent.internal_bv_to_original(&final_internal)
+           }
+       }
+       
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Error applying patch to src/glr/parser.rs:
+      Hunk #1 (header: @@ -1,6 +1,8 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      use crate::tokenizer::LLMTokenID;
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      --- Expected Context (from patch, after normalization): ---
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      use crate::tokenizer::LLMTokenID;
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 3 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        use std::any::Any;
+        use std::cmp::Ordering;
+      - use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      + use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+      ?                                                                                                                  +++++++++++++++++++++++++
+
+        use crate::tokenizer::LLMTokenID;
+        use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+        use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      Problematic diff content:
+      ---
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index 831113a..1111111 100644
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -1,6 +1,8 @@
+      +use std::sync::Mutex;
+      +use crate::datastructures::ArcPtrWrapper;
+       use std::any::Any;
+       use std::cmp::Ordering;
+      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
+      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+       use crate::tokenizer::LLMTokenID;
+       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      @@ -16,7 +18,7 @@ use deterministic_hash::DeterministicHasher;
+       use profiler_macro::{time_it, timeit};
+       use crate::glr::automaton::compute_closure;
+       use std::collections::HashMap;
+      -use crate::glr::items::{Item, LRMode, LR_MODE};
+      +use crate::glr::items::{Item, LRMode, LR_MODE, self};
+       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+       use crate::datastructures::trie::EdgeInserter;
+       
+      @@ -871,49 +873,78 @@         // If the reduction pops below the bottom, we have recognized only the
+               // suffix β of a rule A ::= α β. Per substring parsing semantics,
+               // α lies before the substring start and must be considered unknown (but derivable),
+               // so we continue in every state that has a GOTO on A. We also merge the Acc
+      -        // accumulated along these paths to create a new virtual root to push onto.
+      +        // accumulated along these paths to create a new virtual root to push onto,
+      +        // and update the trie2 nodes.
+               if any_below_bottom {
+      -            let mut merged_acc_opt: Option<Acc> = None;
+      -            for acc_arc in popper.below_bottom.values() {
+      -                merged_acc_opt = Some(match merged_acc_opt.take() {
+      +            // Create one shared new trie2 node and one shared end node for this whole "below bottom" event.
+      +            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +            let new_trie2_end_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+      +
+      +            // Compute possible 'hallucinated' source states. This is just all states in the table.
+      +            let all_source_states: Vec<StateID> = self.parser.table.keys().cloned().collect();
+      +
+      +            let mut final_merged_acc_opt: Option<Acc> = None;
+      +
+      +            // First, merge all Accs from below_bottom to get the final token sets.
+      +            for acc_arc in popper.below_bottom.values() {
+      +                final_merged_acc_opt = Some(match final_merged_acc_opt.take() {
+                           None => (**acc_arc).clone(),
+                           Some(prev) => Acc::merge(&prev, acc_arc),
+                       });
+                   }
+      - 
+      -            if let Some(merged_acc) = merged_acc_opt {
+      -                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      -                for (source_state_id, row) in &self.parser.table {
+      -                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      -                    let mut current_nt_local = nt;
+      -                    loop {
+      -                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      -                            if goto.accept {
+      -                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      -                                self.accepted = true;
+      -                            }
+      -                            if let Some(goto_state_id) = goto.state_id {
+      -                                let next_row = &self.parser.table[&goto_state_id];
+      -                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      -                                    current_nt_local = *next_nt;
+      -                                    continue;
+      +
+      +            // Now, iterate again to update the trie2 nodes.
+      +            for (pops_below, acc_arc) in &popper.below_bottom {
+      +                // Loop over the acc's trie2 node set
+      +                for trie2_node_wrapper in &acc_arc.trie2_nodes {
+      +                    let trie2_node_arc = trie2_node_wrapper.as_arc();
+      +                    // Loop over source states
+      +                    for source_state_id in &all_source_states {
+      +                        let row = &self.parser.table[source_state_id];
+      +                        let edge_key = (*pops_below, Some(*source_state_id));
+      +                        let edge_bv = &acc_arc.llm_tokens_union;
+      +
+      +                        if edge_bv.is_empty() { continue; }
+      +
+      +                        // Push an edge to the new trie2 node
+      +                        EdgeInserter::new(
+      +                            trie2_node_arc.clone(),
+      +                            edge_key,
+      +                            edge_bv.clone(),
+      +                            |e, n| *e |= n,
+      +                        ).try_destination(new_trie2_node.clone()).unwrap(); // Should not fail
+      +
+      +                        // Check for accept and push to end node
+      +                        if let Some(goto) = row.gotos.get(&nt) {
+      +                            if goto.accept {
+      +                                EdgeInserter::new(
+      +                                    trie2_node_arc.clone(),
+      +                                    edge_key,
+      +                                    edge_bv.clone(),
+      +                                    |e, n| *e |= n,
+      +                                ).try_destination(new_trie2_end_node.clone()).unwrap();
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            if let Some(mut merged_acc) = final_merged_acc_opt {
+      +                // Replace its trie2 node set with just the new shared trie2 node
+      +                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node.clone())]);
+      +
+      +                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+      +                for (source_state_id, row) in &self.parser.table {
+      +                    let mut final_goto_state_ids_for_source = BTreeSet::new();
+      +                    let mut current_nt_local = nt;
+      +                    loop {
+      +                        if let Some(goto) = row.gotos.get(&current_nt_local) {
+      +                            if goto.accept {
+      +                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+      +                                self.accepted = true;
+      +                            }
+      +                            if let Some(goto_state_id) = goto.state_id {
+      +                                let next_row = &self.parser.table[&goto_state_id];
+      +                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                                    current_nt_local = *next_nt;
+      +                                    continue;
+                                       } else {
+                                           final_goto_state_ids_for_source.insert(goto_state_id);
+                                           break;
+                                       }
+                                   } else {
+                                       break;
+                                   }
+                               } else {
+                                   break;
+                               }
+                           }
+      -                    if !final_goto_state_ids_for_source.is_empty() {
+      +                    if !final_goto_state_ids_for_source.is_empty() {
+                               states_to_push.insert(*source_state_id);
+                               states_to_push.extend(final_goto_state_ids_for_source);
+                           }
+                       }
+      - 
+      +
+                       if !states_to_push.is_empty() {
+                           let base = GSSNode::new(merged_acc);
+                           let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        }
+      ]
+      Found 2 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint.rs
+      Received code for required file: src/glr/parser.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint.rs
+      Successfully replaced file: src/glr/parser.rs
     metadata:
 ...

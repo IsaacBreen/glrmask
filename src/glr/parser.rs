@@ -22,7 +22,7 @@ use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
-use crate::glr::items::{Item, LRMode, LR_MODE};
+use crate::glr::items::{Item, LRMode, LR_MODE, self};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
 use crate::datastructures::trie::EdgeInserter;
 
@@ -813,16 +813,65 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // α lies before the substring start and must be considered unknown (but derivable),
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
+        // and update the trie2 nodes.
         if any_below_bottom {
-            let mut merged_acc_opt: Option<Acc> = None;
+            // Create one shared new trie2 node and one shared end node for this whole "below bottom" event.
+            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+            let new_trie2_end_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+            
+            // Compute possible 'hallucinated' source states. This is just all states in the table.
+            let all_source_states: Vec<StateID> = self.parser.table.keys().cloned().collect();
+
+            let mut final_merged_acc_opt: Option<Acc> = None;
+
+            // First, merge all Accs from below_bottom to get the final token sets.
             for acc_arc in popper.below_bottom.values() {
-                merged_acc_opt = Some(match merged_acc_opt.take() {
+                final_merged_acc_opt = Some(match final_merged_acc_opt.take() {
                     None => (**acc_arc).clone(),
                     Some(prev) => Acc::merge(&prev, acc_arc),
                 });
             }
- 
-            if let Some(merged_acc) = merged_acc_opt {
+            
+            // Now, iterate again to update the trie2 nodes.
+            for (pops_below, acc_arc) in &popper.below_bottom {
+                // Loop over the acc's trie2 node set
+                for trie2_node_wrapper in &acc_arc.trie2_nodes {
+                    let trie2_node_arc = trie2_node_wrapper.as_arc();
+                    // Loop over source states
+                    for source_state_id in &all_source_states {
+                        let row = &self.parser.table[source_state_id];
+                        let edge_key = (*pops_below, Some(*source_state_id));
+                        let edge_bv = &acc_arc.llm_tokens_union;
+
+                        if edge_bv.is_empty() { continue; }
+
+                        // Push an edge to the new trie2 node
+                        EdgeInserter::new(
+                            trie2_node_arc.clone(),
+                            edge_key,
+                            edge_bv.clone(),
+                            |e, n| *e |= n,
+                        ).try_destination(new_trie2_node.clone()).unwrap(); // Should not fail
+
+                        // Check for accept and push to end node
+                        if let Some(goto) = row.gotos.get(&nt) {
+                            if goto.accept {
+                                EdgeInserter::new(
+                                    trie2_node_arc.clone(),
+                                    edge_key,
+                                    edge_bv.clone(),
+                                    |e, n| *e |= n,
+                                ).try_destination(new_trie2_end_node.clone()).unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(mut merged_acc) = final_merged_acc_opt {
+                // Replace its trie2 node set with just the new shared trie2 node
+                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node.clone())]);
+
                 let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {
                     let mut final_goto_state_ids_for_source = BTreeSet::new();
@@ -1162,48 +1211,34 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        if GSS_LOGGING_ENABLED {
+            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            println!("{}", s);
+            println!("\n\n--- GSS State Explanations ---\n");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
 
-        let (gss_string, state_ids) = {
-            let print_full_forest = stats.unique_nodes <= MAX;
-            let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
-            let config = GSSPrintConfig {
-                max_nodes: max_nodes_to_print,
-                ..Default::default()
-            };
-            let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
-            let final_string = if print_full_forest {
-                format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
-            } else {
-                match find_longest_path(&self.active_state.stack) {
-                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                       stats.unique_nodes,
-                                       p.len(),
-                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-                                            .map(|id| id.to_string())
-                                            .collect::<Vec<_>>()
-                                        .join(" → ")),
-                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                }
-            };
-            (final_string, state_ids)
-        };
-
-        let mut final_string = gss_string;
-        if explain_states && !state_ids.is_empty() {
-            final_string.push_str("\n\n--- GSS State Explanations ---\n");
-                for state_id in state_ids {
-                    let mut explanation = String::new();
-                    writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
-                    self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-                    final_string.push_str(&explanation);
-                }
-        }
-
-        if stats.unique_nodes > PANIC_THRESHOLD {
-            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
+            println!("\n\n--- Begin GSS Graphviz ---");
+            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                .map(|s| s.as_str())
+                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .collect();
+            println!("{}", self.parent.parser.gss_forest_to_dot(
+                &roots_with_labels,
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
+            ));
+            println!("\n\n--- End GSS Graphviz ---");
         }
 
         debug!(3, "{}", final_string);
