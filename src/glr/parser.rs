@@ -1241,7 +1241,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             println!("\n\n--- End GSS Graphviz ---");
         }
 
-        debug!(3, "{}", final_string);
+        // debug!(3, "{}", final_string);
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
