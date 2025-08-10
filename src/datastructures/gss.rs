@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
@@ -24,6 +24,7 @@ use crate::profiler::GSS_LOGGING_ENABLED;
 use profiler_macro::{time_it, timeit};
 
 pub type LLMTokenBV = HybridBitset;
+#[allow(dead_code)]
 pub type TerminalBV = HybridBitset;
 
 // --- Type Aliases ---
@@ -92,6 +93,21 @@ pub struct Acc {
 }
 
 impl Acc {
+    /// Creates a fresh accumulator with a specific set of trie2 nodes.
+    pub fn new_with_trie2_nodes(
+        trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>
+    ) -> Self {
+        Self {
+            llm_tokens_union: HybridBitset::max_ones(),
+            llm_tokens_intersection: HybridBitset::max_ones(),
+            terminals_union: HybridL2Bitset::all(),
+            terminals_intersection: HybridL2Bitset::all(),
+            needs_push_down: false,
+            trie2_nodes,
+        }
+    }
+}
+impl Acc {
     /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
     pub fn new_fresh() -> Self {
         Self {
@@ -116,6 +132,14 @@ impl Acc {
         }
     }
 
+    /// Builder-like helper to set trie2 nodes on self.
+    pub fn with_trie2_nodes(
+        mut self,
+        trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>
+    ) -> Self {
+        self.trie2_nodes = trie2_nodes;
+        self
+    }
     pub fn narrow(from: &Self, to: &Self) -> Self {
         Acc {
             llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
@@ -1537,6 +1561,44 @@ pub fn format_acc(
     format!("[{}, {}, {}, {}]", union_llm_str, intersection_llm_str, union_terminals_str, intersection_terminals_str)
 }
 
+/// Replace the trie2 node set in the Acc of every node in the GSS with `new_nodes`.
+/// This does not change any other field of Acc and recurses through the entire GSS,
+/// rebuilding nodes on the way to preserve structural sharing.
+pub fn set_trie2_nodes_for_all(
+    root_arc: &mut Arc<GSSNode>,
+    new_nodes: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
+) {
+    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+        let mut new_acc = (*node.acc).clone();
+        // Replace trie2 set wholesale.
+        new_acc.trie2_nodes = new_nodes.clone();
+        // Always continue recursion to update descendants.
+        Some((new_acc, true))
+    };
+    let mut memo: PruneAndTransformRecursiveMemo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    }
+}
+
+/// Ensure that the given trie2 node (wrap) is present in the Acc of all nodes in the GSS.
+/// This keeps any existing trie2 nodes and inserts the provided one if missing.
+pub fn ensure_trie2_node_for_all(
+    root_arc: &mut Arc<GSSNode>,
+    to_insert: ArcPtrWrapper<Mutex<PrecomputeNode2>>,
+) {
+    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+        let mut new_acc = (*node.acc).clone();
+        if !new_acc.trie2_nodes.contains(&to_insert) {
+            new_acc.trie2_nodes.insert(to_insert.clone());
+        }
+        Some((new_acc, true))
+    };
+    let mut memo: PruneAndTransformRecursiveMemo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    }
+}
 
 #[cfg(test)]
 mod tests {
