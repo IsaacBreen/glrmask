@@ -344,9 +344,14 @@ impl GrammarConstraint {
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
-    pub fn precompute2(
-    ) -> Precomputed2 {
-        todo!()
+    pub fn precompute2(parser: &GLRParser, precomputed: &Precomputed, llm_vocab: &Arc<LLMVocab>) -> Precomputed2 {
+        // Minimal initial structure: one empty root per tokenizer state.
+        let mut out = BTreeMap::new();
+        for sid in precomputed.keys() {
+            let root2 = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+            out.insert(*sid, root2);
+        }
+        out
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -355,6 +360,17 @@ impl GrammarConstraint {
             self.tokenizer.initial_state_id(),
             self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
         );
+
+        {
+            let entry = state.get_mut(&self.tokenizer.initial_state_id()).unwrap();
+            let root2 = self.precomputed2.get(&self.tokenizer.initial_state_id())
+                .expect("precomputed2 root missing for initial tokenizer state").clone();
+
+            let mut new_acc = (*entry.active_state.stack.acc).clone();
+            new_acc.trie2_nodes.insert(ArcPtrWrapper::new(root2));
+            let new_node = GSSNode::new_with_map(Arc::new(new_acc), entry.active_state.stack.predecessors.clone());
+            entry.active_state.stack = Arc::new(new_node);
+        }
 
         GrammarConstraintState { parent: self, state }
     }
@@ -547,8 +563,8 @@ impl<'r> Precomputer<'r> {
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
+            for token_match in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token_match.id);
                 let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
@@ -1577,7 +1593,7 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-        for (tokenizer_state_id, glr_state) in &self.state {
+        for (tokenizer_state_id, glr_state) in self.state.iter() {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
@@ -1986,6 +2002,16 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
+        for (tid, glr_state) in new_overall_state.iter_mut() {
+            if let Some(root2) = self.parent.precomputed2.get(tid) {
+                let mut new_acc = (*glr_state.active_state.stack.acc).clone();
+                new_acc.trie2_nodes.clear();
+                new_acc.trie2_nodes.insert(ArcPtrWrapper::new(root2.clone()));
+                let new_node = GSSNode::new_with_map(Arc::new(new_acc), glr_state.active_state.stack.predecessors.clone());
+                glr_state.active_state.stack = Arc::new(new_node);
+            }
+        }
+
         self.state = new_overall_state.clone();
 
         for glr_parser_state in self.state.values_mut() {
@@ -2039,7 +2065,36 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        todo!()
+        let mut final_mask_internal = HybridBitset::zeros();
+
+        for glr in self.state.values() {
+            let stack = &glr.active_state.stack;
+            if stack.is_empty() { continue; }
+
+            // Collect top-of-stack state ids at depth 0
+            let mut heads: BTreeSet<StateID> = BTreeSet::new();
+            for peek in GSSNode::peek_iter(stack) {
+                heads.insert(peek.edge_value().state_id);
+            }
+            if heads.is_empty() { continue; }
+
+            // Use frontier trie2 nodes from Acc
+            for node_w in &stack.acc.trie2_nodes {
+                let node_arc = node_w.as_arc();
+                let guard = node_arc.lock().expect("poison");
+                for (ek, dest_map) in guard.children() {
+                    if ek.0 != 0 { continue; }
+                    if let Some(sid) = ek.1 {
+                        if heads.contains(&sid) {
+                            for (_child, ev_bv) in dest_map.iter() {
+                                final_mask_internal |= ev_bv;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.parent.internal_bv_to_original(&final_mask_internal)
     }
 }
-

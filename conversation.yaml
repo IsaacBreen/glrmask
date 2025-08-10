@@ -1,12 +1,12 @@
 local_system:
   attached_files:
-    - src/datastructures/mod.rs
-    - src/lib.rs
-    - src/datastructures/gss.rs
-    - src/glr/parser.rs
-    - src/datastructures/trie.rs
     - src/constraint.rs
-  conversation_file: conversation.yaml
+    - src/datastructures/gss.rs
+    - src/datastructures/mod.rs
+    - src/datastructures/trie.rs
+    - src/glr/parser.rs
+    - src/lib.rs
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/datastructures/mod.rs: |
@@ -22,8 +22,7 @@ local_system:
       pub mod ordered_hash_map;
       pub mod cache;
 
-      // Added
-      pub use arc_wrapper::ArcPtrWrapper; // Added
+      pub use arc_wrapper::ArcPtrWrapper;
     src/lib.rs: |-
       pub mod finite_automata;
       pub mod glr;
@@ -42,6 +41,7 @@ local_system:
       mod profiler;
       mod test_constraint_js;
     src/datastructures/gss.rs: |
+      use std::sync::Mutex;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::sync::Arc;
       use std::fmt::{Debug, Write};
@@ -52,9 +52,10 @@ local_system:
       use deterministic_hash::DeterministicHasher;
       use rand::rngs::StdRng;
       use rand::{Rng, SeedableRng};
+      use crate::datastructures::arc_wrapper::ArcPtrWrapper;
+      use crate::datastructures::trie::Trie;
 
       use crate::glr::parser::ParseStateEdgeContent;
-      use crate::constraint::{LLMTokenBV, TerminalBV};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
       use crate::glr::grammar::Terminal;
@@ -64,6 +65,9 @@ local_system:
       use std::ops::{BitAnd, BitOr};
       use crate::profiler::GSS_LOGGING_ENABLED;
       use profiler_macro::{time_it, timeit};
+
+      pub type LLMTokenBV = HybridBitset;
+      pub type TerminalBV = HybridBitset;
 
       // --- Type Aliases ---
 
@@ -78,6 +82,44 @@ local_system:
       /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
       pub type TerminalInfo = HybridL2Bitset;
 
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct PrecomputedNodeContents {
+          pub end: bool,
+      }
+
+      impl PrecomputedNodeContents {
+          pub fn no_end() -> Self {
+              Self { end: false }
+          }
+
+          pub fn end() -> Self {
+              Self { end: true }
+          }
+      }
+
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+
+      impl JSONConvertible for PrecomputedNodeContents {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("clean_end".to_string(), self.end.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
+                                         .and_then(bool::from_json)?;
+                      Ok(PrecomputedNodeContents { end })
+                  }
+                  _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
+              }
+          }
+      }
+
+      pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+
 
       // --- Accumulator (Acc) ---
 
@@ -89,6 +131,7 @@ local_system:
           pub terminals_union: HybridL2Bitset,
           pub terminals_intersection: HybridL2Bitset,
           pub needs_push_down: bool,
+          pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
       }
 
       impl Acc {
@@ -100,6 +143,7 @@ local_system:
                   terminals_union: HybridL2Bitset::all(),
                   terminals_intersection: HybridL2Bitset::all(),
                   needs_push_down: false,
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -111,6 +155,7 @@ local_system:
                   terminals_union: terminals.clone(),
                   terminals_intersection: terminals,
                   needs_push_down: false,
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -121,6 +166,7 @@ local_system:
                   terminals_union: &from.terminals_union & &to.terminals_union,
                   terminals_intersection: &from.terminals_union & &to.terminals_intersection,
                   needs_push_down: false,
+                  trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
               }
               // Acc {
               //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
@@ -137,6 +183,7 @@ local_system:
                   terminals_union: &lhs.terminals_union | &rhs.terminals_union,
                   terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
                   needs_push_down: false,
+                  trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes,
               }
           }
 
@@ -384,6 +431,9 @@ local_system:
           acc.llm_tokens_intersection.hash(&mut hasher);
           acc.terminals_union.hash(&mut hasher);
           acc.terminals_intersection.hash(&mut hasher);
+          for trie2_node in &acc.trie2_nodes {
+              trie2_node.hash(&mut hasher);
+          }
           for (edge_val, preds_by_depth) in predecessors {
               edge_val.hash(&mut hasher);
               for (dest_key, pred_vec) in preds_by_depth {
@@ -1791,12 +1841,12 @@ local_system:
     src/glr/parser.rs: |+
       use std::any::Any;
       use std::cmp::Ordering;
-      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
       use crate::tokenizer::LLMTokenID;
-      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-      use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
+      use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -1813,6 +1863,7 @@ local_system:
       use std::collections::HashMap;
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+      use crate::datastructures::trie::EdgeInserter;
 
       /// A trait to provide a lazily-evaluated `expect`.
       pub trait ExpectElse<T> {
@@ -6007,7 +6058,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
+      use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -6028,52 +6079,13 @@ local_system:
       use crate::interface::CompiledGrammar;
       use crate::profiler::GSS_LOGGING_ENABLED;
 
-      pub type LLMTokenBV = HybridBitset;
-      pub type TerminalBV = HybridBitset;
-
       const MERGE_THRESHOLD: usize = 20;
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct PrecomputedNodeContents {
-          pub end: bool,
-      }
-
-      impl PrecomputedNodeContents {
-          pub fn no_end() -> Self {
-              Self { end: false }
-          }
-
-          pub fn end() -> Self {
-              Self { end: true }
-          }
-      }
-
-      impl JSONConvertible for PrecomputedNodeContents {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("clean_end".to_string(), self.end.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => {
-                      let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                         .and_then(bool::from_json)?;
-                      Ok(PrecomputedNodeContents { end })
-                  }
-                  _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-              }
-          }
-      }
-
-
-      impl PrecomputedNodeContents {
-      }
 
       pub type PrecomputeNode =
           Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
       pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
+      pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct LLMVocab {
@@ -6088,6 +6100,7 @@ local_system:
           pub(crate) tokenizer:        Regex,
           pub(crate) parser:           GLRParser,
           pub(crate) precomputed:      Precomputed,
+          pub(crate) precomputed2:     Precomputed2,
           pub(crate) llm_vocab:        Arc<LLMVocab>,
           pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
           pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -6099,6 +6112,13 @@ local_system:
               assert_eq!(self.parser, other.parser);
               assert_eq!(self.precomputed.len(), other.precomputed.len());
               for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
+                  assert_eq!(sid1, sid2);
+                  let node1 = arc1.lock().unwrap();
+                  let node2 = arc2.lock().unwrap();
+                  assert_eq!(*node1, *node2);
+              }
+              assert_eq!(self.precomputed2.len(), other.precomputed2.len());
+              for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
                   assert_eq!(sid1, sid2);
                   let node1 = arc1.lock().unwrap();
                   let node2 = arc2.lock().unwrap();
@@ -6119,6 +6139,7 @@ local_system:
               obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
               obj.insert("parser".to_string(), self.parser.to_json());
               obj.insert("precomputed".to_string(), self.precomputed.to_json());
+              obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
               obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
               obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
               obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
@@ -6137,6 +6158,8 @@ local_system:
                                       .and_then(GLRParser::from_json)?;
                       let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
                                            .and_then(|n| Precomputed::from_json(n))?;
+                      let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
+                                           .and_then(|n| Precomputed2::from_json(n))?;
 
                       let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                              .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -6154,6 +6177,7 @@ local_system:
                           tokenizer,
                           parser,
                           precomputed,
+                          precomputed2,
                           llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                           token_name_map,
                           possible_matches,
@@ -6310,10 +6334,13 @@ local_system:
                   &mut computed_possible_matches,
               );
 
+              let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+
               let mut gc = Self {
                   tokenizer, // This is the tokenizer parameter being moved into the struct
                   parser,
                   precomputed,
+                  precomputed2,
                   llm_vocab,
                   token_name_map,
                   possible_matches: computed_possible_matches, // Add this line
@@ -6353,6 +6380,11 @@ local_system:
               helper.prune_dead_paths();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+          }
+
+          pub fn precompute2(
+          ) -> Precomputed2 {
+              todo!()
           }
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -7525,8 +7557,13 @@ local_system:
       }
 
       impl<'a> GrammarConstraintState<'a> {
-          #[time_it]
           pub fn get_mask(&self) -> LLMTokenBV {
+              self.get_mask1()
+              // self.get_mask2()
+          }
+
+          #[time_it]
+          pub fn get_mask1(&self) -> LLMTokenBV {
               let t0 = std::time::Instant::now();
               crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
               let stats = gather_gss_stats(
@@ -8035,6 +8072,12 @@ local_system:
 
           pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
               &self.state
+          }
+      }
+
+      impl<'a> GrammarConstraintState<'a> {
+          pub fn get_mask2(&self) -> LLMTokenBV {
+              todo!()
           }
       }
 
@@ -8052,8 +8095,7 @@ local_system:
       pub mod ordered_hash_map;
       pub mod cache;
 
-      // Added
-      pub use arc_wrapper::ArcPtrWrapper; // Added
+      pub use arc_wrapper::ArcPtrWrapper;
     src/lib.rs: |-
       pub mod finite_automata;
       pub mod glr;
@@ -8072,6 +8114,7 @@ local_system:
       mod profiler;
       mod test_constraint_js;
     src/datastructures/gss.rs: |
+      use std::sync::Mutex;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::sync::Arc;
       use std::fmt::{Debug, Write};
@@ -8082,9 +8125,10 @@ local_system:
       use deterministic_hash::DeterministicHasher;
       use rand::rngs::StdRng;
       use rand::{Rng, SeedableRng};
+      use crate::datastructures::arc_wrapper::ArcPtrWrapper;
+      use crate::datastructures::trie::Trie;
 
       use crate::glr::parser::ParseStateEdgeContent;
-      use crate::constraint::{LLMTokenBV, TerminalBV};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
       use crate::glr::grammar::Terminal;
@@ -8094,6 +8138,9 @@ local_system:
       use std::ops::{BitAnd, BitOr};
       use crate::profiler::GSS_LOGGING_ENABLED;
       use profiler_macro::{time_it, timeit};
+
+      pub type LLMTokenBV = HybridBitset;
+      pub type TerminalBV = HybridBitset;
 
       // --- Type Aliases ---
 
@@ -8108,6 +8155,44 @@ local_system:
       /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
       pub type TerminalInfo = HybridL2Bitset;
 
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct PrecomputedNodeContents {
+          pub end: bool,
+      }
+
+      impl PrecomputedNodeContents {
+          pub fn no_end() -> Self {
+              Self { end: false }
+          }
+
+          pub fn end() -> Self {
+              Self { end: true }
+          }
+      }
+
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+
+      impl JSONConvertible for PrecomputedNodeContents {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("clean_end".to_string(), self.end.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
+                                         .and_then(bool::from_json)?;
+                      Ok(PrecomputedNodeContents { end })
+                  }
+                  _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
+              }
+          }
+      }
+
+      pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+
 
       // --- Accumulator (Acc) ---
 
@@ -8119,6 +8204,7 @@ local_system:
           pub terminals_union: HybridL2Bitset,
           pub terminals_intersection: HybridL2Bitset,
           pub needs_push_down: bool,
+          pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
       }
 
       impl Acc {
@@ -8130,6 +8216,7 @@ local_system:
                   terminals_union: HybridL2Bitset::all(),
                   terminals_intersection: HybridL2Bitset::all(),
                   needs_push_down: false,
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -8141,6 +8228,7 @@ local_system:
                   terminals_union: terminals.clone(),
                   terminals_intersection: terminals,
                   needs_push_down: false,
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -8151,6 +8239,7 @@ local_system:
                   terminals_union: &from.terminals_union & &to.terminals_union,
                   terminals_intersection: &from.terminals_union & &to.terminals_intersection,
                   needs_push_down: false,
+                  trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
               }
               // Acc {
               //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
@@ -8167,6 +8256,7 @@ local_system:
                   terminals_union: &lhs.terminals_union | &rhs.terminals_union,
                   terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
                   needs_push_down: false,
+                  trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes,
               }
           }
 
@@ -8414,6 +8504,9 @@ local_system:
           acc.llm_tokens_intersection.hash(&mut hasher);
           acc.terminals_union.hash(&mut hasher);
           acc.terminals_intersection.hash(&mut hasher);
+          for trie2_node in &acc.trie2_nodes {
+              trie2_node.hash(&mut hasher);
+          }
           for (edge_val, preds_by_depth) in predecessors {
               edge_val.hash(&mut hasher);
               for (dest_key, pred_vec) in preds_by_depth {
@@ -9821,12 +9914,12 @@ local_system:
     src/glr/parser.rs: |+
       use std::any::Any;
       use std::cmp::Ordering;
-      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
       use crate::tokenizer::LLMTokenID;
-      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-      use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
+      use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -9843,6 +9936,7 @@ local_system:
       use std::collections::HashMap;
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+      use crate::datastructures::trie::EdgeInserter;
 
       /// A trait to provide a lazily-evaluated `expect`.
       pub trait ExpectElse<T> {
@@ -14037,7 +14131,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
+      use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -14058,52 +14152,13 @@ local_system:
       use crate::interface::CompiledGrammar;
       use crate::profiler::GSS_LOGGING_ENABLED;
 
-      pub type LLMTokenBV = HybridBitset;
-      pub type TerminalBV = HybridBitset;
-
       const MERGE_THRESHOLD: usize = 20;
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct PrecomputedNodeContents {
-          pub end: bool,
-      }
-
-      impl PrecomputedNodeContents {
-          pub fn no_end() -> Self {
-              Self { end: false }
-          }
-
-          pub fn end() -> Self {
-              Self { end: true }
-          }
-      }
-
-      impl JSONConvertible for PrecomputedNodeContents {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("clean_end".to_string(), self.end.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => {
-                      let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                         .and_then(bool::from_json)?;
-                      Ok(PrecomputedNodeContents { end })
-                  }
-                  _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-              }
-          }
-      }
-
-
-      impl PrecomputedNodeContents {
-      }
 
       pub type PrecomputeNode =
           Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
       pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
+      pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct LLMVocab {
@@ -14118,6 +14173,7 @@ local_system:
           pub(crate) tokenizer:        Regex,
           pub(crate) parser:           GLRParser,
           pub(crate) precomputed:      Precomputed,
+          pub(crate) precomputed2:     Precomputed2,
           pub(crate) llm_vocab:        Arc<LLMVocab>,
           pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
           pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -14129,6 +14185,13 @@ local_system:
               assert_eq!(self.parser, other.parser);
               assert_eq!(self.precomputed.len(), other.precomputed.len());
               for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
+                  assert_eq!(sid1, sid2);
+                  let node1 = arc1.lock().unwrap();
+                  let node2 = arc2.lock().unwrap();
+                  assert_eq!(*node1, *node2);
+              }
+              assert_eq!(self.precomputed2.len(), other.precomputed2.len());
+              for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
                   assert_eq!(sid1, sid2);
                   let node1 = arc1.lock().unwrap();
                   let node2 = arc2.lock().unwrap();
@@ -14149,6 +14212,7 @@ local_system:
               obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
               obj.insert("parser".to_string(), self.parser.to_json());
               obj.insert("precomputed".to_string(), self.precomputed.to_json());
+              obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
               obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
               obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
               obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
@@ -14167,6 +14231,8 @@ local_system:
                                       .and_then(GLRParser::from_json)?;
                       let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
                                            .and_then(|n| Precomputed::from_json(n))?;
+                      let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
+                                           .and_then(|n| Precomputed2::from_json(n))?;
 
                       let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                              .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -14184,6 +14250,7 @@ local_system:
                           tokenizer,
                           parser,
                           precomputed,
+                          precomputed2,
                           llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                           token_name_map,
                           possible_matches,
@@ -14340,10 +14407,13 @@ local_system:
                   &mut computed_possible_matches,
               );
 
+              let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+
               let mut gc = Self {
                   tokenizer, // This is the tokenizer parameter being moved into the struct
                   parser,
                   precomputed,
+                  precomputed2,
                   llm_vocab,
                   token_name_map,
                   possible_matches: computed_possible_matches, // Add this line
@@ -14383,6 +14453,11 @@ local_system:
               helper.prune_dead_paths();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+          }
+
+          pub fn precompute2(
+          ) -> Precomputed2 {
+              todo!()
           }
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -15555,8 +15630,13 @@ local_system:
       }
 
       impl<'a> GrammarConstraintState<'a> {
-          #[time_it]
           pub fn get_mask(&self) -> LLMTokenBV {
+              self.get_mask1()
+              // self.get_mask2()
+          }
+
+          #[time_it]
+          pub fn get_mask1(&self) -> LLMTokenBV {
               let t0 = std::time::Instant::now();
               crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
               let stats = gather_gss_stats(
@@ -16068,29 +16148,37 @@ local_system:
           }
       }
 
+      impl<'a> GrammarConstraintState<'a> {
+          pub fn get_mask2(&self) -> LLMTokenBV {
+              todo!()
+          }
+      }
+
   diffs_applied_this_send: true
 system:
   message: |2
 
     You are a helpful assistant.
     Respond in markdown format.
-    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
-    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
-    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
+    If asked for full code, provide it.
+    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
+    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
+    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
 messages:
   - user: |-
       ```rust 'src/datastructures/mod.rs'
@@ -16106,8 +16194,7 @@ messages:
       pub mod ordered_hash_map;
       pub mod cache;
 
-      // Added
-      pub use arc_wrapper::ArcPtrWrapper; // Added
+      pub use arc_wrapper::ArcPtrWrapper;
 
       ```
     metadata:
@@ -16135,6 +16222,7 @@ messages:
       filename: src/lib.rs
   - user: |-
       ```rust 'src/datastructures/gss.rs'
+      use std::sync::Mutex;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::sync::Arc;
       use std::fmt::{Debug, Write};
@@ -16145,9 +16233,10 @@ messages:
       use deterministic_hash::DeterministicHasher;
       use rand::rngs::StdRng;
       use rand::{Rng, SeedableRng};
+      use crate::datastructures::arc_wrapper::ArcPtrWrapper;
+      use crate::datastructures::trie::Trie;
 
       use crate::glr::parser::ParseStateEdgeContent;
-      use crate::constraint::{LLMTokenBV, TerminalBV};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
       use crate::glr::grammar::Terminal;
@@ -16157,6 +16246,9 @@ messages:
       use std::ops::{BitAnd, BitOr};
       use crate::profiler::GSS_LOGGING_ENABLED;
       use profiler_macro::{time_it, timeit};
+
+      pub type LLMTokenBV = HybridBitset;
+      pub type TerminalBV = HybridBitset;
 
       // --- Type Aliases ---
 
@@ -16171,6 +16263,44 @@ messages:
       /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
       pub type TerminalInfo = HybridL2Bitset;
 
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct PrecomputedNodeContents {
+          pub end: bool,
+      }
+
+      impl PrecomputedNodeContents {
+          pub fn no_end() -> Self {
+              Self { end: false }
+          }
+
+          pub fn end() -> Self {
+              Self { end: true }
+          }
+      }
+
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+
+      impl JSONConvertible for PrecomputedNodeContents {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("clean_end".to_string(), self.end.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
+                                         .and_then(bool::from_json)?;
+                      Ok(PrecomputedNodeContents { end })
+                  }
+                  _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
+              }
+          }
+      }
+
+      pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+
 
       // --- Accumulator (Acc) ---
 
@@ -16182,6 +16312,7 @@ messages:
           pub terminals_union: HybridL2Bitset,
           pub terminals_intersection: HybridL2Bitset,
           pub needs_push_down: bool,
+          pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
       }
 
       impl Acc {
@@ -16193,6 +16324,7 @@ messages:
                   terminals_union: HybridL2Bitset::all(),
                   terminals_intersection: HybridL2Bitset::all(),
                   needs_push_down: false,
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -16204,6 +16336,7 @@ messages:
                   terminals_union: terminals.clone(),
                   terminals_intersection: terminals,
                   needs_push_down: false,
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -16214,6 +16347,7 @@ messages:
                   terminals_union: &from.terminals_union & &to.terminals_union,
                   terminals_intersection: &from.terminals_union & &to.terminals_intersection,
                   needs_push_down: false,
+                  trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
               }
               // Acc {
               //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
@@ -16230,6 +16364,7 @@ messages:
                   terminals_union: &lhs.terminals_union | &rhs.terminals_union,
                   terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
                   needs_push_down: false,
+                  trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes,
               }
           }
 
@@ -16477,6 +16612,9 @@ messages:
           acc.llm_tokens_intersection.hash(&mut hasher);
           acc.terminals_union.hash(&mut hasher);
           acc.terminals_intersection.hash(&mut hasher);
+          for trie2_node in &acc.trie2_nodes {
+              trie2_node.hash(&mut hasher);
+          }
           for (edge_val, preds_by_depth) in predecessors {
               edge_val.hash(&mut hasher);
               for (dest_key, pred_vec) in preds_by_depth {
@@ -17889,12 +18027,12 @@ messages:
       ```rust 'src/glr/parser.rs'
       use std::any::Any;
       use std::cmp::Ordering;
-      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
       use crate::tokenizer::LLMTokenID;
-      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
+      use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-      use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
+      use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -17911,6 +18049,7 @@ messages:
       use std::collections::HashMap;
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+      use crate::datastructures::trie::EdgeInserter;
 
       /// A trait to provide a lazily-evaluated `expect`.
       pub trait ExpectElse<T> {
@@ -22115,7 +22254,7 @@ messages:
       use indicatif::{ProgressBar, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
+      use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -22136,52 +22275,13 @@ messages:
       use crate::interface::CompiledGrammar;
       use crate::profiler::GSS_LOGGING_ENABLED;
 
-      pub type LLMTokenBV = HybridBitset;
-      pub type TerminalBV = HybridBitset;
-
       const MERGE_THRESHOLD: usize = 20;
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct PrecomputedNodeContents {
-          pub end: bool,
-      }
-
-      impl PrecomputedNodeContents {
-          pub fn no_end() -> Self {
-              Self { end: false }
-          }
-
-          pub fn end() -> Self {
-              Self { end: true }
-          }
-      }
-
-      impl JSONConvertible for PrecomputedNodeContents {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("clean_end".to_string(), self.end.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => {
-                      let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                         .and_then(bool::from_json)?;
-                      Ok(PrecomputedNodeContents { end })
-                  }
-                  _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-              }
-          }
-      }
-
-
-      impl PrecomputedNodeContents {
-      }
 
       pub type PrecomputeNode =
           Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
       pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
+      pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct LLMVocab {
@@ -22196,6 +22296,7 @@ messages:
           pub(crate) tokenizer:        Regex,
           pub(crate) parser:           GLRParser,
           pub(crate) precomputed:      Precomputed,
+          pub(crate) precomputed2:     Precomputed2,
           pub(crate) llm_vocab:        Arc<LLMVocab>,
           pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
           pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -22207,6 +22308,13 @@ messages:
               assert_eq!(self.parser, other.parser);
               assert_eq!(self.precomputed.len(), other.precomputed.len());
               for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
+                  assert_eq!(sid1, sid2);
+                  let node1 = arc1.lock().unwrap();
+                  let node2 = arc2.lock().unwrap();
+                  assert_eq!(*node1, *node2);
+              }
+              assert_eq!(self.precomputed2.len(), other.precomputed2.len());
+              for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
                   assert_eq!(sid1, sid2);
                   let node1 = arc1.lock().unwrap();
                   let node2 = arc2.lock().unwrap();
@@ -22227,6 +22335,7 @@ messages:
               obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
               obj.insert("parser".to_string(), self.parser.to_json());
               obj.insert("precomputed".to_string(), self.precomputed.to_json());
+              obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
               obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
               obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
               obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
@@ -22245,6 +22354,8 @@ messages:
                                       .and_then(GLRParser::from_json)?;
                       let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
                                            .and_then(|n| Precomputed::from_json(n))?;
+                      let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
+                                           .and_then(|n| Precomputed2::from_json(n))?;
 
                       let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                              .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -22262,6 +22373,7 @@ messages:
                           tokenizer,
                           parser,
                           precomputed,
+                          precomputed2,
                           llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                           token_name_map,
                           possible_matches,
@@ -22418,10 +22530,13 @@ messages:
                   &mut computed_possible_matches,
               );
 
+              let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+
               let mut gc = Self {
                   tokenizer, // This is the tokenizer parameter being moved into the struct
                   parser,
                   precomputed,
+                  precomputed2,
                   llm_vocab,
                   token_name_map,
                   possible_matches: computed_possible_matches, // Add this line
@@ -22461,6 +22576,11 @@ messages:
               helper.prune_dead_paths();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+          }
+
+          pub fn precompute2(
+          ) -> Precomputed2 {
+              todo!()
           }
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -23633,8 +23753,13 @@ messages:
       }
 
       impl<'a> GrammarConstraintState<'a> {
-          #[time_it]
           pub fn get_mask(&self) -> LLMTokenBV {
+              self.get_mask1()
+              // self.get_mask2()
+          }
+
+          #[time_it]
+          pub fn get_mask1(&self) -> LLMTokenBV {
               let t0 = std::time::Instant::now();
               crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
               let stats = gather_gss_stats(
@@ -24146,6 +24271,12 @@ messages:
           }
       }
 
+      impl<'a> GrammarConstraintState<'a> {
+          pub fn get_mask2(&self) -> LLMTokenBV {
+              todo!()
+          }
+      }
+
 
       ```
     metadata:
@@ -24320,1007 +24451,425 @@ messages:
       Do it in one big response. Specify them fully.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed your request to implement the "Trie 2" precomputation strategy. This is an interesting and complex idea for optimizing grammar constraints. I've implemented the necessary changes across the GSS, parser, and constraint logic based on your design.
+      Below are precise, step-by-step code changes to add and wire up “Trie 2” (precomputed over (pops, state_id) edges with LLM masks), store per-node frontier of trie2 nodes in Acc, push trie2 edges on “below bottom” reductions at runtime, seed trie2 roots per tokenizer state, and expose a simple get_mask2 that reads trie2 via pop-0 checks (no parser stepping).
 
-      Here are the git diff patches for the modified files.
+      I’m intentionally not dumping huge code blocks; I’m giving exact edits you can apply in place.
 
-      ### `src/datastructures/mod.rs`
+      High-level plan
 
-      I've added the `pub use` for `ArcPtrWrapper` as you indicated.
+      - Precompute2 data structure: PrecomputeNode2 = Trie<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>. JSON needs tuple support.
+      - Acc: we already have trie2_nodes. Add a helper to advance this set by pushing a “below bottom” event sequence onto all current trie2 nodes.
+      - Parser: on reduce_and_goto “below bottom” case, compute source state ids used (the “hallucinated” state before goto) and for each extra-pop depth in popper.below_bottom push (depth, source_state) with mask = union_llm_tokens at that point into merged_acc.trie2_nodes before constructing the GSSNode.
+      - GrammarConstraint::precompute2: create an empty trie2 root per tokenizer state. Keep JSON round-trip working by adding JSONConvertible for (usize, Option<StateID>).
+      - Seed trie2 roots into GSS Acc on init and after tokenizer-state transitions (commit_bytes).
+      - get_mask2: do not step the parser; just combine masks of outgoing trie2 edges whose key matches “pop=0 and top-of-stack state ids”. Use union of masks across all frontier trie2 nodes found in Acc.
 
-      ```diff
-      diff --git a/src/datastructures/mod.rs b/src/datastructures/mod.rs
-      index 2171b67..128243f 100644
-      --- a/src/datastructures/mod.rs
-      +++ b/src/datastructures/mod.rs
-      @@ -7,4 +7,4 @@
-       pub mod ordered_hash_map;
-       pub mod cache;
-       
-      -// Added
-      -pub use arc_wrapper::ArcPtrWrapper; // Added
-      +pub use arc_wrapper::ArcPtrWrapper;
+      Detailed edits
 
-      ```
+      1) JSON for (usize, Option<StateID>) for Trie serialization
 
-      ### `src/datastructures/gss.rs`
+      File: src/glr/parser.rs (the StateID type lives here; JSONConvertible is available globally)
 
-      To break a circular dependency, I've moved several type definitions (`LLMTokenBV`, `TerminalBV`, `PrecomputedNodeContents`) here from `constraint.rs`. I've also defined `PrecomputeNode2` and integrated the `trie2_nodes` set into the `Acc` struct as you designed.
+      - After the existing JSONConvertible impls (e.g., StopReason, ParseStateEdgeContent), add a JSONConvertible impl for the tuple key used by PrecomputeNode2:
 
-      ```diff
-      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -6,10 +6,12 @@
-       use deterministic_hash::DeterministicHasher;
-       use rand::rngs::StdRng;
-       use rand::{Rng, SeedableRng};
-      +use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-      +use crate::datastructures::trie::Trie;
-       
-       use crate::glr::parser::ParseStateEdgeContent;
-      -use crate::constraint::{LLMTokenBV, TerminalBV};
-       use crate::datastructures::hybrid_bitset::HybridBitset;
-       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-       use crate::glr::grammar::Terminal;
-      @@ -20,6 +22,9 @@
-       use crate::profiler::GSS_LOGGING_ENABLED;
-       use profiler_macro::{time_it, timeit};
-       
-      +pub type LLMTokenBV = HybridBitset;
-      +pub type TerminalBV = HybridBitset;
-      +
-       // --- Type Aliases ---
-       
-       pub type MaxDepth = usize;
-      @@ -32,6 +37,40 @@
-       type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
-       /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-       pub type TerminalInfo = HybridL2Bitset;
-      +
-      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      +pub struct PrecomputedNodeContents {
-      +    pub end: bool,
-      +}
-      +
-      +impl PrecomputedNodeContents {
-      +    pub fn no_end() -> Self {
-      +        Self { end: false }
-      +    }
-      +
-      +    pub fn end() -> Self {
-      +        Self { end: true }
-      +    }
-      +}
-      +
-      +use crate::json_serialization::{JSONConvertible, JSONNode};
-      +use std::collections::BTreeMap as StdMap;
-      +
-      +impl JSONConvertible for PrecomputedNodeContents {
-      +    fn to_json(&self) -> JSONNode {
-      +        let mut obj = StdMap::new();
-      +        obj.insert("clean_end".to_string(), self.end.to_json());
-      +        JSONNode::Object(obj)
-      +    }
-      +    fn from_json(node: JSONNode) -> Result<Self, String> {
-      +        match node {
-      +            JSONNode::Object(mut obj) => {
-      +                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-      +                                   .and_then(bool::from_json)?;
-      +                Ok(PrecomputedNodeContents { end })
-      +            }
-      +            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-      +        }
-      +    }
-      +}
-      +
-      +pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-       
-       
-       // --- Accumulator (Acc) ---
-      @@ -44,6 +83,7 @@
-           pub terminals_union: HybridL2Bitset,
-           pub terminals_intersection: HybridL2Bitset,
-           pub needs_push_down: bool,
-      +    pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
-       }
-       
-       impl Acc {
-      @@ -55,6 +95,7 @@
-                   terminals_union: HybridL2Bitset::all(),
-                   terminals_intersection: HybridL2Bitset::all(),
-                   needs_push_down: false,
-      +            trie2_nodes: BTreeSet::new(),
-               }
-           }
-       
-      @@ -66,6 +107,7 @@
-                   terminals_union: terminals.clone(),
-                   terminals_intersection: terminals,
-                   needs_push_down: false,
-      +            trie2_nodes: BTreeSet::new(),
-               }
-           }
-       
-      @@ -76,6 +118,7 @@
-                   terminals_union: &from.terminals_union & &to.terminals_union,
-                   terminals_intersection: &from.terminals_union & &to.terminals_intersection,
-                   needs_push_down: false,
-      +            trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
-               }
-               // Acc {
-               //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
-      @@ -91,6 +134,7 @@
-                   terminals_union: &lhs.terminals_union | &rhs.terminals_union,
-                   terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
-                   needs_push_down: false,
-      +            trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes,
-               }
-           }
-       
-      @@ -388,6 +432,9 @@
-           acc.llm_tokens_intersection.hash(&mut hasher);
-           acc.terminals_union.hash(&mut hasher);
-           acc.terminals_intersection.hash(&mut hasher);
-      +    for trie2_node in &acc.trie2_nodes {
-      +        trie2_node.hash(&mut hasher);
-      +    }
-           for (edge_val, preds_by_depth) in predecessors {
-               edge_val.hash(&mut hasher);
-               for (dest_key, pred_vec) in preds_by_depth {
+        - Insert a new impl block:
 
-      ```
+          - Implement JSONConvertible for (usize, Option<StateID>) as an object:
+            - to_json returns an object with keys "pops" and "state_id".
+            - from_json expects those keys and returns the tuple.
 
-      ### `src/glr/parser.rs`
+        - Code sketch you should type in (keep exactly this shape; it’s not long and will compile):
 
-      I've modified `reduce_and_goto` to handle the creation of new edges in the Trie 2 structure when the parser pops below the bottom of the GSS, as you outlined.
+          - Add after the existing JSONConvertible impl of ParseStateEdgeContent:
 
-      ```diff
-      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -1,7 +1,7 @@
-       use std::any::Any;
-       use std::cmp::Ordering;
-      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
-      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
-       use crate::tokenizer::LLMTokenID;
-      -use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
-      +use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-       use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
-      @@ -16,6 +16,7 @@
-       use std::collections::HashMap;
-       use crate::glr::items::{Item, LRMode, LR_MODE};
-       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
-      +use crate::datastructures::trie::EdgeInserter;
-       
-       /// A trait to provide a lazily-evaluated `expect`.
-       pub trait ExpectElse<T> {
-      @@ -1018,6 +1019,31 @@
-                           Some(prev) => Acc::merge(&prev, acc_arc),
-                       });
-                   }
-      + 
-      +            if let Some(merged_acc) = merged_acc_opt.as_ref() {
-      +                if !merged_acc.trie2_nodes.is_empty() {
-      +                    let mut new_dest_node = None;
-      +
-      +                    for (extra_pops, acc_arc) in &popper.below_bottom {
-      +                        for (source_state_id, row) in &self.parser.table {
-      +                            if row.gotos.contains_key(&nt) {
-      +                                // This is a "hallucinated" state.
-      +                                for trie2_node_wrapper in &merged_acc.trie2_nodes {
-      +                                    let dest_node = new_dest_node.get_or_insert_with(|| {
-      +                                        Arc::new(std::sync::Mutex::new(PrecomputeNode2::new(
-      +                                            crate::datastructures::gss::PrecomputedNodeContents::no_end()
-      +                                        )))
-      +                                    });
-      +
-      +                                    let inserter = EdgeInserter::new(
-      +                                        trie2_node_wrapper.as_arc().clone(),
-      +                                        (*extra_pops, Some(*source_state_id)),
-      +                                        acc_arc.llm_tokens_union.clone(),
-      +                                        |e, n| *e |= n,
-      +                                    );
-      +                                    inserter.try_destination(dest_node.clone()).unwrap();
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-       
-                   if let Some(merged_acc) = merged_acc_opt {
-                       let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
+            impl JSONConvertible for (usize, Option<StateID>) {
+                fn to_json(&self) -> JSONNode {
+                    let mut obj = StdMap::new();
+                    obj.insert("pops".to_string(), self.0.to_json());
+                    obj.insert("state_id".to_string(), self.1.to_json());
+                    JSONNode::Object(obj)
+                }
+                fn from_json(node: JSONNode) -> Result<Self, String> {
+                    match node {
+                        JSONNode::Object(mut obj) => {
+                            let pops = obj.remove("pops")
+                                .ok_or_else(|| "Missing field pops for (usize, Option<StateID>)".to_string())
+                                .and_then(usize::from_json)?;
+                            let state_id_opt = obj.remove("state_id")
+                                .ok_or_else(|| "Missing field state_id for (usize, Option<StateID>)".to_string())
+                                .and_then(Option::<StateID>::from_json)?;
+                            Ok((pops, state_id_opt))
+                        }
+                        _ => Err("Expected JSONNode::Object for (usize, Option<StateID>)".to_string()),
+                    }
+                }
+            }
 
-      ```
+      2) Acc helper to push trie2 sequences
 
-      ### `src/constraint.rs`
+      File: src/datastructures/gss.rs
 
-      This file contains the bulk of the changes. I've added the `precomputed2` field and its associated types, implemented the `precompute2` function to build the new trie based on your design, and added a stub for the new `get_mask2` function.
+      - At the top of the file, ensure these imports are present (they likely are already, but verify):
 
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -7,10 +7,10 @@
-       use std::cell::RefCell;
-       
-       use bimap::BiBTreeMap;
-       use bitvec::prelude::*;
-       use indicatif::{ProgressBar, ProgressStyle};
-       
-       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      -use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
-      +use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
-       use crate::datastructures::hybrid_bitset::HybridBitset;
-       use crate::datastructures::trie::{EdgeInserter, Trie};
-       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-      @@ -29,49 +29,12 @@
-       use crate::interface::CompiledGrammar;
-       use crate::profiler::GSS_LOGGING_ENABLED;
-       
-      -pub type LLMTokenBV = HybridBitset;
-      -pub type TerminalBV = HybridBitset;
-      -
-       const MERGE_THRESHOLD: usize = 20;
-       
-      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      -pub struct PrecomputedNodeContents {
-      -    pub end: bool,
-      -}
-      -
-      -impl PrecomputedNodeContents {
-      -    pub fn no_end() -> Self {
-      -        Self { end: false }
-      -    }
-      -
-      -    pub fn end() -> Self {
-      -        Self { end: true }
-      -    }
-      -}
-      -
-      -impl JSONConvertible for PrecomputedNodeContents {
-      -    fn to_json(&self) -> JSONNode {
-      -        let mut obj = StdMap::new();
-      -        obj.insert("clean_end".to_string(), self.end.to_json());
-      -        JSONNode::Object(obj)
-      -    }
-      -    fn from_json(node: JSONNode) -> Result<Self, String> {
-      -        match node {
-      -            JSONNode::Object(mut obj) => {
-      -                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-      -                                   .and_then(bool::from_json)?;
-      -                Ok(PrecomputedNodeContents { end })
-      -            }
-      -            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-      -        }
-      -    }
-      -}
-      -
-      -
-      -impl PrecomputedNodeContents {
-      -}
-      -
-       pub type PrecomputeNode =
-           Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-       
-       pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
-      +pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       pub struct LLMVocab {
-      @@ -85,6 +48,7 @@
-           pub(crate) tokenizer:        Regex,
-           pub(crate) parser:           GLRParser,
-           pub(crate) precomputed:      Precomputed,
-      +    pub(crate) precomputed2:     Precomputed2,
-           pub(crate) llm_vocab:        Arc<LLMVocab>,
-           pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
-           pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-      @@ -100,6 +64,13 @@
-                   let node2 = arc2.lock().unwrap();
-                   assert_eq!(*node1, *node2);
-               }
-      +        assert_eq!(self.precomputed2.len(), other.precomputed2.len());
-      +        for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
-      +            assert_eq!(sid1, sid2);
-      +            let node1 = arc1.lock().unwrap();
-      +            let node2 = arc2.lock().unwrap();
-      +            assert_eq!(*node1, *node2);
-      +        }
-               assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
-               assert_eq!(self.token_name_map, other.token_name_map);
-               assert_eq!(self.llm_vocab.max_original_llm_token_id, other.llm_vocab.max_original_llm_token_id);
-      @@ -114,6 +85,7 @@
-               obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
-               obj.insert("parser".to_string(), self.parser.to_json());
-               obj.insert("precomputed".to_string(), self.precomputed.to_json());
-      +        obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
-               obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
-               obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
-               obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
-      @@ -130,6 +102,8 @@
-                                       .and_then(GLRParser::from_json)?;
-                       let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
-                                            .and_then(|n| Precomputed::from_json(n))?;
-      +                let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
-      +                                     .and_then(|n| Precomputed2::from_json(n))?;
-       
-                       let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
-                                              .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
-      @@ -146,6 +120,7 @@
-                           tokenizer,
-                           parser,
-                           precomputed,
-      +                    precomputed2,
-                           llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
-                           token_name_map,
-                           possible_matches,
-      @@ -252,12 +227,14 @@
-                   &mut computed_possible_matches,
-               );
-       
-      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
-      +
-               let mut gc = Self {
-                   tokenizer, // This is the tokenizer parameter being moved into the struct
-                   parser,
-                   precomputed,
-      +            precomputed2,
-                   llm_vocab,
-                   token_name_map,
-                   possible_matches: computed_possible_matches, // Add this line
-      @@ -295,6 +272,65 @@
-               helper.merge_nodes();
-               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
-           }
-      +
-      +    pub fn precompute2(
-      +        parser: &GLRParser,
-      +        precomputed1: &Precomputed,
-      +        llm_vocab: &Arc<LLMVocab>,
-      +    ) -> Precomputed2 {
-      +        let mut precomputed2 = BTreeMap::new();
-      +
-      +        for (tokenizer_state_id, trie1_root) in precomputed1 {
-      +            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
-      +                PrecomputedNodeContents::no_end(),
-      +            )));
-      +            precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
-      +
-      +            let mut initial_trie2_nodes = BTreeSet::new();
-      +            for state_id in parser.table.keys() {
-      +                let dest_node = Arc::new(Mutex::new(PrecomputeNode2::new(
-      +                    PrecomputedNodeContents::no_end()
-      +                )));
-      +
-      +                let inserter = EdgeInserter::new(
-      +                    trie2_root.clone(),
-      +                    (0, Some(*state_id)),
-      +                    LLMTokenBV::max_ones(),
-      +                    |e, n| *e |= n,
-      +                );
-      +                let pushed_trie2_node = inserter.try_destination(dest_node).unwrap();
-      +                initial_trie2_nodes.insert(ArcPtrWrapper::new(pushed_trie2_node));
-      +            }
-      +
-      +            let mut initial_glr_state = parser.init_glr_substring_parser(Some(llm_vocab.clone()));
-      +            Arc::make_mut(&mut initial_glr_state.active_state.stack).acc = Arc::new(Acc {
-      +                trie2_nodes: initial_trie2_nodes,
-      +                ..Acc::new_fresh()
-      +            });
-      +
-      +            let initial_values = vec![(trie1_root.clone(), initial_glr_state)];
-      +
-      +            Trie::special_map_grouped(
-      +                initial_values,
-      +                // step
-      +                |glr_s, grammar_token_opt, dest_map| {
-      +                    let mut out = Vec::new();
-      +                    let mut stepped = glr_s.clone();
-      +                    if let Some(gtid) = grammar_token_opt {
-      +                        stepped.process_token(*gtid);
-      +                    }
-      +                    if stepped.is_ok() {
-      +                        for (child_w, _edge_bv) in dest_map.iter() {
-      +                            out.push((child_w.clone(), stepped.clone()));
-      +                        }
-      +                    }
-      +                    out
-      +                },
-      +                // merge
-      +                |glr_s1, glr_s2| glr_s1.merge_with(glr_s2),
-      +                // process
-      +                |_precomputed_node_data, _glr_s| true,
-      +            );
-      +        }
-      +
-      +        precomputed2
-      +    }
-       
-           pub fn init(&self) -> GrammarConstraintState<'_> {
-               let mut state = BTreeMap::new();
-      @@ -1000,3 +1036,10 @@
-               &self.state
-           }
-       }
-      +
-      +impl<'a> GrammarConstraintState<'a> {
-      +    pub fn get_mask2(&self) -> LLMTokenBV {
-      +        // TODO: Implement get_mask using Trie 2.
-      +        LLMTokenBV::zeros()
-      +    }
-      +}
+        - use crate::datastructures::trie::EdgeInserter;
+        - use crate::datastructures::ArcPtrWrapper;
 
-      ```
+      - Inside impl Acc (right after current methods new_fresh/new_with_local_constraints/narrow/merge/accessors), add a helper method to “advance” all frontier trie2 nodes by pushing a sequence of (pops, state) pairs onto each, consuming masks:
 
-      I believe these changes accurately reflect your design for the "Trie 2" feature. Let me know if you have any other questions
+        - Insert a new method:
+
+          pub fn push_trie2_sequence(&mut self, seq: &[(usize, StateID)], mask: &HybridBitset) {
+              if seq.is_empty() || self.trie2_nodes.is_empty() { return; }
+              let merge_ev = |existing: &mut HybridBitset, new_bv: HybridBitset| { *existing |= new_bv; };
+
+              let mut current_frontier = self.trie2_nodes.clone();
+              for (pops, sid) in seq {
+                  let mut new_frontier = BTreeSet::new();
+
+                  // Common destination node to promote sharing across parents.
+                  let common_child = Arc::new(Mutex::new(Trie::new(PrecomputedNodeContents::no_end())));
+
+                  for parent in &current_frontier {
+                      let parent_arc = parent.as_arc().clone();
+                      let inserter = EdgeInserter::new(parent_arc, (*pops, Some(*sid)), mask.clone(), merge_ev)
+                          .try_children()
+                          .try_destination(common_child.clone())
+                          .else_create_destination();
+                      let dest = inserter.unwrap();
+                      new_frontier.insert(ArcPtrWrapper::new(dest));
+                  }
+                  current_frontier = new_frontier;
+              }
+
+              // Replace the frontier
+              self.trie2_nodes = current_frontier;
+          }
+
+      - Notes:
+        - The EV of trie2 edges is HybridBitset; we OR-merge masks when the edge already exists.
+        - We intentionally funnel all parents to a single “common_child” per step to increase sharing (per your note “try to push all to the same new destination”).
+
+      3) Wire trie2 push in parser “below bottom” reduction
+
+      File: src/glr/parser.rs
+
+      - In GLRParserState::reduce_and_goto, inside the if any_below_bottom { ... } block, before constructing the “base” GSSNode (base = GSSNode::new(merged_acc);), do the following:
+
+        - Build the set of source_state_ids for which there is at least one final goto (you already compute final_goto_state_ids_for_source; reuse that pass).
+        - Collect all depths ‘d’ present in popper.below_bottom keys.
+        - For each depth d, form a sequence [(d, source_state_id)] for each source_state_id in the set.
+        - Invoke merged_acc.push_trie2_sequence(&seq, &merged_acc.union_llm_tokens()).
+        - This must happen before you construct base (so you mutate the Acc stored in the GSS).
+
+      - Exact edits:
+
+        - Locate the start of the any_below_bottom block. It currently computes merged_acc_opt via Acc::merge and then loops all parser.table states to build states_to_push and final_goto_state_ids_for_source.
+
+        - Add a local BTreeSet<StateID> to capture “source states that actually produce any final goto”:
+
+          - Right after let mut states_to_push: BTreeSet<StateID> = BTreeSet::new(); insert:
+
+            let mut source_states_that_work: BTreeSet<StateID> = BTreeSet::new();
+
+        - Inside the loop over (source_state_id, row), when you finish computing final_goto_state_ids_for_source (the existing set), add:
+
+          - If final_goto_state_ids_for_source is not empty, insert *source_state_id into source_states_that_work (this is alongside the current logic that inserts into states_to_push). Keep the existing logic for states_to_push unchanged.
+
+        - After the loop that populates states_to_push/source_states_that_work, but still inside if let Some(merged_acc) = merged_acc_opt { … }, mutate merged_acc’s trie2 frontier:
+
+          - Compute a sorted Vec<usize> of all depths present in popper.below_bottom:
+
+            let all_depths: Vec<usize> = popper.below_bottom.keys().cloned().collect();
+
+          - For each d in all_depths and for each sid in source_states_that_work, call merged_acc.push_trie2_sequence(&[(d, sid)], &merged_acc.union_llm_tokens()).
+
+          - Important: merged_acc here is a local Acc variable. Mark it as mutable and call the Acc method you added in step (2). This must be done before the code creates base = GSSNode::new(merged_acc).
+
+        - Concretely, in code (type these lines exactly where indicated):
+
+          // ... after computing `states_to_push` and `source_states_that_work` ...
+
+          // Advance trie2 frontier for "below-bottom" events
+          // Use the union LLM mask at this point (as per design).
+          let mask_for_trie2 = merged_acc.union_llm_tokens();
+          let depths: Vec<usize> = popper.below_bottom.keys().cloned().collect();
+
+          for d in depths {
+              for sid in &source_states_that_work {
+                  merged_acc.push_trie2_sequence(&[(d, *sid)], &mask_for_trie2);
+              }
+          }
+
+        - Do not change any of the existing semantics of states_to_push or the out.push(new_gss_node) part; this addition only updates merged_acc.
+
+      4) Implement precompute2 and call it
+
+      File: src/constraint.rs
+
+      - Change the precompute2 signature and implementation to build an empty root per tokenizer state. Keep it minimal: we only need the roots so the runtime Acc can hold a frontier; we will grow the structure at runtime via parser pushes.
+
+        - Change the signature of GrammarConstraint::precompute2 from:
+
+          pub fn precompute2() -> Precomputed2
+
+          to:
+
+          pub fn precompute2(parser: &GLRParser, precomputed: &Precomputed, llm_vocab: &Arc<LLMVocab>) -> Precomputed2
+
+        - Implementation:
+
+          - For each tokenizer state id present in self.precomputed (same set as Trie 1), create Arc::new(Mutex::new(Trie::new(PrecomputedNodeContents::no_end()))). Insert into a BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>.
+
+          - Return the map.
+
+        - Exact code to type inside precompute2:
+
+          pub fn precompute2(
+              parser: &GLRParser,
+              precomputed: &Precomputed,
+              llm_vocab: &Arc<LLMVocab>,
+          ) -> Precomputed2 {
+              // Minimal initial structure: one empty root per tokenizer state.
+              let mut out = BTreeMap::new();
+              for sid in precomputed.keys() {
+                  let root2 = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                  out.insert(*sid, root2);
+              }
+              out
+          }
+
+        - Update the call site in GrammarConstraint::new to pass the new parameters:
+
+          - Find the line that currently reads:
+
+            let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
+
+          - Ensure the precompute2 function signature matches exactly and the call is correct. If this line still has no parameters (legacy), change it to the line above.
+
+      5) Seed trie2 roots into Acc on init and after tokenizer transitions
+
+      File: src/constraint.rs
+
+      - A) In GrammarConstraint::init(), after you build the GLRParserState and insert it into the state map, attach the trie2 root corresponding to the tokenizer initial state.
+
+        - Locate GrammarConstraint::init():
+
+          pub fn init(&self) -> GrammarConstraintState<'_> {
+              let mut state = BTreeMap::new();
+              state.insert(
+                  self.tokenizer.initial_state_id(),
+                  self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
+              );
+
+              GrammarConstraintState { parent: self, state }
+          }
+
+        - Immediately after inserting the GLRParserState, add code to mutate the inserted state’s active_state.stack.acc to include the trie2 root:
+
+          - Get the trie2 root: let root2 = self.precomputed2.get(&self.tokenizer.initial_state_id()).expect("...").clone().
+
+          - Update the GSS acc:
+
+            - Let s = state.get_mut(&self.tokenizer.initial_state_id()).unwrap().
+
+            - Build a new Acc from the current one: let mut new_acc = (*s.active_state.stack.acc).clone(); then insert ArcPtrWrapper::new(root2) into new_acc.trie2_nodes.
+
+            - Replace the stack node by constructing a new node with the same predecessors but the new Acc:
+
+              let new_node = GSSNode::new_with_map(Arc::new(new_acc), s.active_state.stack.predecessors.clone());
+              s.active_state.stack = Arc::new(new_node);
+
+        - Type exactly:
+
+          {
+              let entry = state.get_mut(&self.tokenizer.initial_state_id()).unwrap();
+              let root2 = self.precomputed2.get(&self.tokenizer.initial_state_id())
+                  .expect("precomputed2 root missing for initial tokenizer state").clone();
+
+              let mut new_acc = (*entry.active_state.stack.acc).clone();
+              new_acc.trie2_nodes.insert(ArcPtrWrapper::new(root2));
+              let new_node = GSSNode::new_with_map(Arc::new(new_acc), entry.active_state.stack.predecessors.clone());
+              entry.active_state.stack = Arc::new(new_node);
+          }
+
+      - B) In GrammarConstraintState::commit_bytes, after constructing new_overall_state (i.e., after the while loop and before assigning self.state = new_overall_state.clone();), inject the appropriate trie2 roots into all new GLRParserStates keyed by their tokenizer state.
+
+        - Locate at end of processing_queue loop:
+
+          self.state = new_overall_state.clone();
+
+        - Before this assignment, iterate new_overall_state as follows:
+
+          for (tid, glr_state) in new_overall_state.iter_mut() {
+              if let Some(root2) = self.parent.precomputed2.get(tid) {
+                  let mut new_acc = (*glr_state.active_state.stack.acc).clone();
+                  new_acc.trie2_nodes.clear();
+                  new_acc.trie2_nodes.insert(ArcPtrWrapper::new(root2.clone()));
+                  let new_node = GSSNode::new_with_map(Arc::new(new_acc), glr_state.active_state.stack.predecessors.clone());
+                  glr_state.active_state.stack = Arc::new(new_node);
+              }
+          }
+
+        - This ensures trie2 frontier is re-rooted on the correct tokenizer state after the token is consumed (substring segmentation resets tokenizer state per your design).
+
+      6) Implement get_mask2 (no stepping, only pop=0 checks)
+
+      File: src/constraint.rs
+
+      - Add the body for GrammarConstraintState::get_mask2:
+
+        - Logic:
+
+          - Initialize final = HybridBitset::zeros().
+
+          - For each GLR state in self.state:
+
+            - If stack is empty, skip.
+
+            - Collect all top-of-stack state ids present at depth 0: use GSSNode::peek_iter(&stack) and collect peek.edge_value().state_id into a BTreeSet<StateID>.
+
+            - Get the frontier trie2 nodes: &stack.acc.trie2_nodes. If empty, continue.
+
+            - For each frontier trie2 node:
+
+              - Lock node, check its children map for key (0, Some(sid)) for any sid in top-of-stack set:
+
+                - You need to iterate children(). For each entry where edge_key == (0, Some(sid_in_set)), union all edge masks (EV HybridBitset) across all destinations (the OrderedHashMap is child -> EV). Add them to final.
+
+          - Return self.parent.internal_bv_to_original(&final).
+
+        - Insert code inside GrammarConstraintState impl:
+
+          pub fn get_mask2(&self) -> LLMTokenBV {
+              let mut final_mask_internal = HybridBitset::zeros();
+
+              for glr in self.state.values() {
+                  let stack = &glr.active_state.stack;
+                  if stack.is_empty() { continue; }
+
+                  // Collect top-of-stack state ids at depth 0
+                  let mut heads: BTreeSet<StateID> = BTreeSet::new();
+                  for peek in GSSNode::peek_iter(stack) {
+                      heads.insert(peek.edge_value().state_id);
+                  }
+                  if heads.is_empty() { continue; }
+
+                  // Use frontier trie2 nodes from Acc
+                  for node_w in &stack.acc.trie2_nodes {
+                      let node_arc = node_w.as_arc();
+                      let guard = node_arc.lock().expect("poison");
+                      for (ek, dest_map) in guard.children() {
+                          if ek.0 != 0 { continue; }
+                          if let Some(sid) = ek.1 {
+                              if heads.contains(&sid) {
+                                  for (_child, ev_bv) in dest_map.iter() {
+                                      final_mask_internal |= ev_bv;
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              self.parent.internal_bv_to_original(&final_mask_internal)
+          }
+
+      - Leave get_mask() to call get_mask1() for now (as you do). You can locally switch to get_mask2() once you’re happy.
+
+      7) Fix GrammarConstraint JSON round-trip (already includes precomputed2)
+
+      - Because Trie requires EK: JSONConvertible, and you added tuple JSON above, you do not need to change the to_json/from_json of GrammarConstraint. They already serialize/deserialize precomputed2. Good.
+
+      8) Sanity checks you should run
+
+      - The following items must compile:
+
+        - The new JSONConvertible impl for (usize, Option<StateID>).
+
+        - Acc::push_trie2_sequence (requires imports EdgeInserter and ArcPtrWrapper in gss.rs).
+
+        - GLRParserState::reduce_and_goto changes: ensure merged_acc is mutable; ensure you add source_states_that_work and depths; ensure to call merged_acc.push_trie2_sequence before constructing base.
+
+        - GrammarConstraint::precompute2 signature change matches call in GrammarConstraint::new.
+
+        - GrammarConstraint::init injects correct precomputed2 root in Acc (beware of .clone() on predecessors).
+
+        - GrammarConstraintState::commit_bytes injects trie2 roots into new_overall_state before assigning to self.state.
+
+        - GrammarConstraintState::get_mask2 compiles and returns a mask.
+
+      Notes and caveats
+
+      - Minimal precompute2: This version only creates empty roots. The trie2 graph grows at runtime as reduce_and_goto sees below-bottom events and pushes sequences into Acc’s frontier. This is consistent with “push trie2 when popping below bottom” and avoids a complicated static pass.
+
+      - get_mask2 conservative behavior: The implementation only looks at pop=0 checks, unioning masks of edges whose read-state matches the current top-of-stack state ids. It does not attempt deeper pop K>0 matching. That is intentional per your brief “doesn’t step the parser; just pops and checks”; extending it to match deeper sequences is straightforward:
+
+        - For each trie2 node and each edge with (k, Some(s)), run stack.popn(k) and check if any predecessor peek has state_id == s, then traverse into the child and continue recursively. Stop wherever you like, unioning masks. You can add that later.
+
+      - Acc intersection vs optimization: Acc::narrow currently intersects trie2 frontiers, which is fine (as you decided). You can later add a “clear trie2 frontier on upward pushes” optimization if needed.
+
+      - Make sure Acc union_llm_tokens returns HybridBitset::max_ones only if that’s intended; we used union_llm_tokens as the mask for trie2 edges on below-bottom. If you prefer a stricter mask (e.g., intersection), switch it here.
+
+      - PrecomputeNode2 JSON: With the tuple JSON converter in place, Trie JSON for PrecomputeNode2 will serialize fine if you later persist precomputed2. Right now we build empty roots so they’re tiny.
+
+      What to test manually
+
+      - Build compiles.
+
+      - Run any existing tests. They should remain unaffected, except anything that serialized GrammarConstraint and expected precomputed2 to be a particular value. You’ve been serializing precomputed2 already (was todo! earlier); now it’s non-empty but innocuous.
+
+      - Instrument a grammar with a known “pop below bottom” reduction (len > stack depth in substring mode). After stepping such a token, call GrammarConstraintState::get_mask2() and confirm that:
+
+        - The trie2 frontier in Acc is no longer empty (inspect via a small debug in Acc::push_trie2_sequence).
+
+        - get_mask2() returns non-empty if there are pop-0 edges matching current top-of-stack state ids.
+
+      If you want deeper matching later
+
+      - Extend get_mask2 to explore trie2 edges with pops > 0:
+
+        - For each (k, sid) edge: compute popper = stack.popn(k); if any popper.peek_iter() produces predecessor with edge.state_id == sid, treat this edge as matched and move to the child node; union masks as you go. You can use the same union semantics you use for pop=0.
+
+      That’s it. This gets trie 2 plumbed end-to-end:
+
+      - precomputed2 roots exist per tokenizer state,
+      - Acc carries the trie2 frontier,
+      - parser pushes trie2 edges on below-bottom reductions,
+      - init/commit attach the right trie2 root,
+      - get_mask2 reads trie2 without stepping the parser.
     metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Using model 'gf' for code completion.
 
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/mod.rs
-      Applying patch to 'src/datastructures/mod.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/mod.rs.
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/gss.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        }
+      ]
+      Found 2 code blocks with filepaths in attempt 1.
+      Received code for required file: src/datastructures/gss.rs
+      Received code for required file: src/glr/parser.rs
+      Missing code blocks for: {'src/constraint.rs'}
+      Requesting missing code blocks...
 
-      --- Processing Diff Block 2 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      --- LLM Code Generation Attempt 2/5 ---
+      Found 1 code blocks with filepaths in attempt 2.
+      Received code for required file: src/constraint.rs
+      All required file contents received or no content needed.
 
-      --- Processing Diff Block 3 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-    metadata:
-  - user: |-
-      Diff of src/datastructures/mod.rs since previous turn:
-      ```diff
-      --- original version of src/datastructures/mod.rs+++ current version of src/datastructures/mod.rs@@ -10,5 +10,4 @@ pub mod ordered_hash_map;
-       pub mod cache;
-       
-      -// Added
-      -pub use arc_wrapper::ArcPtrWrapper; // Added
-      +pub use arc_wrapper::ArcPtrWrapper;
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/lib.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/datastructures/gss.rs since previous turn:
-      ```diff
-      --- original version of src/datastructures/gss.rs+++ current version of src/datastructures/gss.rs@@ -1,3 +1,4 @@+use std::sync::Mutex;
-       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-       use std::sync::Arc;
-       use std::fmt::{Debug, Write};
-      @@ -8,9 +9,10 @@ use deterministic_hash::DeterministicHasher;
-       use rand::rngs::StdRng;
-       use rand::{Rng, SeedableRng};
-      +use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-      +use crate::datastructures::trie::Trie;
-       
-       use crate::glr::parser::ParseStateEdgeContent;
-      -use crate::constraint::{LLMTokenBV, TerminalBV};
-       use crate::datastructures::hybrid_bitset::HybridBitset;
-       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-       use crate::glr::grammar::Terminal;
-      @@ -20,6 +22,9 @@ use std::ops::{BitAnd, BitOr};
-       use crate::profiler::GSS_LOGGING_ENABLED;
-       use profiler_macro::{time_it, timeit};
-      +
-      +pub type LLMTokenBV = HybridBitset;
-      +pub type TerminalBV = HybridBitset;
-       
-       // --- Type Aliases ---
-       
-      @@ -34,6 +39,44 @@ /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-       pub type TerminalInfo = HybridL2Bitset;
-       
-      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      +pub struct PrecomputedNodeContents {
-      +    pub end: bool,
-      +}
-      +
-      +impl PrecomputedNodeContents {
-      +    pub fn no_end() -> Self {
-      +        Self { end: false }
-      +    }
-      +
-      +    pub fn end() -> Self {
-      +        Self { end: true }
-      +    }
-      +}
-      +
-      +use crate::json_serialization::{JSONConvertible, JSONNode};
-      +use std::collections::BTreeMap as StdMap;
-      +
-      +impl JSONConvertible for PrecomputedNodeContents {
-      +    fn to_json(&self) -> JSONNode {
-      +        let mut obj = StdMap::new();
-      +        obj.insert("clean_end".to_string(), self.end.to_json());
-      +        JSONNode::Object(obj)
-      +    }
-      +    fn from_json(node: JSONNode) -> Result<Self, String> {
-      +        match node {
-      +            JSONNode::Object(mut obj) => {
-      +                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-      +                                   .and_then(bool::from_json)?;
-      +                Ok(PrecomputedNodeContents { end })
-      +            }
-      +            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-      +        }
-      +    }
-      +}
-      +
-      +pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-      +
-       
-       // --- Accumulator (Acc) ---
-       
-      @@ -45,6 +88,7 @@     pub terminals_union: HybridL2Bitset,
-           pub terminals_intersection: HybridL2Bitset,
-           pub needs_push_down: bool,
-      +    pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
-       }
-       
-       impl Acc {
-      @@ -56,6 +100,7 @@             terminals_union: HybridL2Bitset::all(),
-                   terminals_intersection: HybridL2Bitset::all(),
-                   needs_push_down: false,
-      +            trie2_nodes: BTreeSet::new(),
-               }
-           }
-       
-      @@ -67,6 +112,7 @@             terminals_union: terminals.clone(),
-                   terminals_intersection: terminals,
-                   needs_push_down: false,
-      +            trie2_nodes: BTreeSet::new(),
-               }
-           }
-       
-      @@ -77,6 +123,7 @@             terminals_union: &from.terminals_union & &to.terminals_union,
-                   terminals_intersection: &from.terminals_union & &to.terminals_intersection,
-                   needs_push_down: false,
-      +            trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
-               }
-               // Acc {
-               //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
-      @@ -93,6 +140,7 @@             terminals_union: &lhs.terminals_union | &rhs.terminals_union,
-                   terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
-                   needs_push_down: false,
-      +            trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes,
-               }
-           }
-       
-      @@ -340,6 +388,9 @@     acc.llm_tokens_intersection.hash(&mut hasher);
-           acc.terminals_union.hash(&mut hasher);
-           acc.terminals_intersection.hash(&mut hasher);
-      +    for trie2_node in &acc.trie2_nodes {
-      +        trie2_node.hash(&mut hasher);
-      +    }
-           for (edge_val, preds_by_depth) in predecessors {
-               edge_val.hash(&mut hasher);
-               for (dest_key, pred_vec) in preds_by_depth {
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/glr/parser.rs since previous turn:
-      ```diff
-      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -1,11 +1,11 @@ use std::any::Any;
-       use std::cmp::Ordering;
-      -use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
-      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2};
-       use crate::tokenizer::LLMTokenID;
-      -use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
-      +use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-      -use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
-      +use crate::constraint::LLMVocab; // Import LLMTokenInfo
-       
-       use bimap::BiBTreeMap;
-       use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-      @@ -22,6 +22,7 @@ use std::collections::HashMap;
-       use crate::glr::items::{Item, LRMode, LR_MODE};
-       use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
-      +use crate::datastructures::trie::EdgeInserter;
-       
-       /// A trait to provide a lazily-evaluated `expect`.
-       pub trait ExpectElse<T> {
-      @@ -819,6 +820,35 @@                 });
-                   }
-        
-      +            if let Some(merged_acc) = merged_acc_opt.as_ref() {
-      +                if !merged_acc.trie2_nodes.is_empty() {
-      +                    let mut new_dest_node = None;
-      +
-      +                    for (extra_pops, acc_arc) in &popper.below_bottom {
-      +                        for (source_state_id, row) in &self.parser.table {
-      +                            if row.gotos.contains_key(&nt) {
-      +                                // This is a "hallucinated" state.
-      +                                for trie2_node_wrapper in &merged_acc.trie2_nodes {
-      +                                    let dest_node = new_dest_node.get_or_insert_with(|| {
-      +                                        Arc::new(std::sync::Mutex::new(PrecomputeNode2::new(
-      +                                            crate::datastructures::gss::PrecomputedNodeContents::no_end()
-      +                                        )))
-      +                                    });
-      +
-      +                                    let inserter = EdgeInserter::new(
-      +                                        trie2_node_wrapper.as_arc().clone(),
-      +                                        (*extra_pops, Some(*source_state_id)),
-      +                                        acc_arc.llm_tokens_union.clone(),
-      +                                        |e, n| *e |= n,
-      +                                    );
-      +                                    inserter.try_destination(dest_node.clone()).unwrap();
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-                   if let Some(merged_acc) = merged_acc_opt {
-                       let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
-                       for (source_state_id, row) in &self.parser.table {
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/datastructures/trie.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -20,7 +20,7 @@ use indicatif::{ProgressBar, ProgressStyle};
-       
-       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      -use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig};
-      +use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
-       use crate::datastructures::hybrid_bitset::HybridBitset;
-       use crate::datastructures::trie::{EdgeInserter, Trie};
-       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-      @@ -41,52 +41,13 @@ use crate::interface::CompiledGrammar;
-       use crate::profiler::GSS_LOGGING_ENABLED;
-       
-      -pub type LLMTokenBV = HybridBitset;
-      -pub type TerminalBV = HybridBitset;
-      -
-       const MERGE_THRESHOLD: usize = 20;
-      -
-      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      -pub struct PrecomputedNodeContents {
-      -    pub end: bool,
-      -}
-      -
-      -impl PrecomputedNodeContents {
-      -    pub fn no_end() -> Self {
-      -        Self { end: false }
-      -    }
-      -
-      -    pub fn end() -> Self {
-      -        Self { end: true }
-      -    }
-      -}
-      -
-      -impl JSONConvertible for PrecomputedNodeContents {
-      -    fn to_json(&self) -> JSONNode {
-      -        let mut obj = StdMap::new();
-      -        obj.insert("clean_end".to_string(), self.end.to_json());
-      -        JSONNode::Object(obj)
-      -    }
-      -    fn from_json(node: JSONNode) -> Result<Self, String> {
-      -        match node {
-      -            JSONNode::Object(mut obj) => {
-      -                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-      -                                   .and_then(bool::from_json)?;
-      -                Ok(PrecomputedNodeContents { end })
-      -            }
-      -            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-      -        }
-      -    }
-      -}
-      -
-      -
-      -impl PrecomputedNodeContents {
-      -}
-       
-       pub type PrecomputeNode =
-           Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-       
-       pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
-      +pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       pub struct LLMVocab {
-      @@ -101,6 +62,7 @@     pub(crate) tokenizer:        Regex,
-           pub(crate) parser:           GLRParser,
-           pub(crate) precomputed:      Precomputed,
-      +    pub(crate) precomputed2:     Precomputed2,
-           pub(crate) llm_vocab:        Arc<LLMVocab>,
-           pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
-           pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-      @@ -117,6 +79,13 @@             let node2 = arc2.lock().unwrap();
-                   assert_eq!(*node1, *node2);
-               }
-      +        assert_eq!(self.precomputed2.len(), other.precomputed2.len());
-      +        for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
-      +            assert_eq!(sid1, sid2);
-      +            let node1 = arc1.lock().unwrap();
-      +            let node2 = arc2.lock().unwrap();
-      +            assert_eq!(*node1, *node2);
-      +        }
-               assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
-               assert_eq!(self.token_name_map, other.token_name_map);
-               assert_eq!(self.llm_vocab.max_original_llm_token_id, other.llm_vocab.max_original_llm_token_id);
-      @@ -132,6 +101,7 @@         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
-               obj.insert("parser".to_string(), self.parser.to_json());
-               obj.insert("precomputed".to_string(), self.precomputed.to_json());
-      +        obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
-               obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
-               obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
-               obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
-      @@ -150,6 +120,8 @@                                 .and_then(GLRParser::from_json)?;
-                       let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
-                                            .and_then(|n| Precomputed::from_json(n))?;
-      +                let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
-      +                                     .and_then(|n| Precomputed2::from_json(n))?;
-       
-                       let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
-                                              .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
-      @@ -167,6 +139,7 @@                     tokenizer,
-                           parser,
-                           precomputed,
-      +                    precomputed2,
-                           llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
-                           token_name_map,
-                           possible_matches,
-      @@ -323,10 +296,13 @@             &mut computed_possible_matches,
-               );
-       
-      +        let precomputed2 = Self::precompute2(&parser, &precomputed, &llm_vocab);
-      +
-               let mut gc = Self {
-                   tokenizer, // This is the tokenizer parameter being moved into the struct
-                   parser,
-                   precomputed,
-      +            precomputed2,
-                   llm_vocab,
-                   token_name_map,
-                   possible_matches: computed_possible_matches, // Add this line
-      @@ -366,6 +342,69 @@         helper.prune_dead_paths();
-               helper.merge_nodes();
-               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
-      +    }
-      +
-      +    pub fn precompute2(
-      +        parser: &GLRParser,
-      +        precomputed1: &Precomputed,
-      +        llm_vocab: &Arc<LLMVocab>,
-      +    ) -> Precomputed2 {
-      +        let mut precomputed2 = BTreeMap::new();
-      +
-      +        for (tokenizer_state_id, trie1_root) in precomputed1 {
-      +            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
-      +                PrecomputedNodeContents::no_end(),
-      +            )));
-      +            precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
-      +
-      +            let mut initial_trie2_nodes = BTreeSet::new();
-      +            for state_id in parser.table.keys() {
-      +                let dest_node = Arc::new(Mutex::new(PrecomputeNode2::new(
-      +                    PrecomputedNodeContents::no_end()
-      +                )));
-      +
-      +                let inserter = EdgeInserter::new(
-      +                    trie2_root.clone(),
-      +                    (0, Some(*state_id)),
-      +                    LLMTokenBV::max_ones(),
-      +                    |e, n| *e |= n,
-      +                );
-      +                let pushed_trie2_node = inserter.try_destination(dest_node).unwrap();
-      +                initial_trie2_nodes.insert(ArcPtrWrapper::new(pushed_trie2_node));
-      +            }
-      +
-      +            let mut initial_glr_state = parser.init_glr_substring_parser(Some(llm_vocab.clone()));
-      +            Arc::make_mut(&mut initial_glr_state.active_state.stack).acc = Arc::new(Acc {
-      +                trie2_nodes: initial_trie2_nodes,
-      +                ..Acc::new_fresh()
-      +            });
-      +
-      +            let initial_values = vec![(trie1_root.clone(), initial_glr_state)];
-      +
-      +            Trie::special_map_grouped(
-      +                initial_values,
-      +                // step
-      +                |glr_s, grammar_token_opt, dest_map| {
-      +                    let mut out = Vec::new();
-      +                    let mut stepped = glr_s.clone();
-      +                    if let Some(gtid) = grammar_token_opt {
-      +                        stepped.process_token(*gtid);
-      +                    }
-      +                    if stepped.is_ok() {
-      +                        for (child_w, _edge_bv) in dest_map.iter() {
-      +                            out.push((child_w.clone(), stepped.clone()));
-      +                        }
-      +                    }
-      +                    out
-      +                },
-      +                // merge
-      +                |glr_s1, glr_s2| glr_s1.merge_with(glr_s2),
-      +                // process
-      +                |_precomputed_node_data, _glr_s| true,
-      +            );
-      +        }
-      +
-      +        precomputed2
-           }
-       
-           pub fn init(&self) -> GrammarConstraintState<'_> {
-      @@ -2051,3 +2090,10 @@     }
-       }
-       
-      +impl<'a> GrammarConstraintState<'a> {
-      +    pub fn get_mask2(&self) -> LLMTokenBV {
-      +        // TODO: Implement get_mask using Trie 2.
-      +        LLMTokenBV::zeros()
-      +    }
-      +}
-      +
-
-      ```
-    metadata:
-  - user: Now implement get_mask2.
-    metadata:
-  - assistant: |-
-      Of course! I've implemented the `get_mask2` function based on your design. This new function traverses the `precomputed2` trie and the GSS simultaneously to determine the allowed token mask, without stepping the GLR parser.
-
-      Here is the git diff for `src/constraint.rs` with the new implementation.
-
-      ### `src/constraint.rs`
-
-      I've replaced the placeholder for `get_mask2` with a full implementation that performs a joint traversal of the GSS and the Trie 2 structure. It handles paths that remain on the stack as well as paths that pop below the bottom for substring parsing.
-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      index 2090b67..8876729 100644
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -2090,8 +2090,88 @@
-       
-       impl<'a> GrammarConstraintState<'a> {
-           pub fn get_mask2(&self) -> LLMTokenBV {
-      -        // TODO: Implement get_mask using Trie 2.
-      -        LLMTokenBV::zeros()
-      +        let mut final_mask = LLMTokenBV::zeros();
-      +        if self.state.is_empty() {
-      +            // No active states, so no tokens are allowed.
-      +            // The conversion to original is important.
-      +            return self.parent.internal_bv_to_original(&final_mask);
-      +        }
-      +
-      +        let mut queue: VecDeque<(Arc<Mutex<PrecomputeNode2>>, Arc<GSSNode>)> = VecDeque::new();
-      +        // Visited set uses raw pointers for performance and to handle Arc cycles.
-      +        let mut visited: HashSet<(*const Mutex<PrecomputeNode2>, *const GSSNode)> = HashSet::new();
-      +
-      +        // 1. Initialize the queue with a pair for each active tokenizer state.
-      +        for (tokenizer_state_id, glr_state) in &self.state {
-      +            if let Some(trie2_root) = self.parent.precomputed2.get(tokenizer_state_id) {
-      +                if !glr_state.active_state.stack.is_empty() {
-      +                    let gss_root = glr_state.active_state.stack.clone();
-      +                    let key = (Arc::as_ptr(trie2_root), Arc::as_ptr(&gss_root));
-      +                    if visited.insert(key) {
-      +                        queue.push_back((trie2_root.clone(), gss_root));
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        // 2. Breadth-first traversal of the combined (Trie2, GSS) state space.
-      +        while let Some((current_trie_node, current_gss_node)) = queue.pop_front() {
-      +            let trie_guard = current_trie_node.lock().unwrap();
-      +
-      +            if trie_guard.value.end {
-      +                // End nodes should not have children and thus should not be processed in the queue.
-      +                continue;
-      +            }
-      +
-      +            for (edge_key, dest_map) in trie_guard.children() {
-      +                let (pop_count, required_state_id_opt) = *edge_key;
-      +
-      +                let popper = current_gss_node.popn(pop_count);
-      +
-      +                // Case 1: Paths that remained on the GSS stack.
-      +                for popper_item in popper.iter() {
-      +                    for peek in popper_item.peek_iter() {
-      +                        if required_state_id_opt == Some(peek.edge_value().state_id) {
-      +                            // A GSS path matches the Trie2 edge requirement.
-      +                            let predecessor_gss_node = peek.resolved_predecessor_node();
-      +                            let path_tokens = popper_item.resolved_acc().llm_tokens_union;
-      +
-      +                            for (next_trie_node_wrapper, edge_bv) in dest_map {
-      +                                let allowed_tokens = &path_tokens & edge_bv;
-      +                                if allowed_tokens.is_empty() {
-      +                                    continue;
-      +                                }
-      +
-      +                                let next_trie_node = next_trie_node_wrapper.as_arc();
-      +                                if next_trie_node.lock().unwrap().value.end {
-      +                                    final_mask |= allowed_tokens;
-      +                                } else {
-      +                                    let key = (Arc::as_ptr(next_trie_node), Arc::as_ptr(&predecessor_gss_node));
-      +                                    if visited.insert(key) {
-      +                                        queue.push_back((next_trie_node.clone(), predecessor_gss_node.clone()));
-      +                                    }
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +
-      +                // Case 2: Paths that popped below the GSS stack (for substring parsing).
-      +                if let Some(acc_arc) = popper.below_bottom.get(&pop_count) {
-      +                    let path_tokens = acc_arc.llm_tokens_union.clone();
-      +
-      +                    for (next_trie_node_wrapper, edge_bv) in dest_map {
-      +                        let allowed_tokens = &path_tokens & edge_bv;
-      +                        if allowed_tokens.is_empty() {
-      +                            continue;
-      +                        }
-      +
-      +                        let next_trie_node = next_trie_node_wrapper.as_arc();
-      +                        if next_trie_node.lock().unwrap().value.end {
-      +                            final_mask |= allowed_tokens;
-      +                        } else {
-      +                            let new_gss_parser_state = self.parent.parser.init_glr_substring_parser(Some(self.parent.llm_vocab.clone()));
-      +                            let mut new_gss_stack = new_gss_parser_state.active_state.stack;
-      +                            
-      +                            let mut memo = HashMap::new();
-      +                            allow_only_llm_tokens_and_prune_arc(&mut new_gss_stack, &allowed_tokens, &mut memo);
-      +
-      +                            if !new_gss_stack.is_empty() {
-      +                                let key = (Arc::as_ptr(next_trie_node), Arc::as_ptr(&new_gss_stack));
-      +                                if visited.insert(key) {
-      +                                    queue.push_back((next_trie_node.clone(), new_gss_stack));
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        self.parent.internal_bv_to_original(&final_mask)
-           }
-       }
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint.rs
+      Successfully replaced file: src/datastructures/gss.rs
+      Successfully replaced file: src/glr/parser.rs
     metadata:
 ...
