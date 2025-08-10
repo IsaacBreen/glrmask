@@ -45,6 +45,7 @@ pub struct Acc {
     pub terminals_union: HybridL2Bitset,
     pub terminals_intersection: HybridL2Bitset,
     pub needs_push_down: bool,
+    pub trie2_node_ids: BTreeSet<usize>,
 }
 
 impl Acc {
@@ -56,6 +57,7 @@ impl Acc {
             terminals_union: HybridL2Bitset::all(),
             terminals_intersection: HybridL2Bitset::all(),
             needs_push_down: false,
+            trie2_node_ids: BTreeSet::new(),
         }
     }
 
@@ -67,6 +69,7 @@ impl Acc {
             terminals_union: terminals.clone(),
             terminals_intersection: terminals,
             needs_push_down: false,
+            trie2_node_ids: BTreeSet::new(),
         }
     }
 
@@ -77,6 +80,15 @@ impl Acc {
             terminals_union: &from.terminals_union & &to.terminals_union,
             terminals_intersection: &from.terminals_union & &to.terminals_intersection,
             needs_push_down: false,
+            trie2_node_ids: {
+                let mut inter = BTreeSet::new();
+                for id in &from.trie2_node_ids {
+                    if to.trie2_node_ids.contains(id) {
+                        inter.insert(*id);
+                    }
+                }
+                inter
+            },
         }
         // Acc {
         //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
@@ -93,6 +105,11 @@ impl Acc {
             terminals_union: &lhs.terminals_union | &rhs.terminals_union,
             terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
             needs_push_down: false,
+            trie2_node_ids: {
+                let mut uni = lhs.trie2_node_ids.clone();
+                uni.extend(rhs.trie2_node_ids.iter().copied());
+                uni
+            },
         }
     }
 
@@ -340,6 +357,7 @@ fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
     acc.llm_tokens_intersection.hash(&mut hasher);
     acc.terminals_union.hash(&mut hasher);
     acc.terminals_intersection.hash(&mut hasher);
+    acc.trie2_node_ids.hash(&mut hasher);
     for (edge_val, preds_by_depth) in predecessors {
         edge_val.hash(&mut hasher);
         for (dest_key, pred_vec) in preds_by_depth {
@@ -965,6 +983,27 @@ pub fn map_allowed_terminals_tokenizer_states(
     }
 }
 
+pub fn set_trie2_ids_on_roots(
+    root_arc: &mut Arc<GSSNode>,
+    ids: &BTreeSet<usize>,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) {
+    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+        let mut new_acc = (*node.acc).clone();
+        if node.is_root() {
+            // overwrite the set on roots
+            new_acc.trie2_node_ids = ids.clone();
+            // Mark needs_push_down=false: we only want these sets to live at roots,
+            // not auto-push down.
+            // Tokens/terminals unchanged.
+        }
+        Some((new_acc, true))
+    };
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
+        *root_arc = new_root;
+    }
+}
+
 impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
     #[time_it]
@@ -1483,7 +1522,13 @@ pub fn format_acc(
     let intersection_terminals_str =
         format_disallowed_terminals(&node.acc.terminals_intersection, "Term(I)");
 
-    format!("[{}, {}, {}, {}]", union_llm_str, intersection_llm_str, union_terminals_str, intersection_terminals_str)
+    let trie2_info = if node.acc.trie2_node_ids.is_empty() {
+        "T2(∅)".to_string()
+    } else {
+        format!("T2({} id{})", node.acc.trie2_node_ids.len(), if node.acc.trie2_node_ids.len() == 1 { "" } else { "s" })
+    };
+
+    format!("[{}, {}, {}, {}, {}]", union_llm_str, intersection_llm_str, union_terminals_str, intersection_terminals_str, trie2_info)
 }
 
 

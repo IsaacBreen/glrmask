@@ -26,6 +26,8 @@ use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
+use crate::datastructures::precomputed2_registry::{self, PrecomputeNode2};
+use crate::datastructures::precomputed2_registry as precomputed2;
 use crate::glr::parser::{
     GLRParser, GLRParserState, ParseState, ParseStateEdgeContent,
 };
@@ -87,6 +89,7 @@ pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
+pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
@@ -101,6 +104,7 @@ pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
+    pub(crate) precomputed2:     Precomputed2,
     pub(crate) llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -163,10 +167,12 @@ impl JSONConvertible for GrammarConstraint {
                                                   .and_then(usize::from_json)?;
                 let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
                                           .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
+                let precomputed2 = build_precomputed2_roots(&tokenizer);
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed,
+                    precomputed2,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
@@ -175,6 +181,17 @@ impl JSONConvertible for GrammarConstraint {
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
         }
     }
+}
+
+fn build_precomputed2_roots(tokenizer: &Regex) -> Precomputed2 {
+    let mut map = BTreeMap::new();
+    for sid in tokenizer.iter_states() {
+        let root2 = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        // Register in the global registry so Acc can refer to it by a stable ID.
+        let _ = precomputed2::register(&root2);
+        map.insert(sid, root2);
+    }
+    map
 }
 
 
@@ -323,10 +340,13 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
+        let precomputed2 = build_precomputed2_roots(&tokenizer);
+
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
             precomputed,
+            precomputed2,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches, // Add this line
@@ -374,6 +394,16 @@ impl GrammarConstraint {
             self.tokenizer.initial_state_id(),
             self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
         );
+
+        // Seed Trie2 IDs on bottom nodes for the initial tokenizer state
+        if let Some(root2) = self.precomputed2.get(&self.tokenizer.initial_state_id()) {
+            let id = precomputed2::register(root2);
+            let glr_state = state.get_mut(&self.tokenizer.initial_state_id()).unwrap();
+            let mut ids = BTreeSet::new();
+            ids.insert(id);
+            let mut memo = Default::default();
+            crate::datastructures::gss::set_trie2_ids_on_roots(&mut glr_state.active_state.stack, &ids, &mut memo);
+        }
 
         GrammarConstraintState { parent: self, state }
     }
@@ -1886,6 +1916,49 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_mapped
     }
 
+    pub fn get_mask2(&self) -> LLMTokenBV {
+        use crate::datastructures::gss::GSSNode;
+        let mut final_mask_internal = HybridBitset::zeros();
+
+        for (sid, glr_state) in &self.state {
+            let root2 = match self.parent.precomputed2.get(sid) {
+                Some(r) => r.clone(),
+                None => continue,
+            };
+            // Snapshot root2 edges (avoid long-held lock)
+            let edges: Vec<((usize, Option<crate::glr::table::StateID>), LLMTokenBV)> = {
+                let guard = root2.lock().unwrap();
+                guard.children().iter().flat_map(|(ek, dests)| {
+                    dests.iter().map(move |_child, ev| (ek.clone(), ev.clone()))
+                }).collect()
+            };
+
+            for ((popn, state_opt), edge_bv) in edges {
+                match state_opt {
+                    None => {
+                        final_mask_internal |= &edge_bv;
+                    }
+                    Some(wanted) => {
+                        for peek in GSSNode::peek_iter(&glr_state.active_state.stack) {
+                            let popper = peek.popn(popn);
+                            for item in popper.iter() {
+                                for peek2 in item.peek_iter() {
+                                    if peek2.edge_value().state_id == wanted {
+                                        final_mask_internal |= &edge_bv;
+                                        // We can break only from inner loops if desired,
+                                        // but adding duplicates is harmless since it's OR.
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.parent.internal_bv_to_original(&final_mask_internal)
+    }
+
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
         let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
         self.commit_bytes(llm_token_bytes);
@@ -2004,6 +2077,17 @@ impl<'a> GrammarConstraintState<'a> {
 
         for glr_parser_state in self.state.values_mut() {
             glr_parser_state.process_default_reductions();
+        }
+
+        // Seed Trie 2 IDs
+        for (sid, glr_state) in self.state.iter_mut() {
+            if let Some(root2) = self.parent.precomputed2.get(sid) {
+                let id = precomputed2::register(root2);
+                let mut ids = BTreeSet::new();
+                ids.insert(id);
+                let mut memo = Default::default();
+                crate::datastructures::gss::set_trie2_ids_on_roots(&mut glr_state.active_state.stack, &ids, &mut memo);
+            }
         }
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
