@@ -133,36 +133,49 @@ impl JSONConvertible for () {
     }
 }
 
-impl<T0: JSONConvertible> JSONConvertible for (T0,) {
-    fn to_json(&self) -> JSONNode {
-        JSONNode::Array(vec![self.0.to_json()])
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Array(arr) if arr.len() == 1 => {
-                let item = T0::from_json(arr.into_iter().next().unwrap())?;
-                Ok((item,))
+macro_rules! impl_json_for_tuple {
+    ( $($T:ident : $idx:tt),+ ) => {
+        impl<$($T: JSONConvertible),+> JSONConvertible for ($($T,)+) {
+            fn to_json(&self) -> JSONNode {
+                JSONNode::Array(vec![
+                    $(self.$idx.to_json()),+
+                ])
             }
-            _ => Err("Expected JSONNode::Array with one element for tuple (T0,)".to_string()),
+
+            fn from_json(node: JSONNode) -> Result<Self, String> {
+                match node {
+                    JSONNode::Array(arr) => {
+                        const N: usize = [$(stringify!($T)),+].len();
+                        if arr.len() != N {
+                            return Err(format!(
+                                "Expected JSONNode::Array with {} elements for tuple, got {}",
+                                N,
+                                arr.len()
+                            ));
+                        }
+                        Ok(($(
+                            $T::from_json(arr[$idx].clone())?
+                        ,)+))
+                    }
+                    _ => Err("Expected JSONNode::Array for tuple".to_string()),
+                }
+            }
         }
-    }
+    };
 }
 
-impl<T0: JSONConvertible, T1: JSONConvertible> JSONConvertible for (T0, T1) {
-    fn to_json(&self) -> JSONNode {
-        JSONNode::Array(vec![self.0.to_json(), self.1.to_json()])
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Array(arr) if arr.len() == 2 => {
-                let item0 = T0::from_json(arr[0].clone())?;
-                let item1 = T1::from_json(arr[1].clone())?;
-                Ok((item0, item1))
-            }
-            _ => Err("Expected JSONNode::Array with two elements for tuple (T0, T1)".to_string()),
-        }
-    }
-}
+impl_json_for_tuple!(T0:0);
+impl_json_for_tuple!(T0:0, T1:1);
+impl_json_for_tuple!(T0:0, T1:1, T2:2);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10);
+impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10, T11:11);
 
 impl JSONConvertible for bool {
     fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
@@ -783,5 +796,33 @@ mod tests {
         let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
         assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
                                                      // then from_serde_value converts SerdeValue::Null to JSONNode::Null
+    }
+
+    #[test]
+    fn test_tuple_serialization() {
+        let original: (i32, String, bool) = (123, "hello".to_string(), true);
+        let json_node = original.to_json();
+        assert_eq!(
+            json_node,
+            JSONNode::Array(vec![
+                JSONNode::Int(123),
+                JSONNode::String("hello".to_string()),
+                JSONNode::Bool(true)
+            ])
+        );
+
+        let deserialized = <(i32, String, bool)>::from_json(json_node).unwrap();
+        assert_eq!(original, deserialized);
+
+        // Test single-element tuple
+        let single_tuple: (i32,) = (42,);
+        let json_node_single = single_tuple.to_json();
+        assert_eq!(json_node_single, JSONNode::Array(vec![JSONNode::Int(42)]));
+        let deserialized_single = <(i32,)>::from_json(json_node_single).unwrap();
+        assert_eq!(single_tuple, deserialized_single);
+
+        // Test wrong number of elements for deserialization
+        let wrong_node = JSONNode::Array(vec![JSONNode::Int(1), JSONNode::Int(2)]);
+        assert!(<(i32, String, bool)>::from_json(wrong_node).is_err());
     }
 }
