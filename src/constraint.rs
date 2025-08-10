@@ -2129,78 +2129,7 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        // Final mask of original token IDs
-        if self.state.is_empty() {
-            return HybridBitset::zeros();
-        }
-
-        // Accumulate in internal ID space; convert at the end
-        let mut final_internal = HybridBitset::zeros();
-
-        for (tok_sid, glr_state) in &self.state {
-            // Find trie-2 root for this tokenizer state
-            let root2_arc = match self.parent.precomputed2.get(tok_sid) {
-                Some(a) => a.clone(),
-                None => continue,
-            };
-
-            // Snapshot children by (pop_len, Some(state_id)) -> unioned EV across all dests
-            let (by_state_map, has_any) = {
-                let root_guard = root2_arc.lock().expect("poison");
-                let mut tmp: BTreeMap<StateID, Vec<(usize, LLMTokenBV)>> = BTreeMap::new();
-                let mut any = false;
-                for (ek, dest_map) in root_guard.children().iter() {
-                    let (pop_len, opt_sid) = ek;
-                    if let Some(sid) = opt_sid {
-                        // Union all EVs for this edge key to get the total token set
-                        let mut union_bv = HybridBitset::zeros();
-                        for (_dst, ev_bv) in dest_map.iter() {
-                            union_bv |= ev_bv;
-                        }
-                        if !union_bv.is_empty() {
-                            tmp.entry(*sid).or_default().push((*pop_len, union_bv));
-                            any = true;
-                        }
-                    }
-                }
-                (tmp, any)
-            };
-
-            if !has_any {
-                continue;
-            }
-
-            // For each top-of-stack path in the GLR GSS, see if it matches trie-2's (state_id, pop_len).
-            for peek in GSSNode::peek_iter(&glr_state.active_state.stack) {
-                let top_state = peek.edge_value().state_id;
-                let path_allowed_tokens = peek.resolved_llm_tokens_union();
-
-                if let Some(entries) = by_state_map.get(&top_state) {
-                    for (pop_len, edge_bv) in entries {
-                        if *pop_len == 0 {
-                            // No pop required – applicable immediately on this path.
-                            let mut contrib = edge_bv.clone();
-                            contrib &= &path_allowed_tokens;
-                            final_internal |= contrib;
-                        } else {
-                            // Pop 'pop_len' on this isolated path and check if the path remains above bottom.
-                            let popper = peek.popn(*pop_len);
-                            // Consider successful if we have at least one predecessor path remaining,
-                            // or we ended exactly at bottom (depth 0 below bottom).
-                            let ok = popper.num_predecessors() > 0 || popper.below_bottom.get(&0).is_some();
-                            if ok {
-                                let mut contrib = edge_bv.clone();
-                                contrib &= &path_allowed_tokens;
-                                final_internal |= contrib;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Convert to original IDs bitset
-        self.parent.internal_bv_to_original(&final_internal)
+        todo!()
     }
 }
 
