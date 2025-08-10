@@ -1929,7 +1929,7 @@ impl<'a> GrammarConstraintState<'a> {
             let edges: Vec<((usize, Option<crate::glr::table::StateID>), LLMTokenBV)> = {
                 let guard = root2.lock().unwrap();
                 guard.children().iter().flat_map(|(ek, dests)| {
-                    dests.iter().map(move |_child, ev| (ek.clone(), ev.clone()))
+                    dests.iter().map(|(_child, ev)| (ek.clone(), ev.clone()))
                 }).collect()
             };
 
