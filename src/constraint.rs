@@ -345,66 +345,8 @@ impl GrammarConstraint {
     }
 
     pub fn precompute2(
-        parser: &GLRParser,
-        precomputed1: &Precomputed,
-        llm_vocab: &Arc<LLMVocab>,
     ) -> Precomputed2 {
-        let mut precomputed2 = BTreeMap::new();
-
-        for (tokenizer_state_id, trie1_root) in precomputed1 {
-            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
-                PrecomputedNodeContents::no_end(),
-            )));
-            precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
-
-            let mut initial_trie2_nodes = BTreeSet::new();
-            for state_id in parser.table.keys() {
-                let dest_node = Arc::new(Mutex::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::no_end()
-                )));
-
-                let inserter = EdgeInserter::new(
-                    trie2_root.clone(),
-                    (0, Some(*state_id)),
-                    LLMTokenBV::max_ones(),
-                    |e, n| *e |= n,
-                );
-                let pushed_trie2_node = inserter.try_destination(dest_node).unwrap();
-                initial_trie2_nodes.insert(ArcPtrWrapper::new(pushed_trie2_node));
-            }
-
-            let mut initial_glr_state = parser.init_glr_substring_parser(Some(llm_vocab.clone()));
-            Arc::make_mut(&mut initial_glr_state.active_state.stack).acc = Arc::new(Acc {
-                trie2_nodes: initial_trie2_nodes,
-                ..Acc::new_fresh()
-            });
-
-            let initial_values = vec![(trie1_root.clone(), initial_glr_state)];
-
-            Trie::special_map_grouped(
-                initial_values,
-                // step
-                |glr_s, grammar_token_opt, dest_map| {
-                    let mut out = Vec::new();
-                    let mut stepped = glr_s.clone();
-                    if let Some(gtid) = grammar_token_opt {
-                        stepped.process_token(*gtid);
-                    }
-                    if stepped.is_ok() {
-                        for (child_w, _edge_bv) in dest_map.iter() {
-                            out.push((child_w.clone(), stepped.clone()));
-                        }
-                    }
-                    out
-                },
-                // merge
-                |glr_s1, glr_s2| glr_s1.merge_with(glr_s2),
-                // process
-                |_precomputed_node_data, _glr_s| true,
-            );
-        }
-
-        precomputed2
+        todo!()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -1578,8 +1520,8 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        // self.get_mask1()
-        self.get_mask2()
+        self.get_mask1()
+        // self.get_mask2()
     }
 
     #[time_it]
@@ -2097,105 +2039,7 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        let mut final_mask = LLMTokenBV::zeros();
-        if self.state.is_empty() {
-            // No active states, so no tokens are allowed.
-            // The conversion to original is important.
-            return self.parent.internal_bv_to_original(&final_mask);
-        }
-
-        let mut queue: VecDeque<(Arc<Mutex<PrecomputeNode2>>, Arc<GSSNode>)> = VecDeque::new();
-        // Visited set uses raw pointers for performance and to handle Arc cycles.
-        let mut visited: HashSet<(*const Mutex<PrecomputeNode2>, *const GSSNode)> = HashSet::new();
-
-        // 1. Initialize the queue with a pair for each active tokenizer state.
-        for (tokenizer_state_id, glr_state) in &self.state {
-            if let Some(trie2_root) = self.parent.precomputed2.get(tokenizer_state_id) {
-                if !glr_state.active_state.stack.is_empty() {
-                    let gss_root = glr_state.active_state.stack.clone();
-                    let key = (Arc::as_ptr(trie2_root), Arc::as_ptr(&gss_root));
-                    if visited.insert(key) {
-                        queue.push_back((trie2_root.clone(), gss_root));
-                    }
-                }
-            }
-        }
-
-        // 2. Breadth-first traversal of the combined (Trie2, GSS) state space.
-        while let Some((current_trie_node, current_gss_node)) = queue.pop_front() {
-            let trie_guard = current_trie_node.lock().unwrap();
-
-            if trie_guard.value.end {
-                // End nodes should not have children and thus should not be processed in the queue.
-                continue;
-            }
-
-            for (edge_key, dest_map) in trie_guard.children() {
-                let (pop_count, required_state_id_opt) = *edge_key;
-
-                let popper = current_gss_node.popn(pop_count);
-
-                // Case 1: Paths that remained on the GSS stack.
-                for popper_item in popper.iter() {
-                    for peek in popper_item.peek_iter() {
-                        if required_state_id_opt == Some(peek.edge_value().state_id) {
-                            // A GSS path matches the Trie2 edge requirement.
-                            let predecessor_gss_node = peek.resolved_predecessor_node();
-                            let path_tokens = popper_item.resolved_acc().llm_tokens_union;
-
-                            for (next_trie_node_wrapper, edge_bv) in dest_map {
-                                let allowed_tokens = &path_tokens & edge_bv;
-                                if allowed_tokens.is_empty() {
-                                    continue;
-                                }
-
-                                let next_trie_node = next_trie_node_wrapper.as_arc();
-                                if next_trie_node.lock().unwrap().value.end {
-                                    final_mask |= allowed_tokens;
-                                } else {
-                                    let key = (Arc::as_ptr(next_trie_node), Arc::as_ptr(&predecessor_gss_node));
-                                    if visited.insert(key) {
-                                        queue.push_back((next_trie_node.clone(), predecessor_gss_node.clone()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Case 2: Paths that popped below the GSS stack (for substring parsing).
-                if let Some(acc_arc) = popper.below_bottom.get(&pop_count) {
-                    let path_tokens = acc_arc.llm_tokens_union.clone();
-
-                    for (next_trie_node_wrapper, edge_bv) in dest_map {
-                        let allowed_tokens = &path_tokens & edge_bv;
-                        if allowed_tokens.is_empty() {
-                            continue;
-                        }
-
-                        let next_trie_node = next_trie_node_wrapper.as_arc();
-                        if next_trie_node.lock().unwrap().value.end {
-                            final_mask |= allowed_tokens;
-                        } else {
-                            let new_gss_parser_state = self.parent.parser.init_glr_substring_parser(Some(self.parent.llm_vocab.clone()));
-                            let mut new_gss_stack = new_gss_parser_state.active_state.stack;
-                            
-                            let mut memo = HashMap::new();
-                            allow_only_llm_tokens_and_prune_arc(&mut new_gss_stack, &allowed_tokens, &mut memo);
-
-                            if !new_gss_stack.is_empty() {
-                                let key = (Arc::as_ptr(next_trie_node), Arc::as_ptr(&new_gss_stack));
-                                if visited.insert(key) {
-                                    queue.push_back((next_trie_node.clone(), new_gss_stack));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        self.parent.internal_bv_to_original(&final_mask)
+        todo!()
     }
 }
 
