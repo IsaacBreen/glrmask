@@ -820,8 +820,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
  
             if let Some(merged_acc) = merged_acc_opt {
-                let mut final_goto_state_ids: BTreeSet<StateID> = BTreeSet::new();
+                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {
+                    let mut final_goto_state_ids_for_source = BTreeSet::new();
                     let mut current_nt_local = nt;
                     loop {
                         if let Some(goto) = row.gotos.get(&current_nt_local) {
@@ -835,7 +836,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     current_nt_local = *next_nt;
                                     continue;
                                 } else {
-                                    final_goto_state_ids.insert(goto_state_id);
+                                    final_goto_state_ids_for_source.insert(goto_state_id);
                                     break;
                                 }
                             } else {
@@ -845,11 +846,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             break;
                         }
                     }
+                    if !final_goto_state_ids_for_source.is_empty() {
+                        states_to_push.insert(*source_state_id);
+                        states_to_push.extend(final_goto_state_ids_for_source);
+                    }
                 }
  
-                if !final_goto_state_ids.is_empty() {
+                if !states_to_push.is_empty() {
                     let base = GSSNode::new(merged_acc);
-                    let new_gss_node = base.push_many(final_goto_state_ids.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+                    let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
                     out.push(new_gss_node);
                 }
             }
@@ -995,15 +1000,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
 
                             if let Some(merged_acc) = merged_acc_opt {
-                                let mut final_goto_state_ids = BTreeSet::new();
+                                let mut states_to_push = BTreeSet::new();
                                 // For substring parsing, when popping below bottom, we can transition
                                 // from *any* state in the automaton that has a GOTO on `nt`.
                                 for (source_state_id, _source_row) in &self.parser.table {
-                                    final_goto_state_ids.extend(default_reduce_chain(self.parser, *source_state_id, nt));
+                                    let goto_ids = default_reduce_chain(self.parser, *source_state_id, nt);
+                                    if !goto_ids.is_empty() {
+                                        states_to_push.insert(*source_state_id);
+                                        states_to_push.extend(goto_ids);
+                                    }
                                 }
-                                if !final_goto_state_ids.is_empty() {
+                                if !states_to_push.is_empty() {
                                     let base = GSSNode::new(merged_acc);
-                                    let new_gss_node = base.push_many(final_goto_state_ids.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+                                    let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
                                     out_nodes_for_this_peek.push(new_gss_node);
                                 }
                             }
@@ -1385,17 +1394,17 @@ fn default_reduce_chain(
 ) -> BTreeSet<StateID> {
     let mut final_goto_state_ids = BTreeSet::new();
     let mut current_nt = initial_nt;
-    let mut current_state_id = start_state_id; // This is the state where the GOTO originates
+    // The state for GOTO lookups is always the one before the reduction sequence.
+    let goto_source_state_id = start_state_id;
 
     loop {
-        if let Some(goto) = parser.table.get(&current_state_id).and_then(|row| row.gotos.get(&current_nt)) {
+        if let Some(goto) = parser.table.get(&goto_source_state_id).and_then(|row| row.gotos.get(&current_nt)) {
             if let Some(goto_state_id) = goto.state_id {
                 let next_row = &parser.table[&goto_state_id];
                 if let Some(next_reduce) = &next_row.default_reduce.reduce {
                     if next_reduce.len == 1 {
-                        // This is a unit reduction. Continue the chain.
+                        // This is a unit reduction. Continue the chain with the new non-terminal.
                         current_nt = next_reduce.nonterminal_id;
-                        current_state_id = goto_state_id; // Move to the new state for the next GOTO lookup
                         continue; // Continue the loop
                     }
                 }
@@ -1407,7 +1416,7 @@ fn default_reduce_chain(
                 break;
             }
         } else {
-            // No goto for current_nt from current_state_id. End of chain.
+            // No goto for current_nt from goto_source_state_id. End of chain.
             break;
         }
     }
