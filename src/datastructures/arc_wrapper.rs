@@ -79,3 +79,14 @@ impl<T> fmt::Debug for ArcPtrWrapper<T> {
     }
 }
 
+impl <T> PartialOrd for ArcPtrWrapper<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for ArcPtrWrapper<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
+    }
+}
