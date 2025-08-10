@@ -5,7 +5,7 @@ use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
+use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};

@@ -1235,7 +1235,6 @@ mod tests {
     use crate::{choice_fast, groups, seq_fast};
     use bitvec::prelude::*;
     use std::sync::{Arc, Mutex};
-    use crate::constraint::LLMTokenBV;
     use crate::datastructures::hybrid_bitset::HybridBitset;
 
     use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal};

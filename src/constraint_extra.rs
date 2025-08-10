@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, LLMTokenBV};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
@@ -11,6 +11,7 @@ use bimap::BiBTreeMap;
 use crate::datastructures::ArcPtrWrapper;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use crate::datastructures::gss::LLMTokenBV;
 use crate::glr::grammar::Terminal;
 
 /// Creates a neat string representation of a HybridBitset, showing values as ranges.
