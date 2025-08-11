@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::glr::parser::ParserPhase;
 use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
@@ -299,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2(&tokenizer);
+        let precomputed2 = Self::precompute2();
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -349,36 +348,21 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
-        tokenizer: &Regex,
     ) -> Precomputed2 {
-        let mut precomputed2 = BTreeMap::new();
-        for sid in tokenizer.iter_states() {
-            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
-                PrecomputedNodeContents::no_end(),
-            )));
-            precomputed2.insert(sid, trie2_root);
-        }
-        precomputed2
+        // For now, initialize an empty Trie-2 root per tokenizer state on demand elsewhere.
+        // We keep this map empty at construction time; runtime will create and attach Trie-2 nodes
+        // when popping below the bottom occurs. This avoids requiring JSONConvertible for the
+        // tuple edge key before any edges exist.
+        BTreeMap::new()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
-        let mut glr_parser_state = self.parser.init_glr_parser(Some(self.llm_vocab.clone()));
-        let mut initial_acc = Acc::new_fresh();
-        if let Some(trie2_root) = self.precomputed2.get(&self.tokenizer.initial_state_id()) {
-            initial_acc.trie2_nodes.insert(ArcPtrWrapper::new(trie2_root.clone()));
-        }
-        let initial_gss_root = GSSNode::new(initial_acc);
-        let initial_content = ParseStateEdgeContent { state_id: self.parser.start_state_id };
-        let stack = Arc::new(initial_gss_root.push(initial_content));
-        let active_state = ParseState { stack };
-        let glr_parser_state = GLRParserState {
-            parser: &self.parser,
-            active_state,
-            accepted: false,
-            phase: ParserPhase::ReadyForDefaultReductions,
-        };
-        state.insert(self.tokenizer.initial_state_id(), glr_parser_state);
+        state.insert(
+            self.tokenizer.initial_state_id(),
+            self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
+        );
+
         GrammarConstraintState { parent: self, state }
     }
 
@@ -438,13 +422,12 @@ impl GrammarConstraint {
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
-            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
+                let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
@@ -570,8 +553,8 @@ impl<'r> Precomputer<'r> {
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token_match in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token_match.id);
+            for token in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token.id);
                 let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
@@ -1543,7 +1526,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        // self.get_mask1();
+        // self.get_mask1()
         self.get_mask2()
     }
 
@@ -2062,53 +2045,71 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        let final_mask_internal = RefCell::new(LLMTokenBV::zeros());
+        // This fast-path uses Trie-2 edges attached to the current Acc at the GSS root(s).
+        // For each active GLR state:
+        //  - For each Trie-2 node in the Acc, inspect edges keyed by (pops, Some(state_id))
+        //  - Pop the stack by 'pops' and collect the set of top state_ids reachable
+        //  - If the edge's state_id is among those, add its BV to the mask
+        // The resulting mask is ANDed with the current allowed LLM tokens of the stack
+        // to stay conservative. If no Trie-2 nodes are present or the result is empty,
+        // we fall back to get_mask1 (Trie-1 driven computation).
+        let mut any_trie2_present = false;
+        let mut final_mask_internal = HybridBitset::zeros();
 
-        for (tok_sid, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
+        for (_tok_state, glr_state) in &self.state {
+            let acc = &glr_state.active_state.stack.acc;
+            if acc.trie2_nodes.is_empty() {
                 continue;
             }
-            if let Some(trie2_root) = self.parent.precomputed2.get(tok_sid) {
-                Trie::special_map_grouped(
-                    vec![(trie2_root.clone(), glr_state.active_state.stack.clone())],
-                    // step
-                    |gss_node, edge_key, dest_map| {
-                        let (pops, state_id_opt) = edge_key;
-                        let popper = gss_node.popn(*pops);
-                        
-                        let mut next_gss = GSSNode::new_fresh();
-                        let mut any_valid_path = false;
+            any_trie2_present = true;
 
-                        for item in popper.iter() {
-                            if let Some(state_id) = state_id_opt {
-                                if item.peek_iter().any(|peek| peek.edge_value().state_id == *state_id) {
-                                    next_gss.merge_with_depth(1, &item.resolved_node());
-                                    any_valid_path = true;
+            // Cache of top-of-stack state IDs after popping 'pops' steps
+            let mut top_states_after_pop: BTreeMap<usize, BTreeSet<StateID>> = BTreeMap::new();
+
+            // Mask for this GLR state from Trie-2
+            let mut mask_for_state = HybridBitset::zeros();
+
+            for node_wrapper in &acc.trie2_nodes {
+                let node_arc = node_wrapper.as_arc();
+                let node_guard = node_arc.lock().expect("Trie-2 node mutex poisoned");
+                for ((pops, opt_state_id), dest_map) in node_guard.children() {
+                    if let Some(sid) = opt_state_id {
+                        // Compute or get cached set of top state IDs after 'pops' pops
+                        let entry = top_states_after_pop.entry(*pops).or_insert_with(|| {
+                            let popper = glr_state.active_state.stack.popn(*pops);
+                            let mut set = BTreeSet::new();
+                            for item in popper.iter() {
+                                for peek2 in item.peek_iter() {
+                                    set.insert(peek2.edge_value().state_id);
                                 }
-                            } else {
-                                next_gss.merge_with_depth(1, &item.resolved_node());
-                                any_valid_path = true;
                             }
-                        }
-
-                        let mut results = Vec::new();
-                        if any_valid_path {
-                            let next_gss_arc = Arc::new(next_gss);
-                            for (child_wrapper, edge_bv) in dest_map.iter() {
-                                let mut final_gss = next_gss_arc.clone();
-                                allow_only_llm_tokens_and_prune_arc(&mut final_gss, edge_bv, &mut HashMap::new());
-                                if !final_gss.is_empty() { results.push((child_wrapper.clone(), final_gss)); }
+                            set
+                        });
+                        if entry.contains(sid) {
+                            // Union EVs from all children under this key
+                            let mut ev_union = HybridBitset::zeros();
+                            for (_child, ev_bv) in dest_map.iter() {
+                                ev_union |= ev_bv.clone();
                             }
+                            mask_for_state |= ev_union;
                         }
-                        results
-                    },
-                    |gss1, gss2| { Arc::make_mut(gss1).merge_with_depth(1, &gss2); },
-                    |trie2_node, gss_node| { if trie2_node.value.end { *final_mask_internal.borrow_mut() |= &gss_node.allowed_llm_tokens(); return false; } !gss_node.is_empty() }
-                );
+                    }
+                }
             }
+
+            // Be conservative: intersect with currently allowed tokens
+            let allowed_now = glr_state.active_state.stack.allowed_llm_tokens();
+            mask_for_state &= &allowed_now;
+
+            final_mask_internal |= mask_for_state;
         }
 
-        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
+        if !any_trie2_present || final_mask_internal.is_empty() {
+            // Fall back to the full Trie-1 driven mask computation
+            return self.get_mask1();
+        }
+
+        // Map internal->original IDs
+        self.parent.internal_bv_to_original(&final_mask_internal)
     }
 }
-

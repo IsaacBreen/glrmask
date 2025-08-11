@@ -984,7 +984,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 let proceed = {
-                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    let mut guard = node_arc_ptr_wrappers.as_slice()[0].as_arc().lock().expect("poison");
+                    // Safety: The guard here aims to keep API consistent; we only need a &mut Trie to call process.
+                    // Using the first wrapper is acceptable as we already are iterating it.
                     process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
@@ -1002,7 +1004,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     for (child_arc, new_v) in new_values_for_children {
                         let child_ptr = Arc::as_ptr(&child_arc);
                         values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        let child_depth = child_arc.as_arc().lock().expect("poison").max_depth;
                         todo.entry(child_depth).or_default().insert(child_arc);
                     }
                 }
@@ -1809,6 +1811,7 @@ mod tests {
         // Diamond structure
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(Mutex::new(TestTrieBasic::new(2))).lock().unwrap().clone()); // ensure compile
         let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
         let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
 

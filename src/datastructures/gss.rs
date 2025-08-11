@@ -31,7 +31,7 @@ pub type TerminalBV = HybridBitset;
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>> >;
+type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
@@ -75,6 +75,31 @@ impl JSONConvertible for PrecomputedNodeContents {
     }
 }
 
+// Provide a JSONConvertible implementation for the edge key type of Trie-2:
+// (usize pops, Option<StateID> state_id)
+impl JSONConvertible for (usize, Option<StateID>) {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("pops".to_string(), self.0.to_json());
+        obj.insert("state_id".to_string(), self.1.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let pops = obj.remove("pops")
+                    .ok_or_else(|| "Missing field pops for (usize, Option<StateID>)".to_string())
+                    .and_then(usize::from_json)?;
+                let state_id = obj.remove("state_id")
+                    .ok_or_else(|| "Missing field state_id for (usize, Option<StateID>)".to_string())
+                    .and_then(Option::<StateID>::from_json)?;
+                Ok((pops, state_id))
+            }
+            _ => Err("Expected JSONNode::Object for (usize, Option<StateID>)".to_string()),
+        }
+    }
+}
+
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 
@@ -88,7 +113,7 @@ pub struct Acc {
     pub terminals_union: HybridL2Bitset,
     pub terminals_intersection: HybridL2Bitset,
     pub needs_push_down: bool,
-    pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>
+    pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
 }
 
 impl Acc {
@@ -100,7 +125,7 @@ impl Acc {
             terminals_union: HybridL2Bitset::all(),
             terminals_intersection: HybridL2Bitset::all(),
             needs_push_down: false,
-            trie2_nodes: BTreeSet::new()
+            trie2_nodes: BTreeSet::new(),
         }
     }
 
@@ -112,7 +137,7 @@ impl Acc {
             terminals_union: terminals.clone(),
             terminals_intersection: terminals,
             needs_push_down: false,
-            trie2_nodes: BTreeSet::new()
+            trie2_nodes: BTreeSet::new(),
         }
     }
 
@@ -123,7 +148,8 @@ impl Acc {
             terminals_union: &from.terminals_union & &to.terminals_union,
             terminals_intersection: &from.terminals_union & &to.terminals_intersection,
             needs_push_down: false,
-            trie2_nodes: &from.trie2_nodes & &to.trie2_nodes
+            // Keep trie2 nodes conservative: intersect sets to avoid leaking edges upward.
+            trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
         }
         // Acc {
         //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
@@ -140,7 +166,7 @@ impl Acc {
             terminals_union: &lhs.terminals_union | &rhs.terminals_union,
             terminals_intersection: &lhs.terminals_intersection & &rhs.terminals_intersection,
             needs_push_down: false,
-            trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes
+            trie2_nodes: &lhs.trie2_nodes | &rhs.trie2_nodes,
         }
     }
 
@@ -680,8 +706,7 @@ impl GSSNode {
         let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
                           new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
                           new_acc.terminals_union != node.acc.terminals_union ||
-                          new_acc.terminals_intersection != node.acc.terminals_intersection ||
-                          new_acc.trie2_nodes != node.acc.trie2_nodes;
+                          new_acc.terminals_intersection != node.acc.terminals_intersection;
 
         if !acc_changed {
             return;
@@ -834,8 +859,7 @@ fn prune_and_transform_recursive(
                 let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
                                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
                                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-                                  new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
-                                  new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
+                                  new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection;
                 if acc_changed {
                     new_local_acc.needs_push_down = true;
                 }
@@ -1797,4 +1821,3 @@ mod tests {
         assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
     }
 }
-
