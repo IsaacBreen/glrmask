@@ -753,7 +753,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let popper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-        let any_below_bottom = !popper.below_bottom.is_empty();
+        let mut any_below_bottom = !popper.below_bottom.is_empty();
         timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
@@ -806,12 +806,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
  
+        // Handle “popped below bottom” cases:
+        //
+        // If the reduction pops below the bottom, we have recognized only the
+        // suffix β of a rule A ::= α β. Per substring parsing semantics,
+        // α lies before the substring start and must be considered unknown (but derivable),
+        // so we continue in every state that has a GOTO on A. We also merge the Acc
+        // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
-            // Create one shared new trie2 node and one shared end node for this reduction.
-            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            let end_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-
-            // Merge all below-bottom Accs first to get a combined view.
             let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
                 merged_acc_opt = Some(match merged_acc_opt.take() {
@@ -819,144 +821,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(prev) => Acc::merge(&prev, acc_arc),
                 });
             }
-
-            // This block handles the GSS construction.
-            if let Some(mut merged_acc) = merged_acc_opt {
-                // Update trie2 nodes based on all paths that went below bottom.
-                for (pops_below, acc_arc) in &popper.below_bottom {
-                    let edge_bv = acc_arc.llm_tokens_union.clone();
-                    if edge_bv.is_empty() { continue; }
-
-                    for trie2_node_wrapper in &acc_arc.trie2_nodes {
-                        for (source_state_id, row) in &self.parser.table {
-                            if let Some(goto) = row.gotos.get(&nt) {
-                                let edge_key = (*pops_below, Some(*source_state_id));
-                                
-                                // Push edge to the new shared trie2 node.
-                                EdgeInserter::new(
-                                    trie2_node_wrapper.as_arc().clone(),
-                                    edge_key,
-                                    edge_bv.clone(),
-                                    |e, n| *e |= n,
-                                ).try_destination(new_trie2_node.clone()).unwrap();
-
-                                if goto.accept {
-                                    self.accepted = true;
-                                    EdgeInserter::new(
-                                        trie2_node_wrapper.as_arc().clone(),
-                                        edge_key,
-                                        edge_bv.clone(),
-                                        |e, n| *e |= n,
-                                    ).try_destination(end_trie2_node.clone()).unwrap();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // The new GSS root's Acc should only point to the new shared trie2 node.
-                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node)]);
-                
-                let base_gss_node = GSSNode::new(merged_acc);
-
-                // For each valid source state, find its final goto states and push them.
-                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
-                for (source_state_id, row) in &self.parser.table {
-                    let mut final_goto_state_ids_for_source = BTreeSet::new();
-                    let mut current_nt_local = nt;
-                    loop {
-                        if let Some(goto) = row.gotos.get(&current_nt_local) {
-                            if let Some(goto_state_id) = goto.state_id {
-                                let next_row = &self.parser.table[&goto_state_id];
-                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
-                                    current_nt_local = *next_nt;
-                                    continue;
-                                } else {
-                                    final_goto_state_ids_for_source.insert(goto_state_id);
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if !final_goto_state_ids_for_source.is_empty() {
-                        states_to_push.insert(*source_state_id);
-                        states_to_push.extend(final_goto_state_ids_for_source);
-                    }
-                }
-
-                if !states_to_push.is_empty() {
-                    let new_gss_node = base_gss_node.push_many(
-                        states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect()
-                    );
-                    out.push(new_gss_node);
-                }
-            }
-        }
  
-        if any_below_bottom {
-            // Create one shared new trie2 node and one shared end node for this reduction.
-            let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            let end_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-
-            // Merge all below-bottom Accs first to get a combined view.
-            let mut merged_acc_opt: Option<Acc> = None;
-            for acc_arc in popper.below_bottom.values() {
-                merged_acc_opt = Some(match merged_acc_opt.take() {
-                    None => (**acc_arc).clone(),
-                    Some(prev) => Acc::merge(&prev, acc_arc),
-                });
-            }
-
-            // This block handles the GSS construction.
-            if let Some(mut merged_acc) = merged_acc_opt {
-                // Update trie2 nodes based on all paths that went below bottom.
-                for (pops_below, acc_arc) in &popper.below_bottom {
-                    let edge_bv = acc_arc.llm_tokens_union.clone();
-                    if edge_bv.is_empty() { continue; }
-
-                    for trie2_node_wrapper in &acc_arc.trie2_nodes {
-                        for (source_state_id, row) in &self.parser.table {
-                            if let Some(goto) = row.gotos.get(&nt) {
-                                let edge_key = (*pops_below, Some(*source_state_id));
-                                
-                                // Push edge to the new shared trie2 node.
-                                EdgeInserter::new(
-                                    trie2_node_wrapper.as_arc().clone(),
-                                    edge_key,
-                                    edge_bv.clone(),
-                                    |e, n| *e |= n,
-                                ).try_destination(new_trie2_node.clone()).unwrap();
-
-                                if goto.accept {
-                                    self.accepted = true;
-                                    EdgeInserter::new(
-                                        trie2_node_wrapper.as_arc().clone(),
-                                        edge_key,
-                                        edge_bv.clone(),
-                                        |e, n| *e |= n,
-                                    ).try_destination(end_trie2_node.clone()).unwrap();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // The new GSS root's Acc should only point to the new shared trie2 node.
-                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node)]);
-                
-                let base_gss_node = GSSNode::new(merged_acc);
-
-                // For each valid source state, find its final goto states and push them.
+            if let Some(merged_acc) = merged_acc_opt {
                 let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {
                     let mut final_goto_state_ids_for_source = BTreeSet::new();
                     let mut current_nt_local = nt;
                     loop {
                         if let Some(goto) = row.gotos.get(&current_nt_local) {
+                            if goto.accept {
+                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+                                self.accepted = true;
+                            }
                             if let Some(goto_state_id) = goto.state_id {
                                 let next_row = &self.parser.table[&goto_state_id];
                                 if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
@@ -978,11 +854,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         states_to_push.extend(final_goto_state_ids_for_source);
                     }
                 }
-
+ 
                 if !states_to_push.is_empty() {
-                    let new_gss_node = base_gss_node.push_many(
-                        states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect()
-                    );
+                    let base = GSSNode::new(merged_acc);
+                    let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
                     out.push(new_gss_node);
                 }
             }
@@ -1550,3 +1425,4 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
+

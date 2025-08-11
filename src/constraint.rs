@@ -298,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2(&tokenizer);
+        let precomputed2 = Self::precompute2();
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -349,10 +349,7 @@ impl GrammarConstraint {
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
     ) -> Precomputed2 {
-        // For now, this returns an empty map. The trie2 nodes are created dynamically
-        // and seeded into the initial GrammarConstraintState. If a more complex
-        // static precomputation for trie2 is needed, this is where it would go.
-        BTreeMap::new()
+        todo!()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -1583,7 +1580,7 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-        for (tokenizer_state_id, glr_state) in self.state.iter() {
+        for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
@@ -2044,29 +2041,8 @@ impl<'a> GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    #[time_it]
     pub fn get_mask2(&self) -> LLMTokenBV {
-        let mut final_mask = LLMTokenBV::zeros();
-
-        for (_sid, glr_state) in &self.state {
-            let stack = &glr_state.active_state.stack;
-            if stack.is_empty() {
-                continue;
-            }
-
-            let mut q: VecDeque<(Arc<GSSNode>, Arc<Mutex<PrecomputeNode2>>)> = VecDeque::new();
-            for trie2_root in &stack.acc.trie2_nodes {
-                q.push_back((stack.clone(), trie2_root.as_arc().clone()));
-            }
-
-            while let Some((gss_node, trie2_node)) = q.pop_front() {
-                let trie2_guard = trie2_node.lock().unwrap();
-                if trie2_guard.value.end {
-                    final_mask |= gss_node.allowed_llm_tokens();
-                }
-            }
-        }
-
-        self.parent.internal_bv_to_original(&final_mask)
+        todo!()
     }
 }
+

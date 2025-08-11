@@ -487,7 +487,7 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
             } else {
                 let mut iter = nodes_to_merge.into_iter();
                 let first = iter.next().unwrap();
-                let mut merged = (*first).clone();
+                let mut merged = first.as_ref().clone();
                 for other in iter {
                     merged._merge(&other, merge_depth - 1);
                 }
