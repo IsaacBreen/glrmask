@@ -75,31 +75,6 @@ impl JSONConvertible for PrecomputedNodeContents {
     }
 }
 
-// Provide a JSONConvertible implementation for the edge key type of Trie-2:
-// (usize pops, Option<StateID> state_id)
-impl JSONConvertible for (usize, Option<StateID>) {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("pops".to_string(), self.0.to_json());
-        obj.insert("state_id".to_string(), self.1.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let pops = obj.remove("pops")
-                    .ok_or_else(|| "Missing field pops for (usize, Option<StateID>)".to_string())
-                    .and_then(usize::from_json)?;
-                let state_id = obj.remove("state_id")
-                    .ok_or_else(|| "Missing field state_id for (usize, Option<StateID>)".to_string())
-                    .and_then(Option::<StateID>::from_json)?;
-                Ok((pops, state_id))
-            }
-            _ => Err("Expected JSONNode::Object for (usize, Option<StateID>)".to_string()),
-        }
-    }
-}
-
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 

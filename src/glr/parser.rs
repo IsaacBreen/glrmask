@@ -931,7 +931,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
-        if self.phase == ParserPhase::Ready_forToken {
+        if self.phase == ParserPhase::ReadyForToken {
             // This branch name fixed below; but we keep logic same
         }
 
