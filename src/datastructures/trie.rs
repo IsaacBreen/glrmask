@@ -13,7 +13,7 @@ use ordered_hash_map::OrderedHashMap;
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
-use crate::datastructures::arc_wrapper::ArcPtrWrapper; // Import ArcPtrWrapper
+use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
@@ -839,6 +839,256 @@ where
     }
 }
 
+
+// Implementation block for special_map and related functionality
+// Requires T: Clone, EK: Ord + Clone, EV: Clone
+impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+    /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
+    /// (special_map implementation remains unchanged)
+    #[time_it]
+    pub fn special_map<V: Clone>(
+        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
+        mut merge: impl FnMut(&mut V, V),
+        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
+    ) {
+        // ------------------------------------------------------------------
+        //  Simple depth-driven scheduler.
+        //
+        //  The key observation is:
+        //      parent.max_depth  <  child.max_depth
+        //  for every edge (parent → child).
+        //  Therefore processing nodes strictly in ascending `max_depth`
+        //  guarantees every parent is handled before each of its children.
+        //
+        //  • `values`  – accumulated V for every discovered node
+        //  • `done`    – nodes that have already been processed
+        //  • `todo`    – min-heap keyed by max_depth
+        // ------------------------------------------------------------------
+        let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
+        let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
+        let mut todo     : BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+
+        // Seed with the user-supplied starting set
+        for (node_arc, v0) in initial_nodes_and_values {
+            let ptr = Arc::as_ptr(&node_arc);
+            values
+                .entry(ptr)
+                .and_modify(|old| merge(old, v0.clone()))
+                .or_insert(v0);
+            let depth = node_arc.lock().expect("poison").max_depth;
+            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+        }
+
+        // Main loop ---------------------------------------------------------
+        while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+            // #[allow(clippy::iter_over_hash_type)]
+            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
+                if done.contains(&ptr) { continue; }               // already processed
+
+                // Pull the merged value that all parents contributed
+                let mut agg_v = match values.remove(&ptr) {
+                    Some(v) => v,
+                    None => continue,                            // can happen if every parent’s `step` returned None
+                };
+
+                // ---------- user ‘process’ callback ----------
+                let proceed = {
+                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    process(&mut guard, &mut agg_v)
+                };
+                done.insert(ptr);
+
+                if !proceed { continue; }                           // user stopped traversal at this node
+
+                // ---------- propagate to children -------------
+                // We read children once, outside any long-lived locks
+                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    guard.children
+                        .iter()
+                        .flat_map(|(ek, dst_map)| {
+                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
+                        })
+                        .collect()
+                };
+
+                for (ek, ev, child_arc) in edges {
+                    let child_ptr = Arc::as_ptr(&child_arc);
+
+                    // user ‘step’ callback
+                    let maybe_v = {
+                        let child_guard = child_arc.lock().expect("poison");
+                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
+                    };
+                    if let Some(new_v) = maybe_v {
+                        values
+                            .entry(child_ptr)
+                            .and_modify(|old| merge(old, new_v.clone()))
+                            .or_insert(new_v);
+
+                        // Queue child by its declared depth
+                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Performs a specialized breadth-first traversal, grouping children by edge key.
+    /// This is more efficient than `special_map` when many edges share the same key,
+    /// as the `step` function is called once per key, not once per edge.
+    #[time_it]
+    pub fn special_map_grouped<V, S, I>(
+        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
+        mut step: S,
+        mut merge: impl FnMut(&mut V, V),
+        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
+    )
+    where
+        V: Clone,
+        S: FnMut(
+            &V, &EK, &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
+        ) -> I,
+        I: IntoIterator<Item = (ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, V)>,
+    {
+        // ------------------------------------------------------------------
+        //  Simple depth-driven scheduler. (Same as special_map)
+        // ------------------------------------------------------------------
+        let mut values: HashMap<*const Mutex<Self>, V> = HashMap::new();
+        let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
+        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+
+        // Seed with the user-supplied starting set
+        for (node_arc, v0) in initial_nodes_and_values {
+            let ptr = Arc::as_ptr(&node_arc);
+            values
+                .entry(ptr)
+                .and_modify(|old| merge(old, v0.clone()))
+                .or_insert(v0);
+            let depth = node_arc.lock().expect("poison").max_depth;
+            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+        }
+
+        // Main loop ---------------------------------------------------------
+        while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
+                if done.contains(&ptr) { continue; }
+
+                let mut agg_v = match values.remove(&ptr) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let proceed = {
+                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    process(&mut guard, &mut agg_v)
+                };
+                done.insert(ptr);
+
+                if !proceed { continue; }
+
+                // ---------- propagate to children (grouped by edge key) -------------
+                let children_by_ek: Vec<(EK, OrderedHashMap<ArcPtrWrapper<Mutex<Self>>, EV>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    guard.children.iter().map(|(ek, dst_map)| (ek.clone(), dst_map.clone())).collect()
+                };
+
+                for (ek, dest_map) in children_by_ek {
+                    let new_values_for_children = step(&agg_v, &ek, &dest_map);
+                    for (child_arc, new_v) in new_values_for_children {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
+                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(child_arc);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Implement PartialEq for Trie
+impl<EK, EV, T> PartialEq for Trie<EK, EV, T>
+where
+    EK: Ord, // Ord implies PartialEq + Eq, needed for BTreeMap keys and get
+    EV: PartialEq + Clone, // PartialEq for EV comparison, Clone for collecting pairs
+    T: PartialEq, // For self.value == other.value
+{
+    fn eq(&self, other: &Self) -> bool {
+        // 1. Compare non-recursive fields: value and max_depth.
+        if self.value != other.value || self.max_depth != other.max_depth {
+            return false;
+        }
+
+        // 2. Compare children structure (number of distinct edge keys).
+        if self.children.len() != other.children.len() {
+            return false;
+        }
+        
+        // Initialize cache for recursive calls on child Arcs.
+        // This cache is passed down through all recursive calls originating from this top-level eq.
+        // Type alias for pointer to Mutex<Trie<...>> for clarity.
+        type NodeMutexPtr<EKK, EVV, TT> = *const Mutex<Trie<EKK, EVV, TT>>;
+        let mut comparison_cache: HashMap<(NodeMutexPtr<EK, EV, T>, NodeMutexPtr<EK, EV, T>), bool> = HashMap::new();
+
+
+        // 3. Compare children for each edge key.
+        for (self_ek, self_dest_map) in &self.children {
+            match other.children.get(self_ek) {
+                None => { // Edge key present in self but not in other.
+                    return false;
+                }
+                Some(other_dest_map) => {
+                    // Number of destinations for this edge key must match.
+                    if self_dest_map.len() != other_dest_map.len() {
+                        return false;
+                    }
+
+                    // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
+                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+                    
+                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+
+
+                    // For each child in self_child_pairs, find a matching child in other_child_pairs.
+                    // A match requires equal edge values (EV) and recursively equal Trie nodes.
+                    'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
+                        let mut found_match_for_current_self_pair = false;
+                        for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
+                            if s_ev == &other_child_pairs[i].1 { // Compare EV
+                                // Edge values match, now recursively compare the pointed-to Trie nodes.
+                                let o_arc_for_recursion = other_child_pairs[i].0.clone();
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, &mut comparison_cache) {
+                                    other_child_pairs.remove(i); // Match found.
+                                    found_match_for_current_self_pair = true;
+                                    break; // Found match for current s_arc, move to next s_arc.
+                                }
+                            }
+                        }
+                        if !found_match_for_current_self_pair {
+                            // No match found for the current s_arc/s_ev.
+                            return false;
+                        }
+                    }
+                    // If all self_child_pairs found matches, other_child_pairs should be empty.
+                }
+            }
+        }
+        
+        // All checks passed.
+        true
+    }
+}
 
 // Implement Eq for Trie
 impl<EK, EV, T> Eq for Trie<EK, EV, T>
