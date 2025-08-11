@@ -883,8 +883,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
             // #[allow(clippy::iter_over_hash_type)]
-            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
+            for node_arc_ptr_wrappers in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrappers.as_arc());
                 if done.contains(&ptr) { continue; }               // already processed
 
                 // Pull the merged value that all parents contributed
@@ -895,7 +895,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
-                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    let mut guard = node_arc_ptr_wrappers.as_arc().lock().expect("poison");
                     process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
@@ -905,7 +905,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 // ---------- propagate to children -------------
                 // We read children once, outside any long-lived locks
                 let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
-                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    let guard = node_arc_ptr_wrappers.as_arc().lock().expect("poison");
                     guard.children
                         .iter()
                         .flat_map(|(ek, dst_map)| {
@@ -1809,7 +1809,7 @@ mod tests {
         // Diamond structure
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(Mutex::new(TestTrieBasic::new(2))).into_inner().unwrap());
         let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
 
         // Build the structure

@@ -42,6 +42,7 @@ use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::GSS_LOGGING_ENABLED;
+use crate::datastructures::gss::ensure_trie2_node_for_all;
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -298,7 +299,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2();
+        let precomputed2 = Self::precompute2(&tokenizer);
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -348,15 +349,28 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
+        tokenizer: &Regex,
     ) -> Precomputed2 {
-        todo!()
+        // Per design: create one empty root trie-2 node per tokenizer state. These nodes
+        // will be populated incrementally during parsing when “pops below bottom” occur.
+        let mut map: Precomputed2 = BTreeMap::new();
+        for sid in tokenizer.iter_states() {
+            map.insert(sid, Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))));
+        }
+        map
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
+        let mut glr = self.parser.init_glr_parser(Some(self.llm_vocab.clone()));
+        // Ensure trie-2 root for the tokenizer initial state is present in the GSS Acc
+        if let Some(t2_root) = self.precomputed2.get(&self.tokenizer.initial_state_id()) {
+            let wrapper = ArcPtrWrapper::new(t2_root.clone());
+            ensure_trie2_node_for_all(&mut glr.active_state.stack, wrapper);
+        }
         state.insert(
             self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
+            glr,
         );
 
         GrammarConstraintState { parent: self, state }
@@ -1991,6 +2005,14 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = new_overall_state.clone();
 
+        // Ensure trie2 roots are present for each resulting tokenizer state
+        for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
+            if let Some(t2_root) = self.parent.precomputed2.get(tokenizer_state_id) {
+                let wrap = ArcPtrWrapper::new(t2_root.clone());
+                ensure_trie2_node_for_all(&mut glr_state.active_state.stack, wrap);
+            }
+        }
+
         for glr_parser_state in self.state.values_mut() {
             glr_parser_state.process_default_reductions();
         }
@@ -2042,7 +2064,82 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        todo!()
+        // Trie-2 based mask computation: do not step the parser; just “pop and read”
+        // the GSS and match against Trie-2 edges.
+        let mut final_internal = HybridBitset::zeros();
+
+        for (tokenizer_state_id, glr_state) in &self.state {
+            let stack_root = &glr_state.active_state.stack;
+            if stack_root.is_empty() {
+                continue;
+            }
+            // Tokens allowed by the current GSS root
+            let allowed_here = stack_root.allowed_llm_tokens();
+
+            // Collect Trie-2 nodes from the Acc set on the root
+            let trie2_nodes = stack_root.acc.trie2_nodes.clone();
+            if trie2_nodes.is_empty() {
+                continue;
+            }
+
+            // Determine which depths we need to consider based on the Trie-2 edges present.
+            let mut needed_depths: BTreeSet<usize> = BTreeSet::new();
+            for wrap in trie2_nodes.iter() {
+                let guard = wrap.as_arc().lock().expect("Trie2 node mutex poisoned");
+                for (key, _dest_map) in guard.children() {
+                    needed_depths.insert(key.0);
+                }
+            }
+
+            // For each needed depth, prepare the set of states visible at that depth in the GSS.
+            let mut states_by_depth: BTreeMap<usize, BTreeSet<StateID>> = BTreeMap::new();
+            for depth in &needed_depths {
+                let d = *depth;
+                if d == 0 {
+                    let mut set = BTreeSet::new();
+                    for peek in GSSNode::peek_iter(stack_root) {
+                        set.insert(peek.edge_value().state_id);
+                    }
+                    states_by_depth.insert(d, set);
+                } else {
+                    let mut popper = stack_root.popn(d);
+                    let mut set = BTreeSet::new();
+                    for item in popper.iter() {
+                        for peek2 in item.peek_iter() {
+                            set.insert(peek2.edge_value().state_id);
+                        }
+                    }
+                    // Note: if popping beyond bottom, no states are visible at that depth => empty set.
+                    states_by_depth.insert(d, set);
+                }
+            }
+
+            // Now scan trie-2 edges and accumulate matching token masks
+            for wrap in trie2_nodes.iter() {
+                let guard = wrap.as_arc().lock().expect("Trie2 node mutex poisoned");
+                for ((depth, maybe_state), dest_map) in guard.children() {
+                    let d = *depth;
+                    let visible_states = states_by_depth.get(&d).cloned().unwrap_or_default();
+                    // Determine if this key matches the current GSS top states at that depth.
+                    let key_matches = match maybe_state {
+                        Some(sid) => visible_states.contains(sid),
+                        None => !visible_states.is_empty(), // wildcard matches if any state is visible
+                    };
+                    if !key_matches {
+                        continue;
+                    }
+                    // Union all EVs for this key across destinations
+                    let mut tokens_for_key = HybridBitset::zeros();
+                    for (_dest, ev_bv) in dest_map.iter() {
+                        tokens_for_key |= ev_bv;
+                    }
+                    // Respect current GSS allowed mask
+                    final_internal |= (&tokens_for_key & &allowed_here);
+                }
+            }
+        }
+
+        // Convert internal bitset to original IDs
+        self.parent.internal_bv_to_original(&final_internal)
     }
 }
-
