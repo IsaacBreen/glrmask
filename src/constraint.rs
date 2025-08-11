@@ -550,8 +550,8 @@ impl<'r> Precomputer<'r> {
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
+            for token_match in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token_match.id);
                 let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
@@ -2045,4 +2045,3 @@ impl<'a> GrammarConstraintState<'a> {
         todo!()
     }
 }
-

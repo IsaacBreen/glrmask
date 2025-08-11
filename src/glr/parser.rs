@@ -686,7 +686,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
                             }
-                            for (len, nts) in reduces {
+                            for (len, nts) {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                     let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
@@ -1162,7 +1162,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>(),
+        );
         crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
