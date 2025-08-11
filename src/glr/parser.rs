@@ -579,8 +579,8 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
-    pub accepted: bool,                // <-- NEW
-    pub phase: ParserPhase,
+    accepted: bool,                // <-- NEW
+    phase: ParserPhase,
 }
 
 impl Display for GLRParserState<'_> {
@@ -821,31 +821,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(prev) => Acc::merge(&prev, acc_arc),
                 });
             }
-            
-            if let Some(mut merged_acc) = merged_acc_opt {
-                let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-                let end_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-
-                let mut all_source_states = BTreeSet::new();
-                for (source_state_id, row) in &self.parser.table {
-                    if row.gotos.contains_key(&nt) {
-                        all_source_states.insert(*source_state_id);
-                    }
-                }
-
-                for (pops, acc) in &popper.below_bottom {
-                    for trie2_node_wrapper in &acc.trie2_nodes {
-                        for source_state in &all_source_states {
-                            let edge_key = (*pops, Some(*source_state));
-                            let edge_bv = acc.llm_tokens_union.clone();
-
-                            let _ = EdgeInserter::new(trie2_node_wrapper.as_arc().clone(), edge_key, edge_bv.clone(), |e, n| *e |= n).try_destination(new_trie2_node.clone()).unwrap();
-                            if let Some(goto) = self.parser.table.get(source_state).and_then(|r| r.gotos.get(&nt)) { if goto.accept { let _ = EdgeInserter::new(trie2_node_wrapper.as_arc().clone(), edge_key, edge_bv.clone(), |e, n| *e |= n).try_destination(end_trie2_node.clone()).unwrap(); } }
-                        }
-                    }
-                }
-                merged_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_trie2_node)]);
  
+            if let Some(merged_acc) = merged_acc_opt {
                 let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {
                     let mut final_goto_state_ids_for_source = BTreeSet::new();
@@ -1194,10 +1171,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
             let config = GSSPrintConfig {
                 max_nodes: max_nodes_to_print,
-                original_internal_bimap: None,
-                llm_token_map: None,
-                labels: None,
-                verbose: false,
+                ..Default::default()
             };
             let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
             let final_string = if print_full_forest {
