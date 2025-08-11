@@ -298,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2(&tokenizer);
+        let precomputed2 = Self::precompute2();
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -349,13 +349,7 @@ impl GrammarConstraint {
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
     ) -> Precomputed2 {
-        // Trie2 nodes are created dynamically during substring parsing when a reduction
-        // pops below the bottom of the GSS. Therefore, there is no static precomputation
-        // needed for them. This function returns an empty map, and the `precomputed2`
-        // field in GrammarConstraint serves as a placeholder for potential future uses or
-        // alternative precomputation strategies. The core mechanism relies on runtime
-        // generation of these specialized trie nodes.
-        BTreeMap::new()
+        todo!()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -1529,10 +1523,12 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
+        // self.get_mask1()
         self.get_mask2()
     }
 
-    fn get_mask1(&self) -> LLMTokenBV {
+    #[time_it]
+    pub fn get_mask1(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
@@ -2045,44 +2041,8 @@ impl<'a> GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    #[time_it]
     pub fn get_mask2(&self) -> LLMTokenBV {
-        let mask_from_trie1 = self.get_mask1();
-
-        let mut final_mask_internal = LLMTokenBV::zeros();
-
-        let mut visited_p2_nodes = HashSet::new();
-        let mut queue: VecDeque<Arc<Mutex<PrecomputeNode2>>> = VecDeque::new();
-
-        // Initial nodes from all active GLR states
-        for glr_state in self.state.values() {
-            let stack_acc = &glr_state.active_state.stack.acc;
-            for p2_root_wrapper in &stack_acc.trie2_nodes {
-                let p2_root_arc = p2_root_wrapper.as_arc();
-                if visited_p2_nodes.insert(Arc::as_ptr(p2_root_arc)) {
-                    queue.push_back(p2_root_arc.clone());
-                }
-            }
-        }
-
-        while let Some(p2_node_arc) = queue.pop_front() {
-            let p2_node = p2_node_arc.lock().unwrap();
-            
-            for dest_map in p2_node.children().values() {
-                for (child_wrapper, edge_bv) in dest_map {
-                    let child_arc = child_wrapper.as_arc();
-                    if child_arc.lock().unwrap().value.end {
-                        final_mask_internal |= edge_bv;
-                    } else if visited_p2_nodes.insert(Arc::as_ptr(child_arc)) {
-                        queue.push_back(child_arc.clone());
-                    }
-                }
-            }
-        }
-        
-        let mask_from_trie2 = self.parent.internal_bv_to_original(&final_mask_internal);
-
-        mask_from_trie1 | mask_from_trie2
+        todo!()
     }
 }
 
