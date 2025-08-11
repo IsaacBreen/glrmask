@@ -349,11 +349,7 @@ impl GrammarConstraint {
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
     ) -> Precomputed2 {
-        // For now, initialize an empty Trie-2 root per tokenizer state on demand elsewhere.
-        // We keep this map empty at construction time; runtime will create and attach Trie-2 nodes
-        // when popping below the bottom occurs. This avoids requiring JSONConvertible for the
-        // tuple edge key before any edges exist.
-        BTreeMap::new()
+        todo!()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -421,7 +417,8 @@ impl GrammarConstraint {
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        for (segment_bytes, child_vocab_node_ref) in vocab_node.iter_children() {
+        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
@@ -2045,71 +2042,7 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        // This fast-path uses Trie-2 edges attached to the current Acc at the GSS root(s).
-        // For each active GLR state:
-        //  - For each Trie-2 node in the Acc, inspect edges keyed by (pops, Some(state_id))
-        //  - Pop the stack by 'pops' and collect the set of top state_ids reachable
-        //  - If the edge's state_id is among those, add its BV to the mask
-        // The resulting mask is ANDed with the current allowed LLM tokens of the stack
-        // to stay conservative. If no Trie-2 nodes are present or the result is empty,
-        // we fall back to get_mask1 (Trie-1 driven computation).
-        let mut any_trie2_present = false;
-        let mut final_mask_internal = HybridBitset::zeros();
-
-        for (_tok_state, glr_state) in &self.state {
-            let acc = &glr_state.active_state.stack.acc;
-            if acc.trie2_nodes.is_empty() {
-                continue;
-            }
-            any_trie2_present = true;
-
-            // Cache of top-of-stack state IDs after popping 'pops' steps
-            let mut top_states_after_pop: BTreeMap<usize, BTreeSet<StateID>> = BTreeMap::new();
-
-            // Mask for this GLR state from Trie-2
-            let mut mask_for_state = HybridBitset::zeros();
-
-            for node_wrapper in &acc.trie2_nodes {
-                let node_arc = node_wrapper.as_arc();
-                let node_guard = node_arc.lock().expect("Trie-2 node mutex poisoned");
-                for ((pops, opt_state_id), dest_map) in node_guard.children() {
-                    if let Some(sid) = opt_state_id {
-                        // Compute or get cached set of top state IDs after 'pops' pops
-                        let entry = top_states_after_pop.entry(*pops).or_insert_with(|| {
-                            let popper = glr_state.active_state.stack.popn(*pops);
-                            let mut set = BTreeSet::new();
-                            for item in popper.iter() {
-                                for peek2 in item.peek_iter() {
-                                    set.insert(peek2.edge_value().state_id);
-                                }
-                            }
-                            set
-                        });
-                        if entry.contains(sid) {
-                            // Union EVs from all children under this key
-                            let mut ev_union = HybridBitset::zeros();
-                            for (_child, ev_bv) in dest_map.iter() {
-                                ev_union |= ev_bv.clone();
-                            }
-                            mask_for_state |= ev_union;
-                        }
-                    }
-                }
-            }
-
-            // Be conservative: intersect with currently allowed tokens
-            let allowed_now = glr_state.active_state.stack.allowed_llm_tokens();
-            mask_for_state &= &allowed_now;
-
-            final_mask_internal |= mask_for_state;
-        }
-
-        if !any_trie2_present || final_mask_internal.is_empty() {
-            // Fall back to the full Trie-1 driven mask computation
-            return self.get_mask1();
-        }
-
-        // Map internal->original IDs
-        self.parent.internal_bv_to_original(&final_mask_internal)
+        todo!()
     }
 }
+
