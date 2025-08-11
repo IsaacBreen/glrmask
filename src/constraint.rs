@@ -298,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2();
+        let precomputed2 = Self::precompute2(&tokenizer);
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -349,7 +349,10 @@ impl GrammarConstraint {
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
     ) -> Precomputed2 {
-        todo!()
+        // For now, this returns an empty map. The trie2 nodes are created dynamically
+        // and seeded into the initial GrammarConstraintState. If a more complex
+        // static precomputation for trie2 is needed, this is where it would go.
+        BTreeMap::new()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -2041,7 +2044,29 @@ impl<'a> GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    #[time_it]
     pub fn get_mask2(&self) -> LLMTokenBV {
-        todo!()
+        let mut final_mask = LLMTokenBV::zeros();
+
+        for (_sid, glr_state) in &self.state {
+            let stack = &glr_state.active_state.stack;
+            if stack.is_empty() {
+                continue;
+            }
+
+            let mut q: VecDeque<(Arc<GSSNode>, Arc<Mutex<PrecomputeNode2>>)> = VecDeque::new();
+            for trie2_root in &stack.acc.trie2_nodes {
+                q.push_back((stack.clone(), trie2_root.as_arc().clone()));
+            }
+
+            while let Some((gss_node, trie2_node)) = q.pop_front() {
+                let trie2_guard = trie2_node.lock().unwrap();
+                if trie2_guard.value.end {
+                    final_mask |= gss_node.allowed_llm_tokens();
+                }
+            }
+        }
+
+        self.parent.internal_bv_to_original(&final_mask)
     }
 }
