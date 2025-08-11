@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use crate::glr::parser::ParserPhase;
 use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
@@ -298,7 +299,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2();
+        let precomputed2 = Self::precompute2(&tokenizer);
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -348,17 +349,36 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
+        tokenizer: &Regex,
     ) -> Precomputed2 {
-        todo!()
+        let mut precomputed2 = BTreeMap::new();
+        for sid in tokenizer.iter_states() {
+            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
+                PrecomputedNodeContents::no_end(),
+            )));
+            precomputed2.insert(sid, trie2_root);
+        }
+        precomputed2
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
-        state.insert(
-            self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
-        );
-
+        let mut glr_parser_state = self.parser.init_glr_parser(Some(self.llm_vocab.clone()));
+        let mut initial_acc = Acc::new_fresh();
+        if let Some(trie2_root) = self.precomputed2.get(&self.tokenizer.initial_state_id()) {
+            initial_acc.trie2_nodes.insert(ArcPtrWrapper::new(trie2_root.clone()));
+        }
+        let initial_gss_root = GSSNode::new(initial_acc);
+        let initial_content = ParseStateEdgeContent { state_id: self.parser.start_state_id };
+        let stack = Arc::new(initial_gss_root.push(initial_content));
+        let active_state = ParseState { stack };
+        let glr_parser_state = GLRParserState {
+            parser: &self.parser,
+            active_state,
+            accepted: false,
+            phase: ParserPhase::ReadyForDefaultReductions,
+        };
+        state.insert(self.tokenizer.initial_state_id(), glr_parser_state);
         GrammarConstraintState { parent: self, state }
     }
 
@@ -550,8 +570,8 @@ impl<'r> Precomputer<'r> {
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
+            for token_match in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token_match.id);
                 let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
@@ -1523,7 +1543,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        // self.get_mask1()
+        // self.get_mask1();
         self.get_mask2()
     }
 
@@ -2042,7 +2062,53 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        todo!()
+        let final_mask_internal = RefCell::new(LLMTokenBV::zeros());
+
+        for (tok_sid, glr_state) in &self.state {
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            if let Some(trie2_root) = self.parent.precomputed2.get(tok_sid) {
+                Trie::special_map_grouped(
+                    vec![(trie2_root.clone(), glr_state.active_state.stack.clone())],
+                    // step
+                    |gss_node, edge_key, dest_map| {
+                        let (pops, state_id_opt) = edge_key;
+                        let popper = gss_node.popn(*pops);
+                        
+                        let mut next_gss = GSSNode::new_fresh();
+                        let mut any_valid_path = false;
+
+                        for item in popper.iter() {
+                            if let Some(state_id) = state_id_opt {
+                                if item.peek_iter().any(|peek| peek.edge_value().state_id == *state_id) {
+                                    next_gss.merge_with_depth(1, &item.resolved_node());
+                                    any_valid_path = true;
+                                }
+                            } else {
+                                next_gss.merge_with_depth(1, &item.resolved_node());
+                                any_valid_path = true;
+                            }
+                        }
+
+                        let mut results = Vec::new();
+                        if any_valid_path {
+                            let next_gss_arc = Arc::new(next_gss);
+                            for (child_wrapper, edge_bv) in dest_map.iter() {
+                                let mut final_gss = next_gss_arc.clone();
+                                allow_only_llm_tokens_and_prune_arc(&mut final_gss, edge_bv, &mut HashMap::new());
+                                if !final_gss.is_empty() { results.push((child_wrapper.clone(), final_gss)); }
+                            }
+                        }
+                        results
+                    },
+                    |gss1, gss2| { Arc::make_mut(gss1).merge_with_depth(1, &gss2); },
+                    |trie2_node, gss_node| { if trie2_node.value.end { *final_mask_internal.borrow_mut() |= &gss_node.allowed_llm_tokens(); return false; } !gss_node.is_empty() }
+                );
+            }
+        }
+
+        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
     }
 }
 
