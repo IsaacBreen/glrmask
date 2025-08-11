@@ -131,7 +131,7 @@ impl ParseState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
@@ -814,10 +814,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
-            // Create shared trie2 nodes for this below-bottom event.
-            let shared_t2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            let shared_t2_end = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-
             let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
                 merged_acc_opt = Some(match merged_acc_opt.take() {
@@ -826,21 +822,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 });
             }
  
-            if let Some(mut merged_acc) = merged_acc_opt {
-                // Compute, for every possible source state, the final goto states and
-                // whether the goto on current_nt is accepting from that source.
-                let mut states_to_final_gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-                let mut accept_by_source: BTreeMap<StateID, bool> = BTreeMap::new();
+            if let Some(merged_acc) = merged_acc_opt {
+                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
                 for (source_state_id, row) in &self.parser.table {
                     let mut final_goto_state_ids_for_source = BTreeSet::new();
                     let mut current_nt_local = nt;
-                    let mut accept_seen_for_source = false;
                     loop {
                         if let Some(goto) = row.gotos.get(&current_nt_local) {
                             if goto.accept {
                                 crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
                                 self.accepted = true;
-                                accept_seen_for_source = true;
                             }
                             if let Some(goto_state_id) = goto.state_id {
                                 let next_row = &self.parser.table[&goto_state_id];
@@ -859,54 +850,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     }
                     if !final_goto_state_ids_for_source.is_empty() {
-                        states_to_final_gotos.insert(*source_state_id, final_goto_state_ids_for_source);
-                        accept_by_source.insert(*source_state_id, accept_seen_for_source);
+                        states_to_push.insert(*source_state_id);
+                        states_to_push.extend(final_goto_state_ids_for_source);
                     }
                 }
-
-                // Push edges into trie2: for each below-bottom depth and each contributing acc,
-                // use the acc's trie2 node set as sources. For each source LR state, add an edge
-                // keyed by (depth, Some(source_state)) with the acc's active tokens as edge BV.
-                for (depth, acc_arc) in &popper.below_bottom {
-                    let edge_bv = acc_arc.union_llm_tokens();
-                    for t2_wrap in acc_arc.trie2_nodes.iter() {
-                        let t2_src = t2_wrap.as_arc().clone();
-                        for (source_sid, goto_set) in &states_to_final_gotos {
-                            // Primary: push to shared non-end node
-                            let inserter = EdgeInserter::new(
-                                t2_src.clone(),
-                                (*depth, Some(*source_sid)),
-                                edge_bv.clone(),
-                                |existing, new| { *existing |= new; },
-                            );
-                            let _ = inserter.try_destination(shared_t2_node.clone());
-                            // If accept was seen from this source, also link to END node
-                            if *accept_by_source.get(source_sid).unwrap_or(&false) {
-                                let inserter_end = EdgeInserter::new(
-                                    t2_src.clone(),
-                                    (*depth, Some(*source_sid)),
-                                    edge_bv.clone(),
-                                    |existing, new| { *existing |= new; },
-                                );
-                                let _ = inserter_end.try_destination(shared_t2_end.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Update merged acc to carry only the new shared trie2 node (not the end marker).
-                let mut new_trie2_set = BTreeSet::new();
-                new_trie2_set.insert(ArcPtrWrapper::new(shared_t2_node.clone()));
-                merged_acc.trie2_nodes = new_trie2_set;
-
-                // Build a virtual base and push source and then goto states
-                let base = GSSNode::new(merged_acc);
-                for (source_sid, goto_set) in states_to_final_gotos {
-                    let node_after_source = base.push(ParseStateEdgeContent { state_id: source_sid });
-                    for goto_sid in goto_set {
-                        let node_after_goto = node_after_source.push(ParseStateEdgeContent { state_id: goto_sid });
-                        out.push(node_after_goto);
-                    }
+ 
+                if !states_to_push.is_empty() {
+                    let base = GSSNode::new(merged_acc);
+                    let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
+                    out.push(new_gss_node);
                 }
             }
         }
@@ -936,7 +888,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
 
-        self.log_gss("has_action_for-start", token_id, false, false);
+        self.log_gss("Phase1/2-start", token_id, false, false);
 
         let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
@@ -1096,7 +1048,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     next_active_state.merge(state);
                     // println!("next_active_state.stack after merge: {}", print_gss_forest(&[next_active_state.stack.clone()], &Default::default(), &GSSPrintConfig { verbose: true, ..Default::default() }).0);
                     // let stats = gather_gss_stats(&[&next_active_state.stack]);
-                    // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.unique_nodes); }
+                    // if stats.unique_nodes > stats.structurally_unique_nodes { crate::debug!(3, "Expected unique_nodes <= structurally_unique_nodes. Got unique_nodes: {}, structurally_unique_nodes: {}", stats.unique_nodes, stats.structurally_unique_nodes); }
                 }
             }
         });
