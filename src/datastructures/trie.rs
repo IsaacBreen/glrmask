@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
 // Import TryLockError explicitly for matching
-use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
+use std::sync::{Arc, Mutex, TryLockError, MutexGuard, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
@@ -20,6 +20,7 @@ use ordered_hash_map::OrderedHashSet;
 use profiler_macro::time_it;
 // Added for derive macro pattern
 
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
@@ -34,6 +35,74 @@ impl fmt::Display for CycleDetectedError {
 
 impl Error for CycleDetectedError {}
 
+/// Error type for weak-edge insertion attempts.
+/// Weak edges are the only allowed way to explicitly form cycles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WeakEdgeInsertError {
+    /// A strong edge to the same destination already exists under this key.
+    AlreadyHasStrongEdge,
+    /// A weak edge to the same destination already exists under this key.
+    AlreadyHasWeakEdge,
+    /// Adding this weak edge would not actually form a cycle (i.e. `self` is not
+    /// reachable from `dst` via strong edges). Cycles must be explicit and real.
+    WouldNotFormCycle,
+}
+
+impl fmt::Display for WeakEdgeInsertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WeakEdgeInsertError::AlreadyHasStrongEdge =>
+                write!(f, "A strong edge to this destination already exists for the given key"),
+            WeakEdgeInsertError::AlreadyHasWeakEdge =>
+                write!(f, "A weak edge to this destination already exists for the given key"),
+            WeakEdgeInsertError::WouldNotFormCycle =>
+                write!(f, "This weak edge would not form a cycle (destination does not strongly reach the source)"),
+        }
+    }
+}
+
+impl Error for WeakEdgeInsertError {}
+
+/// Wrapper for Weak<Mutex<T>> that compares and hashes by the allocation pointer.
+/// This allows use as a key in OrderedHashMap without upgrading.
+#[derive(Clone)]
+pub struct WeakArcPtrWrapper<M>(Weak<M>);
+
+impl<M> WeakArcPtrWrapper<M> {
+    pub fn new_from_arc(arc: &Arc<M>) -> Self {
+        Self(Arc::downgrade(arc))
+    }
+    pub fn from_weak(w: Weak<M>) -> Self {
+        Self(w)
+    }
+    pub fn as_weak(&self) -> &Weak<M> {
+        &self.0
+    }
+    pub fn upgrade(&self) -> Option<Arc<M>> {
+        self.0.upgrade()
+    }
+    pub fn as_ptr(&self) -> *const M {
+        self.0.as_ptr()
+    }
+}
+
+impl<M> PartialEq for WeakArcPtrWrapper<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ptr() == other.as_ptr()
+    }
+}
+impl<M> Eq for WeakArcPtrWrapper<M> {}
+impl<M> Hash for WeakArcPtrWrapper<M> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ptr().hash(state)
+    }
+}
+impl<M> Debug for WeakArcPtrWrapper<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WeakArcPtrWrapper({:p})", self.as_ptr())
+    }
+}
+
 
 /// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).
 /// Multiple children can exist for the same edge key. Each edge instance has a value.
@@ -46,6 +115,9 @@ pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
     children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+    /// Weak edges that are allowed to create cycles explicitly. These do not contribute
+    /// to max_depth, and are not considered by algorithms that assume DAG structure.
+    weak_children: BTreeMap<EK, OrderedHashMap<WeakArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     /// If A -> B, then A.max_depth < B.max_depth.
@@ -63,7 +135,8 @@ where
         // Maps the raw pointer of an Arc<Mutex<Trie>> to its index in nodes_json_list
         let mut arc_ptr_to_idx_map: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
         // Queue for BFS traversal, storing Arcs to keep them alive and allow locking
-        let mut bfs_q: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        let mut bfs_q: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = Vec::new();
+        // Note: we enqueue both strong and (upgraded) weak children.
 
         // --- Step 1: Serialize `self` (the root node for this call) ---
         // `self` is node at index 0.
@@ -74,9 +147,10 @@ where
         nodes_json_list.push(JSONNode::Null); // Placeholder for root, will be filled after processing its children.
 
         let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
+        let mut root_weak_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
 
         for (edge_key, destinations_map) in &self.children {
-            let ek_json = edge_key.to_json();
+            let ek_json = edge_key.to_json().clone();
             let mut dest_map_json_array = Vec::new();
             // #[allow(clippy::iter_over_hash_type)]
             for (child_arc_ptr_wrapper, edge_val) in destinations_map {
@@ -101,11 +175,42 @@ where
             root_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
         }
 
+        // Handle root weak children too (if any)
+        for (edge_key, destinations_map) in &self.weak_children {
+            let ek_json = edge_key.to_json().clone();
+            let mut dest_map_json_array = Vec::new();
+            for (weak_wrapper, edge_val) in destinations_map {
+                if let Some(child_arc) = weak_wrapper.upgrade() {
+                    let child_arc_ptr = Arc::as_ptr(&child_arc);
+                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                        Some(idx) => *idx,
+                        None => {
+                            let new_idx = nodes_json_list.len();
+                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                            bfs_q.push_back(child_arc.clone());
+                            nodes_json_list.push(JSONNode::Null);
+                            new_idx
+                        }
+                    };
+                    dest_map_json_array.push(JSONNode::Array(vec![
+                        child_idx.to_json(),
+                        edge_val.to_json(),
+                    ]));
+                } else {
+                    // Dangling weak edge – skip serialization of this edge
+                    // (it cannot be upgraded, so we cannot reference a node index)
+                }
+            }
+            root_weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
+        }
+
         // Fill in the root node's (self's) data
         nodes_json_list[root_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
             ("value".to_string(), self.value.to_json()),
             ("max_depth".to_string(), self.max_depth.to_json()),
             ("children".to_string(), JSONNode::Array(root_children_json_data)),
+            // Optional field; may be empty array
+            ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
         ]));
 
 
@@ -117,9 +222,10 @@ where
 
             let node_guard = current_arc.lock().expect("Mutex poisoned during Trie serialization (BFS part)");
             let mut current_node_children_json_bfs = Vec::new();
+            let mut current_node_weak_children_json_bfs = Vec::new();
 
             for (edge_key, destinations_map) in &node_guard.children {
-                let ek_json = edge_key.to_json();
+                let ek_json = edge_key.to_json().clone();
                 let mut dest_map_json_array_bfs = Vec::new();
                 // #[allow(clippy::iter_over_hash_type)]
                 for (child_arc_ptr_wrapper, edge_val) in destinations_map {
@@ -144,11 +250,38 @@ where
                 current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
             }
 
+            // weak_children (upgrade if possible)
+            for (edge_key, destinations_map) in &node_guard.weak_children {
+                let ek_json = edge_key.to_json().clone();
+                let mut dest_map_json_array_bfs = Vec::new();
+                for (weak_wrapper, edge_val) in destinations_map {
+                    if let Some(child_arc) = weak_wrapper.upgrade() {
+                        let child_arc_ptr = Arc::as_ptr(&child_arc);
+                        let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                            Some(idx) => *idx,
+                            None => {
+                                let new_idx = nodes_json_list.len();
+                                arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                                bfs_q.push_back(child_arc.clone());
+                                nodes_json_list.push(JSONNode::Null); // Placeholder
+                                new_idx
+                            }
+                        };
+                        dest_map_json_array_bfs.push(JSONNode::Array(vec![
+                            child_idx.to_json(),
+                            edge_val.to_json(),
+                        ]));
+                    }
+                }
+                current_node_weak_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
+            }
+
             // Fill in the data for the current node from the BFS queue
             nodes_json_list[current_node_json_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
                 ("value".to_string(), node_guard.value.to_json()),
                 ("max_depth".to_string(), node_guard.max_depth.to_json()),
                 ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
+                ("weak_children".to_string(), JSONNode::Array(current_node_weak_children_json_bfs)),
             ]));
         }
 
@@ -189,6 +322,7 @@ where
                             let new_node_arc = Arc::new(Mutex::new(Trie {
                                 value,
                                 children: BTreeMap::new(), // Children populated in Pass 2
+                                weak_children: BTreeMap::new(), // Weak-Children populated in Pass 2
                                 max_depth,
                             }));
                             deserialized_arcs.insert(i, new_node_arc);
@@ -249,6 +383,51 @@ where
                                 }
                                 _ => return Err(format!("'children' field for node {} is not an array of EK-entries", i)),
                             }
+
+                            // Now link weak_children (optional field)
+                            let weak_children_json_outer_array = n_obj.get("weak_children").unwrap_or(&JSONNode::Array(Vec::new()));
+                            match weak_children_json_outer_array {
+                                JSONNode::Array(children_ek_map_array) => {
+                                    for ek_entry_json in children_ek_map_array {
+                                        match ek_entry_json {
+                                            JSONNode::Array(ek_pair) if ek_pair.len() == 2 => {
+                                                let ek_json = &ek_pair[0];
+                                                let dest_map_json_array = &ek_pair[1];
+
+                                                let edge_key = EK::from_json(ek_json.clone())?;
+                                                let mut destinations_for_this_ek: OrderedHashMap<
+                                                    WeakArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV
+                                                > = OrderedHashMap::new();
+
+                                                match dest_map_json_array {
+                                                    JSONNode::Array(dest_array_inner) => {
+                                                        for child_ev_pair_json in dest_array_inner {
+                                                            match child_ev_pair_json {
+                                                                JSONNode::Array(child_ev_pair_inner) if child_ev_pair_inner.len() == 2 => {
+                                                                    let child_idx_json = &child_ev_pair_inner[0];
+                                                                    let ev_json = &child_ev_pair_inner[1];
+
+                                                                    let child_idx = usize::from_json(child_idx_json.clone())?;
+                                                                    let child_arc = deserialized_arcs.get(&child_idx)
+                                                                        .ok_or_else(|| format!("Child index {} not found for node {} in Pass 2 (weak)", child_idx, i))?
+                                                                        .clone();
+                                                                    let edge_value = EV::from_json(ev_json.clone())?;
+                                                                    destinations_for_this_ek.insert(WeakArcPtrWrapper::new_from_arc(&child_arc), edge_value);
+                                                                }
+                                                                _ => return Err(format!("Invalid child_idx-EV pair format for node {} under weak edge key {:?}", i, edge_key)),
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => return Err(format!("Weak-children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
+                                                }
+                                                current_node_guard.weak_children.insert(edge_key, destinations_for_this_ek);
+                                            }
+                                            _ => return Err(format!("Invalid EK-weak_children_map_array pair format for node {}", i)),
+                                        }
+                                    }
+                                }
+                                _ => return Err(format!("'weak_children' field for node {} is not an array of EK-entries", i)),
+                            }
                         }
                         _ => unreachable!("Node data should be an object, checked in Pass 1"),
                     }
@@ -293,6 +472,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         Trie {
             value,
             children: BTreeMap::new(),
+            weak_children: BTreeMap::new(),
             max_depth: 0,
         }
     }
@@ -311,6 +491,33 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
     }
 
+    /// Explicitly insert a weak edge. This is the only way to create cycles.
+    /// This method requires that adding this weak edge would actually form a cycle,
+    /// i.e. `self` must be strongly reachable from `dst` via existing strong edges.
+    pub fn try_insert_weak(
+        &mut self,
+        edge_key: EK,
+        edge_value: EV,
+        dst: Arc<Mutex<Trie<EK, EV, T>>>,
+    ) -> Result<(), WeakEdgeInsertError> {
+        if self.already_has_dst(edge_key.clone(), &dst) {
+            return Err(WeakEdgeInsertError::AlreadyHasStrongEdge);
+        }
+        if self.already_has_weak_dst(&edge_key, &dst) {
+            return Err(WeakEdgeInsertError::AlreadyHasWeakEdge);
+        }
+        // Only allow if this would actually form a cycle: `self` reachable from `dst` via strong edges
+        let self_ptr = self as *const Trie<EK, EV, T>;
+        if !Self::detect_cycle(self_ptr, &dst) {
+            return Err(WeakEdgeInsertError::WouldNotFormCycle);
+        }
+        self.weak_children.entry(edge_key).or_default().insert(
+            WeakArcPtrWrapper::new_from_arc(&dst),
+            edge_value
+        );
+        Ok(())
+    }
+
     // already_has_dst remains unchanged
     pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
         let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
@@ -321,6 +528,18 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
+    }
+
+    /// Returns whether there's a weak edge to dst under edge_key.
+    pub fn already_has_weak_dst(&self, edge_key: &EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+        let lookup_key = WeakArcPtrWrapper::new_from_arc(dst);
+        self.weak_children.get(edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
+    }
+
+    /// Get a weak edge's value, if present (upgrades are not performed here).
+    pub fn get_weak_edge_value(&self, edge_key: &EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
+        let lookup_key = WeakArcPtrWrapper::new_from_arc(dst);
+        self.weak_children.get(edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
     }
 
     // get_edge_value_mut remains unchanged
@@ -537,6 +756,20 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         self.children.get(edge_key)
     }
 
+    /// Get weak children set for a given edge key (no upgrading).
+    pub fn get_weak(
+        &self,
+        edge_key: &EK,
+    ) -> Option<&OrderedHashMap<WeakArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    {
+        self.weak_children.get(edge_key)
+    }
+    pub fn get_weak_mut(
+        &mut self,
+        edge_key: &EK,
+    ) -> Option<&mut OrderedHashMap<WeakArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    { self.weak_children.get_mut(edge_key) }
+
     // get_mut remains unchanged
     pub fn get_mut(
         &mut self,
@@ -553,6 +786,14 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
     pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
         &mut self.children
+    }
+
+    /// Access the weak-children map.
+    pub fn weak_children(&self) -> &BTreeMap<EK, OrderedHashMap<WeakArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+        &self.weak_children
+    }
+    pub fn weak_children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<WeakArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+        &mut self.weak_children
     }
 
     // is_leaf remains unchanged
@@ -1143,7 +1384,11 @@ where
 
         // Hash children.
         node.children.len().hash(state);
-        for (ek, dest_map) in &node.children {
+        // Note: We intentionally do NOT hash weak_children to keep hashing aligned with
+        // the DAG structure (strong edges). If desired in the future, mirror the logic
+        // below for weak_children as well (including deterministic sorting).
+
+        for (ek, dest_map) in dest_map {
             ek.hash(state);
             dest_map.len().hash(state);
 
@@ -1930,6 +2175,8 @@ mod tests {
 
         println!("Done testing cycle detection on try_insert");
     }
+
+    // Existing tests below continue to exercise strong-edge behavior only.
 
 
     #[test]
@@ -2765,5 +3012,90 @@ mod tests {
         let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
         assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
         assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
+    }
+
+    #[test]
+    fn test_try_insert_weak_success() {
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+
+        // Establish a strong edge from child to root to create a cycle possibility
+        child.lock().unwrap().force_insert_to_node("c_to_r_strong", "e_strong", &root);
+
+        // Now try to insert a weak edge from root to child
+        let result = root.lock().unwrap().try_insert_weak("r_to_c_weak", "e_weak", child.clone());
+        assert!(result.is_ok());
+
+        // Verify the weak edge exists
+        let root_guard = root.lock().unwrap();
+        let weak_children_map = root_guard.weak_children().get(&"r_to_c_weak").unwrap();
+        assert_eq!(weak_children_map.len(), 1);
+        let (weak_wrapper, ev) = weak_children_map.iter().next().unwrap();
+        assert_eq!(*ev, "e_weak");
+        assert!(weak_wrapper.upgrade().map_or(false, |arc| Arc::ptr_eq(&arc, &child)));
+
+        // Verify strong children are unchanged
+        assert!(root_guard.children().is_empty());
+    }
+
+    #[test]
+    fn test_try_insert_weak_fail_already_has_strong_edge() {
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+
+        // Pre-exist a strong edge
+        root.lock().unwrap().force_insert_to_node("r_to_c", "e_strong", &child);
+
+        // Attempt to insert a weak edge with the same key and destination
+        let result = root.lock().unwrap().try_insert_weak("r_to_c", "e_weak", child.clone());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), WeakEdgeInsertError::AlreadyHasStrongEdge);
+
+        // Verify no weak edge was added
+        assert!(root.lock().unwrap().weak_children().is_empty());
+    }
+
+    #[test]
+    fn test_try_insert_weak_fail_already_has_weak_edge() {
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+
+        // Establish a strong edge from child to root to create a cycle possibility
+        child.lock().unwrap().force_insert_to_node("c_to_r_strong", "e_strong", &root);
+
+        // Pre-exist a weak edge
+        root.lock().unwrap().try_insert_weak("r_to_c_weak", "e_weak_initial", child.clone()).unwrap();
+
+        // Attempt to insert another weak edge with the same key and destination
+        let result = root.lock().unwrap().try_insert_weak("r_to_c_weak", "e_weak_new", child.clone());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), WeakEdgeInsertError::AlreadyHasWeakEdge);
+
+        // Verify the original weak edge is still there and not modified
+        let root_guard = root.lock().unwrap();
+        let weak_children_map = root_guard.weak_children().get(&"r_to_c_weak").unwrap();
+        let (weak_wrapper, ev) = weak_children_map.iter().next().unwrap();
+        assert_eq!(*ev, "e_weak_initial");
+    }
+
+    #[test]
+    fn test_try_insert_weak_fail_would_not_form_cycle() {
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let unrelated_node: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+
+        // No strong edge from child to root, so root is not reachable from child
+        // Attempt to insert a weak edge from root to child
+        let result = root.lock().unwrap().try_insert_weak("r_to_c_weak", "e_weak", child.clone());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), WeakEdgeInsertError::WouldNotFormCycle);
+
+        // Verify no weak edge was added
+        assert!(root.lock().unwrap().weak_children().is_empty());
+
+        // Test with an unrelated node
+        let result_unrelated = root.lock().unwrap().try_insert_weak("r_to_unrelated_weak", "e_weak", unrelated_node.clone());
+        assert!(result_unrelated.is_err());
+        assert_eq!(result_unrelated.unwrap_err(), WeakEdgeInsertError::WouldNotFormCycle);
     }
 }
