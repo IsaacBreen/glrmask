@@ -13,11 +13,12 @@ use ordered_hash_map::OrderedHashMap;
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
-use crate::datastructures::{ArcPtrWrapper, WeakPtrWrapper}; // Import ArcPtrWrapper and WeakPtrWrapper
+use crate::datastructures::{ArcPtrWrapper}; // Import ArcPtrWrapper and WeakPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
 use profiler_macro::time_it;
+use crate::datastructures::arc_wrapper::WeakPtrWrapper;
 // Added for derive macro pattern
 
 

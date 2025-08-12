@@ -607,13 +607,13 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: std::collections::HashMap<BelowBottomCacheKey, Arc<Mutex<PrecomputeNode2>>>,
+    below_bottom_cache: std::collections::HashMap<BelowBottomCacheKey, ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -893,7 +893,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     (k, Some(*source_state_id)),
                                     active_llm_tokens.clone(),
                                     |e, n| *e |= n,
-                                ).try_destination_auto(cached_trie2_node.clone());
+                                ).try_destination_auto(cached_trie2_node.as_arc().clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                             }
 
@@ -911,7 +911,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 .entry(*source_state_id)
                                 .or_insert_with(|| Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
                                 .clone();
-                            self.below_bottom_cache.insert(cache_key, new_trie2_node.clone());
+                            self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
                             for existing_trie2_node in &trie2_nodes {
                                 // Allow cycles to be represented as WEAK edges if they occur.
