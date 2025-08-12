@@ -298,7 +298,18 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2();
+        let precomputed2 = Self::precompute2(
+            &precomputed,
+            &tokenizer,
+            Some(&parser),
+            Some(llm_vocab.clone()),
+            &internal_llm_token_map_for_precompute,
+            &token_name_map,
+            internal_max_llm_token,
+            &terminal_follow_map, // Pass the new map
+            parser.ignore_terminal_id,
+            &mut computed_possible_matches,
+        );
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -348,6 +359,16 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
+        precomputed: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+        tokenizer:        &Regex,
+        parser:           Option<&GLRParser>,
+        llm_vocab:        Option<Arc<LLMVocab>>,
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        token_name_map:   &BiBTreeMap<Terminal, usize>,
+        internal_max_llm_token: usize,
+        terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        ignore_terminal_id: Option<TerminalID>,
+        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
         todo!()
     }
