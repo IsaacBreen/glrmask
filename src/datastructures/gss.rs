@@ -577,6 +577,19 @@ impl GSSNode {
     pub fn is_root(&self) -> bool {
         self.predecessors.is_empty()
     }
+
+    pub fn merge_many_with_depth(nodes: impl IntoIterator<Item = Arc<GSSNode>>, merge_depth: usize) -> Arc<GSSNode> {
+        let mut iter = nodes.into_iter();
+        if let Some(first) = iter.next() {
+            let mut merged = first.as_ref().clone();
+            for other in iter {
+                merged.merge_with_depth(merge_depth, &other);
+            }
+            Arc::new(merged)
+        } else {
+            Arc::new(GSSNode::new_fresh())
+        }
+    }
 }
 
 // Core GSS operations

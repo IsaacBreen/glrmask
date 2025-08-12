@@ -2212,8 +2212,32 @@ impl<'a> GrammarConstraintState<'a> {
         Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
-            |glr_s, (k ), dest_map| {
-                let out: Vec<_> = todo!();
+            |glr_s, (k, expected_state_id_opt ), dest_map| {
+                let mut out_gsss = Vec::new();
+                let popped = glr_s.active_state.stack.popn(*k);
+                for popper_item in popped.iter() {
+                    for peek in popper_item.peek_iter() {
+                        let ok = if let Some(expected_state_id) = expected_state_id_opt {
+                            expected_state_id == &peek.edge_value().state_id
+                        } else {
+                            true
+                        };
+                        if ok {
+                            out_gsss.push(peek.isolated_parent());
+                        }
+                    }
+                }
+                let out_gss = GSSNode::merge_many_with_depth(out_gsss, 1);
+                let mut out = Vec::new();
+                for (dst_node_wrapper, edge_bv) in dest_map.iter() {
+                    let mut out_gss_filtered = out_gss.clone();
+                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, &edge_bv, &mut HashMap::new());
+                    let mut out_glr_s = glr_s.clone();
+                    out_glr_s.active_state.stack = out_gss_filtered;
+                    if out_glr_s.is_ok() {
+                        out.push((dst_node_wrapper.clone(), out_glr_s));
+                    }
+                }
                 out
             },
             // merge_fn
