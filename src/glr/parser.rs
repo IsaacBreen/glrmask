@@ -797,11 +797,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
-        let popper = timeit!(peek.popn(len));
+        let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
         let mut any_below_bottom = !popper.below_bottom.is_empty();
-        timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+        // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
         let mut out = Vec::new();
