@@ -416,6 +416,7 @@ impl GrammarConstraint {
 
         let trie2_end = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end(), )));
 
+        crate::debug!(2, "Running special_map_grouped for Trie 2 precomputation");
         Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
