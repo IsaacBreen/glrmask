@@ -681,7 +681,8 @@ impl GSSNode {
         let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
                           new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
                           new_acc.terminals_union != node.acc.terminals_union ||
-                          new_acc.terminals_intersection != node.acc.terminals_intersection;
+                          new_acc.terminals_intersection != node.acc.terminals_intersection ||
+                          new_acc.trie2_nodes != node.acc.trie2_nodes;
 
         if !acc_changed {
             return;
@@ -834,7 +835,8 @@ fn prune_and_transform_recursive(
                 let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
                                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
                                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-                                  new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection;
+                                  new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
+                                 new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
                 if acc_changed {
                     new_local_acc.needs_push_down = true;
                 }
