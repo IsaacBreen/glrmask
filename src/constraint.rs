@@ -379,7 +379,8 @@ impl GrammarConstraint {
             initial_nodes_and_values,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
-                todo!()
+                let mut out: Vec<_> = vec![];
+                out
             },
             |glr_s1, glr_s2| {
                 todo!()
