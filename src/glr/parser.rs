@@ -843,12 +843,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 }
                 states_to_push.insert(*source_state_id, (final_goto_state_ids_for_source, accepted));
-                // if !states_to_push.is_empty() {
-                //     let base = GSSNode::new(merged_acc);
-                //     let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
-                //     out.push(new_gss_node);
-                    // }
-
             }
             let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
             for (k, acc_arc) in popper.below_bottom {
