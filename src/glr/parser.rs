@@ -853,6 +853,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
                 states_to_push.insert(*source_state_id, (final_goto_state_ids_for_source, accepted));
             }
+            let mut shared_dest_nodes: BTreeMap<StateID, Arc<Mutex<PrecomputeNode2>>> = BTreeMap::new();
+            for (source_state_id, _) in &states_to_push {
+                shared_dest_nodes.insert(*source_state_id, Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))));
+            }
+
             let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
             for (k, acc_arc) in popper.below_bottom {
                 let mut acc: Acc = acc_arc.as_ref().clone();
@@ -860,7 +865,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                 for (source_state_id, (final_goto_state_ids_for_source, accepted)) in &states_to_push {
                     // Handle pop and read state
-                    let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                    let new_trie2_node = shared_dest_nodes.get(source_state_id).unwrap().clone();
                     for existing_trie2_node in &trie2_nodes {
                         let mut inserter = EdgeInserter::new(
                             existing_trie2_node.as_arc().clone(),
