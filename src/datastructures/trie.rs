@@ -1112,12 +1112,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges");
 
         // Seed with the user-supplied starting set
-        for (node_arc, v0) in initial_nodes_and_values.iter() {
-            let ptr = Arc::as_ptr(node_arc);
+        for (node_arc, v0) in initial_nodes_and_values {
+            let ptr = Arc::as_ptr(&node_arc);
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
-                .or_insert(v0.clone());
+                .or_insert(v0);
             let depth = node_arc.lock().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
@@ -1178,7 +1178,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
-        pb.close();
     }
 
     /// Performs a specialized breadth-first traversal, grouping children by edge key.
@@ -1210,12 +1209,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges");
 
         // Seed with the user-supplied starting set
-        for (node_arc, v0) in initial_nodes_and_values.iter() {
-            let ptr = Arc::as_ptr(node_arc);
+        for (node_arc, v0) in initial_nodes_and_values {
+            let ptr = Arc::as_ptr(&node_arc);
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
-                .or_insert(v0.clone());
+                .or_insert(v0);
             let depth = node_arc.lock().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
@@ -1257,7 +1256,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
-        pb.close();
     }
 }
 
