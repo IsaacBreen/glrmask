@@ -888,8 +888,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                         // If we have seen this exact situation before, reuse the cached Trie-2 node
                         if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                            timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
                             for existing_trie2_node in &trie2_nodes {
-                                timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
+                                timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
                                 // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
                                 let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
@@ -917,9 +918,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 .clone();
                             self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
+                            timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
                             for existing_trie2_node in &trie2_nodes {
-                                timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
                                 // Allow cycles to be represented as WEAK edges if they occur.
+                                timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
                                 let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
                                     (k, Some(*source_state_id)),
@@ -927,8 +929,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     |e, n| *e |= n,
                                 ).try_destination_auto(new_trie2_node.clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                });
                             }
+                            });
 
                             let mut acc2 = acc.clone();
                             acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
