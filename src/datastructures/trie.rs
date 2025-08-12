@@ -597,8 +597,9 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
         // Otherwise, perform strong try_insert (will not fail now)
         let mut ev_opt = edge_value.take();
-        // try_insert will .take() from this Option again, so we pass &mut
-        let _ = self.try_insert(edge_key, &mut ev_opt, child)
+        // Since we've already checked for cycles, we can use the `unchecked` variant
+        // to avoid a redundant `detect_cycle` call.
+        let _ = self.try_insert_unchecked(edge_key, &mut ev_opt, child)
             .expect("Cycle re-appeared unexpectedly during try_insert_auto strong path");
         // If try_insert consumed the value, that's fine; if not, ev_opt may still have it.
         // Ensure caller's Option stays updated:
