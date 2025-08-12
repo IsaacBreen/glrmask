@@ -1938,172 +1938,6 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_mapped
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-        let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
-        self.commit_bytes(llm_token_bytes);
-    }
-
-    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
-        if llm_token_bytes.is_empty() {
-            return;
-        }
-
-        crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
-
-        let mut gss_transformation_memo = HashMap::new();
-
-        for state in self.state.values_mut() {
-            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
-
-        // Handle allowed terminals
-        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-        for (tokenizer_state_id, _state) in self.state.iter() {
-            let exec_result = self.parent.tokenizer.execute_from_state(
-                &llm_token_bytes,
-                *tokenizer_state_id,
-            );
-            if let Some(new_state) = exec_result.end_state {
-                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
-            }
-            let mut terminals = TerminalBV::zeros();
-            for token in exec_result.matches {
-                terminals.insert(token.id);
-            }
-            terminals_map.insert(*tokenizer_state_id, terminals);
-        }
-
-        let gss_stats_before_pruning = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        crate::debug!(3, "GSS stats before pruning disallowed terminals: {:#?}", gss_stats_before_pruning);
-        for state in self.state.values_mut() {
-            prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
-        let gss_stats_after_pruning = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
-        if gss_stats_after_pruning != gss_stats_before_pruning {
-            crate::debug!(3, "GSS stats changed after pruning disallowed terminals.");
-        } else {
-            crate::debug!(3, "GSS stats did not change after pruning disallowed terminals.");
-        }
-
-        for state in self.state.values_mut() {
-            map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
-        // println!("State after preparation: {}", self);
-
-        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-
-        let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, GLRParserState<'a>>> = BTreeMap::new();
-        processing_queue.insert(0, std::mem::take(&mut self.state));
-
-        while let Some((offset, states_to_process)) = processing_queue.pop_first() {
-            crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
-            for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
-                assert!(offset < llm_token_bytes.len());
-
-                let exec_result = self.parent.tokenizer.execute_from_state(
-                    &llm_token_bytes[offset..],
-                    tokenizer_s_id_at_offset,
-                );
-
-                for match_info in &exec_result.matches {
-                    let mut cloned_glr_s = glr_s_at_offset.clone();
-
-                    cloned_glr_s.step(TerminalID(match_info.id));
-                    // cloned_glr_s.do_phase3();
-
-                    if cloned_glr_s.is_ok() {
-                        let new_offset = offset + match_info.width;
-                        // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                        let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-
-                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                        if let Some(end_state_id) = exec_result.end_state {
-                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
-                            // Disallow this token from being matched again immediately.
-                            disallowed_terminals_for_end_state.insert(match_info.id);
-                            disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
-                        }
-                        disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
-
-                        if new_offset == llm_token_bytes.len() {
-                            // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
-                            new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
-                        } else {
-                            processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
-                        }
-                    }
-                }
-
-                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
-                }
-            }
-        }
-
-        self.state = new_overall_state.clone();
-
-        for glr_parser_state in self.state.values_mut() {
-            glr_parser_state.process_default_reductions();
-        }
-
-        // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
-        for state in self.state.values_mut() {
-            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
-
-        self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
-
-        let mut fuse_memo = HashMap::new();
-        for state in self.state.values_mut() {
-            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
-        }
-        fuse_memo.clear();
-
-        // let mut roots_to_simplify_arcs = Vec::new();
-        // for glr_parser_state in self.state.values_mut() {
-        //     if !glr_parser_state.active_state.stack.is_empty() {
-        //         roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
-        //     }
-        // }
-        //
-        // if !roots_to_simplify_arcs.is_empty() {
-        //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
-        // }
-
-        crate::debug!(2, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-        for (tokenizer_id, glr_state) in &self.state {
-            if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
-                // glr_state.log_gss(
-                //     &format!("GSS for tokenizer state {} after commit of text", tokenizer_id.0),
-                //     TerminalID(0)
-                // );
-            }
-        }
-    }
-
-    pub fn is_active(&self) -> bool {
-        !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty())
-    }
-
-    pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
-        &self.state
-    }
-}
-
-impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
@@ -2302,5 +2136,168 @@ impl<'a> GrammarConstraintState<'a> {
 
         final_mask_mapped
     }
-}
 
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
+        let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
+        self.commit_bytes(llm_token_bytes);
+    }
+
+    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
+        if llm_token_bytes.is_empty() {
+            return;
+        }
+
+        crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
+
+        let mut gss_transformation_memo = HashMap::new();
+
+        for state in self.state.values_mut() {
+            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+
+        // Handle allowed terminals
+        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+        for (tokenizer_state_id, _state) in self.state.iter() {
+            let exec_result = self.parent.tokenizer.execute_from_state(
+                &llm_token_bytes,
+                *tokenizer_state_id,
+            );
+            if let Some(new_state) = exec_result.end_state {
+                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+            }
+            let mut terminals = TerminalBV::zeros();
+            for token in exec_result.matches {
+                terminals.insert(token.id);
+            }
+            terminals_map.insert(*tokenizer_state_id, terminals);
+        }
+
+        let gss_stats_before_pruning = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats before pruning disallowed terminals: {:#?}", gss_stats_before_pruning);
+        for state in self.state.values_mut() {
+            prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+        let gss_stats_after_pruning = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
+        if gss_stats_after_pruning != gss_stats_before_pruning {
+            crate::debug!(3, "GSS stats changed after pruning disallowed terminals.");
+        } else {
+            crate::debug!(3, "GSS stats did not change after pruning disallowed terminals.");
+        }
+
+        for state in self.state.values_mut() {
+            map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+        // println!("State after preparation: {}", self);
+
+        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+
+        let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, GLRParserState<'a>>> = BTreeMap::new();
+        processing_queue.insert(0, std::mem::take(&mut self.state));
+
+        while let Some((offset, states_to_process)) = processing_queue.pop_first() {
+            crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
+            for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
+                assert!(offset < llm_token_bytes.len());
+
+                let exec_result = self.parent.tokenizer.execute_from_state(
+                    &llm_token_bytes[offset..],
+                    tokenizer_s_id_at_offset,
+                );
+
+                for match_info in &exec_result.matches {
+                    let mut cloned_glr_s = glr_s_at_offset.clone();
+
+                    cloned_glr_s.step(TerminalID(match_info.id));
+                    // cloned_glr_s.do_phase3();
+
+                    if cloned_glr_s.is_ok() {
+                        let new_offset = offset + match_info.width;
+                        // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                        let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+
+                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                        if let Some(end_state_id) = exec_result.end_state {
+                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                            // Disallow this token from being matched again immediately.
+                            disallowed_terminals_for_end_state.insert(match_info.id);
+                            disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
+                        }
+                        disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+
+                        if new_offset == llm_token_bytes.len() {
+                            // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
+                            new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                        } else {
+                            processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                        }
+                    }
+                }
+
+                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
+                }
+            }
+        }
+
+        self.state = new_overall_state.clone();
+
+        for glr_parser_state in self.state.values_mut() {
+            glr_parser_state.process_default_reductions();
+        }
+
+        // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
+        for state in self.state.values_mut() {
+            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+
+        self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
+
+        let mut fuse_memo = HashMap::new();
+        for state in self.state.values_mut() {
+            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
+        }
+        fuse_memo.clear();
+
+        // let mut roots_to_simplify_arcs = Vec::new();
+        // for glr_parser_state in self.state.values_mut() {
+        //     if !glr_parser_state.active_state.stack.is_empty() {
+        //         roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
+        //     }
+        // }
+        //
+        // if !roots_to_simplify_arcs.is_empty() {
+        //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
+        // }
+
+        crate::debug!(2, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        for (tokenizer_id, glr_state) in &self.state {
+            if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
+                // glr_state.log_gss(
+                //     &format!("GSS for tokenizer state {} after commit of text", tokenizer_id.0),
+                //     TerminalID(0)
+                // );
+            }
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty())
+    }
+
+    pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
+        &self.state
+    }
+}
