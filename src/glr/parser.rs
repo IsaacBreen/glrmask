@@ -284,8 +284,8 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>, precomputed2_root: Option<Arc<Mutex<PrecomputeNode2>>>) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(precomputed2_root)
+    pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
+        self.init_glr_parser_with_acc()
     }
 
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -297,8 +297,8 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_with_acc(&self, precomputed2_root: Option<Arc<Mutex<PrecomputeNode2>>>) -> GLRParserState { // No longer generic
-        let initial_parse_state = self.init_parse_state_with_acc(precomputed2_root);
+    pub fn init_glr_parser_with_acc(&self) -> GLRParserState { // No longer generic
+        let initial_parse_state = self.init_parse_state_with_acc();
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
@@ -348,24 +348,20 @@ impl GLRParser {
         ParseState { stack: Arc::new(stack_top) }
     }
 
-    pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>, precomputed2_root: Option<Arc<Mutex<PrecomputeNode2>>>) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(precomputed2_root)
+    pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
+        self.init_parse_state_with_acc()
     }
 
-    pub fn init_parse_state_with_acc(&self, precomputed2_root: Option<Arc<Mutex<PrecomputeNode2>>>) -> ParseState { // No longer generic
+    pub fn init_parse_state_with_acc(&self) -> ParseState { // No longer generic
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let mut acc = Acc::new_fresh();
-        if let Some(root) = precomputed2_root {
-            acc.trie2_nodes.insert(ArcPtrWrapper::new(root));
-        }
-        let stack = Arc::new(GSSNode::new(acc).push(initial_content));
+        let stack = Arc::new(GSSNode::new_fresh().push(initial_content)); // pushed node has initial_acc
         ParseState { stack }
     }
 
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-        let mut state = self.init_glr_parser(llm_vocab, None);
+        let mut state = self.init_glr_parser(llm_vocab);
         state.parse(input);
         state
     }
