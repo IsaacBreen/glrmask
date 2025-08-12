@@ -371,30 +371,46 @@ impl GrammarConstraint {
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
         let mut precomputed2 = BTreeMap::new();
-        if let Some(p) = parser {
-            for (tokenizer_state_id, _trie1_root) in precomputed {
-                let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::no_end(),
-                )));
-                precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
 
-                for state_id in p.table.keys() {
-                    let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(
-                        PrecomputedNodeContents::no_end(),
-                    )));
+        // TODO: compute initial nodes and values
+        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
 
-                    let mut inserter = EdgeInserter::new(
-                        trie2_root.clone(),
-                        (0, Some(*state_id)),
-                        LLMTokenBV::max_ones(),
-                        |e, n| *e |= n,
-                    );
-                    inserter
-                        .try_destination(new_trie2_node)
-                        .expect("Failed to insert initial edge into Trie2");
+        Trie::special_map_grouped(
+            initial_values_for_map,
+            // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
+            |current_glr_state, edge_grammar_token_opt, destinations_map| {
+                let mut glr_s = current_glr_state.clone();
+                if let Some(gt) = edge_grammar_token_opt {
+                    glr_s.process_token(*gt);
                 }
-            }
-        }
+
+                let mut out = Vec::new();
+                for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                    let mut glr_s_copy = glr_s.clone();
+                    // Restrict the GLR state to the LLM tokens allowed on this edge.
+                    allow_only_llm_tokens_and_prune_arc(
+                        &mut glr_s_copy.active_state.stack,
+                        edge_bv,
+                        &mut HashMap::new(),
+                    );
+                    out.push((
+                        dst_node_wrapper.clone(),
+                        glr_s_copy,
+                    ));
+                }
+
+                out
+            },
+            |glr_s1, glr_s2| {
+                glr_s1.merge_with(glr_s2);
+            },
+            // process_fn
+            |precomputed_node_data, glr_s| {
+                let active_llm_tokens = glr_s.active_state.stack.acc.union_llm_tokens();
+                let keep_going = !active_llm_tokens.is_empty();
+                keep_going
+            },
+        );
 
         precomputed2
     }
@@ -2196,38 +2212,8 @@ impl<'a> GrammarConstraintState<'a> {
         Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
-            |glr_s, (k, state_id_opt), dest_map| {
-                let mut out: Vec<(ArcPtrWrapper<Mutex<PrecomputeNode2>>, GLRParserState)> = Vec::new();
-                let gss_node = &glr_s.active_state.stack;
-
-                let popper = gss_node.popn(*k);
-                let mut gathered_gss_nodes = Vec::new();
-
-                for item in popper.iter() {
-                    for peek in item.peek_iter() {
-                        if state_id_opt.is_none() || Some(peek.edge_value().state_id) == *state_id_opt {
-                            gathered_gss_nodes.push(peek.isolated_parent());
-                        }
-                    }
-                }
-
-                if gathered_gss_nodes.is_empty() {
-                    return out;
-                }
-
-                let mut merged_gss_arc = gathered_gss_nodes.remove(0);
-                for node_arc in gathered_gss_nodes {
-                    Arc::make_mut(&mut merged_gss_arc).merge_with_depth(1, &node_arc);
-                }
-
-                for (dest_node_wrapper, edge_bv) in dest_map.iter() {
-                    let mut new_gss_arc = merged_gss_arc.clone();
-                    allow_only_llm_tokens_and_prune_arc(&mut new_gss_arc, edge_bv, &mut HashMap::new());
-                    if !new_gss_arc.is_empty() && new_gss_arc.is_alive() {
-                        let new_glr_state = glr_s.parser.init_glr_parser_with_stack(ParseState { stack: new_gss_arc });
-                        out.push((dest_node_wrapper.clone(), new_glr_state));
-                    }
-                }
+            |glr_s, (k ), dest_map| {
+                let out: Vec<_> = todo!();
                 out
             },
             // merge_fn
