@@ -347,7 +347,7 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        helper.optimize_precomputed_via_substring_parser();
+        // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
         helper.prune_dead_paths();
