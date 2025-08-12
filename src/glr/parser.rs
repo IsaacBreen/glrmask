@@ -855,8 +855,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let mut acc: Acc = acc_arc.as_ref().clone();
                 let active_llm_tokens = acc.union_llm_tokens();
                 let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
                 for (source_state_id, (final_goto_state_ids_for_source, accepted)) in &states_to_push {
+                    // Handle pop and read state
+                    let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
                     for existing_trie2_node in &trie2_nodes {
                         let mut inserter = EdgeInserter::new(
                             existing_trie2_node.as_arc().clone(),
@@ -867,9 +868,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         inserter = inserter.try_destination(new_trie2_node.clone());
                         inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                     }
-                    // let
-                    if *accepted {
+                    let mut acc2 = acc.clone();
+                    acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                    if !final_goto_state_ids_for_source.is_empty() {
+                        let new_gss0 = GSSNode::new(acc2);
+                        let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                        let new_gss2 = new_gss1.push_many(final_goto_state_ids_for_source.iter().map(|sid| ParseStateEdgeContent { state_id: *sid }).collect());
+                        out.push(new_gss2);
+                    }
 
+                    // Handle accept
+                    if *accepted {
+                        for existing_trie2_node in &trie2_nodes {
+                            let mut end_inserter = EdgeInserter::new(
+                                existing_trie2_node.as_arc().clone(),
+                                (k, Some(*source_state_id)),
+                                active_llm_tokens.clone(),
+                                |e, n| *e |= n,
+                            );
+                            end_inserter = end_inserter.try_destination(new_trie2_end.clone());
+                            end_inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed for end");
+                        }
                     }
                 }
             }
