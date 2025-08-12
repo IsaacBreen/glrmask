@@ -379,7 +379,26 @@ impl GrammarConstraint {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
-                let mut out: Vec<_> = vec![];
+                let mut glr_s = current_glr_state.clone();
+                if let Some(gt) = edge_grammar_token_opt {
+                    glr_s.process_token(*gt);
+                }
+
+                let mut out = Vec::new();
+                for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                    let mut glr_s_copy = glr_s.clone();
+                    // Restrict the GLR state to the LLM tokens allowed on this edge.
+                    allow_only_llm_tokens_and_prune_arc(
+                        &mut glr_s_copy.active_state.stack,
+                        edge_bv,
+                        &mut HashMap::new(),
+                    );
+                    out.push((
+                        dst_node_wrapper.clone(),
+                        glr_s_copy,
+                    ));
+                }
+
                 out
             },
             |glr_s1, glr_s2| {
