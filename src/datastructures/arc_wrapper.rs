@@ -10,7 +10,6 @@ use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
 /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
 /// It also dereferences to the underlying `Arc<T>`.
-#[derive(Clone)]
 pub struct ArcPtrWrapper<T>(Arc<T>);
 
 // ArcPtrWrapper serialization:
@@ -27,6 +26,12 @@ impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
     }
 }
 
+impl<T> Clone for ArcPtrWrapper<T> {
+    fn clone(&self) -> Self {
+        ArcPtrWrapper(self.0.clone())
+    }
+}
+
 /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
 /// and `Hash` based on the pointer value of the `Weak`.
 /// This allows `Weak<T>` instances to be used as map/set keys where identity is
@@ -35,7 +40,6 @@ impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
 /// Note:
 /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
 ///   to skip dangling weak references.
-#[derive(Clone)]
 pub struct WeakPtrWrapper<T>(Weak<T>);
 
 impl<T> WeakPtrWrapper<T> {
@@ -57,6 +61,12 @@ impl<T> WeakPtrWrapper<T> {
     /// Consumes the wrapper and returns the inner `Weak<T>`.
     pub fn into_weak(self) -> Weak<T> {
         self.0
+    }
+}
+
+impl<T> Clone for WeakPtrWrapper<T> {
+    fn clone(&self) -> Self {
+        WeakPtrWrapper(self.0.clone())
     }
 }
 
