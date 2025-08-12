@@ -722,6 +722,7 @@ impl<'r> Precomputer<'r> {
             crate::debug!(2, "Skipping optimization via substring parser as parser is None");
             return;
         }
+        crate::debug!(2, "Optimizing precomputed trie via substring parser");
 
         // Collect all unique nodes from all roots to process each node only once.
         let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
@@ -881,6 +882,7 @@ impl<'r> Precomputer<'r> {
             }
         }
         pb.finish_with_message("Optimization complete");
+        crate::debug!(2, "Finished optimizing precomputed trie via substring parser");
     }
 
     // Walk a trie subtree starting from the provided initial (node, GLRState) pairs.
