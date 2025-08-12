@@ -373,10 +373,10 @@ impl GrammarConstraint {
         let mut precomputed2 = BTreeMap::new();
 
         // TODO: compute initial nodes and values
-        let mut initial_nodes_and_values: Vec<_> = vec![];
+        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
 
         Trie::special_map_grouped(
-            initial_nodes_and_values,
+            initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
                 let mut out: Vec<_> = vec![];
