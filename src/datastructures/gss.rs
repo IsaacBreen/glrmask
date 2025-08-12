@@ -343,7 +343,8 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let resolved_acc = self.resolved_acc();
+        let mut resolved_acc = self.resolved_acc();
+        resolved_acc.trie2_nodes.clear();
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
@@ -596,12 +597,14 @@ impl GSSNode {
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
     pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
-        let acc = (*self.acc).clone();
+        let mut acc = (*self.acc).clone();
+        acc.trie2_nodes.clear();
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
     }
 
     pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
-        let acc = (*self.acc).clone();
+        let mut acc = (*self.acc).clone();
+        acc.trie2_nodes.clear();
         Self::new_with_many_predecessors(Arc::new(self.clone()), edge_values, acc)
     }
 
@@ -712,7 +715,8 @@ impl GSSNode {
     }
 
     pub fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let acc = (*self.acc).clone();
+        let mut acc = (*self.acc).clone();
+        acc.trie2_nodes.clear();
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
     }
     
@@ -758,7 +762,8 @@ impl<'a> GSSPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let resolved_acc = self.resolved_acc();
+        let mut resolved_acc = self.resolved_acc();
+        resolved_acc.trie2_nodes.clear();
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
