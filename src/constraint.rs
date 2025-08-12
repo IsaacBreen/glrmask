@@ -373,11 +373,16 @@ impl GrammarConstraint {
     ) -> Precomputed2 {
         crate::debug!(2, "Precomputing Trie 2...");
         let mut precomputed2 = BTreeMap::new();
+        let mut memo: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, GLRParserState> = HashMap::new();
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
         for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc= "Precomputing Trie 2") {
+            if let Some(existing) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
+                initial_values_for_map.push((trie1_root.clone(), existing.clone()));
+                continue;
+            }
             let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
                 PrecomputedNodeContents::no_end(),
             )));
@@ -412,7 +417,10 @@ impl GrammarConstraint {
             let parse_state = ParseState { stack: merged_gss };
             let glr_state = parser.init_glr_parser_from_parse_state(parse_state);
 
+            memo.insert(ArcPtrWrapper::new(trie1_root.clone()), glr_state.clone());
+
             initial_values_for_map.push((trie1_root.clone(), glr_state));
+
         }
 
         let trie2_end = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end(), )));
