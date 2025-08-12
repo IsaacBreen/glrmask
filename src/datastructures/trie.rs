@@ -18,7 +18,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
 use kdam::{tqdm, BarExt};
-use profiler_macro::time_it;
+use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::WeakPtrWrapper;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 // Added for derive macro pattern
@@ -644,6 +644,8 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                         .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
                         .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                         .collect();
+
+                    timeit!(format!("BFS: Node has {} children", children_arcs.len()));
 
                     // Explicitly drop the guard before potentially long operations (queueing).
                     drop(node_guard);
