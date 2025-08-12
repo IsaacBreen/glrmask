@@ -288,6 +288,15 @@ impl GLRParser {
         self.init_glr_parser_with_acc()
     }
 
+    pub fn init_glr_parser_with_stack(&self, stack: ParseState) -> GLRParserState { // No longer generic
+        GLRParserState {
+            parser: self,
+            active_state: stack,
+            accepted: false,
+            phase: ParserPhase::ReadyForDefaultReductions,
+        }
+    }
+
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
