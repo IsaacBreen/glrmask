@@ -620,7 +620,7 @@ pub struct GLRParserState<'a> { // No longer generic
 struct BelowBottomCacheKey {
     nonterminal_id: NonTerminalID,
     source_state_id: StateID,
-    k: usize,
+    // k: usize,
     // Important: this Acc must have trie2_nodes cleared before being placed here.
     acc: Acc,
 }
@@ -880,7 +880,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let cache_key = BelowBottomCacheKey {
                             nonterminal_id: nt,
                             source_state_id: *source_state_id,
-                            k,
+                            // k,
                             acc: acc.clone(),
                         };
 
