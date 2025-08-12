@@ -402,11 +402,13 @@ impl GrammarConstraint {
                 out
             },
             |glr_s1, glr_s2| {
-                todo!()
+                glr_s1.merge_with(glr_s2);
             },
             // process_fn
             |precomputed_node_data, glr_s| {
-                todo!()
+                let active_llm_tokens = glr_s.active_state.stack.acc.union_llm_tokens();
+                let keep_going = !active_llm_tokens.is_empty();
+                keep_going
             },
         );
 
