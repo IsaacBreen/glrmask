@@ -29,7 +29,7 @@ use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{
     GLRParser, GLRParserState, ParseState, ParseStateEdgeContent,
-};
+    LLMVocab};
 use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -50,14 +50,6 @@ pub type PrecomputeNode =
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LLMVocab {
-    pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
-    pub(crate) max_original_llm_token_id: usize,
-    pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
-    pub(crate) internal_max_llm_token: usize
-}
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
@@ -298,7 +290,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2();
+        let precomputed2 = Self::precompute2(&tokenizer, &parser);
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -348,15 +340,18 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
+        tokenizer: &Regex,
+        parser: &GLRParser,
     ) -> Precomputed2 {
-        todo!()
+        // todo!()
+        BTreeMap::new()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
         state.insert(
             self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
+            self.parser.init_glr_parser_with_acc(Some(self)),
         );
 
         GrammarConstraintState { parent: self, state }
@@ -1522,11 +1517,6 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_mask(&self) -> LLMTokenBV {
-        // self.get_mask1()
-        self.get_mask2()
-    }
-
     #[time_it]
     pub fn get_mask1(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
@@ -1584,7 +1574,7 @@ impl<'a> GrammarConstraintState<'a> {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
-                continue;
+                continue
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
@@ -1875,12 +1865,14 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_mapped
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+        // llm_token_id is original
         let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
         self.commit_bytes(llm_token_bytes);
     }
 
-    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
+    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) {
+        // llm_token_id is original
         if llm_token_bytes.is_empty() {
             return;
         }
@@ -1954,7 +1946,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for match_info in &exec_result.matches {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
 
-                    cloned_glr_s.step(TerminalID(match_info.id));
+                    cloned_glr_s.step(TerminalID(match_info.id), Some(self.parent));
                     // cloned_glr_s.do_phase3();
 
                     if cloned_glr_s.is_ok() {
@@ -2041,8 +2033,12 @@ impl<'a> GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    pub fn get_mask(&self) -> LLMTokenBV {
+        self.get_mask2()
+    }
+
     pub fn get_mask2(&self) -> LLMTokenBV {
-        todo!()
+        self.get_mask1()
     }
 }
 

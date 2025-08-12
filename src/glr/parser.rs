@@ -3,11 +3,9 @@ use crate::datastructures::ArcPtrWrapper;
 use std::any::Any;
 use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
-use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
-use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -15,6 +13,7 @@ use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
+use crate::constraint::GrammarConstraint;
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -24,7 +23,17 @@ use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+use crate::tokenizer::LLMTokenID;
 use crate::datastructures::trie::EdgeInserter;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LLMVocab {
+    pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
+    pub(crate) max_original_llm_token_id: usize,
+    pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
+    pub(crate) internal_max_llm_token: usize
+}
+
 
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
@@ -284,23 +293,25 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc()
+    pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
+        self.init_glr_parser_with_acc(None)
     }
 
-    pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
+    pub fn init_glr_parser_null(&self) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
+            constraint: None,
             active_state: ParseState::new(),
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
         }
     }
 
-    pub fn init_glr_parser_with_acc(&self) -> GLRParserState { // No longer generic
+    pub fn init_glr_parser_with_acc(&self, constraint: Option<&'a GrammarConstraint>) -> GLRParserState<'a> { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc();
         let mut parser_state = GLRParserState {
             parser: self,
+            constraint,
             active_state: initial_parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
@@ -312,6 +323,7 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
+            constraint: None, // Or pass it in? For now, None.
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
         };
@@ -325,7 +337,7 @@ impl GLRParser {
     /// This corresponds to starting “for each state directly reachable”
     /// simultaneously (as per Rekers/Koorn, 4.3), but since we do not know
     /// the first token a priori, we simply include all table states here.
-    pub fn init_glr_substring_parser(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+    pub fn init_glr_substring_parser(&self) -> GLRParserState {
         let initial_parse_state = self.init_parse_state_substring();
         GLRParserState {
             parser: self,
@@ -348,7 +360,7 @@ impl GLRParser {
         ParseState { stack: Arc::new(stack_top) }
     }
 
-    pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
+    pub fn init_parse_state(&self) -> ParseState { // No longer generic
         self.init_parse_state_with_acc()
     }
 
@@ -360,8 +372,8 @@ impl GLRParser {
         ParseState { stack }
     }
 
-    pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
-        let mut state = self.init_glr_parser(llm_vocab);
+    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState { // No longer generic
+        let mut state = self.init_glr_parser();
         state.parse(input);
         state
     }
@@ -578,6 +590,7 @@ impl Display for GLRParser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
+    constraint: Option<&'a GrammarConstraint>,
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
@@ -814,6 +827,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
+            // TODO: Trie2 implementation
             let mut merged_acc_opt: Option<Acc> = None;
             for acc_arc in popper.below_bottom.values() {
                 merged_acc_opt = Some(match merged_acc_opt.take() {
@@ -878,7 +892,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     #[time_it("GLRParserState::process_token")]
-    pub fn process_token(&mut self, token_id: TerminalID) {
+    pub fn process_token(&mut self, token_id: TerminalID, constraint: Option<&'a GrammarConstraint>) {
         // Reset acceptance flag for the new token
         self.accepted = false;
 
@@ -896,7 +910,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, self.active_state.clone());
-            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo);
+            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, constraint);
         } else { // ParserPhase::ReadyForDefaultReductions
             // If we are ready for phase 3, it means we have a set of shifted states.
             // Instead of performing default reductions (phase 3), we can process the next token.
@@ -906,7 +920,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // --- Phase 2 ---
-        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo);
+        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo, constraint);
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
@@ -1103,8 +1117,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     #[time_it("GLRParserState::step")]
-    pub fn step(&mut self, token_id: TerminalID) {
-        self.process_token(token_id);
+    pub fn step(&mut self, token_id: TerminalID, constraint: Option<&'a GrammarConstraint>) {
+        self.process_token(token_id, constraint);
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
@@ -1113,12 +1127,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub fn parse_part(&mut self, input: &[TerminalID]) {
         for &token_id in input {
-            self.step(token_id);
+            self.step(token_id, self.constraint);
         }
     }
 
     pub fn and_step(mut self, token_id: TerminalID) -> Self {
-        self.step(token_id);
+        self.step(token_id, self.constraint);
         self
     }
 
