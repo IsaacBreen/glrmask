@@ -220,7 +220,7 @@ impl JSONConvertible for GLRParser {
                     ignore_terminal_id,
                 })
             }
-            _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+            _ => Err("Expected JSONNode::Object for GLRParser".to_string()), // Corrected struct name
         }
     }
 }
@@ -751,10 +751,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
         let popper = timeit!(peek.popn(len));
-        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
         let mut any_below_bottom = !popper.below_bottom.is_empty();
-        timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+        timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
         let mut out = Vec::new();
@@ -812,51 +812,77 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // suffix β of a rule A ::= α β. Per substring parsing semantics,
         // α lies before the substring start and must be considered unknown (but derivable),
         // so we continue in every state that has a GOTO on A. We also merge the Acc
-        // accumulated along these paths to create a new virtual root to push onto.
+        // accumulated along these paths to create a new virtual root to push onto,
+        // and we dynamically extend Trie 2.
         if any_below_bottom {
-            let mut merged_acc_opt: Option<Acc> = None;
-            for acc_arc in popper.below_bottom.values() {
-                merged_acc_opt = Some(match merged_acc_opt.take() {
-                    None => (**acc_arc).clone(),
-                    Some(prev) => Acc::merge(&prev, acc_arc),
-                });
-            }
- 
-            if let Some(merged_acc) = merged_acc_opt {
-                let mut states_to_push: BTreeSet<StateID> = BTreeSet::new();
-                for (source_state_id, row) in &self.parser.table {
-                    let mut final_goto_state_ids_for_source = BTreeSet::new();
-                    let mut current_nt_local = nt;
-                    loop {
-                        if let Some(goto) = row.gotos.get(&current_nt_local) {
-                            if goto.accept {
-                                crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
-                                self.accepted = true;
-                            }
-                            if let Some(goto_state_id) = goto.state_id {
-                                let next_row = &self.parser.table[&goto_state_id];
-                                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
-                                    current_nt_local = *next_nt;
-                                    continue;
-                                } else {
-                                    final_goto_state_ids_for_source.insert(goto_state_id);
-                                    break;
-                                }
+            // 1. Aggregate Acc across below_bottom entries
+            let mut merged_acc: Acc = popper.below_bottom.values()
+                .map(|acc_arc| (**acc_arc).clone())
+                .reduce(|acc1, acc2| Acc::merge(&acc1, &acc2))
+                .unwrap_or_else(Acc::new_fresh);
+
+            // Shared END node for this event
+            let end_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+
+            // For each hallucinated source state...
+            for (source_state_id, row) in &self.parser.table {
+                // Compute GOTO chain for this source state
+                let mut final_goto_state_ids_for_source = BTreeSet::new();
+                let mut current_nt_local = nt;
+                let mut acceptance_in_chain = false;
+                loop {
+                    if let Some(goto) = row.gotos.get(&current_nt_local) {
+                        if goto.accept {
+                            acceptance_in_chain = true;
+                        }
+                        if let Some(goto_state_id) = goto.state_id {
+                            let next_row = &self.parser.table[&goto_state_id];
+                            if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+                                current_nt_local = *next_nt;
+                                continue;
                             } else {
+                                final_goto_state_ids_for_source.insert(goto_state_id);
                                 break;
                             }
                         } else {
                             break;
                         }
-                    }
-                    if !final_goto_state_ids_for_source.is_empty() {
-                        states_to_push.insert(*source_state_id);
-                        states_to_push.extend(final_goto_state_ids_for_source);
+                    } else {
+                        break;
                     }
                 }
- 
-                if !states_to_push.is_empty() {
-                    let base = GSSNode::new(merged_acc);
+
+                if !final_goto_state_ids_for_source.is_empty() {
+                    // Create a shared destination Trie 2 node for this source state
+                    let dest_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+
+                    // For each pop depth, and each existing trie2 node, add edges
+                    for (k, acc_k) in &popper.below_bottom {
+                        let mask = acc_k.llm_tokens_union.clone();
+                        if mask.is_empty() { continue; }
+
+                        for trie2_node_wrapper in &acc_k.trie2_nodes {
+                            let trie2_node_arc = trie2_node_wrapper.as_arc();
+                            let edge_key = (*k, Some(*source_state_id));
+
+                            EdgeInserter::new(trie2_node_arc.clone(), edge_key.clone(), mask.clone(), |e, n| *e |= n)
+                                .try_destination(dest_trie2_node.clone()).unwrap();
+
+                            if acceptance_in_chain {
+                                 EdgeInserter::new(trie2_node_arc.clone(), edge_key, mask.clone(), |e, n| *e |= n)
+                                    .try_destination(end_trie2_node.clone()).unwrap();
+                            }
+                        }
+                    }
+
+                    // Re-seed GSS
+                    let mut acc_for_s = merged_acc.clone();
+                    acc_for_s.trie2_nodes.clear();
+                    acc_for_s.trie2_nodes.insert(ArcPtrWrapper::new(dest_trie2_node));
+
+                    let base = GSSNode::new(acc_for_s);
+                    let mut states_to_push = final_goto_state_ids_for_source;
+                    states_to_push.insert(*source_state_id);
                     let new_gss_node = base.push_many(states_to_push.into_iter().map(|sid| ParseStateEdgeContent { state_id: sid }).collect());
                     out.push(new_gss_node);
                 }
@@ -1162,7 +1188,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
         crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
                       phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
 
