@@ -312,6 +312,7 @@ impl GLRParser {
             active_state: stack,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_cache: Default::default(),
         }
     }
 
@@ -321,6 +322,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_cache: Default::default(),
         }
     }
 
@@ -331,6 +333,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_cache: Default::default(),
         };
         parser_state
     }
@@ -341,6 +344,7 @@ impl GLRParser {
             active_state: parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_cache: Default::default(),
         };
         parser_state
     }
@@ -361,6 +365,7 @@ impl GLRParser {
             // We will process with the “full” set of actions upon first token,
             // mirroring phase-2 behavior that does not require default-reduce bootstrap.
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_cache: Default::default(),
         }
     }
 
@@ -602,12 +607,22 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
+    below_bottom_cache: std::collections::HashMap<BelowBottomCacheKey, Arc<Mutex<PrecomputeNode2>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BelowBottomCacheKey {
+    nonterminal_id: NonTerminalID,
+    source_state_id: StateID,
+    k: usize,
+    // Important: this Acc must have trie2_nodes cleared before being placed here.
+    acc: Acc,
 }
 
 impl Display for GLRParserState<'_> {
@@ -857,29 +872,65 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 crate::debug!(6, "States to push after reduction (precomputed): {:?}", states_to_push);
                 let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
                 for (k, acc_arc) in popper.below_bottom {
-                    crate::debug!(6, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
                     let mut acc: Acc = acc_arc.as_ref().clone();
                     let active_llm_tokens = acc.union_llm_tokens();
                     let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                     for (source_state_id, (final_goto_state_ids_for_source, accepted)) in states_to_push {
-                        if !final_goto_state_ids_for_source.is_empty() {
-                            // Handle pop and read state
-                            let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                        // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
+                        let cache_key = BelowBottomCacheKey {
+                            nonterminal_id: nt,
+                            source_state_id: *source_state_id,
+                            k,
+                            acc: acc.clone(),
+                        };
+
+                        // If we have seen this exact situation before, reuse the cached Trie-2 node
+                        if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
                             for existing_trie2_node in &trie2_nodes {
-                                let mut inserter = EdgeInserter::new(
+                                // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
+                                let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
                                     (k, Some(*source_state_id)),
                                     active_llm_tokens.clone(),
                                     |e, n| *e |= n,
-                                );
-                                inserter = inserter.try_destination(new_trie2_node.clone());
+                                ).try_destination_auto(cached_trie2_node.clone());
+                                inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                            }
+
+                            if *accepted {
+                                self.accepted = true;
+                            }
+
+                            // IMPORTANT: No need to push a new GSS node here.
+                            // It would be equivalent to the one created when this key was first seen.
+                            continue;
+                        }
+                        if !final_goto_state_ids_for_source.is_empty() {
+                            // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
+                            let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                            self.below_bottom_cache.insert(cache_key, new_trie2_node.clone());
+
+                            for existing_trie2_node in &trie2_nodes {
+                                // Allow cycles to be represented as WEAK edges if they occur.
+                                let inserter = EdgeInserter::new(
+                                    existing_trie2_node.as_arc().clone(),
+                                    (k, Some(*source_state_id)),
+                                    active_llm_tokens.clone(),
+                                    |e, n| *e |= n,
+                                ).try_destination_auto(new_trie2_node.clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                             }
+
                             let mut acc2 = acc.clone();
                             acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
                             let new_gss0 = GSSNode::new(acc2);
                             let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                            let new_gss2 = new_gss1.push_many(final_goto_state_ids_for_source.iter().map(|sid| ParseStateEdgeContent { state_id: *sid }).collect());
+                            let new_gss2 = new_gss1.push_many(
+                                final_goto_state_ids_for_source
+                                    .iter()
+                                    .map(|sid| ParseStateEdgeContent { state_id: *sid })
+                                    .collect()
+                            );
                             out.push(new_gss2);
                         }
 
@@ -1468,3 +1519,4 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
+
