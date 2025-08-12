@@ -870,6 +870,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             if let Some(states_to_push) = precomputed_map.get(&(nt, token_id)) {
                 crate::debug!(6, "States to push after reduction (precomputed): {:?}", states_to_push);
+                let mut trie2_dst_nodes = HashMap::new();
                 for (k, acc_arc) in popper.below_bottom {
                     let mut acc: Acc = acc_arc.as_ref().clone();
                     let active_llm_tokens = acc.union_llm_tokens();
@@ -906,7 +907,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                         if !final_goto_state_ids_for_source.is_empty() {
                             // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
-                            let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                            let new_trie2_node = trie2_dst_nodes
+                                .entry(*source_state_id)
+                                .or_insert_with(|| Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                                .clone();
                             self.below_bottom_cache.insert(cache_key, new_trie2_node.clone());
 
                             for existing_trie2_node in &trie2_nodes {
