@@ -42,7 +42,7 @@ use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
-use crate::profiler::GSS_LOGGING_ENABLED;
+use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED};
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -425,6 +425,9 @@ impl GrammarConstraint {
                 let mut glr_s = current_glr_state.clone();
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token(*gt);
+                        print_summary_flat();
+                        print_summary();
+                        reset();
                 }
 
                 let mut out = Vec::new();
