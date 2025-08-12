@@ -20,6 +20,7 @@ use ordered_hash_map::OrderedHashSet;
 use kdam::{tqdm, BarExt};
 use profiler_macro::time_it;
 use crate::datastructures::arc_wrapper::WeakPtrWrapper;
+use crate::profiler::PROGRESS_BAR_ENABLED;
 // Added for derive macro pattern
 
 
@@ -1109,7 +1110,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
-        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges");
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
@@ -1206,7 +1207,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
-        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges");
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {

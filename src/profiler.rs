@@ -12,6 +12,9 @@ pub const PROFILING_ENABLED: bool = true;
 /// Controls detailed GSS logging. If false, `log_gss` and `print_gss_forest` are disabled.
 pub const GSS_LOGGING_ENABLED: bool = false;
 
+/// Controls whether `tqdm` progress bars are displayed during long operations.
+pub const PROGRESS_BAR_ENABLED: bool = true;
+
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
 pub struct ProfileNode {
