@@ -17,6 +17,7 @@ use crate::datastructures::{ArcPtrWrapper}; // Import ArcPtrWrapper and WeakPtrW
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
+use kdam::{tqdm, BarExt};
 use profiler_macro::time_it;
 use crate::datastructures::arc_wrapper::WeakPtrWrapper;
 // Added for derive macro pattern
@@ -1053,6 +1054,33 @@ where
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+    fn count_all_edges(root_nodes: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> usize {
+        let mut visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        let mut total_edges = 0;
+
+        for root in root_nodes {
+            let root_arc_ptr = Arc::as_ptr(root);
+            if visited_arcs.insert(root_arc_ptr) {
+                queue.push_back(root.clone());
+            }
+        }
+
+        while let Some(node_arc) = queue.pop_front() {
+            let node_guard = node_arc.lock().expect("Mutex poisoned during edge count");
+            for children_map in node_guard.children.values() {
+                total_edges += children_map.len();
+                for child_wrapper_arc in children_map.keys() {
+                    let child_arc = child_wrapper_arc.as_arc();
+                    if visited_arcs.insert(Arc::as_ptr(child_arc)) {
+                        queue.push_back(child_arc.clone());
+                    }
+                }
+            }
+        }
+        total_edges
+    }
+
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
     /// (special_map implementation remains unchanged)
     #[time_it]
@@ -1079,13 +1107,17 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
         let mut todo     : BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
+        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
+        let total_edges = Self::count_all_edges(&initial_nodes);
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges");
+
         // Seed with the user-supplied starting set
-        for (node_arc, v0) in initial_nodes_and_values {
-            let ptr = Arc::as_ptr(&node_arc);
+        for (node_arc, v0) in initial_nodes_and_values.iter() {
+            let ptr = Arc::as_ptr(node_arc);
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
-                .or_insert(v0);
+                .or_insert(v0.clone());
             let depth = node_arc.lock().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
@@ -1125,6 +1157,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 for (ek, ev, child_arc) in edges {
+                    let _ = pb.update(1);
                     let child_ptr = Arc::as_ptr(&child_arc);
 
                     // user ‘step’ callback
@@ -1145,6 +1178,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
+        pb.close();
     }
 
     /// Performs a specialized breadth-first traversal, grouping children by edge key.
@@ -1171,13 +1205,17 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
         let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
+        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
+        let total_edges = Self::count_all_edges(&initial_nodes);
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges");
+
         // Seed with the user-supplied starting set
-        for (node_arc, v0) in initial_nodes_and_values {
-            let ptr = Arc::as_ptr(&node_arc);
+        for (node_arc, v0) in initial_nodes_and_values.iter() {
+            let ptr = Arc::as_ptr(node_arc);
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
-                .or_insert(v0);
+                .or_insert(v0.clone());
             let depth = node_arc.lock().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
@@ -1208,6 +1246,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 for (ek, dest_map) in children_by_ek {
+                    let _ = pb.update(dest_map.len());
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
                     for (child_arc, new_v) in new_values_for_children {
                         let child_ptr = Arc::as_ptr(&child_arc);
@@ -1218,6 +1257,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
+        pb.close();
     }
 }
 
