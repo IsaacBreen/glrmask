@@ -45,6 +45,29 @@ impl<T> ExpectElse<T> for Option<T> {
     }
 }
 
+// Cache key for below-bottom recursion handling:
+// Detects re-entries into the same reduce_and_goto "below-bottom" logic
+// for the same nonterminal and the same Acc (with trie2_nodes cleared).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BelowBottomCacheKey {
+    nonterminal_id: NonTerminalID,
+    acc_without_trie2: Acc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParseStateKey {
+    stack_state_id: StateID,
+}
+
+impl ParseState { // No longer generic
+    pub fn merge(&mut self, mut other: ParseState) {
+        // if self.stack.max_depth() > other.stack.max_depth() {
+        //     std::mem::swap(self, &mut other);
+        // }
+        Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
+    }
+}
+
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
 }
@@ -312,6 +335,7 @@ impl GLRParser {
             active_state: stack,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_trie2_cache: HashMap::new(),
         }
     }
 
@@ -321,6 +345,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_trie2_cache: HashMap::new(),
         }
     }
 
@@ -331,6 +356,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_trie2_cache: HashMap::new(),
         };
         parser_state
     }
@@ -341,6 +367,7 @@ impl GLRParser {
             active_state: parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_trie2_cache: HashMap::new(),
         };
         parser_state
     }
@@ -361,6 +388,7 @@ impl GLRParser {
             // We will process with the “full” set of actions upon first token,
             // mirroring phase-2 behavior that does not require default-reduce bootstrap.
             phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_trie2_cache: HashMap::new(),
         }
     }
 
@@ -608,7 +636,20 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
+    // Per-call cache to detect recurring below-bottom expansions that would cause cycles.
+    // This is cleared at the beginning of each process_action_queue call.
+    below_bottom_trie2_cache: HashMap<BelowBottomCacheKey, Arc<Mutex<PrecomputeNode2>>>,
 }
+
+impl PartialEq for GLRParserState<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.parser, other.parser)
+            && self.active_state == other.active_state
+            && self.accepted == other.accepted
+            && self.phase == other.phase
+    }
+}
+impl Eq for GLRParserState<'_> {}
 
 impl Display for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -679,6 +720,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     ) where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
+        // Clear per-call cycle-detection cache. The key implicitly encodes token_id and action set
+        // via the properties of Acc and the nonterminal; we scope this cache to a single processing
+        // pass to avoid suppressing legitimate expansions across different tokens/passes.
+        self.below_bottom_trie2_cache.clear();
+
         while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
             let row = &self.parser.table[&state_id];
             if let Some(action) = action_selector(row).get(&token_id) {
@@ -860,23 +906,47 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     crate::debug!(6, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
                     let mut acc: Acc = acc_arc.as_ref().clone();
                     let active_llm_tokens = acc.union_llm_tokens();
+                    // Remove trie2 nodes to compute a stable cache key for recurrence detection.
                     let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                    let cache_key = BelowBottomCacheKey {
+                        nonterminal_id: nt,
+                        acc_without_trie2: acc.clone(), // acc now has trie2_nodes cleared
+                    };
+                    
+                    let target_trie2_node: Arc<Mutex<PrecomputeNode2>>;
+                    let is_fresh_expansion: bool;
+
+                    if let Some(cached) = self.below_bottom_trie2_cache.get(&cache_key) {
+                        target_trie2_node = cached.clone();
+                        is_fresh_expansion = false;
+                    } else {
+                        target_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                        self.below_bottom_trie2_cache.insert(cache_key.clone(), target_trie2_node.clone());
+                        is_fresh_expansion = true;
+                    }
+
                     for (source_state_id, (final_goto_state_ids_for_source, accepted)) in states_to_push {
-                        if !final_goto_state_ids_for_source.is_empty() {
-                            // Handle pop and read state
-                            let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-                            for existing_trie2_node in &trie2_nodes {
-                                let mut inserter = EdgeInserter::new(
-                                    existing_trie2_node.as_arc().clone(),
-                                    (k, Some(*source_state_id)),
-                                    active_llm_tokens.clone(),
-                                    |e, n| *e |= n,
-                                );
-                                inserter = inserter.try_destination(new_trie2_node.clone());
-                                inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                        // Insert edges from existing trie2 nodes to the target (cached or fresh) node.
+                        for existing_trie2_node in &trie2_nodes {
+                            let mut inserter = EdgeInserter::new(
+                                existing_trie2_node.as_arc().clone(),
+                                (k, Some(*source_state_id)),
+                                active_llm_tokens.clone(),
+                                |e, n| *e |= n,
+                            );
+                            // If we reused a cached node, allow cycles by degrading to weak if needed.
+                            if !is_fresh_expansion { // If it's not a fresh expansion, it means we're reusing a cached node.
+                                inserter = inserter.try_destination_auto(target_trie2_node.clone());
+                            } else {
+                                inserter = inserter.try_destination(target_trie2_node.clone());
                             }
+                            inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed to link Trie2 (below-bottom)");
+                        }
+
+                        if is_fresh_expansion {
+                            // Only create new GSS nodes if this is a fresh expansion for this cache_key.
                             let mut acc2 = acc.clone();
-                            acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                            acc2.trie2_nodes = vec![ArcPtrWrapper::new(target_trie2_node.clone())].into_iter().collect();
                             let new_gss0 = GSSNode::new(acc2);
                             let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                             let new_gss2 = new_gss1.push_many(final_goto_state_ids_for_source.iter().map(|sid| ParseStateEdgeContent { state_id: *sid }).collect());
@@ -1468,3 +1538,4 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
+

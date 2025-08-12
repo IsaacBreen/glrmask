@@ -1,12 +1,12 @@
 local_system:
   attached_files:
-    - src/datastructures/trie.rs
     - src/datastructures/gss.rs
+    - src/datastructures/trie.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
     - src/glr/mod.rs
-    - src/glr/table.rs
     - src/glr/parser.rs
+    - src/glr/table.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -15817,23 +15817,25 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
-    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
-    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
+    If asked for full code, provide it.
+    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
+    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
+    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
 messages:
   - user: |-
       ```rust 'src/datastructures/trie.rs'
@@ -24072,8 +24074,21 @@ messages:
                                // ACTUALLY no we don't accept...
       *** End Patch```
     metadata:
-  - user: |-
-      Apply result (git-llm mode):
-      No git diff blocks (```diff) found in the last assistant message.
+  - user: |
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/parser.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/parser.rs
     metadata:
 ...
