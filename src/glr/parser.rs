@@ -860,6 +860,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // α lies before the substring start and must be considered unknown (but derivable),
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
+        timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
             
@@ -888,6 +889,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // If we have seen this exact situation before, reuse the cached Trie-2 node
                         if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
                             for existing_trie2_node in &trie2_nodes {
+                                timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
                                 // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
                                 let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
@@ -897,6 +899,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 ).try_destination_auto(cached_trie2_node.as_arc().clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                             }
+                            });
 
                             if *accepted {
                                 self.accepted = true;
@@ -915,6 +918,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
                             for existing_trie2_node in &trie2_nodes {
+                                timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
                                 // Allow cycles to be represented as WEAK edges if they occur.
                                 let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
@@ -923,6 +927,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     |e, n| *e |= n,
                                 ).try_destination_auto(new_trie2_node.clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                });
                             }
 
                             let mut acc2 = acc.clone();
@@ -945,6 +950,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
+        });
  
         if out.is_empty() {
             Arc::new(GSSNode::new_fresh())
