@@ -500,6 +500,17 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             return Err(CycleDetectedError);
         }
 
+        self.try_insert_unchecked(edge_key, edge_value, child)
+    }
+
+    #[time_it]
+    pub fn try_insert_unchecked(
+        &mut self,
+        edge_key: EK,
+        edge_value: &mut Option<EV>, // Changed to allow taking the value
+        child: Arc<Mutex<Trie<EK, EV, T>>>,
+    ) -> Result<(), CycleDetectedError> {
+
         // ------------------------------------------------------------------
         // 2. Update the child's max-depth *before* the edge is inserted.
         //    This lets us rollback cleanly if `propagate_max_depth` fails
@@ -567,7 +578,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     ) -> InsertedEdgeKind {
         // Detect whether adding a strong edge would create a cycle
         let self_ptr = self as *const Trie<EK, EV, T>;
-        let mut would_cycle = false;
+        let mut would_cycle;
         // If it already has an edge to this node, it can't create a cycle.
         if self.already_has_dst_for_any_key(&child) {
             would_cycle = false;
