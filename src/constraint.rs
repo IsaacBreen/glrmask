@@ -34,6 +34,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateI
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use kdam::tqdm;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
@@ -376,7 +377,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        for (tokenizer_state_id, trie1_root) in precomputed {
+        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc= "Precomputing Trie 2") {
             let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
                 PrecomputedNodeContents::no_end(),
             )));
