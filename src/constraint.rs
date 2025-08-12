@@ -298,7 +298,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let precomputed2 = Self::precompute2(&parser, &tokenizer);
+        let precomputed2 = Self::precompute2();
 
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -319,8 +319,7 @@ impl GrammarConstraint {
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
-        internal_max_llm_token: usize,                       
-        merge_threshold:  usize,
+        internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -349,28 +348,8 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
-        parser: &GLRParser,
-        tokenizer: &Regex,
     ) -> Precomputed2 {
-        let mut precomputed2 = BTreeMap::new();
-        for &tokenizer_state_id in tokenizer.iter_states() {
-            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
-                PrecomputedNodeContents::no_end(),
-            )));
-            let mut trie2_root_guard = trie2_root.lock().unwrap();
-
-            for &parser_state_id in parser.table.keys() {
-                let edge_key = (0, Some(parser_state_id));
-                let edge_mask = LLMTokenBV::max_ones();
-                
-                let dest_node = Arc::new(Mutex::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::no_end(),
-                )));
-                trie2_root_guard.force_insert_to_node(edge_key, edge_mask, &dest_node);
-            }
-            precomputed2.insert(tokenizer_state_id, trie2_root);
-        }
-        precomputed2
+        todo!()
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -571,9 +550,8 @@ impl<'r> Precomputer<'r> {
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-
-            for token_match in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token_match.id);
+            for token in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token.id);
                 let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
@@ -582,12 +560,7 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = Self::compute_possible_matches_for_vocab_node(
-                        self.tokenizer,
-                        child_vocab_arc, // Recurse with the child node
-                        TokenizerStateID(final_state_val),
-                        &mut self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default(), // Pass a mutable reference to the inner map
-                    );
+                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
@@ -1758,7 +1731,8 @@ impl<'a> GrammarConstraintState<'a> {
                     for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
                         let mut glr_s = glr_s.clone();
                         allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                        crate::debug!(4, "Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
+                        crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
+                        glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
                         crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
                         // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
@@ -2068,76 +2042,7 @@ impl<'a> GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
-        let final_mask_internal = RefCell::new(HybridBitset::zeros());
-
-        if self.state.is_empty() {
-            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        }
-
-        let mut initial_values = Vec::new();
-        for (tokenizer_state_id, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
-            }
-            if let Some(trie2_root) = self.parent.precomputed2.get(tokenizer_state_id) {
-                initial_values.push((trie2_root.clone(), glr_state.active_state.stack.clone()));
-            }
-        }
-
-        if initial_values.is_empty() {
-            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        }
-
-        Trie::special_map_grouped(
-            initial_values,
-            // step
-            |gss_node, edge_key, dest_map| {
-                let (pop_k, read_state_opt) = edge_key;
-                let mut gathered_gss_nodes = Vec::new();
-                
-                let popper = gss_node.as_ref().popn(*pop_k);
-                for item in popper.iter() {
-                    for peek in item.peek_iter() {
-                        if read_state_opt.is_none() || Some(peek.edge_value().state_id) == *read_state_opt {
-                            gathered_gss_nodes.push(peek.isolated_parent());
-                        }
-                    }
-                }
-
-                if gathered_gss_nodes.is_empty() {
-                    return Vec::new();
-                }
-
-                let mut merged_gss_arc = gathered_gss_nodes.pop().unwrap();
-                for node_arc in gathered_gss_nodes {
-                    Arc::make_mut(&mut merged_gss_arc).merge_with_depth(1, &node_arc);
-                }
-
-                let mut outputs = Vec::new();
-                for (dest_node_wrapper, llm_bv) in dest_map.iter() {
-                    let mut new_gss_node_arc = merged_gss_arc.clone();
-                    let mut memo = HashMap::new();
-                    allow_only_llm_tokens_and_prune_arc(&mut new_gss_node_arc, llm_bv, &mut memo);
-                    if !new_gss_node_arc.is_empty() && new_gss_node_arc.is_alive() {
-                        outputs.push((dest_node_wrapper.clone(), new_gss_node_arc));
-                    }
-                }
-                outputs
-            },
-            // merge
-            |gss1, gss2| {
-                Arc::make_mut(gss1).merge_with_depth(1, &gss2);
-            },
-            // process
-            |trie2_node, gss_node_arc| {
-                if trie2_node.value.end {
-                    *final_mask_internal.borrow_mut() |= &gss_node_arc.allowed_llm_tokens();
-                }
-                !gss_node_arc.is_empty() && gss_node_arc.is_alive()
-            }
-        );
-
-        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
+        todo!()
     }
 }
 
