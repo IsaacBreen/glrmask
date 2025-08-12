@@ -358,69 +358,59 @@ impl GrammarConstraint {
     }
 
     /// Build the "Trie 2" precomputation.
-    ///
-    /// For every tokenizer state, we create a root node in Trie2. If a parser is provided,
-    /// we also seed that root with one edge for every parser state:
-    ///   (0, Some(state_id)) --[ALL LLM TOKENS]--> new node
-    ///
-    /// These seed edges allow get_mask2 to immediately perform a “pop 0; read top-of-stack state”
-    /// match against the current GSS without any parser stepping. Additional, more precise
-    /// edges are learned dynamically during parsing in reduce_and_goto() when reductions pop
-    /// below the bottom (already implemented there).
     pub fn precompute2(
-        _precomputed: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+        precomputed: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
-        _llm_vocab:        Option<Arc<LLMVocab>>,
-        _internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        _token_name_map:   &BiBTreeMap<Terminal, usize>,
-        _internal_max_llm_token: usize,
-        _terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-        _ignore_terminal_id: Option<TerminalID>,
-        _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+        llm_vocab:        Option<Arc<LLMVocab>>,
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        token_name_map:   &BiBTreeMap<Terminal, usize>,
+        internal_max_llm_token: usize,
+        terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        ignore_terminal_id: Option<TerminalID>,
+        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
-        let mut precomputed2: Precomputed2 = BTreeMap::new();
+        let mut precomputed2 = BTreeMap::new();
 
-        // Create a Trie2 root for every tokenizer state.
-        // We iterate over tokenizer states to match the coverage used in precompute().
-        for sid in tokenizer.iter_states() {
-            let root_arc: Arc<Mutex<PrecomputeNode2>> =
-                Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-            precomputed2.insert(sid, root_arc);
-        }
+        // TODO: compute initial nodes and values
+        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
 
-        // If a parser is available, seed each root with (0, Some(state_id)) edges carrying an
-        // “all tokens” mask. This enables get_mask2 to match the current top-of-stack state
-        // without requiring any prior dynamic updates.
-        if let Some(parser_ref) = parser {
-            // Collect all parser states once.
-            let all_parser_states: Vec<StateID> = parser_ref.table.keys().cloned().collect();
-            let all_tokens_mask = HybridBitset::max_ones();
-
-            for (_tok_state, root_arc) in precomputed2.iter() {
-                // For each parser state, create or merge an edge:
-                //   root -- (0, Some(state_id)) / [all_tokens_mask] --> dst_node
-                // We create a fresh destination node per parser state under this root.
-                for state_id in &all_parser_states {
-                    let dst_arc: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(
-                        PrecomputeNode2::new(PrecomputedNodeContents::no_end()),
-                    ));
-
-                    // Insert edge; merge closure unions bitsets on repeated insertions.
-                    let inserter = EdgeInserter::new(
-                        root_arc.clone(),
-                        (0usize, Some(*state_id)),
-                        all_tokens_mask.clone(),
-                        |existing, new_val| {
-                            *existing |= new_val;
-                        },
-                    );
-                    // Try to attach to our new destination; if an equivalent edge exists already,
-                    // EdgeInserter will merge the bitvector instead.
-                    let _ = inserter.try_destination(dst_arc).into_option();
+        Trie::special_map_grouped(
+            initial_values_for_map,
+            // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
+            |current_glr_state, edge_grammar_token_opt, destinations_map| {
+                let mut glr_s = current_glr_state.clone();
+                if let Some(gt) = edge_grammar_token_opt {
+                    glr_s.process_token(*gt);
                 }
-            }
-        }
+
+                let mut out = Vec::new();
+                for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                    let mut glr_s_copy = glr_s.clone();
+                    // Restrict the GLR state to the LLM tokens allowed on this edge.
+                    allow_only_llm_tokens_and_prune_arc(
+                        &mut glr_s_copy.active_state.stack,
+                        edge_bv,
+                        &mut HashMap::new(),
+                    );
+                    out.push((
+                        dst_node_wrapper.clone(),
+                        glr_s_copy,
+                    ));
+                }
+
+                out
+            },
+            |glr_s1, glr_s2| {
+                glr_s1.merge_with(glr_s2);
+            },
+            // process_fn
+            |precomputed_node_data, glr_s| {
+                let active_llm_tokens = glr_s.active_state.stack.acc.union_llm_tokens();
+                let keep_going = !active_llm_tokens.is_empty();
+                keep_going
+            },
+        );
 
         precomputed2
     }
