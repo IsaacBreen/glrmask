@@ -375,6 +375,8 @@ impl GrammarConstraint {
         // TODO: compute initial nodes and values
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
 
+        todo!("Compute initial values for map in precompute2");
+
         Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
