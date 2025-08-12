@@ -1,103 +1,10 @@
 local_system:
   attached_files:
-    - src/datastructures/arc_wrapper.rs
     - src/datastructures/trie.rs
+    - src/datastructures/arc_wrapper.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/datastructures/arc_wrapper.rs: |-
-      use std::sync::Arc;
-      use std::ops::Deref;
-      use std::fmt;
-      use std::hash::{Hash, Hasher};
-      use std::cmp::Ordering;
-      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-
-      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
-      /// and `Hash` based on the pointer value of the `Arc`.
-      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
-      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
-      /// It also dereferences to the underlying `Arc<T>`.
-      pub struct ArcPtrWrapper<T>(Arc<T>);
-
-      // ArcPtrWrapper serialization:
-      // Serializing based on pointer identity is not meaningful for JSON.
-      // We will serialize the *content* of the Arc.
-      // Deserialization will create a new Arc, so pointer identity will not be preserved.
-      // This is a fundamental limitation when serializing pointer-based identity wrappers.
-      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
-          fn to_json(&self) -> JSONNode {
-              self.0.as_ref().to_json() // Serialize the content
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
-          }
-      }
-
-
-      impl<T> ArcPtrWrapper<T> {
-          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
-          pub fn new(arc: Arc<T>) -> Self {
-              ArcPtrWrapper(arc)
-          }
-
-          /// Returns a reference to the inner `Arc<T>`.
-          pub fn as_arc(&self) -> &Arc<T> {
-              &self.0
-          }
-
-          /// Consumes the wrapper and returns the inner `Arc<T>`.
-          pub fn into_arc(self) -> Arc<T> {
-              self.0
-          }
-      }
-
-      impl<T> Clone for ArcPtrWrapper<T> {
-          fn clone(&self) -> Self {
-              ArcPtrWrapper(self.0.clone())
-          }
-      }
-
-      impl<T> Deref for ArcPtrWrapper<T> {
-          type Target = Arc<T>;
-          fn deref(&self) -> &Self::Target {
-              &self.0
-          }
-      }
-
-      impl<T> PartialEq for ArcPtrWrapper<T> {
-          fn eq(&self, other: &Self) -> bool {
-              Arc::ptr_eq(&self.0, &other.0)
-          }
-      }
-
-      impl<T> Eq for ArcPtrWrapper<T> {}
-
-      impl<T> Hash for ArcPtrWrapper<T> {
-          fn hash<H: Hasher>(&self, state: &mut H) {
-              (Arc::as_ptr(&self.0) as usize).hash(state);
-          }
-      }
-
-      impl<T> fmt::Debug for ArcPtrWrapper<T> {
-          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-              f.debug_tuple("ArcPtrWrapper")
-               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
-               .finish()
-          }
-      }
-
-      impl <T> PartialOrd for ArcPtrWrapper<T> {
-          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-              Some(self.cmp(other))
-          }
-      }
-
-      impl<T> Ord for ArcPtrWrapper<T> {
-          fn cmp(&self, other: &Self) -> Ordering {
-              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
-          }
-      }
     src/datastructures/trie.rs: |
       // #![deny(clippy::iter_over_hash_type)]
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -2866,102 +2773,158 @@ local_system:
               let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
               assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
               assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
+          }
+      }
+    src/datastructures/arc_wrapper.rs: |-
+      use std::sync::{Arc, Weak};
+      use std::ops::Deref;
+      use std::fmt;
+      use std::hash::{Hash, Hasher};
+      use std::cmp::Ordering;
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+
+      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Arc`.
+      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
+      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
+      /// It also dereferences to the underlying `Arc<T>`.
+      #[derive(Clone)]
+      pub struct ArcPtrWrapper<T>(Arc<T>);
+
+      // ArcPtrWrapper serialization:
+      // Serializing based on pointer identity is not meaningful for JSON.
+      // We will serialize the *content* of the Arc.
+      // Deserialization will create a new Arc, so pointer identity will not be preserved.
+      // This is a fundamental limitation when serializing pointer-based identity wrappers.
+      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+          fn to_json(&self) -> JSONNode {
+              self.0.as_ref().to_json() // Serialize the content
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+          }
+      }
+
+      /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Weak`.
+      /// This allows `Weak<T>` instances to be used as map/set keys where identity is
+      /// determined by the allocation pointer, not its content.
+      ///
+      /// Note:
+      /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
+      ///   to skip dangling weak references.
+      #[derive(Clone)]
+      pub struct WeakPtrWrapper<T>(Weak<T>);
+
+      impl<T> WeakPtrWrapper<T> {
+          /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
+          pub fn new(weak: Weak<T>) -> Self {
+              WeakPtrWrapper(weak)
+          }
+
+          /// Returns a reference to the inner `Weak<T>`.
+          pub fn as_weak(&self) -> &Weak<T> {
+              &self.0
+          }
+
+          /// Attempts to upgrade the weak reference to an `Arc<T>`.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              self.0.upgrade()
+          }
+
+          /// Consumes the wrapper and returns the inner `Weak<T>`.
+          pub fn into_weak(self) -> Weak<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for WeakPtrWrapper<T> {
+          type Target = Weak<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for WeakPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+          }
+      }
+
+      impl<T> Eq for WeakPtrWrapper<T> {}
+
+      impl<T> Hash for WeakPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Weak::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for WeakPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("WeakPtrWrapper")
+               .field(&(Weak::as_ptr(&self.0) as *const ()))
+               .finish()
+          }
+      }
+
+      impl<T> ArcPtrWrapper<T> {
+          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
+          pub fn new(arc: Arc<T>) -> Self {
+              ArcPtrWrapper(arc)
+          }
+
+          /// Returns a reference to the inner `Arc<T>`.
+          pub fn as_arc(&self) -> &Arc<T> {
+              &self.0
+          }
+
+          /// Consumes the wrapper and returns the inner `Arc<T>`.
+          pub fn into_arc(self) -> Arc<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for ArcPtrWrapper<T> {
+          type Target = Arc<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for ArcPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.0, &other.0)
+          }
+      }
+
+      impl<T> Eq for ArcPtrWrapper<T> {}
+
+      impl<T> Hash for ArcPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Arc::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for ArcPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("ArcPtrWrapper")
+               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
+               .finish()
+          }
+      }
+
+      impl <T> PartialOrd for ArcPtrWrapper<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for ArcPtrWrapper<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
           }
       }
   prev_file_contents:
-    src/datastructures/arc_wrapper.rs: |-
-      use std::sync::Arc;
-      use std::ops::Deref;
-      use std::fmt;
-      use std::hash::{Hash, Hasher};
-      use std::cmp::Ordering;
-      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-
-      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
-      /// and `Hash` based on the pointer value of the `Arc`.
-      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
-      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
-      /// It also dereferences to the underlying `Arc<T>`.
-      pub struct ArcPtrWrapper<T>(Arc<T>);
-
-      // ArcPtrWrapper serialization:
-      // Serializing based on pointer identity is not meaningful for JSON.
-      // We will serialize the *content* of the Arc.
-      // Deserialization will create a new Arc, so pointer identity will not be preserved.
-      // This is a fundamental limitation when serializing pointer-based identity wrappers.
-      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
-          fn to_json(&self) -> JSONNode {
-              self.0.as_ref().to_json() // Serialize the content
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
-          }
-      }
-
-
-      impl<T> ArcPtrWrapper<T> {
-          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
-          pub fn new(arc: Arc<T>) -> Self {
-              ArcPtrWrapper(arc)
-          }
-
-          /// Returns a reference to the inner `Arc<T>`.
-          pub fn as_arc(&self) -> &Arc<T> {
-              &self.0
-          }
-
-          /// Consumes the wrapper and returns the inner `Arc<T>`.
-          pub fn into_arc(self) -> Arc<T> {
-              self.0
-          }
-      }
-
-      impl<T> Clone for ArcPtrWrapper<T> {
-          fn clone(&self) -> Self {
-              ArcPtrWrapper(self.0.clone())
-          }
-      }
-
-      impl<T> Deref for ArcPtrWrapper<T> {
-          type Target = Arc<T>;
-          fn deref(&self) -> &Self::Target {
-              &self.0
-          }
-      }
-
-      impl<T> PartialEq for ArcPtrWrapper<T> {
-          fn eq(&self, other: &Self) -> bool {
-              Arc::ptr_eq(&self.0, &other.0)
-          }
-      }
-
-      impl<T> Eq for ArcPtrWrapper<T> {}
-
-      impl<T> Hash for ArcPtrWrapper<T> {
-          fn hash<H: Hasher>(&self, state: &mut H) {
-              (Arc::as_ptr(&self.0) as usize).hash(state);
-          }
-      }
-
-      impl<T> fmt::Debug for ArcPtrWrapper<T> {
-          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-              f.debug_tuple("ArcPtrWrapper")
-               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
-               .finish()
-          }
-      }
-
-      impl <T> PartialOrd for ArcPtrWrapper<T> {
-          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-              Some(self.cmp(other))
-          }
-      }
-
-      impl<T> Ord for ArcPtrWrapper<T> {
-          fn cmp(&self, other: &Self) -> Ordering {
-              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
-          }
-      }
     src/datastructures/trie.rs: |
       // #![deny(clippy::iter_over_hash_type)]
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -5730,6 +5693,155 @@ local_system:
               let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
               assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
               assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
+          }
+      }
+    src/datastructures/arc_wrapper.rs: |-
+      use std::sync::{Arc, Weak};
+      use std::ops::Deref;
+      use std::fmt;
+      use std::hash::{Hash, Hasher};
+      use std::cmp::Ordering;
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+
+      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Arc`.
+      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
+      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
+      /// It also dereferences to the underlying `Arc<T>`.
+      #[derive(Clone)]
+      pub struct ArcPtrWrapper<T>(Arc<T>);
+
+      // ArcPtrWrapper serialization:
+      // Serializing based on pointer identity is not meaningful for JSON.
+      // We will serialize the *content* of the Arc.
+      // Deserialization will create a new Arc, so pointer identity will not be preserved.
+      // This is a fundamental limitation when serializing pointer-based identity wrappers.
+      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+          fn to_json(&self) -> JSONNode {
+              self.0.as_ref().to_json() // Serialize the content
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+          }
+      }
+
+      /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Weak`.
+      /// This allows `Weak<T>` instances to be used as map/set keys where identity is
+      /// determined by the allocation pointer, not its content.
+      ///
+      /// Note:
+      /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
+      ///   to skip dangling weak references.
+      #[derive(Clone)]
+      pub struct WeakPtrWrapper<T>(Weak<T>);
+
+      impl<T> WeakPtrWrapper<T> {
+          /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
+          pub fn new(weak: Weak<T>) -> Self {
+              WeakPtrWrapper(weak)
+          }
+
+          /// Returns a reference to the inner `Weak<T>`.
+          pub fn as_weak(&self) -> &Weak<T> {
+              &self.0
+          }
+
+          /// Attempts to upgrade the weak reference to an `Arc<T>`.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              self.0.upgrade()
+          }
+
+          /// Consumes the wrapper and returns the inner `Weak<T>`.
+          pub fn into_weak(self) -> Weak<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for WeakPtrWrapper<T> {
+          type Target = Weak<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for WeakPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+          }
+      }
+
+      impl<T> Eq for WeakPtrWrapper<T> {}
+
+      impl<T> Hash for WeakPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Weak::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for WeakPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("WeakPtrWrapper")
+               .field(&(Weak::as_ptr(&self.0) as *const ()))
+               .finish()
+          }
+      }
+
+      impl<T> ArcPtrWrapper<T> {
+          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
+          pub fn new(arc: Arc<T>) -> Self {
+              ArcPtrWrapper(arc)
+          }
+
+          /// Returns a reference to the inner `Arc<T>`.
+          pub fn as_arc(&self) -> &Arc<T> {
+              &self.0
+          }
+
+          /// Consumes the wrapper and returns the inner `Arc<T>`.
+          pub fn into_arc(self) -> Arc<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for ArcPtrWrapper<T> {
+          type Target = Arc<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for ArcPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.0, &other.0)
+          }
+      }
+
+      impl<T> Eq for ArcPtrWrapper<T> {}
+
+      impl<T> Hash for ArcPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Arc::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for ArcPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("ArcPtrWrapper")
+               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
+               .finish()
+          }
+      }
+
+      impl <T> PartialOrd for ArcPtrWrapper<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for ArcPtrWrapper<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
           }
       }
   diffs_applied_this_send: true
@@ -5756,103 +5868,6 @@ system:
   temperature: 0.0
   apply_mode: git-llm
 messages:
-  - user: |-
-      ```rust 'src/datastructures/arc_wrapper.rs'
-      use std::sync::Arc;
-      use std::ops::Deref;
-      use std::fmt;
-      use std::hash::{Hash, Hasher};
-      use std::cmp::Ordering;
-      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-
-      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
-      /// and `Hash` based on the pointer value of the `Arc`.
-      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
-      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
-      /// It also dereferences to the underlying `Arc<T>`.
-      pub struct ArcPtrWrapper<T>(Arc<T>);
-
-      // ArcPtrWrapper serialization:
-      // Serializing based on pointer identity is not meaningful for JSON.
-      // We will serialize the *content* of the Arc.
-      // Deserialization will create a new Arc, so pointer identity will not be preserved.
-      // This is a fundamental limitation when serializing pointer-based identity wrappers.
-      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
-          fn to_json(&self) -> JSONNode {
-              self.0.as_ref().to_json() // Serialize the content
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
-          }
-      }
-
-
-      impl<T> ArcPtrWrapper<T> {
-          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
-          pub fn new(arc: Arc<T>) -> Self {
-              ArcPtrWrapper(arc)
-          }
-
-          /// Returns a reference to the inner `Arc<T>`.
-          pub fn as_arc(&self) -> &Arc<T> {
-              &self.0
-          }
-
-          /// Consumes the wrapper and returns the inner `Arc<T>`.
-          pub fn into_arc(self) -> Arc<T> {
-              self.0
-          }
-      }
-
-      impl<T> Clone for ArcPtrWrapper<T> {
-          fn clone(&self) -> Self {
-              ArcPtrWrapper(self.0.clone())
-          }
-      }
-
-      impl<T> Deref for ArcPtrWrapper<T> {
-          type Target = Arc<T>;
-          fn deref(&self) -> &Self::Target {
-              &self.0
-          }
-      }
-
-      impl<T> PartialEq for ArcPtrWrapper<T> {
-          fn eq(&self, other: &Self) -> bool {
-              Arc::ptr_eq(&self.0, &other.0)
-          }
-      }
-
-      impl<T> Eq for ArcPtrWrapper<T> {}
-
-      impl<T> Hash for ArcPtrWrapper<T> {
-          fn hash<H: Hasher>(&self, state: &mut H) {
-              (Arc::as_ptr(&self.0) as usize).hash(state);
-          }
-      }
-
-      impl<T> fmt::Debug for ArcPtrWrapper<T> {
-          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-              f.debug_tuple("ArcPtrWrapper")
-               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
-               .finish()
-          }
-      }
-
-      impl <T> PartialOrd for ArcPtrWrapper<T> {
-          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-              Some(self.cmp(other))
-          }
-      }
-
-      impl<T> Ord for ArcPtrWrapper<T> {
-          fn cmp(&self, other: &Self) -> Ordering {
-              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
-          }
-      }
-      ```
-    metadata:
-      filename: src/datastructures/arc_wrapper.rs
   - user: |-
       ```rust 'src/datastructures/trie.rs'
       // #![deny(clippy::iter_over_hash_type)]
@@ -8629,116 +8644,832 @@ messages:
     metadata:
       filename: src/datastructures/trie.rs
   - user: |-
-      Modify this code to support cycles. But require them to be inserted explicitly as weak edges, not normal edges. ie the user shouldn't be able to create a cycle by accident. AND they shouldn't be able to do the converse, try to create a cycle but end up not doing so, since losing all strong references can lead to unexpected deallocation of the whole part of the tree.
+      ```rust 'src/datastructures/arc_wrapper.rs'
+      use std::sync::{Arc, Weak};
+      use std::ops::Deref;
+      use std::fmt;
+      use std::hash::{Hash, Hasher};
+      use std::cmp::Ordering;
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 
+      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Arc`.
+      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
+      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
+      /// It also dereferences to the underlying `Arc<T>`.
+      #[derive(Clone)]
+      pub struct ArcPtrWrapper<T>(Arc<T>);
+
+      // ArcPtrWrapper serialization:
+      // Serializing based on pointer identity is not meaningful for JSON.
+      // We will serialize the *content* of the Arc.
+      // Deserialization will create a new Arc, so pointer identity will not be preserved.
+      // This is a fundamental limitation when serializing pointer-based identity wrappers.
+      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+          fn to_json(&self) -> JSONNode {
+              self.0.as_ref().to_json() // Serialize the content
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+          }
+      }
+
+      /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Weak`.
+      /// This allows `Weak<T>` instances to be used as map/set keys where identity is
+      /// determined by the allocation pointer, not its content.
+      ///
+      /// Note:
+      /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
+      ///   to skip dangling weak references.
+      #[derive(Clone)]
+      pub struct WeakPtrWrapper<T>(Weak<T>);
+
+      impl<T> WeakPtrWrapper<T> {
+          /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
+          pub fn new(weak: Weak<T>) -> Self {
+              WeakPtrWrapper(weak)
+          }
+
+          /// Returns a reference to the inner `Weak<T>`.
+          pub fn as_weak(&self) -> &Weak<T> {
+              &self.0
+          }
+
+          /// Attempts to upgrade the weak reference to an `Arc<T>`.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              self.0.upgrade()
+          }
+
+          /// Consumes the wrapper and returns the inner `Weak<T>`.
+          pub fn into_weak(self) -> Weak<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for WeakPtrWrapper<T> {
+          type Target = Weak<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for WeakPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+          }
+      }
+
+      impl<T> Eq for WeakPtrWrapper<T> {}
+
+      impl<T> Hash for WeakPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Weak::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for WeakPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("WeakPtrWrapper")
+               .field(&(Weak::as_ptr(&self.0) as *const ()))
+               .finish()
+          }
+      }
+
+      impl<T> ArcPtrWrapper<T> {
+          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
+          pub fn new(arc: Arc<T>) -> Self {
+              ArcPtrWrapper(arc)
+          }
+
+          /// Returns a reference to the inner `Arc<T>`.
+          pub fn as_arc(&self) -> &Arc<T> {
+              &self.0
+          }
+
+          /// Consumes the wrapper and returns the inner `Arc<T>`.
+          pub fn into_arc(self) -> Arc<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for ArcPtrWrapper<T> {
+          type Target = Arc<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for ArcPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.0, &other.0)
+          }
+      }
+
+      impl<T> Eq for ArcPtrWrapper<T> {}
+
+      impl<T> Hash for ArcPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Arc::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for ArcPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("ArcPtrWrapper")
+               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
+               .finish()
+          }
+      }
+
+      impl <T> PartialOrd for ArcPtrWrapper<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for ArcPtrWrapper<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
+          }
+      }
+      ```
+    metadata:
+      filename: src/datastructures/arc_wrapper.rs
+  - user: |-
+      Modify this code to support cycles. But require them to be inserted explicitly as weak edges, not normal edges. ie the user shouldn't be able to create a cycle by accident. AND they shouldn't be able to do the converse, try to create a cycle but end up not doing so, since losing all strong references can lead to unexpected deallocation of the whole part of the tree.
       But ALSO make it possible to try inserting an edge not knowing whether it'll create a cycle, and if there is a cycle then it becomes a weak edge, and otherwise a strong one.
+      Implement this in trie.rs
     metadata:
   - assistant: |-
       ```diff
-      diff --git a/src/datastructures/arc_wrapper.rs b/src/datastructures/arc_wrapper.rs
-      index 69b6a7b..16c8b78 100644
-      --- a/src/datastructures/arc_wrapper.rs
-      +++ b/src/datastructures/arc_wrapper.rs
-      @@ -1,6 +1,7 @@
-      -use std::sync::Arc;
-      +use std::sync::{Arc, Weak};
-       use std::ops::Deref;
-       use std::fmt;
-       use std::hash::{Hash, Hasher};
-       use std::cmp::Ordering;
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      index b5a0d7b..b2d1a15 100644
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -1,38 +1,41 @@
+       // #![deny(clippy::iter_over_hash_type)]
+       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+       use std::error::Error;
+       use std::fmt::{self, Debug};
+       // Import TryLockError explicitly for matching
+       use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
+       use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
+       use std::cmp::Reverse;          // min-heap helper
+       use std::collections::BinaryHeap;
+       use std::hash::{DefaultHasher, Hash, Hasher};
+       use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
+       use ordered_hash_map::OrderedHashMap;
+       
+       
+       use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
+      -use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
+      +use crate::datastructures::{ArcPtrWrapper, WeakPtrWrapper}; // Import ArcPtrWrapper and WeakPtrWrapper
        use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-      @@ -11,6 +12,7 @@
-       /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
-       /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
-       /// It also dereferences to the underlying `Arc<T>`.
-      +#[derive(Clone)]
-       pub struct ArcPtrWrapper<T>(Arc<T>);
+       use deterministic_hash::DeterministicHasher;
+       use ordered_hash_map::OrderedHashSet;
+       use profiler_macro::time_it;
+       // Added for derive macro pattern
        
-       // ArcPtrWrapper serialization:
-      @@ -24,6 +26,60 @@
+       
+       /// Error type indicating that a cycle was detected during an operation
+       /// that updates graph structure or properties like max_depth.
+       #[derive(Debug, Clone, PartialEq, Eq)]
+       pub struct CycleDetectedError;
+       
+      +/// Result type indicating whether an inserted edge became Strong or Weak.
+      +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+      +pub enum InsertedEdgeKind { Strong, Weak }
+      +
+       impl fmt::Display for CycleDetectedError {
+           fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+               write!(f, "Cycle detected in Trie structure")
            }
        }
        
-      +/// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
-      +/// and `Hash` based on the pointer value of the `Weak`.
-      +/// This allows `Weak<T>` instances to be used as map/set keys where identity is
-      +/// determined by the allocation pointer, not its content.
-      +///
-      +/// Note:
-      +/// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
-      +///   to skip dangling weak references.
-      +#[derive(Clone)]
-      +pub struct WeakPtrWrapper<T>(Weak<T>);
-      +
-      +impl<T> WeakPtrWrapper<T> {
-      +    /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
-      +    pub fn new(weak: Weak<T>) -> Self {
-      +        WeakPtrWrapper(weak)
-      +    }
-      +
-      +    /// Returns a reference to the inner `Weak<T>`.
-      +    pub fn as_weak(&self) -> &Weak<T> {
-      +        &self.0
-      +    }
-      +
-      +    /// Attempts to upgrade the weak reference to an `Arc<T>`.
-      +    pub fn upgrade(&self) -> Option<Arc<T>> {
-      +        self.0.upgrade()
-      +    }
-      +
-      +    /// Consumes the wrapper and returns the inner `Weak<T>`.
-      +    pub fn into_weak(self) -> Weak<T> {
-      +        self.0
-      +    }
-      +}
-      +
-      +impl<T> Deref for WeakPtrWrapper<T> {
-      +    type Target = Weak<T>;
-      +    fn deref(&self) -> &Self::Target {
-      +        &self.0
-      +    }
-      +}
-      +
-      +impl<T> PartialEq for WeakPtrWrapper<T> {
-      +    fn eq(&self, other: &Self) -> bool {
-      +        Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
-      +    }
-      +}
-      +
-      +impl<T> Eq for WeakPtrWrapper<T> {}
-      +
-      +impl<T> Hash for WeakPtrWrapper<T> {
-      +    fn hash<H: Hasher>(&self, state: &mut H) {
-      +        (Weak::as_ptr(&self.0) as usize).hash(state);
-      +    }
-      +}
-      +
-      +impl<T> fmt::Debug for WeakPtrWrapper<T> {
-      +    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-      +        f.debug_tuple("WeakPtrWrapper")
-      +         .field(&(Weak::as_ptr(&self.0) as *const ()))
-      +         .finish()
-      +    }
-      +}
+       impl Error for CycleDetectedError {}
        
-       impl<T> ArcPtrWrapper<T> {
-           /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
-           pub fn new(arc: Arc<T>) -> Self {
-               ArcPtrWrapper(arc)
+       
+       /// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).
+       /// Multiple children can exist for the same edge key. Each edge instance has a value.
+      @@ -45,14 +48,18 @@
+       pub struct Trie<EK: Ord, EV, T> {
+           pub value: T,
+           /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
+           children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+      +    /// Weak edges: allow explicit cycles without keeping the target alive.
+      +    /// Edges here do NOT affect max_depth and are not considered for cycle detection.
+      +    weak_children: BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+           /// The “longest distance” from some source node (as computed during insertion).
+           /// This value is set (or updated) when an edge is inserted.
+           /// If A -> B, then A.max_depth < B.max_depth.
+           pub max_depth: usize,
+       }
+       
+       impl<EK, EV, T> JSONConvertible for Trie<EK, EV, T>
+       where
+           EK: Ord + Clone + JSONConvertible + Debug,
+           EV: Clone + JSONConvertible,
+           T: Clone + JSONConvertible,
+       {
+           fn to_json(&self) -> JSONNode {
+               let mut nodes_json_list: Vec<JSONNode> = Vec::new();
+      @@ -67,6 +74,8 @@
+               // Since `self` is not an Arc here, we handle it specially as the first node.
+               // Its children, which are Arcs, will be processed via the BFS queue.
+               let root_idx = 0;
+               nodes_json_list.push(JSONNode::Null); // Placeholder for root, will be filled after processing its children.
+       
+               let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
+      +        let mut root_weak_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]] for weak edges
+       
+               for (edge_key, destinations_map) in &self.children {
+                   let ek_json = edge_key.to_json();
+                   let mut dest_map_json_array = Vec::new();
+                   // #[allow(clippy::iter_over_hash_type)]
+      @@ -90,15 +99,41 @@
+                       dest_map_json_array.push(JSONNode::Array(vec![
+                           child_idx.to_json(), // Child index
+                           edge_val.to_json(),          // Edge value
+                       ]));
+                   }
+                   root_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
+               }
+       
+      +        // Serialize weak children (upgrade Weak to Arc; skip if upgrade fails)
+      +        for (edge_key, destinations_map) in &self.weak_children {
+      +            let ek_json = edge_key.to_json();
+      +            let mut dest_map_json_array = Vec::new();
+      +            for (weak_wrapper, edge_val) in destinations_map {
+      +                if let Some(child_arc) = weak_wrapper.upgrade() {
+      +                    let child_arc_ptr = Arc::as_ptr(&child_arc);
+      +                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+      +                        Some(idx) => *idx,
+      +                        None => {
+      +                            let new_idx = nodes_json_list.len();
+      +                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+      +                            bfs_q.push_back(child_arc.clone());
+      +                            nodes_json_list.push(JSONNode::Null);
+      +                            new_idx
+      +                        }
+      +                    };
+      +                    dest_map_json_array.push(JSONNode::Array(vec![
+      +                        child_idx.to_json(),
+      +                        edge_val.to_json(),
+      +                    ]));
+      +                } else {
+      +                    // dangling weak ref; skip
+      +                }
+      +            }
+      +            root_weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
+      +        }
+      +
+               // Fill in the root node's (self's) data
+               nodes_json_list[root_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
+                   ("value".to_string(), self.value.to_json()),
+                   ("max_depth".to_string(), self.max_depth.to_json()),
+      -            ("children".to_string(), JSONNode::Array(root_children_json_data)),
+      +            ("children".to_string(), JSONNode::Array(root_children_json_data)),
+      +            ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
+               ]));
+       
+       
+               // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
+               while let Some(current_arc) = bfs_q.pop_front() {
+                   let current_arc_ptr = Arc::as_ptr(&current_arc);
+      @@ -106,11 +141,14 @@
+                       .expect("Node in BFS queue must have an assigned index");
+       
+                   let node_guard = current_arc.lock().expect("Mutex poisoned during Trie serialization (BFS part)");
+                   let mut current_node_children_json_bfs = Vec::new();
+      +            let mut current_node_weak_children_json_bfs = Vec::new();
+       
+                   for (edge_key, destinations_map) in &node_guard.children {
+                       let ek_json = edge_key.to_json();
+                       let mut dest_map_json_array_bfs = Vec::new();
+                       // #[allow(clippy::iter_over_hash_type)]
+                       for (child_arc_ptr_wrapper, edge_val) in destinations_map {
+                           let child_arc = child_arc_ptr_wrapper.as_arc();
+                           let child_arc_ptr = Arc::as_ptr(child_arc);
+       
+      @@ -128,17 +166,53 @@
+                       }
+                       current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
+                   }
+       
+      +            // Serialize weak children (upgrade if possible; skip otherwise)
+      +            for (edge_key, destinations_map) in &node_guard.weak_children {
+      +                let ek_json = edge_key.to_json();
+      +                let mut dest_map_json_array_bfs = Vec::new();
+      +                for (weak_wrapper, edge_val) in destinations_map {
+      +                    if let Some(child_arc) = weak_wrapper.upgrade() {
+      +                        let child_arc_ptr = Arc::as_ptr(&child_arc);
+      +                        let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+      +                            Some(idx) => *idx,
+      +                            None => {
+      +                                let new_idx = nodes_json_list.len();
+      +                                arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+      +                                bfs_q.push_back(child_arc.clone());
+      +                                nodes_json_list.push(JSONNode::Null);
+      +                                new_idx
+      +                            }
+      +                        };
+      +                        dest_map_json_array_bfs.push(JSONNode::Array(vec![
+      +                            child_idx.to_json(),
+      +                            edge_val.to_json(),
+      +                        ]));
+      +                    } else {
+      +                        // dangling weak ref; skip
+      +                    }
+      +                }
+      +                current_node_weak_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
+      +            }
+      +
+                   // Fill in the data for the current node from the BFS queue
+                   nodes_json_list[current_node_json_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
+                       ("value".to_string(), node_guard.value.to_json()),
+                       ("max_depth".to_string(), node_guard.max_depth.to_json()),
+      -                ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
+      +                ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
+      +                ("weak_children".to_string(), JSONNode::Array(current_node_weak_children_json_bfs)),
+                   ]));
+               }
+       
+               JSONNode::Object(BTreeMap::from_iter(vec![
+                   ("nodes".to_string(), JSONNode::Array(nodes_json_list)),
+                   ("root_idx".to_string(), root_idx.to_json()),
+               ]))
            }
-      @@ -39,12 +95,6 @@ impl<T> ArcPtrWrapper<T> {
+       
+           fn from_json(node: JSONNode) -> Result<Self, String> {
+      @@ -161,7 +235,7 @@
+                                   let value = T::from_json(value_json.clone())?;
+                                   let max_depth = usize::from_json(max_depth_json.clone())?;
+       
+                                   let new_node_arc = Arc::new(Mutex::new(Trie {
+                                       value,
+      -                                children: BTreeMap::new(), // Children populated in Pass 2
+      +                                children: BTreeMap::new(), // Children populated in Pass 2
+      +                                weak_children: BTreeMap::new(),
+                                       max_depth,
+                                   }));
+                                   deserialized_arcs.insert(i, new_node_arc);
+                               }
+                               _ => return Err(format!("Node data at index {} is not an object", i)),
+      @@ -174,16 +248,17 @@
+                               JSONNode::Object(n_obj) => {
+                                   let current_node_arc = deserialized_arcs.get(&i)
+                                       .ok_or_else(|| format!("Failed to find node for index {} in Pass 2", i))?
+                                       .clone();
+                                   let mut current_node_guard = current_node_arc.lock().unwrap();
+       
+                                   let children_json_outer_array = n_obj.get("children")
+                                       .ok_or_else(|| format!("Node at index {} missing 'children' field in Pass 2", i))?;
+      +                            let weak_children_json_outer_array_opt = n_obj.get("weak_children");
+       
+                                   match children_json_outer_array {
+                                       JSONNode::Array(children_ek_map_array) => {
+                                           for ek_entry_json in children_ek_map_array {
+                                               match ek_entry_json {
+                                                   JSONNode::Array(ek_pair) if ek_pair.len() == 2 => {
+                                                       let ek_json = &ek_pair[0];
+                                                       let dest_map_json_array = &ek_pair[1];
+      @@ -216,6 +291,47 @@
+                                       }
+                                       _ => return Err(format!("'children' field for node {} is not an array of EK-entries", i)),
+                                   }
+      +
+      +                            // Link weak_children if present
+      +                            if let Some(weak_children_node) = weak_children_json_outer_array_opt {
+      +                                match weak_children_node {
+      +                                    JSONNode::Array(children_ek_map_array) => {
+      +                                        for ek_entry_json in children_ek_map_array {
+      +                                            match ek_entry_json {
+      +                                                JSONNode::Array(ek_pair) if ek_pair.len() == 2 => {
+      +                                                    let ek_json = &ek_pair[0];
+      +                                                    let dest_map_json_array = &ek_pair[1];
+      +
+      +                                                    let edge_key = EK::from_json(ek_json.clone())?;
+      +                                                    let mut destinations_for_this_ek: OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV> = OrderedHashMap::new();
+      +
+      +                                                    match dest_map_json_array {
+      +                                                        JSONNode::Array(dest_array_inner) => {
+      +                                                            for child_ev_pair_json in dest_array_inner {
+      +                                                                match child_ev_pair_json {
+      +                                                                    JSONNode::Array(child_ev_pair_inner) if child_ev_pair_inner.len() == 2 => {
+      +                                                                        let child_idx_json = &child_ev_pair_inner[0];
+      +                                                                        let ev_json = &child_ev_pair_inner[1];
+      +
+      +                                                                        let child_idx = usize::from_json(child_idx_json.clone())?;
+      +                                                                        let child_arc = deserialized_arcs.get(&child_idx)
+      +                                                                            .ok_or_else(|| format!("Child index {} not found for node {} in Pass 2 (weak)", child_idx, i))?
+      +                                                                            .clone();
+      +                                                                        let edge_value = EV::from_json(ev_json.clone())?;
+      +                                                                        let weak_wrapper = WeakPtrWrapper::new(Arc::downgrade(&child_arc));
+      +                                                                        destinations_for_this_ek.insert(weak_wrapper, edge_value);
+      +                                                                    }
+      +                                                                    _ => return Err(format!("Invalid weak child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
+      +                                                                }
+      +                                                            }
+      +                                                        }
+      +                                                        _ => return Err(format!("Weak children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
+      +                                                    }
+      +                                                    current_node_guard.weak_children.insert(edge_key, destinations_for_this_ek);
+      +                                                }
+      +                                                _ => return Err(format!("Invalid EK-weak_children_map_array pair format for node {}", i)),
+      +                                            }
+      +                                        }
+      +                                    }
+      +                                    _ => return Err(format!("'weak_children' field for node {} is not an array of EK-entries", i)),
+      +                                }
+      +                            }
+                               }
+                               _ => unreachable!("Node data should be an object, checked in Pass 1"),
+                           }
+                       }
+       
+      @@ -254,6 +370,7 @@
+           pub fn new(value: T) -> Self {
+               Trie {
+                   value,
+                   children: BTreeMap::new(),
+      +            weak_children: BTreeMap::new(),
+                   max_depth: 0,
+               }
+           }
+      @@ -265,11 +382,31 @@
+               let new_node_comparable = ArcPtrWrapper::new(new_node.clone());
+               self.children.entry(edge_key).or_default().insert(new_node_comparable, edge_value);
+               // Note: force_insert does NOT update max_depth or check for cycles. Use with caution.
+               new_node.clone()
+           }
+       
+           pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<Mutex<Trie<EK, EV, T>>>) {
+               let dst_comparable = ArcPtrWrapper::new(dst.clone());
+               self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
+           }
+      +
+      +    /// Insert a weak edge explicitly. This allows cycles by design.
+      +    /// Does NOT update max_depth and will not keep the destination alive.
+      +    pub fn insert_weak_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<Mutex<Trie<EK, EV, T>>>) {
+      +        let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
+      +        self.weak_children.entry(edge_key).or_default().insert(weak, edge_value);
+      +    }
+      +
+      +    /// Convenience: create a new node and insert a weak edge to it.
+      +    /// Note: a weak edge to a freshly created node is usually useless unless
+      +    /// another strong edge also points to it; otherwise it may be dropped.
+      +    pub fn insert_weak_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
+      +        let new_node = Arc::new(Mutex::new(Trie::new(value)));
+      +        {
+      +            let weak = WeakPtrWrapper::new(Arc::downgrade(&new_node));
+      +            self.weak_children.entry(edge_key).or_default().insert(weak, edge_value);
+      +        }
+      +        new_node
+      +    }
+       
+           // already_has_dst remains unchanged
+           pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+               let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
+               self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
+           }
+      @@ -282,6 +419,18 @@
+               let lookup_key = ArcPtrWrapper::new(dst.clone());
+               self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
+           }
+       
+      +    /// Weak variant: check if a weak edge already exists to dst.
+      +    pub fn already_has_weak_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+      +        let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
+      +        self.weak_children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&weak))
+      +    }
+      +
+      +    /// Weak variant: get weak edge EV (if the weak pointer matches).
+      +    pub fn get_weak_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
+      +        let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
+      +        self.weak_children.get(&edge_key).and_then(|dest_map| dest_map.get(&weak))
+      +    }
+      +
+           // get_edge_value_mut remains unchanged
+           pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&mut EV> {
+               let lookup_key = ArcPtrWrapper::new(dst.clone());
+               self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
+           }
+      @@ -329,6 +478,41 @@
+       
+               Ok(())
+           }
+       
+      +    /// Try to insert an edge; if it would create a strong cycle, insert it as a WEAK edge instead.
+      +    /// Returns whether it became Strong or Weak.
+      +    ///
+      +    /// Strong edge semantics (acyclic, affects depth) are preserved when possible.
+      +    /// Weak edge semantics (may create cycles, no depth propagation) are used otherwise.
+      +    pub fn try_insert_auto(
+      +        &mut self,
+      +        edge_key: EK,
+      +        edge_value: &mut Option<EV>,
+      +        child: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    ) -> InsertedEdgeKind {
+      +        // Detect whether adding a strong edge would create a cycle
+      +        let self_ptr = self as *const Trie<EK, EV, T>;
+      +        let would_cycle = Self::detect_cycle(self_ptr, &child);
+      +        if would_cycle {
+      +            // Degrade to weak edge; do NOT update depths
+      +            if let Some(ev) = edge_value.take() {
+      +                let weak = WeakPtrWrapper::new(Arc::downgrade(&child));
+      +                self.weak_children.entry(edge_key).or_default().insert(weak, ev);
+      +            }
+      +            return InsertedEdgeKind::Weak;
+      +        }
+      +
+      +        // Otherwise, perform strong try_insert (will not fail now)
+      +        let mut ev_opt = edge_value.take();
+      +        // try_insert will .take() from this Option again, so we pass &mut
+      +        let _ = self.try_insert(edge_key, &mut ev_opt, child)
+      +            .expect("Cycle re-appeared unexpectedly during try_insert_auto strong path");
+      +        // If try_insert consumed the value, that's fine; if not, ev_opt may still have it.
+      +        // Ensure caller's Option stays updated:
+      +        *edge_value = ev_opt;
+      +        InsertedEdgeKind::Strong
+      +    }
+      +
+           /// Returns `true` if `target_ptr` (pointer to the Trie data) is reachable from `start_arc`.
+           /// This function handles the case where `target_ptr` points to a node that is currently locked
+           /// by the calling thread (e.g., `self` in `try_insert`).
+           pub fn detect_cycle(
+               target_ptr: *const Trie<EK, EV, T>,
+      @@ -387,10 +571,22 @@
+               // Collect *all* child Arcs outside of the lock to avoid holding lock during recursion.
+               let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+                   let node_guard_val = node_arc.lock().expect("Mutex poisoned in _propagate_max_depth (getting children)"); // Renamed node_guard
+                   node_guard_val.children // Use node_guard_val
+                       .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
+                       .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
+                       .collect()
+               }; // node_guard_val lock is released here.
+      +        // NOTE: Weak edges do NOT participate in max_depth propagation.
+       
+               // For each child, compute the candidate depth.
+               let candidate_depth_val = current_depth.saturating_add(1); // Renamed candidate_depth
+               for child_arc in children_arcs {
+                   // Check if the child needs updating *before* recursing.
+                   let should_propagate;
+      @@ -441,6 +637,26 @@
+           {
+               self.children.get_mut(edge_key)
+           }
+       
+           // children remains unchanged
+           pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+               &self.children
+           }
+       
+           pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+               &mut self.children
+           }
+      +
+      +    /// Access weak children maps
+      +    pub fn weak_children(&self) -> &BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+      +        &self.weak_children
+      +    }
+      +
+      +    pub fn weak_children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+      +        &mut self.weak_children
+      +    }
+      +
+      +    /// Get weak children (for a specific key)
+      +    pub fn get_weak(
+      +        &self,
+      +        edge_key: &EK,
+      +    ) -> Option<&OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+      +        self.weak_children.get(edge_key)
+      +    }
+       
+           // is_leaf remains unchanged
+           pub fn is_leaf(&self) -> bool {
+               self.children.is_empty()
+           }
+      @@ -462,13 +678,25 @@
+               while let Some(node_arc) = queue.pop_front() {
+                   result.push(node_arc.clone()); // Add the node itself to the result
+       
+                   // Lock the node to get its children
+                   let node_guard = node_arc.lock().expect("Mutex poisoned during BFS"); // Renamed node to node_guard
+                   for children_map in node_guard.children.values() { // Use node_guard
+                       // #[allow(clippy::iter_over_hash_type)]
+                       for child_wrapper_arc in children_map.keys() { // Iterate over ArcPtrWrapper keys
+                           let child_arc = child_wrapper_arc.as_arc();
+                           let child_arc_ptr = Arc::as_ptr(child_arc);
+                           if visited_arcs.insert(child_arc_ptr) {
+                               queue.push_back(child_arc.clone());
+                           }
+                       }
+                   }
+      +            // Traverse weak children as well (upgrade; skip dangling)
+      +            for children_map in node_guard.weak_children.values() {
+      +                for weak_wrapper in children_map.keys() {
+      +                    if let Some(child_arc) = weak_wrapper.upgrade() {
+      +                        let child_ptr = Arc::as_ptr(&child_arc);
+      +                        if visited_arcs.insert(child_ptr) {
+      +                            queue.push_back(child_arc.clone());
+      +                        }
+      +                    }
+      +                }
+      +            }
+                   // node_guard lock is released here
+               }
+               result
+           }
+      @@ -632,6 +860,7 @@
+               if self.children.len() != other.children.len() {
+                   return false;
+               }
+      +        if self.weak_children.len() != other.weak_children.len() { return false; }
+               
+               // Initialize cache for recursive calls on child Arcs.
+               // This cache is passed down through all recursive calls originating from this top-level eq.
+      @@ -679,6 +908,51 @@
+                           // If all self_child_pairs found matches, other_child_pairs should be empty.
+                       }
+                   }
+               }
+      +
+      +        // 4. Compare weak children structure as well (using upgraded Arcs only).
+      +        for (self_ek, self_dest_map) in &self.weak_children {
+      +            match other.weak_children.get(self_ek) {
+      +                None => return false,
+      +                Some(other_dest_map) => {
+      +                    // Upgrade both sides and compare only successfully upgraded edges
+      +                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
+      +                        .iter()
+      +                        .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
+      +                        .collect();
+      +                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+      +                        .iter()
+      +                        .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
+      +                        .collect();
+      +
+      +                    if self_child_pairs.len() != other_child_pairs.len() {
+      +                        return false;
+      +                    }
+      +
+      +                    'self_weak_loop: for (s_arc, s_ev) in &self_child_pairs {
+      +                        let mut found_match = false;
+      +                        for i in 0..other_child_pairs.len() {
+      +                            if s_ev == &other_child_pairs[i].1 {
+      +                                let o_arc = other_child_pairs[i].0.clone();
+      +                                if Trie::compare_arcs_recursive(s_arc, &o_arc, &mut comparison_cache) {
+      +                                    other_child_pairs.remove(i);
+      +                                    found_match = true;
+      +                                    break;
+      +                                }
+      +                            }
+      +                        }
+      +                        if !found_match {
+      +                            return false;
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+               
+               // All checks passed.
+               true
+           }
+      @@ -708,6 +982,7 @@
+               node.max_depth.hash(state);
+       
+               // Hash children.
+               node.children.len().hash(state);
+               for (ek, dest_map) in &node.children {
+                   ek.hash(state);
+                   dest_map.len().hash(state);
+      @@ -725,6 +1000,31 @@
+                   for h in pair_hashes {
+                       h.hash(state);
+                   }
+               }
+      +
+      +        // Hash weak children (skip dangling weak refs).
+      +        node.weak_children.len().hash(state);
+      +        for (ek, dest_map) in &node.weak_children {
+      +            ek.hash(state);
+      +            let mut pair_hashes: Vec<u64> = Vec::new();
+      +            for (wpw, ev) in dest_map {
+      +                if let Some(child_arc) = wpw.upgrade() {
+      +                    // hash pair (ev, child)
+      +                    let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
+      +                    ev.hash(&mut pair_hasher);
+      +                    let child_guard = child_arc.lock().expect("Mutex poisoned during Hash (weak)");
+      +                    Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
+      +                    pair_hashes.push(pair_hasher.finish());
+      +                } else {
+      +                    // dangling weak edge ignored to keep consistency with eq which also ignores
+      +                }
+      +            }
+      +            // also mix in number of included pairs
+      +            pair_hashes.sort_unstable();
+      +            (pair_hashes.len()).hash(state);
+      +            for h in pair_hashes {
+      +                h.hash(state);
+      +            }
+      +        }
            }
        }
        
-      -impl<T> Clone for ArcPtrWrapper<T> {
-      -    fn clone(&self) -> Self {
-      -        ArcPtrWrapper(self.0.clone())
-      -    }
-      -}
-      -
-       impl<T> Deref for ArcPtrWrapper<T> {
-           type Target = Arc<T>;
-           fn deref(&self) -> &Self::Target {
+      @@ -760,6 +1060,40 @@
+           /// Returns `self` to allow chaining.
+           pub fn try_destination(mut self, destination: Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
+               if self.result.is_some() {
+                   return self; // Already found a destination
+               }
+       
+               let mut source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_destination"); // Renamed source to source_guard
+               let destination_wrapper = ArcPtrWrapper::new(destination.clone()); // Use ArcPtrWrapper
+       
+               // Check if edge already exists and try merging EV
+               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
+                   (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
+                   self.result = Some(destination);
+               } else {
+                   // Edge doesn't exist, try inserting. try_insert expects the value by move.
+                   match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
+                       Ok(()) => {
+                           self.result = Some(destination); // Insert successful, destination found
+                       }
+                       Err(CycleDetectedError) => {
+                           // Cycle detected, insert failed, result remains None
+                           crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
+                       }
+                   }
+               }
+               drop(source_guard); // Use source_guard
+               self
+           }
+      +
+      +    /// Like try_destination, but if a strong cycle would be created, insert a WEAK edge instead.
+      +    /// This guarantees the edge exists (weak if necessary) and avoids accidental cycles.
+      +    pub fn try_destination_auto(mut self, destination: Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
+      +        if self.result.is_some() {
+      +            return self;
+      +        }
+      +        let mut source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_destination_auto");
+      +        let destination_wrapper = ArcPtrWrapper::new(destination.clone());
+      +        if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
+      +            (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
+      +            self.result = Some(destination);
+      +        } else {
+      +            // Attempt strong; if cycle, degrade to weak
+      +            let kind = source_guard.try_insert_auto(self.edge_key.clone(), &mut self.edge_value, destination.clone());
+      +            match kind {
+      +                InsertedEdgeKind::Strong | InsertedEdgeKind::Weak => {
+      +                    self.result = Some(destination);
+      +                }
+      +            }
+      +        }
+      +        drop(source_guard);
+      +        self
+      +    }
+       
+           /// Tries to establish an edge to any destination in the provided slice.
+           ///
+           /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
+      @@ -858,6 +1192,22 @@
+               .try_destinations(destinations)
+               .into_option()
+       }
+       
+      +/// Attempts to establish an edge from `source` to a single `destination`.
+      +/// If a strong cycle would be created, it inserts a WEAK edge instead.
+      +pub fn try_destination_auto<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&mut EV, EV),
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value).try_destination_auto(destination).into_option()
+      +}
+       
+       // ─────────────────────────────────────────────────────────────────────────────
+       // TESTS
+       // ─────────────────────────────────────────────────────────────────────────────
+      @@ -978,6 +1328,7 @@
+               assert_eq!(all_nodes.len(), 2);
+               let node_ptrs: HashSet<_> = all_nodes.iter().map(arc_ptr).collect(); // Use arc_ptr
+               assert_eq!(node_ptrs.len(), 2);
+               assert!(node_ptrs.contains(&arc_ptr(&root)));
+               assert!(node_ptrs.contains(&arc_ptr(&child)));
+           }
+       
+            #[test]
       ```
     metadata:
   - user: |
@@ -8746,8 +9477,8 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/arc_wrapper.rs
-      Applying patch to 'src/datastructures/arc_wrapper.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/arc_wrapper.rs.
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
 ...
