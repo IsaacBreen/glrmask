@@ -370,10 +370,27 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
+        let mut precomputed2 = BTreeMap::new();
+
         // TODO: compute initial nodes and values
         let mut initial_nodes_and_values: Vec<_> = vec![];
 
-        todo!();
+        Trie::special_map_grouped(
+            initial_nodes_and_values,
+            // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
+            |current_glr_state, edge_grammar_token_opt, destinations_map| {
+                todo!()
+            },
+            |glr_s1, glr_s2| {
+                todo!()
+            },
+            // process_fn
+            |precomputed_node_data, glr_s| {
+                todo!()
+            },
+        );
+
+        precomputed2
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
