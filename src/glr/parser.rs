@@ -750,6 +750,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
             }
         }
+        self.below_bottom_cache.clear();
     }
 
     fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>) {
