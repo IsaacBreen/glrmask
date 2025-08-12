@@ -454,6 +454,11 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
     }
 
+    pub fn already_has_dst_for_any_key(&self, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
+        self.children.values().any(|dest_map| dest_map.contains_key(&lookup_key))
+    }
+
     // get_edge_value remains unchanged
     pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
@@ -478,6 +483,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
     }
 
+    #[time_it]
     pub fn try_insert(
         &mut self,
         edge_key: EK,
@@ -489,7 +495,8 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         //    A cycle exists iff `self` is reachable from `child`.
         // ------------------------------------------------------------------
         let self_ptr = self as *const Trie<EK, EV, T>;
-        if Self::detect_cycle(self_ptr, &child) {
+        if !self.already_has_dst_for_any_key(&child) &&
+            Self::detect_cycle(self_ptr, &child) {
             return Err(CycleDetectedError);
         }
 
@@ -551,6 +558,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     ///
     /// Strong edge semantics (acyclic, affects depth) are preserved when possible.
     /// Weak edge semantics (may create cycles, no depth propagation) are used otherwise.
+    #[time_it]
     pub fn try_insert_auto(
         &mut self,
         edge_key: EK,
@@ -559,7 +567,14 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     ) -> InsertedEdgeKind {
         // Detect whether adding a strong edge would create a cycle
         let self_ptr = self as *const Trie<EK, EV, T>;
-        let would_cycle = Self::detect_cycle(self_ptr, &child);
+        let mut would_cycle = false;
+        // If it already has an edge to this node, it can't create a cycle.
+        if self.already_has_dst_for_any_key(&child) {
+            would_cycle = false;
+        } else {
+            // Check if adding this edge would create a cycle
+            would_cycle = Self::detect_cycle(self_ptr, &child);
+        }
         if would_cycle {
             // Degrade to weak edge; do NOT update depths
             if let Some(ev) = edge_value.take() {
@@ -583,6 +598,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// Returns `true` if `target_ptr` (pointer to the Trie data) is reachable from `start_arc`.
     /// This function handles the case where `target_ptr` points to a node that is currently locked
     /// by the calling thread (e.g., `self` in `try_insert`).
+    #[time_it]
     pub fn detect_cycle(
         target_ptr: *const Trie<EK, EV, T>,
         start_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
@@ -1566,6 +1582,7 @@ where
 
     /// Like try_destination, but if a strong cycle would be created, insert a WEAK edge instead.
     /// This guarantees the edge exists (weak if necessary) and avoids accidental cycles.
+    #[time_it]
     pub fn try_destination_auto(mut self, destination: Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
         if self.result.is_some() {
             return self;
