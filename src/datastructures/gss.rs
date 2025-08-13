@@ -1132,8 +1132,8 @@ impl<'a> Ord for RootItem<'a> {
 }
 
 impl<'a> RootItem<'a> {
-    pub fn resolved_acc(&self) -> Acc {
-        Acc::narrow(&self.node.acc, &self.path_acc)
+    pub fn resolved_acc(&self) -> Arc<Acc> {
+        Arc::new(Acc::narrow(&self.path_acc, &self.node.acc))
     }
 }
 
