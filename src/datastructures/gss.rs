@@ -1045,14 +1045,13 @@ pub fn merge_trie2_nodes_if_needed(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc).clone();
         if new_acc.trie2_nodes.len() > merge_threshold {
-            let active_llm_tokens = new_acc.union_llm_tokens();
             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
             let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
             for existing_trie2_node in &new_acc.trie2_nodes {
                 let inserter = EdgeInserter::new(
                     existing_trie2_node.as_arc().clone(),
                     (0, None),
-                    active_llm_tokens.clone(),
+                    HybridBitset::max_ones(),
                     |e, n| *e |= n,
                 ).to_destination_weakly(new_trie2_node_arc.as_arc().clone());
                 inserter.expect("merge_trie2_nodes_if_needed: merge insert failed");
