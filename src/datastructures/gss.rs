@@ -1058,6 +1058,9 @@ pub fn merge_trie2_nodes_if_needed(
             }
             new_acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
         }
+        if new_acc == *node.acc {
+            new_acc = (*node.acc).clone();
+        }
         Some((new_acc, true))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
