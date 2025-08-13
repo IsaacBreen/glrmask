@@ -124,7 +124,7 @@ impl Acc {
             terminals_intersection: &from.terminals_union & &to.terminals_intersection,
             needs_push_down: false,
             // Keep trie2 nodes conservative: intersect sets to avoid leaking edges upward.
-            trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
+            trie2_nodes: to.trie2_nodes.clone(),
         }
         // Acc {
         //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
