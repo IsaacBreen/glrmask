@@ -439,7 +439,6 @@ impl GrammarConstraint {
                         glr_s_copy,
                     ));
                 }
-
                 out
             },
             |glr_s1, glr_s2| {
