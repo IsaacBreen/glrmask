@@ -232,7 +232,7 @@ impl GSSPopper {
             // Shift existing "below bottom" entries down by 1, since we're popping one more time.
             let mut new_below: BTreeMap<usize, Arc<Acc>> = BTreeMap::new();
             for (k, acc) in std::mem::take(&mut self.below_bottom) {
-                Self::merge_below_into(&mut new_below, k + 1, acc);
+                new_below.insert(k + 1, acc);
             }
 
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
