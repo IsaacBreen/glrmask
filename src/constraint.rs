@@ -314,6 +314,12 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
+        // Promote weak edges in the second precomputed trie, which may have been
+        // created by the GLR parser logic to break cycles.
+        let roots2: Vec<_> = precomputed2.values().cloned().collect();
+        let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+        crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
