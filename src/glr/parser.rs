@@ -884,6 +884,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     // Handle accept
                     if *accepted {
+                        crate::debug!(4, "Accepting with NT '{}' from source state {:?}. Pushing to {} trie 2 nodes", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), source_state_id, trie2_nodes.len());
                         for existing_trie2_node in &trie2_nodes {
                             let mut end_inserter = EdgeInserter::new(
                                 existing_trie2_node.as_arc().clone(),
