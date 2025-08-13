@@ -10,7 +10,6 @@ use std::collections::BinaryHeap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 use ordered_hash_map::OrderedHashMap;
-use rustc_hash::FxHashSet;
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
@@ -495,17 +494,10 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         // 1. Detect whether adding the edge would introduce a cycle.
         //    A cycle exists iff `self` is reachable from `child`.
         // ------------------------------------------------------------------
-        if !self.already_has_dst_for_any_key(&child) {
-            // Optimization: If child's depth is not greater than self's, a cycle is impossible,
-            // because depths must strictly increase along any strong path.
-            let child_depth = child.lock().expect("Mutex poisoned while getting child depth for cycle check").max_depth;
-            if child_depth > self.max_depth {
-                // Only run the expensive check if a cycle is possible based on depth.
-                let self_ptr = self as *const Trie<EK, EV, T>;
-                if Self::detect_cycle(self_ptr, self.max_depth, &child) {
-                    return Err(CycleDetectedError);
-                }
-            }
+        let self_ptr = self as *const Trie<EK, EV, T>;
+        if !self.already_has_dst_for_any_key(&child) &&
+            Self::detect_cycle(self_ptr, &child) {
+            return Err(CycleDetectedError);
         }
 
         self.try_insert_unchecked(edge_key, edge_value, child)
@@ -585,19 +577,15 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         child: Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> InsertedEdgeKind {
         // Detect whether adding a strong edge would create a cycle
-        let would_cycle = if self.already_has_dst_for_any_key(&child) {
-            false
+        let self_ptr = self as *const Trie<EK, EV, T>;
+        let would_cycle;
+        // If it already has an edge to this node, it can't create a cycle.
+        if self.already_has_dst_for_any_key(&child) {
+            would_cycle = false;
         } else {
-            // Optimization: If child's depth is not greater than self's, a cycle is impossible.
-            let child_depth = child.lock().expect("Mutex poisoned while getting child depth for cycle check").max_depth;
-            if child_depth > self.max_depth {
-                let self_ptr = self as *const Trie<EK, EV, T>;
-                Self::detect_cycle(self_ptr, self.max_depth, &child)
-            } else {
-                false
-            }
-        };
-
+            // Check if adding this edge would create a cycle
+            would_cycle = Self::detect_cycle(self_ptr, &child);
+        }
         if would_cycle {
             // Degrade to weak edge; do NOT update depths
             if let Some(ev) = edge_value.take() {
@@ -620,102 +608,70 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     }
 
     /// Returns `true` if `target_ptr` (pointer to the Trie data) is reachable from `start_arc`.
-    /// This is a depth-bounded BFS for performance. A cycle from a child to a parent is only
-    /// possible if child.max_depth > parent.max_depth. The search is pruned for any
-    /// nodes with depth <= parent.max_depth, which dramatically reduces the search space.
+    /// This function handles the case where `target_ptr` points to a node that is currently locked
+    /// by the calling thread (e.g., `self` in `try_insert`).
     #[time_it]
     pub fn detect_cycle(
         target_ptr: *const Trie<EK, EV, T>,
-        target_depth: usize,
         start_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> bool {
-        // Use a faster hasher for pointer hashing.
-        let mut visited_arcs: FxHashSet<*const Mutex<Trie<EK, EV, T>>> = FxHashSet::default();
-        // Queue stores (Arc to node, raw pointer to its data, its depth) to avoid re-locking.
-        let mut queue: VecDeque<(Arc<Mutex<Trie<EK, EV, T>>>, *const Trie<EK, EV, T>, usize)> = VecDeque::new();
+        // Use Arc::as_ptr to get stable pointers to the Mutex itself for visited tracking.
+        let mut visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
 
-        // --- Seed the queue with the starting node ---
         let start_arc_ptr = Arc::as_ptr(start_arc);
         if visited_arcs.insert(start_arc_ptr) {
-            // Lock once to get initial data pointer and depth
-            match start_arc.try_lock() {
-                Ok(start_guard) => {
-                    let start_data_ptr = &*start_guard as *const Trie<EK, EV, T>;
-                    let start_depth = start_guard.max_depth;
-                    // Optimization: if start_arc is already not deep enough, we can stop.
-                    if start_depth > target_depth {
-                        queue.push_back((start_arc.clone(), start_data_ptr, start_depth));
-                    }
-                }
-                Err(TryLockError::WouldBlock) => {
-                    // If we can't even lock the start node, it might be the target.
-                    // This is a heuristic for the case where the caller holds the lock on the target.
-                    return true;
-                }
-                Err(TryLockError::Poisoned(p)) => {
-                    panic!("Mutex poisoned during cycle detection setup: {:?}", p);
-                }
-            }
+            queue.push_back(start_arc.clone());
         }
 
-        while let Some((node_arc, node_data_ptr, node_depth)) = queue.pop_front() {
-            // Check 1: Have we reached the target? (No lock needed for this check)
-            if node_data_ptr == target_ptr {
-                return true;
-            }
+        while let Some(node_arc) = queue.pop_front() {
+            // Attempt to lock the node to get its data pointer and children.
+            let lock_result = node_arc.try_lock();
 
-            // Check 2: Depth pruning. (No lock needed for this check)
-            // If this node's depth is <= target's depth, its children cannot reach target.
-            if node_depth <= target_depth {
-                continue;
-            }
-
-            // --- Expand children ---
-            // Now we need to lock to get the children list.
-            match node_arc.try_lock() {
+            match lock_result {
                 Ok(node_guard) => {
+                    // Successfully locked the node.
+                    let current_data_ptr = &*node_guard as *const Trie<EK, EV, T>;
+
+                    // Check if this node's data pointer matches the target pointer.
+                    if current_data_ptr == target_ptr {
+                        // We reached the target node. Cycle detected.
+                        return true;
+                    }
+
+                    // Get children while holding the lock.
                     let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = node_guard.children
-                        .values()
+                        .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
                         .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                         .collect();
 
-                    drop(node_guard); // Release lock before processing children
+                    timeit!(format!("BFS: Node has {} children", children_arcs.len()), {});
 
-                    for child_arc in children_arcs {
-                        let child_arc_ptr = Arc::as_ptr(&child_arc);
+                    // Explicitly drop the guard before potentially long operations (queueing).
+                    drop(node_guard);
+
+                    // Enqueue unvisited children.
+                    for child_arc_val in children_arcs { // Renamed child_arc
+                        let child_arc_ptr = Arc::as_ptr(&child_arc_val); // Use child_arc_val
                         if visited_arcs.insert(child_arc_ptr) {
-                            // Lock child briefly to get its data for the queue
-                            match child_arc.try_lock() {
-                                Ok(child_guard) => {
-                                    let child_data_ptr = &*child_guard as *const Trie<EK, EV, T>;
-                                    let child_depth = child_guard.max_depth;
-                                    // Pre-prune before enqueueing
-                                    if child_depth > target_depth {
-                                        queue.push_back((child_arc.clone(), child_data_ptr, child_depth));
-                                    }
-                                }
-                                Err(TryLockError::WouldBlock) => {
-                                    // Heuristic: assume a blocked lock means we hit the target.
-                                    return true;
-                                }
-                                Err(TryLockError::Poisoned(p)) => {
-                                    panic!("Mutex poisoned during cycle detection child processing: {:?}", p);
-                                }
-                            }
+                            queue.push_back(child_arc_val); // Use child_arc_val
                         }
                     }
                 }
                 Err(TryLockError::WouldBlock) => {
-                    // This should not happen if we successfully locked it before to put it in the queue,
-                    // unless another thread is involved. Treat as a cycle for safety.
+                    // Failed to lock because it's held elsewhere (potentially by the thread calling try_insert).
+                    // Assume this means we've reached the target node in the context of try_insert.
+                    // If detect_cycle were used elsewhere, this assumption might need revisiting.
                     return true;
                 }
                 Err(TryLockError::Poisoned(p)) => {
+                    // A mutex was poisoned. Propagate the panic.
                     panic!("Mutex poisoned during cycle detection: {:?}", p);
                 }
             }
         }
 
+        // BFS completed without finding the target pointer. No cycle detected.
         false
     }
 
