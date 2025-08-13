@@ -1106,15 +1106,66 @@ pub fn fuse_predecessors_recursive(
 }
 
 // --- Analysis and Debugging ---
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq, Hash)]
 pub struct RootItem<'a> {
     pub node: &'a GSSNode,
     pub path_acc: Arc<Acc>,
 }
 
+impl<'a> PartialEq for RootItem<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node && self.path_acc == other.path_acc
+    }
+}
+
+impl<'a> PartialOrd for RootItem<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for RootItem<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.node.cmp(other.node)
+            .then_with(|| self.path_acc.cmp(&other.path_acc))
+    }
+}
+
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
-    todo!()
+    let mut queue: BTreeMap<MaxDepth, BTreeMap<*const GSSNode, Arc<Acc>>> = BTreeMap::new();
+    let mut found_roots = BTreeSet::new();
+
+    for node in nodes {
+        let node_ptr = node as *const GSSNode;
+        let depth = node.max_depth();
+        queue.entry(depth).or_default().entry(node_ptr).or_insert_with(|| Arc::new(Acc::new_fresh()));
+    }
+
+    while let Some((_depth, nodes_at_depth)) = queue.pop_last() {
+        for (node_ptr, path_acc) in nodes_at_depth {
+            let current_node = unsafe { &*node_ptr };
+
+            if current_node.is_root() {
+                let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+                found_roots.insert(RootItem { node: current_node, path_acc: final_acc });
+            } else {
+                let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+                for pred_arc in current_node.predecessors.values().flat_map(|m| m.values()).flatten() {
+                    let pred_ptr = pred_arc.as_ref() as *const GSSNode;
+                    let pred_depth = pred_arc.max_depth();
+                    queue
+                        .entry(pred_depth)
+                        .or_default()
+                        .entry(pred_ptr)
+                        .and_modify(|e| *e = Arc::new(Acc::merge(e, &new_path_acc_base)))
+                        .or_insert_with(|| new_path_acc_base.clone());
+                }
+            }
+        }
+    }
+
+    found_roots
 }
 
 impl GSSNode {
@@ -1838,33 +1889,49 @@ mod tests {
 
     #[test]
     fn test_get_roots() {
-        let leaf1 = Arc::new(GSSNode::new(empty_acc()));
-        let leaf2 = Arc::new(GSSNode::new(empty_acc()));
-        let b = leaf1.push(mock_edge(1));
-        let c = leaf2.push(mock_edge(2));
+        let acc1 = Arc::new(mock_acc(1));
+        let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
+        let acc2 = Arc::new(mock_acc(2));
+        let leaf2 = Arc::new(GSSNode::new((*acc2).clone()));
 
-        let mut root1 = b.push(mock_edge(10));
-        let root2 = c.push(mock_edge(20));
-        root1.merge_with_depth(1, &root2);
-        let root = root1;
+        let acc_b = Arc::new(mock_acc(3));
+        let b = Arc::new(GSSNode::new_with_single_predecessor(leaf1.clone(), mock_edge(1), (*acc_b).clone()));
 
-        // Test method on GSSNode
-        let roots_from_method = root.get_roots();
-        let mut expected_roots = BTreeSet::new();
-        expected_roots.insert(leaf1.clone());
-        expected_roots.insert(leaf2.clone());
-        assert_eq!(roots_from_method, expected_roots);
+        let acc_c = Arc::new(mock_acc(4));
+        let c = Arc::new(GSSNode::new_with_single_predecessor(leaf2.clone(), mock_edge(2), (*acc_c).clone()));
 
-        // Test standalone function
-        let roots_from_func = get_roots(vec![&root, &b]);
-        assert_eq!(roots_from_func, expected_roots);
+        let mut preds_map = NodeMap::new();
+        preds_map.entry(mock_edge(10)).or_default().insert(b.dest_key(), vec![b.clone()]);
+        preds_map.entry(mock_edge(20)).or_default().insert(c.dest_key(), vec![c.clone()]);
+        let acc_root = Arc::new(mock_acc(5));
+        let root = GSSNode::new_with_map(acc_root.clone(), preds_map);
 
-        // Test with roots as input
-        let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
-        assert_eq!(roots_from_leaves, expected_roots);
+        // Test from root
+        let roots = get_roots(std::iter::once(&root));
+        let mut expected = BTreeSet::new();
+        let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
+        expected.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc1 });
+        let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
+        expected.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2.clone() });
+        assert_eq!(roots, expected);
 
-        // Test with empty input
-        let no_roots: Vec<&GSSNode> = vec![];
-        assert!(get_roots(no_roots).is_empty());
+        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
+        // because its initial `fresh` acc has a wider union of possibilities.
+        let roots_multi = get_roots(vec![&root, b.as_ref()]);
+        let mut expected_multi = BTreeSet::new();
+        let path_acc_b_l1 = Arc::new(Acc::narrow(&acc_b, &acc1));
+        expected_multi.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc_b_l1 });
+        expected_multi.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2 });
+        assert_eq!(roots_multi, expected_multi);
+
+        // Test from leaves
+        let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+        let mut expected_leaves = BTreeSet::new();
+        expected_leaves.insert(RootItem { node: leaf1.as_ref(), path_acc: acc1.clone() });
+        expected_leaves.insert(RootItem { node: leaf2.as_ref(), path_acc: acc2.clone() });
+        assert_eq!(roots_leaves, expected_leaves);
+
+        // Test empty
+        assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
     }
 }

@@ -1113,6 +1113,16 @@ local_system:
       }
 
       // --- Analysis and Debugging ---
+      #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      pub struct RootItem<'a> {
+          pub node: &'a GSSNode,
+          pub path_acc: Arc<Acc>,
+      }
+
+      /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
+          todo!()
+      }
 
       impl GSSNode {
           pub fn reset_llm_tokens(&mut self) {
@@ -1120,6 +1130,10 @@ local_system:
               let mut memo = HashMap::new();
               reset_llm_tokens(&mut node_arc, &mut memo);
               *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+          }
+
+          pub fn get_roots(&self) -> BTreeSet<RootItem<'_>> {
+              get_roots(std::iter::once(self))
           }
       }
 
@@ -1827,6 +1841,38 @@ local_system:
                   stats
               );
               assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+          }
+
+          #[test]
+          fn test_get_roots() {
+              let leaf1 = Arc::new(GSSNode::new(empty_acc()));
+              let leaf2 = Arc::new(GSSNode::new(empty_acc()));
+              let b = leaf1.push(mock_edge(1));
+              let c = leaf2.push(mock_edge(2));
+
+              let mut root1 = b.push(mock_edge(10));
+              let root2 = c.push(mock_edge(20));
+              root1.merge_with_depth(1, &root2);
+              let root = root1;
+
+              // Test method on GSSNode
+              let roots_from_method = root.get_roots();
+              let mut expected_roots = BTreeSet::new();
+              expected_roots.insert(leaf1.clone());
+              expected_roots.insert(leaf2.clone());
+              assert_eq!(roots_from_method, expected_roots);
+
+              // Test standalone function
+              let roots_from_func = get_roots(vec![&root, &b]);
+              assert_eq!(roots_from_func, expected_roots);
+
+              // Test with roots as input
+              let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+              assert_eq!(roots_from_leaves, expected_roots);
+
+              // Test with empty input
+              let no_roots: Vec<&GSSNode> = vec![];
+              assert!(get_roots(no_roots).is_empty());
           }
       }
   prev_file_contents:
@@ -2939,6 +2985,16 @@ local_system:
       }
 
       // --- Analysis and Debugging ---
+      #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      pub struct RootItem<'a> {
+          pub node: &'a GSSNode,
+          pub path_acc: Arc<Acc>,
+      }
+
+      /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
+          todo!()
+      }
 
       impl GSSNode {
           pub fn reset_llm_tokens(&mut self) {
@@ -2946,6 +3002,10 @@ local_system:
               let mut memo = HashMap::new();
               reset_llm_tokens(&mut node_arc, &mut memo);
               *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+          }
+
+          pub fn get_roots(&self) -> BTreeSet<RootItem<'_>> {
+              get_roots(std::iter::once(self))
           }
       }
 
@@ -3653,6 +3713,38 @@ local_system:
                   stats
               );
               assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+          }
+
+          #[test]
+          fn test_get_roots() {
+              let leaf1 = Arc::new(GSSNode::new(empty_acc()));
+              let leaf2 = Arc::new(GSSNode::new(empty_acc()));
+              let b = leaf1.push(mock_edge(1));
+              let c = leaf2.push(mock_edge(2));
+
+              let mut root1 = b.push(mock_edge(10));
+              let root2 = c.push(mock_edge(20));
+              root1.merge_with_depth(1, &root2);
+              let root = root1;
+
+              // Test method on GSSNode
+              let roots_from_method = root.get_roots();
+              let mut expected_roots = BTreeSet::new();
+              expected_roots.insert(leaf1.clone());
+              expected_roots.insert(leaf2.clone());
+              assert_eq!(roots_from_method, expected_roots);
+
+              // Test standalone function
+              let roots_from_func = get_roots(vec![&root, &b]);
+              assert_eq!(roots_from_func, expected_roots);
+
+              // Test with roots as input
+              let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+              assert_eq!(roots_from_leaves, expected_roots);
+
+              // Test with empty input
+              let no_roots: Vec<&GSSNode> = vec![];
+              assert!(get_roots(no_roots).is_empty());
           }
       }
   diffs_applied_this_send: true
@@ -4789,6 +4881,16 @@ messages:
       }
 
       // --- Analysis and Debugging ---
+      #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      pub struct RootItem<'a> {
+          pub node: &'a GSSNode,
+          pub path_acc: Arc<Acc>,
+      }
+
+      /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
+          todo!()
+      }
 
       impl GSSNode {
           pub fn reset_llm_tokens(&mut self) {
@@ -4796,6 +4898,10 @@ messages:
               let mut memo = HashMap::new();
               reset_llm_tokens(&mut node_arc, &mut memo);
               *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+          }
+
+          pub fn get_roots(&self) -> BTreeSet<RootItem<'_>> {
+              get_roots(std::iter::once(self))
           }
       }
 
@@ -5504,116 +5610,215 @@ messages:
               );
               assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
           }
+
+          #[test]
+          fn test_get_roots() {
+              let leaf1 = Arc::new(GSSNode::new(empty_acc()));
+              let leaf2 = Arc::new(GSSNode::new(empty_acc()));
+              let b = leaf1.push(mock_edge(1));
+              let c = leaf2.push(mock_edge(2));
+
+              let mut root1 = b.push(mock_edge(10));
+              let root2 = c.push(mock_edge(20));
+              root1.merge_with_depth(1, &root2);
+              let root = root1;
+
+              // Test method on GSSNode
+              let roots_from_method = root.get_roots();
+              let mut expected_roots = BTreeSet::new();
+              expected_roots.insert(leaf1.clone());
+              expected_roots.insert(leaf2.clone());
+              assert_eq!(roots_from_method, expected_roots);
+
+              // Test standalone function
+              let roots_from_func = get_roots(vec![&root, &b]);
+              assert_eq!(roots_from_func, expected_roots);
+
+              // Test with roots as input
+              let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+              assert_eq!(roots_from_leaves, expected_roots);
+
+              // Test with empty input
+              let no_roots: Vec<&GSSNode> = vec![];
+              assert!(get_roots(no_roots).is_empty());
+          }
       }
 
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: Add a function called `get_roots` that takes an iterable of GSS refs and
-      returns their roots. Add a method on GSSNode with the same name (that just calls
-      the function with itself).
+  - user: |-
+      Implement `get_roots`. Do it by iterating over a queue of nodes, popping the deepest node first to give maximum opportunities for merging accs (and ensure we don't pop any a node twice).
+      Maintain a queue as a btreemap from node depth to (a map from ArcPtrWrapper to Acc).
+      If an entry already exists, merge the Accs.
+      Narrow accs when we step down to a node's predecessors.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the changes to add the `get_roots` function and method to your `gss.rs` file.
+      Hello! As a helpful assistant, I'd be happy to help you with your Rust code. Dealing with graph-structured stacks can be tricky, especially when trying to trace paths and accumulate constraints. Here are the patches to implement the `get_roots` function as you've described.
 
-      I've added the `get_roots` function to find all root nodes (those without predecessors) by traversing the GSS graph from a given set of starting nodes. I've also added a corresponding `get_roots` method to `GSSNode` for convenience. Additionally, I've included a test case to ensure everything works as expected.
+      I've implemented the function to traverse the GSS from a set of starting nodes, finding all unique leaf nodes (those with no predecessors). The implementation uses a queue prioritized by node depth to explore deeper paths first, and it correctly merges path constraints (`Acc`) when a node is reachable from multiple starting points.
 
-      Here is the git diff patch for the modified file:
+      I've also updated the corresponding test case to correctly validate the new functionality, including scenarios with single and multiple starting points.
+
+      Here are the diffs for the changes:
+
+      In `src/datastructures/gss.rs`, I'll add the necessary trait implementations for `RootItem`, implement `get_roots`, and update the test case.
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -1091,12 +1091,44 @@
+      @@ -1309,15 +1309,49 @@
+           result_arc
+       }
        
        // --- Analysis and Debugging ---
+      -#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      +#[derive(Debug, Clone, Eq, Hash)]
+       pub struct RootItem<'a> {
+           pub node: &'a GSSNode,
+           pub path_acc: Arc<Acc>,
+       }
        
-      +/// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
-      +pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<Arc<GSSNode>> {
-      +    let mut roots = BTreeSet::new();
-      +    let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
-      +    let mut visited: HashSet<*const GSSNode> = HashSet::new();
+      +impl<'a> PartialEq for RootItem<'a> {
+      +    fn eq(&self, other: &Self) -> bool {
+      +        self.node == other.node && self.path_acc == other.path_acc
+      +    }
+      +}
+      +
+      +impl<'a> PartialOrd for RootItem<'a> {
+      +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+      +        Some(self.cmp(other))
+      +    }
+      +}
+      +
+      +impl<'a> Ord for RootItem<'a> {
+      +    fn cmp(&self, other: &Self) -> Ordering {
+      +        self.node.cmp(other.node)
+      +            .then_with(|| self.path_acc.cmp(&other.path_acc))
+      +    }
+      +}
+      +
+       /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
+       pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
+      -    todo!()
+      +    let mut queue: BTreeMap<MaxDepth, BTreeMap<*const GSSNode, Arc<Acc>>> = BTreeMap::new();
+      +    let mut found_roots = BTreeSet::new();
       +
       +    for node in nodes {
-      +        // We have to clone the node to get an owned Arc<GSSNode>.
-      +        // This is potentially inefficient if the caller already has an Arc,
-      +        // but the interface with `&GSSNode` is consistent with other analysis functions.
-      +        let node_arc = Arc::new(node.clone());
-      +        let node_ptr = Arc::as_ptr(&node_arc);
-      +        if visited.insert(node_ptr) {
-      +            queue.push_back(node_arc);
-      +        }
+      +        let node_ptr = node as *const GSSNode;
+      +        let depth = node.max_depth();
+      +        queue.entry(depth).or_default().entry(node_ptr).or_insert_with(|| Arc::new(Acc::new_fresh()));
       +    }
       +
-      +    while let Some(node_arc) = queue.pop_front() {
-      +        if node_arc.is_root() {
-      +            roots.insert(node_arc);
-      +        } else {
-      +            for predecessor_arc in node_arc.predecessors.values().flat_map(|m| m.values()).flat_map(|v| v.iter()) {
-      +                let predecessor_ptr = Arc::as_ptr(predecessor_arc);
-      +                if visited.insert(predecessor_ptr) {
-      +                    queue.push_back(predecessor_arc.clone());
+      +    while let Some((_depth, nodes_at_depth)) = queue.pop_last() {
+      +        for (node_ptr, path_acc) in nodes_at_depth {
+      +            let current_node = unsafe { &*node_ptr };
+      +
+      +            if current_node.is_root() {
+      +                let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+      +                found_roots.insert(RootItem { node: current_node, path_acc: final_acc });
+      +            } else {
+      +                let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+      +                for pred_arc in current_node.predecessors.values().flat_map(|m| m.values()).flatten() {
+      +                    let pred_ptr = pred_arc.as_ref() as *const GSSNode;
+      +                    let pred_depth = pred_arc.max_depth();
+      +                    queue
+      +                        .entry(pred_depth)
+      +                        .or_default()
+      +                        .entry(pred_ptr)
+      +                        .and_modify(|e| *e = Arc::new(Acc::merge(e, &new_path_acc_base)))
+      +                        .or_insert_with(|| new_path_acc_base.clone());
       +                }
       +            }
       +        }
       +    }
-      +    roots
-      +}
       +
-       impl GSSNode {
-           pub fn reset_llm_tokens(&mut self) {
-               let mut node_arc = Arc::new(self.clone());
-               let mut memo = HashMap::new();
-               reset_llm_tokens(&mut node_arc, &mut memo);
-               *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
-           }
-      +
-      +    pub fn get_roots(&self) -> BTreeSet<Arc<GSSNode>> {
-      +        get_roots(std::iter::once(self))
-      +    }
+      +    found_roots
        }
        
-       #[derive(Debug, Clone, Default, PartialEq)]
-      @@ -1583,4 +1615,35 @@
-               );
-               assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+       impl GSSNode {
+      @@ -1815,31 +1849,42 @@
+       
+           #[test]
+           fn test_get_roots() {
+      -        let leaf1 = Arc::new(GSSNode::new(empty_acc()));
+      -        let leaf2 = Arc::new(GSSNode::new(empty_acc()));
+      -        let b = leaf1.push(mock_edge(1));
+      -        let c = leaf2.push(mock_edge(2));
+      -
+      -        let mut root1 = b.push(mock_edge(10));
+      -        let root2 = c.push(mock_edge(20));
+      -        root1.merge_with_depth(1, &root2);
+      -        let root = root1;
+      -
+      -        // Test method on GSSNode
+      -        let roots_from_method = root.get_roots();
+      -        let mut expected_roots = BTreeSet::new();
+      -        expected_roots.insert(leaf1.clone());
+      -        expected_roots.insert(leaf2.clone());
+      -        assert_eq!(roots_from_method, expected_roots);
+      -
+      -        // Test standalone function
+      -        let roots_from_func = get_roots(vec![&root, &b]);
+      -        assert_eq!(roots_from_func, expected_roots);
+      -
+      -        // Test with roots as input
+      -        let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+      -        assert_eq!(roots_from_leaves, expected_roots);
+      -
+      -        // Test with empty input
+      -        let no_roots: Vec<&GSSNode> = vec![];
+      -        assert!(get_roots(no_roots).is_empty());
+      +        let acc1 = Arc::new(mock_acc(1));
+      +        let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
+      +        let acc2 = Arc::new(mock_acc(2));
+      +        let leaf2 = Arc::new(GSSNode::new((*acc2).clone()));
+      +
+      +        let acc_b = Arc::new(mock_acc(3));
+      +        let b = Arc::new(GSSNode::new_with_single_predecessor(leaf1.clone(), mock_edge(1), (*acc_b).clone()));
+      +
+      +        let acc_c = Arc::new(mock_acc(4));
+      +        let c = Arc::new(GSSNode::new_with_single_predecessor(leaf2.clone(), mock_edge(2), (*acc_c).clone()));
+      +
+      +        let mut preds_map = NodeMap::new();
+      +        preds_map.entry(mock_edge(10)).or_default().insert(b.dest_key(), vec![b.clone()]);
+      +        preds_map.entry(mock_edge(20)).or_default().insert(c.dest_key(), vec![c.clone()]);
+      +        let acc_root = Arc::new(mock_acc(5));
+      +        let root = GSSNode::new_with_map(acc_root.clone(), preds_map);
+      +
+      +        // Test from root
+      +        let roots = get_roots(std::iter::once(&root));
+      +        let mut expected = BTreeSet::new();
+      +        let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
+      +        expected.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc1 });
+      +        let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
+      +        expected.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2.clone() });
+      +        assert_eq!(roots, expected);
+      +
+      +        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
+      +        // because its initial `fresh` acc has a wider union of possibilities.
+      +        let roots_multi = get_roots(vec![&root, b.as_ref()]);
+      +        let mut expected_multi = BTreeSet::new();
+      +        let path_acc_b_l1 = Arc::new(Acc::narrow(&acc_b, &acc1));
+      +        expected_multi.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc_b_l1 });
+      +        expected_multi.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2 });
+      +        assert_eq!(roots_multi, expected_multi);
+      +
+      +        // Test from leaves
+      +        let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+      +        let mut expected_leaves = BTreeSet::new();
+      +        expected_leaves.insert(RootItem { node: leaf1.as_ref(), path_acc: acc1.clone() });
+      +        expected_leaves.insert(RootItem { node: leaf2.as_ref(), path_acc: acc2.clone() });
+      +        assert_eq!(roots_leaves, expected_leaves);
+      +
+      +        // Test empty
+      +        assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
            }
-      +
-      +    #[test]
-      +    fn test_get_roots() {
-      +        let leaf1 = Arc::new(GSSNode::new(empty_acc()));
-      +        let leaf2 = Arc::new(GSSNode::new(empty_acc()));
-      +        let b = leaf1.push(mock_edge(1));
-      +        let c = leaf2.push(mock_edge(2));
-      +
-      +        let mut root1 = b.push(mock_edge(10));
-      +        let root2 = c.push(mock_edge(20));
-      +        root1.merge_with_depth(1, &root2);
-      +        let root = root1;
-      +
-      +        // Test method on GSSNode
-      +        let roots_from_method = root.get_roots();
-      +        let mut expected_roots = BTreeSet::new();
-      +        expected_roots.insert(leaf1.clone());
-      +        expected_roots.insert(leaf2.clone());
-      +        assert_eq!(roots_from_method, expected_roots);
-      +
-      +        // Test standalone function
-      +        let roots_from_func = get_roots(vec![&root, &b]);
-      +        assert_eq!(roots_from_func, expected_roots);
-      +
-      +        // Test with roots as input
-      +        let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
-      +        assert_eq!(roots_from_leaves, expected_roots);
-      +
-      +        // Test with empty input
-      +        let no_roots: Vec<&GSSNode> = vec![];
-      +        assert!(get_roots(no_roots).is_empty());
-      +    }
        }
 
       ```
 
-      Let me know if you have any other questions
+      These changes should correctly implement the desired functionality. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
