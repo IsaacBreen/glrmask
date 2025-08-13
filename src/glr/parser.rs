@@ -898,7 +898,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     (k, Some(*source_state_id)),
                                     active_llm_tokens.clone(),
                                     |e, n| *e |= n,
-                                ).try_destination_weakly(cached_trie2_node.as_arc().clone());
+                                ).to_destination_weakly(cached_trie2_node.as_arc().clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                             }
                             });
