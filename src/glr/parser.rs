@@ -823,7 +823,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
-            crate::debug!(4, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+            crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
             let mut states_to_push: BTreeMap<StateID, (BTreeSet<StateID>, bool)> = BTreeMap::new();
             for (source_state_id, row) in &self.parser.table {
                 let mut final_goto_state_ids_for_source = BTreeSet::new();
@@ -832,7 +832,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 loop {
                     if let Some(goto) = row.gotos.get(&current_nt_local) {
                         if goto.accept {
-                            crate::debug!(4, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
+                            crate::debug!(6, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
                             self.accepted = true;
                             accepted = true;
                         }
@@ -854,7 +854,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
                 states_to_push.insert(*source_state_id, (final_goto_state_ids_for_source, accepted));
             }
-            crate::debug!(4, "States to push after reduction: {:?}", states_to_push);
+            crate::debug!(6, "States to push after reduction: {:?}", states_to_push);
             let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
             for (k, acc_arc) in popper.below_bottom {
                 crate::debug!(6, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
