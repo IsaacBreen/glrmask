@@ -875,7 +875,7 @@ fn prune_and_transform_recursive(
                         }
                     }
                 }
-                if new_predecessors_set.is_empty() && !node_arc.predecessors.is_empty() {
+                if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
                     memo.insert(node_ptr, None);
                     return None;
                 }
