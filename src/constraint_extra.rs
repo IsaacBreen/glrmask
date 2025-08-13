@@ -29,7 +29,12 @@ fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
         if range.start() == range.end() {
             format!("{}", range.start())
         } else {
-            format!("{}..={}", range.start(), range.end())
+            let range_end_str = if range.end() == &usize::MAX {
+                "usize::MAX".to_string()
+            } else {
+                range.end().to_string()
+            };
+            format!("{}..={}", range.start(), range_end_str)
         }
     }).collect::<Vec<_>>().join(", ");
 
