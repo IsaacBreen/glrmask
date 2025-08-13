@@ -37,13 +37,14 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use kdam::tqdm;
 use profiler_macro::{time_it, timeit};
+use crate::datastructures::arc_wrapper::NodePtr;
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
-use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED};
+use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -379,7 +380,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc= "Precomputing Trie 2") {
+        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable= !PROGRESS_BAR_ENABLED) {
             if let Some(trie2_root) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
                 precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
                 continue;
@@ -609,9 +610,9 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
-    // Map each precompute node to its contents and the token node/position/state used to compute its
-    tags:             RefCell<HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>>,
-    end_node:       ArcPtrWrapper<RwLock<PrecomputeNode>>,
+    // Map each precompute node to the set of LLM tokens that can pass through it.
+    tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>,
+    end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -666,7 +667,7 @@ impl<'r> Precomputer<'r> {
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
             ignore_terminal_id,
-            tags: RefCell::new(Default::default()),
+            tags: RefCell::new(HashMap::new()),
             end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
@@ -710,14 +711,14 @@ impl<'r> Precomputer<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>,
+            OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
                 .entry(*sid)
                 .or_default()
-                .insert(ArcPtrWrapper::new(arc.clone()));
+                .insert(NodePtr::Strong(ArcPtrWrapper::new(arc.clone())));
         }
 
         crate::debug!(2, "Starting precompute DFS");
@@ -770,7 +771,7 @@ impl<'r> Precomputer<'r> {
         for node_arc in &all_nodes {
             pb.inc(1);
             // Snapshot the outgoing edges so we can run analyses without holding the lock.
-            let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>)> = {
+            let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>)> = {
                 let guard = node_arc.read().expect("poison");
                 guard.children()
                     .iter()
@@ -801,7 +802,7 @@ impl<'r> Precomputer<'r> {
                         allow_only_llm_tokens_and_prune_arc(&mut glr.active_state.stack, edge_bv, &mut memo);
                     }
                     if glr.is_ok() {
-                        initial_values.push((child_wrapper.as_arc().clone(), glr));
+                        initial_values.push((child_wrapper.upgrade().unwrap().clone(), glr));
                     }
                 }
 
@@ -832,7 +833,7 @@ impl<'r> Precomputer<'r> {
                     };
 
                     // 1) Intersect each child's BV with `can_mask`. Collect empties to remove.
-                    let mut to_remove: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = Vec::new();
+                    let mut to_remove: Vec<NodePtr<RwLock<PrecomputeNode>>> = Vec::new();
                     for (child_w, bv) in dest_map_mut.iter_mut() {
                         *bv &= &can_mask;
                         if bv.is_empty() {
@@ -852,7 +853,7 @@ impl<'r> Precomputer<'r> {
                     // 2) If this edge already goes to an end node, do not add a None shortcut.
                     let mut has_end_dest = false;
                     for (child_w, _bv) in dest_map_mut.iter() {
-                        if child_w.as_arc().read().unwrap().value.end {
+                        if child_w.upgrade().unwrap().read().unwrap().value.end {
                             has_end_dest = true;
                             break;
                         }
@@ -860,7 +861,7 @@ impl<'r> Precomputer<'r> {
 
                     if !has_end_dest && !must_mask.is_empty() {
                         // Subtract must_mask from the start-edge BVs.
-                        let mut to_remove2: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = Vec::new();
+                        let mut to_remove2: Vec<NodePtr<RwLock<PrecomputeNode>>> = Vec::new();
                         for (child_w, bv) in dest_map_mut.iter_mut() {
                             *bv -= &must_mask;
                             if bv.is_empty() {
@@ -885,7 +886,7 @@ impl<'r> Precomputer<'r> {
                         };
 
                         let dest_none = node_guard.children_mut().entry(None).or_default();
-                        let end_key = ArcPtrWrapper::new(end_arc);
+                        let end_key = NodePtr::Strong(ArcPtrWrapper::new(end_arc));
                         if let Some(existing_bv) = dest_none.get_mut(&end_key) {
                             *existing_bv |= &must_mask;
                         } else {
@@ -926,7 +927,7 @@ impl<'r> Precomputer<'r> {
             // step: given current GLR state, edge key (Option<GrammarTokenID>), and grouped destinations,
             // produce next (child, GLR state) items.
             |glr_s, grammar_token_opt, dest_map| {
-                let mut out: Vec<(ArcPtrWrapper<RwLock<PrecomputeNode>>, GLRParserState)> = Vec::new();
+                let mut out: Vec<(NodePtr<RwLock<PrecomputeNode>>, GLRParserState)> = Vec::new();
 
                 match grammar_token_opt {
                     Some(gtid) => {
@@ -1103,7 +1104,7 @@ impl<'r> Precomputer<'r> {
             // Record all outgoing edges for incoming map
             for (ek, dest_map) in guard.children().iter() {
                 for (child_wrap, ev_bv) in dest_map.iter() {
-                    let child_arc = child_wrap.as_arc().clone();
+                    let child_arc = child_wrap.upgrade().unwrap().clone();
                     let child_ptr = Arc::as_ptr(&child_arc);
                     incoming.entry(child_ptr)
                         .or_default()
@@ -1114,7 +1115,7 @@ impl<'r> Precomputer<'r> {
             if let Some(dest_map_none) = guard.children().get(&None) {
                 let list = none_edges_from.entry(src_ptr).or_default();
                 for (child_wrap, ev_bv) in dest_map_none.iter() {
-                    list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
+                    list.push((child_wrap.upgrade().unwrap().clone(), ev_bv.clone()));
                     let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
                     *entry |= ev_bv;
                 }
@@ -1152,7 +1153,7 @@ impl<'r> Precomputer<'r> {
                 Some(a) => a.clone(),
                 None => continue,
             };
-            let b_key = ArcPtrWrapper::new(b_arc.clone());
+            let b_key = NodePtr::Strong(ArcPtrWrapper::new(b_arc.clone()));
 
             // For each incoming edge A -(x; bv1)-> B, split tokens:
             //   move:    to C with mask (bv1 ∩ bv2)
@@ -1174,7 +1175,7 @@ impl<'r> Precomputer<'r> {
                     if to_move_for_c.is_empty() {
                         continue;
                     }
-                    let c_key = ArcPtrWrapper::new(c_arc.clone());
+                    let c_key = NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()));
                     if let Some(existing_ev) = dest_map.get_mut(&c_key) {
                         *existing_ev |= &to_move_for_c;
                     } else {
@@ -1269,7 +1270,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
         // A cache of nodes to the set of "live" LLM tokens reachable from them.
-        let mut live_tokens_cache: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
+        let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
 
         // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
         // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
@@ -1279,7 +1280,7 @@ impl<'r> Precomputer<'r> {
         // immutably (to call `get_live_tokens_and_prune`) while `retain` itself holds a mutable borrow
         // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
         let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
-            let root_wrapper = ArcPtrWrapper::new(root_arc.clone());
+            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
             // A root is dead if no live tokens are reachable from it.
             if self.get_live_tokens_and_prune(root_wrapper, &mut live_tokens_cache).is_empty() {
                 Some(*sid) // This root is dead, mark for removal.
@@ -1305,8 +1306,8 @@ impl<'r> Precomputer<'r> {
     /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
     fn get_live_tokens_and_prune(
         &self,
-        node_wrapper: ArcPtrWrapper<RwLock<PrecomputeNode>>,
-        live_tokens_cache: &mut HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>,
+        node_wrapper: NodePtr<RwLock<PrecomputeNode>>,
+        live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
     ) -> LLMTokenBV {
         // If we've already computed the live tokens for this node, return the cached result.
         if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
@@ -1317,10 +1318,10 @@ impl<'r> Precomputer<'r> {
         // have been found through it yet.
         live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
 
-        let node_arc = node_wrapper.as_arc();
+        let node_arc = node_wrapper.upgrade().unwrap();
 
         // We must collect children before recursing to avoid holding the lock.
-        let children_to_check: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = {
+        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode>>> = {
             let node_guard = node_arc.read().unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
@@ -1433,15 +1434,15 @@ impl<'r> Precomputer<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>,
+            OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>,
         >,
-        no_go: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>,
+        no_go: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>>> = BTreeMap::new();
+            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>>> = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
@@ -1475,7 +1476,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    src_node_wrapper.as_arc().clone(),
+                                    src_node_wrapper.upgrade().unwrap().clone(),
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
@@ -1496,7 +1497,7 @@ impl<'r> Precomputer<'r> {
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
-                                src_node_wrapper.as_arc().clone(),
+                                src_node_wrapper.upgrade().unwrap().clone(),
                                 Some(terminal_id),
                                 edge_bv.clone(),
                                 |e, n| *e |= n,
@@ -1505,22 +1506,26 @@ impl<'r> Precomputer<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read().unwrap().value.end));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().filter_map(|w| w.upgrade()).filter(|w| !w.read().unwrap().value.end));
 
                             if true {
-                                let children_of_src: Vec<_> = if true { src_node_wrapper.read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect() }
-                                else { src_node_wrapper.read().unwrap().children().get(&Some(terminal_id)).cloned().unwrap_or_default().keys().cloned().collect() };
+                                let children_of_src: Vec<_> = src_node_wrapper.upgrade().unwrap().read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                                 let tags = self.tags.borrow();
-                                let eligible_children = children_of_src.iter().filter(|child_wrapper| {
-                                    tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_wrapper.read().unwrap().value.end
-                                }).map(|w| w.as_arc().clone());
+                                let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
+                                    if let Some(child_arc) = child_node_ptr.upgrade() {
+                                        if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_arc.read().unwrap().value.end {
+                                            Some(child_arc)
+                                        } else { None }
+                                    } else { None }
+                                });
                                 inserter = inserter.try_destinations_iter(eligible_children);
                                 drop(tags);
                             }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
-                            dest_nodes_in_queue.insert(ArcPtrWrapper::new(result_node.clone()));
-                            *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
+                            let result_node_ptr = NodePtr::Strong(ArcPtrWrapper::new(result_node.clone()));
+                            dest_nodes_in_queue.insert(result_node_ptr.clone());
+                            *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv;
                         }
                     }
 
@@ -1532,7 +1537,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    src_node_wrapper.as_arc().clone(),
+                                    src_node_wrapper.upgrade().unwrap().clone(),
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
@@ -1557,8 +1562,8 @@ impl<'r> Precomputer<'r> {
 
     fn merge_handles(
         &self,
-        set: &OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>,
-    ) -> OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>> {
+        set: &OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>,
+    ) -> OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>> {
         if set.len() <= self.merge_threshold {
             return set.clone();
         }
@@ -1568,9 +1573,9 @@ impl<'r> Precomputer<'r> {
         )));
 
         for child_wrapper in set { 
-            let edge_tokens_for_merge = self.all_llm_tokens.clone();
+            let edge_tokens_for_merge = self.all_llm_tokens.clone(); // This seems wrong.
             let mut inserter = EdgeInserter::new(
-                child_wrapper.as_arc().clone(), 
+                child_wrapper.upgrade().unwrap().clone(),
                 None::<GrammarTokenID>,   
                 edge_tokens_for_merge.clone(), 
                 |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
@@ -1581,7 +1586,7 @@ impl<'r> Precomputer<'r> {
         }
 
         let mut out = OrderedHashSet::new();
-        out.insert(ArcPtrWrapper::new(merged_node_arc)); 
+        out.insert(NodePtr::Strong(ArcPtrWrapper::new(merged_node_arc))); 
         out
     }
 }
@@ -1796,7 +1801,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut num_end = 0;
                 let mut num_non_end = 0;
                 for child_node_trie_data in dest_map.keys() {
-                    if child_node_trie_data.as_arc().read().unwrap().value.end {
+                    if child_node_trie_data.upgrade().unwrap().read().unwrap().value.end {
                         num_end += 1;
                     } else {
                         num_non_end += 1;
@@ -1880,7 +1885,7 @@ impl<'a> GrammarConstraintState<'a> {
                             continue;
                         }
 
-                        if child_node_trie_data.as_arc().read().unwrap().value.end {
+                        if child_node_trie_data.upgrade().unwrap().read().unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                             crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
                             // timeit!("get_mask final_mask update", {
@@ -1921,7 +1926,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 num_outgoing_edges_that_lead_to_non_end_nodes += 1
                             } else {
                                 for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
-                                    if !child_node_trie_data.as_arc().read().unwrap().value.end {
+                                    if !child_node_trie_data.upgrade().unwrap().read().unwrap().value.end {
                                         num_outgoing_edges_that_lead_to_non_end_nodes += 1;
                                         break;
                                     }
@@ -1934,7 +1939,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // Print GSS stats
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                        // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                        let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         let mut do_phase3 = false;
                         do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
@@ -1950,7 +1955,7 @@ impl<'a> GrammarConstraintState<'a> {
                             crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                             glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                            // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                             crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
                             Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
@@ -2139,7 +2144,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
                     let mut out_gss_filtered = out_gss.clone();
-                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, &edge_bv, &mut HashMap::new());
+                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
                     if out_glr_s.is_ok() {
