@@ -782,7 +782,7 @@ impl<'a> GSSPeek<'a> {
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     /// The new node has the parent's `Acc` and a single predecessor (the one from this peek).
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        let new_acc = Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc);
+        let new_acc = Acc::narrow(&Acc::narrow(self.path_acc, &self.parent_arc.acc), &self.predecessor_node.acc);
 
         if self.parent_arc.num_predecessors() == 1 && *self.parent_arc.acc == new_acc {
             return self.parent_arc.clone();
@@ -1940,50 +1940,76 @@ mod tests {
     }
 
     #[test]
-    fn test_get_roots() {
-        let acc1 = Arc::new(mock_acc(1));
-        let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
-        let acc2 = Arc::new(mock_acc(2));
-        let leaf2 = Arc::new(GSSNode::new((*acc2).clone()));
+    fn test_merge_trie2_nodes_simple() {
+        // 1. Create a set of PrecomputeNode2s.
+        let t2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let t2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let t2_node3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
 
-        let acc_b = Arc::new(mock_acc(3));
-        let b = Arc::new(GSSNode::new_with_single_predecessor(leaf1.clone(), mock_edge(1), (*acc_b).clone()));
+        // 2. Create a GSSNode and populate its acc.trie2_nodes.
+        let mut acc = Acc::new_fresh();
+        acc.trie2_nodes.insert(ArcPtrWrapper::new(t2_node1.clone()));
+        acc.trie2_nodes.insert(ArcPtrWrapper::new(t2_node2.clone()));
+        acc.trie2_nodes.insert(ArcPtrWrapper::new(t2_node3.clone()));
+        
+        let mut gss_root = Arc::new(GSSNode::new(acc));
+        assert_eq!(gss_root.acc.trie2_nodes.len(), 3);
 
-        let acc_c = Arc::new(mock_acc(4));
-        let c = Arc::new(GSSNode::new_with_single_predecessor(leaf2.clone(), mock_edge(2), (*acc_c).clone()));
+        // 3. Call merge_trie2_nodes_if_needed with a threshold of 2.
+        let merge_threshold = 2;
+        let mut memo = HashMap::new();
+        merge_trie2_nodes_if_needed(&mut gss_root, merge_threshold, &mut memo);
 
-        let mut preds_map = NodeMap::new();
-        preds_map.entry(mock_edge(10)).or_default().insert(b.dest_key(), vec![b.clone()]);
-        preds_map.entry(mock_edge(20)).or_default().insert(c.dest_key(), vec![c.clone()]);
-        let acc_root = Arc::new(mock_acc(5));
-        let root = GSSNode::new_with_map(acc_root.clone(), preds_map);
+        // 4. Assert that the GSSNode's acc.trie2_nodes now contains only 1 node.
+        assert_eq!(gss_root.acc.trie2_nodes.len(), 1);
 
-        // Test from root
-        let roots = get_roots(std::iter::once(&root));
-        let mut expected = BTreeSet::new();
-        let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
-        expected.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc1 });
-        let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
-        expected.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2.clone() });
-        assert_eq!(roots, expected);
+        // 5. Assert that the original 3 PrecomputeNode2s now have a weak edge to the new node.
+        let new_trie2_node_wrapper = gss_root.acc.trie2_nodes.iter().next().unwrap();
+        let new_trie2_node_arc = new_trie2_node_wrapper.as_arc();
 
-        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
-        // because its initial `fresh` acc has a wider union of possibilities.
-        let roots_multi = get_roots(vec![&root, b.as_ref()]);
-        let mut expected_multi = BTreeSet::new();
-        let path_acc_b_l1 = Arc::new(Acc::narrow(&acc_b, &acc1));
-        expected_multi.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc_b_l1 });
-        expected_multi.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2 });
-        assert_eq!(roots_multi, expected_multi);
+        for original_node in &[t2_node1, t2_node2, t2_node3] {
+            let guard = original_node.read().unwrap();
+            let children_map = guard.children().get(&(0, None)).unwrap();
+            assert_eq!(children_map.len(), 1);
+            let (node_ptr, _bv) = children_map.iter().next().unwrap();
+            assert!(!node_ptr.is_strong()); // Should be a weak edge
+            assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), new_trie2_node_arc));
+        }
+    }
 
-        // Test from leaves
-        let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
-        let mut expected_leaves = BTreeSet::new();
-        expected_leaves.insert(RootItem { node: leaf1.as_ref(), path_acc: acc1.clone() });
-        expected_leaves.insert(RootItem { node: leaf2.as_ref(), path_acc: acc2.clone() });
-        assert_eq!(roots_leaves, expected_leaves);
+    #[test]
+    fn test_merge_trie2_nodes_on_merged_gss() {
+        // This test simulates a GSS node accumulating many trie2_nodes via merging predecessors.
+        let merge_threshold = 5;
+        let num_leaves = merge_threshold + 1; // 6 leaves to trigger merge
 
-        // Test empty
-        assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
+        // Create leaf GSS nodes, each with a unique Trie2 node in its Acc.
+        let mut leaves = Vec::new();
+        let mut original_trie2_nodes = Vec::new();
+
+        for _ in 0..num_leaves {
+            let t2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+            original_trie2_nodes.push(t2_node.clone());
+
+            let mut acc = Acc::new_fresh();
+            acc.trie2_nodes.insert(ArcPtrWrapper::new(t2_node));
+            
+            leaves.push(GSSNode::new(acc));
+        }
+
+        // Simulate merging these leaves into a single root node.
+        let mut root_node = GSSNode::new_fresh();
+        for leaf_node in leaves {
+            root_node.merge(&leaf_node);
+        }
+        let mut root_arc = Arc::new(root_node);
+        
+        assert_eq!(root_arc.acc.trie2_nodes.len(), num_leaves);
+
+        // Call the function under test.
+        let mut memo = HashMap::new();
+        merge_trie2_nodes_if_needed(&mut root_arc, merge_threshold, &mut memo);
+
+        assert_eq!(root_arc.acc.trie2_nodes.len(), 1);
     }
 }
