@@ -1131,6 +1131,12 @@ impl<'a> Ord for RootItem<'a> {
     }
 }
 
+impl<'a> RootItem<'a> {
+    pub fn resolved_acc(&self) -> Acc {
+        Acc::narrow(&self.node.acc, &self.path_acc)
+    }
+}
+
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
     let mut queue: BTreeMap<MaxDepth, BTreeMap<*const GSSNode, Arc<Acc>>> = BTreeMap::new();
