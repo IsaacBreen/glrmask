@@ -883,20 +883,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         out.push(new_gss2);
                     }
 
+                    // ACTUALLY no we don't accept...
                     // Handle accept
-                    if *accepted {
-                        crate::debug!(4, "Accepting with NT '{}' from source state {:?}. Pushing to {} trie 2 nodes", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), source_state_id, trie2_nodes.len());
-                        for existing_trie2_node in &trie2_nodes {
-                            let mut end_inserter = EdgeInserter::new(
-                                existing_trie2_node.as_arc().clone(),
-                                (k, Some(*source_state_id)),
-                                active_llm_tokens.clone(),
-                                |e, n| *e |= n,
-                            );
-                            end_inserter = end_inserter.try_destination(new_trie2_end.clone());
-                            end_inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed for end");
-                        }
-                    }
+                    // if *accepted {
+                    //     crate::debug!(4, "Accepting with NT '{}' from source state {:?}. Pushing to {} trie 2 nodes", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), source_state_id, trie2_nodes.len());
+                    //     for existing_trie2_node in &trie2_nodes {
+                    //         let mut end_inserter = EdgeInserter::new(
+                    //             existing_trie2_node.as_arc().clone(),
+                    //             (k, Some(*source_state_id)),
+                    //             active_llm_tokens.clone(),
+                    //             |e, n| *e |= n,
+                    //         );
+                    //         end_inserter = end_inserter.try_destination(new_trie2_end.clone());
+                    //         end_inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed for end");
+                    //     }
+                    // }
                 }
             }
         }
