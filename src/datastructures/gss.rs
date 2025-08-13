@@ -245,11 +245,11 @@ impl GSSPopper {
                                 // Reached the bottom on this pop. Do not keep root in paths.
                                 // Register as "at bottom" (depth 0) and merge accs.
                                 let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
-                                if let Some(existing) = new_below.get_mut(&0) {
+                                if let Some(existing) = new_below.get_mut(&1) {
                                     let merged = Arc::new(Acc::merge(existing, &combined));
                                     *existing = merged;
                                 } else {
-                                    new_below.insert(0, combined);
+                                    new_below.insert(1, combined);
                                 }
                             } else {
                                 if let Some(existing_acc) = new_paths.get_mut(child) {
