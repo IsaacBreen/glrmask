@@ -24,7 +24,7 @@ impl<T> NodePtr<T> {
     }
 
     /// Returns the raw pointer as a `usize` for comparison and hashing.
-    fn as_ptr_usize(&self) -> usize {
+    pub fn as_ptr_usize(&self) -> usize {
         match self {
             NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()) as usize,
             NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()) as usize,
