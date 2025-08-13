@@ -22,36 +22,19 @@ fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
         return "[]".to_string();
     }
 
-    let mut ranges = vec![];
-    let mut iter = bv.iter();
-
-    if let Some(mut start) = iter.next() {
-        let mut end = start;
-        for val in iter {
-            if val == end + 1 {
-                end = val;
-            } else {
-                if start == end {
-                    ranges.push(format!("{}", start));
-                } else {
-                    ranges.push(format!("{}..={}", start, end));
-                }
-                start = val;
-                end = val;
-            }
-        }
-        if start == end {
-            ranges.push(format!("{}", start));
-        } else {
-            ranges.push(format!("{}..={}", start, end));
-        }
-    }
-
     const MAX_RANGES_TO_SHOW: usize = 5;
-    let ellipsis = if ranges.len() > MAX_RANGES_TO_SHOW { ", ..." } else { "" };
-    let ranges_to_show = ranges.iter().take(MAX_RANGES_TO_SHOW).cloned().collect::<Vec<_>>().join(", ");
+    let total_ranges = bv.inner().ranges_len();
 
-    format!("[{}{}]", ranges_to_show, ellipsis)
+    let ranges_to_show_str = bv.inner().ranges().take(MAX_RANGES_TO_SHOW).map(|range| {
+        if range.start() == range.end() {
+            format!("{}", range.start())
+        } else {
+            format!("{}..={}", range.start(), range.end())
+        }
+    }).collect::<Vec<_>>().join(", ");
+
+    let ellipsis = if total_ranges > MAX_RANGES_TO_SHOW { ", ..." } else { "" };
+    format!("[{}{}]", ranges_to_show_str, ellipsis)
 }
 
 /// Helper function to format a HybridBitset for display, showing its debug representation
