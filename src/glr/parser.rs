@@ -854,6 +854,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
                 states_to_push.insert(*source_state_id, (final_goto_state_ids_for_source, accepted));
             }
+            crate::debug!(4, "States to push after reduction: {:?}", states_to_push);
             let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
             for (k, acc_arc) in popper.below_bottom {
                 let mut acc: Acc = acc_arc.as_ref().clone();
