@@ -92,11 +92,7 @@ pub fn dump_precompute_trie_recursive(
         // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
-                (
-                    edge_key.clone(),
-                    edge_val.clone(),
-                    child_wrapper.upgrade().unwrap(),
-                )
+                (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
             })
         }).collect::<Vec<_>>();
     }
@@ -233,11 +229,7 @@ pub fn dump_precompute_trie2_recursive(
         let node = node_arc.read().expect("RwLock poisoned during dump");
         node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
-                (
-                    edge_key.clone(),
-                    edge_val.clone(),
-                    child_wrapper.upgrade().unwrap(),
-                )
+                (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
             })
         }).collect::<Vec<_>>()
     };
@@ -423,11 +415,7 @@ pub fn calculate_final_stats(
             let ptr = &*node_guard as *const PrecomputeNode;
             let children = node_guard.children()
                 .values()
-                .flat_map(|dest_map| {
-                    dest_map
-                        .keys()
-                        .filter_map(|wrapper| wrapper.upgrade())
-                })
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
                 .collect::<Vec<_>>();
             (children, ptr)
         };

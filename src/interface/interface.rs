@@ -723,7 +723,7 @@ impl GrammarDefinition {
         ];
         let start_production_id = 0; // The augmented start production is always the first one.
 
-        for (name, expr) in tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED) {
+        for (name, expr) in tqdm!(grammar_exprs.iter()) {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
@@ -1152,7 +1152,6 @@ impl Display for CompiledGrammar {
 
 // --- Incremental Parser ---
 use crate::glr::parser::GLRParserState;
-use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::tokenizer::{ExecuteResult, LLMTokenID, TokenizerStateID};
 
 #[derive(Clone)]

@@ -19,7 +19,7 @@ use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
 use kdam::{tqdm, BarExt};
 use profiler_macro::{time_it, timeit};
-use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
+use crate::datastructures::arc_wrapper::WeakPtrWrapper;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 // Added for derive macro pattern
 
@@ -51,8 +51,11 @@ impl Error for CycleDetectedError {}
 #[derive(Debug, Clone)]
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
-    /// Stores a map from EdgeKey to a map of destination nodes and edge values.
-    children: BTreeMap<EK, OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>>,
+    /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
+    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>,
+    /// Weak edges: allow explicit cycles without keeping the target alive.
+    /// Edges here do NOT affect max_depth and are not considered for cycle detection.
+    weak_children: BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     /// If A -> B, then A.max_depth < B.max_depth.
@@ -83,42 +86,58 @@ where
         let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
         let mut root_weak_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]] for weak edges
 
-        // Serialize strong and weak children
         for (edge_key, destinations_map) in &self.children {
             let ek_json = edge_key.to_json();
-            let mut strong_dests_json = Vec::new();
-            let mut weak_dests_json = Vec::new();
+            let mut dest_map_json_array = Vec::new();
+            // #[allow(clippy::iter_over_hash_type)]
+            for (child_arc_ptr_wrapper, edge_val) in destinations_map {
+                let child_arc = child_arc_ptr_wrapper.as_arc();
+                let child_arc_ptr = Arc::as_ptr(child_arc);
 
-            for (node_ptr, edge_val) in destinations_map {
-                if let Some(child_arc) = node_ptr.upgrade() {
+                let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                    Some(idx) => *idx,
+                    None => {
+                        let new_idx = nodes_json_list.len(); // Next available index
+                        arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                        bfs_q.push_back(child_arc.clone());
+                        nodes_json_list.push(JSONNode::Null); // Placeholder for this new child
+                        new_idx
+                    }
+                };
+                dest_map_json_array.push(JSONNode::Array(vec![
+                    child_idx.to_json(), // Child index
+                    edge_val.to_json(),          // Edge value
+                ]));
+            }
+            root_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
+        }
+
+        // Serialize weak children (upgrade Weak to Arc; skip if upgrade fails)
+        for (edge_key, destinations_map) in &self.weak_children {
+            let ek_json = edge_key.to_json();
+            let mut dest_map_json_array = Vec::new();
+            for (weak_wrapper, edge_val) in destinations_map {
+                if let Some(child_arc) = weak_wrapper.upgrade() {
                     let child_arc_ptr = Arc::as_ptr(&child_arc);
                     let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
                         Some(idx) => *idx,
                         None => {
                             let new_idx = nodes_json_list.len();
                             arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                            bfs_q.push_back(child_arc);
+                            bfs_q.push_back(child_arc.clone());
                             nodes_json_list.push(JSONNode::Null);
                             new_idx
                         }
                     };
-                    let dest_entry = JSONNode::Array(vec![
+                    dest_map_json_array.push(JSONNode::Array(vec![
                         child_idx.to_json(),
                         edge_val.to_json(),
-                    ]);
-                    if node_ptr.is_strong() {
-                        strong_dests_json.push(dest_entry);
-                    } else {
-                        weak_dests_json.push(dest_entry);
-                    }
+                    ]));
+                } else {
+                    // dangling weak ref; skip
                 }
             }
-            if !strong_dests_json.is_empty() {
-                root_children_json_data.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(strong_dests_json)]));
-            }
-            if !weak_dests_json.is_empty() {
-                root_weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(weak_dests_json)]));
-            }
+            root_weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
         }
 
         // Fill in the root node's (self's) data
@@ -140,42 +159,58 @@ where
             let mut current_node_children_json_bfs = Vec::new();
             let mut current_node_weak_children_json_bfs = Vec::new();
 
-            // Serialize strong and weak children for the current node
             for (edge_key, destinations_map) in &node_guard.children {
                 let ek_json = edge_key.to_json();
-                let mut strong_dests_json_bfs = Vec::new();
-                let mut weak_dests_json_bfs = Vec::new();
+                let mut dest_map_json_array_bfs = Vec::new();
+                // #[allow(clippy::iter_over_hash_type)]
+                for (child_arc_ptr_wrapper, edge_val) in destinations_map {
+                    let child_arc = child_arc_ptr_wrapper.as_arc();
+                    let child_arc_ptr = Arc::as_ptr(child_arc);
 
-                for (node_ptr, edge_val) in destinations_map {
-                    if let Some(child_arc) = node_ptr.upgrade() {
+                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                        Some(idx) => *idx,
+                        None => {
+                            let new_idx = nodes_json_list.len();
+                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                            bfs_q.push_back(child_arc.clone());
+                            nodes_json_list.push(JSONNode::Null); // Placeholder
+                            new_idx
+                        }
+                    };
+                    dest_map_json_array_bfs.push(JSONNode::Array(vec![
+                        child_idx.to_json(),
+                        edge_val.to_json(),
+                    ]));
+                }
+                current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
+            }
+
+            // Serialize weak children (upgrade if possible; skip otherwise)
+            for (edge_key, destinations_map) in &node_guard.weak_children {
+                let ek_json = edge_key.to_json();
+                let mut dest_map_json_array_bfs = Vec::new();
+                for (weak_wrapper, edge_val) in destinations_map {
+                    if let Some(child_arc) = weak_wrapper.upgrade() {
                         let child_arc_ptr = Arc::as_ptr(&child_arc);
                         let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
                             Some(idx) => *idx,
                             None => {
                                 let new_idx = nodes_json_list.len();
                                 arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                                bfs_q.push_back(child_arc);
+                                bfs_q.push_back(child_arc.clone());
                                 nodes_json_list.push(JSONNode::Null);
                                 new_idx
                             }
                         };
-                        let dest_entry = JSONNode::Array(vec![
+                        dest_map_json_array_bfs.push(JSONNode::Array(vec![
                             child_idx.to_json(),
                             edge_val.to_json(),
-                        ]);
-                        if node_ptr.is_strong() {
-                            strong_dests_json_bfs.push(dest_entry);
-                        } else {
-                            weak_dests_json_bfs.push(dest_entry);
-                        }
+                        ]));
+                    } else {
+                        // dangling weak ref; skip
                     }
                 }
-                if !strong_dests_json_bfs.is_empty() {
-                    current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(strong_dests_json_bfs)]));
-                }
-                if !weak_dests_json_bfs.is_empty() {
-                    current_node_weak_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(weak_dests_json_bfs)]));
-                }
+                current_node_weak_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
             }
 
             // Fill in the data for the current node from the BFS queue
@@ -223,7 +258,8 @@ where
 
                             let new_node_arc = Arc::new(RwLock::new(Trie {
                                 value,
-                                children: BTreeMap::new(),
+                                children: BTreeMap::new(), // Children populated in Pass 2
+                                weak_children: BTreeMap::new(),
                                 max_depth,
                             }));
                             deserialized_arcs.insert(i, new_node_arc);
@@ -269,7 +305,7 @@ where
                                                                         .ok_or_else(|| format!("Child index {} not found for node {} in Pass 2", child_idx, i))?
                                                                         .clone();
                                                                     let edge_value = EV::from_json(ev_json.clone())?;
-                                                                    destinations_for_this_ek.insert(NodePtr::Strong(ArcPtrWrapper::new(child_arc)), edge_value);
+                                                                    destinations_for_this_ek.insert(ArcPtrWrapper::new(child_arc), edge_value);
                                                                 }
                                                                 _ => return Err(format!("Invalid child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
                                                             }
@@ -297,7 +333,7 @@ where
                                                     let dest_map_json_array = &ek_pair[1];
 
                                                     let edge_key = EK::from_json(ek_json.clone())?;
-                                                    let destinations_for_this_ek = current_node_guard.children.entry(edge_key.clone()).or_default();
+                                                    let mut destinations_for_this_ek: OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV> = OrderedHashMap::new();
 
                                                     match dest_map_json_array {
                                                         JSONNode::Array(dest_array_inner) => {
@@ -312,15 +348,16 @@ where
                                                                             .ok_or_else(|| format!("Child index {} not found for node {} in Pass 2 (weak)", child_idx, i))?
                                                                             .clone();
                                                                         let edge_value = EV::from_json(ev_json.clone())?;
-                                                                        let weak_wrapper = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc)));
+                                                                        let weak_wrapper = WeakPtrWrapper::new(Arc::downgrade(&child_arc));
                                                                         destinations_for_this_ek.insert(weak_wrapper, edge_value);
                                                                     }
                                                                     _ => return Err(format!("Invalid weak child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
                                                                 }
                                                             }
                                                         }
-                                                        _ => return Err(format!("Weak children destination map for node {} under edge key {:?} is not an array", i, &edge_key)),
+                                                        _ => return Err(format!("Weak children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
                                                     }
+                                                    current_node_guard.weak_children.insert(edge_key, destinations_for_this_ek);
                                                 }
                                                 _ => return Err(format!("Invalid EK-weak_children_map_array pair format for node {}", i)),
                                             }
@@ -373,6 +410,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         Trie {
             value,
             children: BTreeMap::new(),
+            weak_children: BTreeMap::new(),
             max_depth: 0,
         }
     }
@@ -380,22 +418,22 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     // force_insert remains unchanged
     pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<RwLock<Trie<EK, EV, T>>> {
         let new_node = Arc::new(RwLock::new(Trie::new(value)));
-        let new_node_comparable = NodePtr::Strong(ArcPtrWrapper::new(new_node.clone()));
+        let new_node_comparable = ArcPtrWrapper::new(new_node.clone());
         self.children.entry(edge_key).or_default().insert(new_node_comparable, edge_value);
         // Note: force_insert does NOT update max_depth or check for cycles. Use with caution.
         new_node.clone()
     }
 
     pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<Trie<EK, EV, T>>>) {
-        let dst_comparable = NodePtr::Strong(ArcPtrWrapper::new(dst.clone()));
+        let dst_comparable = ArcPtrWrapper::new(dst.clone());
         self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
     }
 
     /// Insert a weak edge explicitly. This allows cycles by design.
     /// Does NOT update max_depth and will not keep the destination alive.
     pub fn insert_weak_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<Trie<EK, EV, T>>>) {
-        let weak = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(dst)));
-        self.children.entry(edge_key).or_default().insert(weak, edge_value);
+        let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
+        self.weak_children.entry(edge_key).or_default().insert(weak, edge_value);
     }
 
     /// Convenience: create a new node and insert a weak edge to it.
@@ -404,44 +442,44 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn insert_weak_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<RwLock<Trie<EK, EV, T>>> {
         let new_node = Arc::new(RwLock::new(Trie::new(value)));
         {
-            let weak = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&new_node)));
-            self.children.entry(edge_key).or_default().insert(weak, edge_value);
+            let weak = WeakPtrWrapper::new(Arc::downgrade(&new_node));
+            self.weak_children.entry(edge_key).or_default().insert(weak, edge_value);
         }
         new_node
     }
 
     // already_has_dst remains unchanged
     pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
-        let lookup_key = NodePtr::Strong(ArcPtrWrapper::new(dst.clone())); // Clone Arc for temporary ownership in key
+        let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
         self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
     }
 
     pub fn already_has_dst_for_any_key(&self, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
-        let lookup_key = NodePtr::Strong(ArcPtrWrapper::new(dst.clone()));
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.values().any(|dest_map| dest_map.contains_key(&lookup_key))
     }
 
     // get_edge_value remains unchanged
     pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&EV> {
-        let lookup_key = NodePtr::Strong(ArcPtrWrapper::new(dst.clone()));
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
     }
 
     /// Weak variant: check if a weak edge already exists to dst.
     pub fn already_has_weak_dst(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
-        let weak = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(dst)));
-        self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&weak))
+        let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
+        self.weak_children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&weak))
     }
 
     /// Weak variant: get weak edge EV (if the weak pointer matches).
     pub fn get_weak_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&EV> {
-        let weak = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(dst)));
-        self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&weak))
+        let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
+        self.weak_children.get(&edge_key).and_then(|dest_map| dest_map.get(&weak))
     }
 
     // get_edge_value_mut remains unchanged
     pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&mut EV> {
-        let lookup_key = NodePtr::Strong(ArcPtrWrapper::new(dst.clone()));
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
     }
 
@@ -516,7 +554,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         // 3. All checks have passed – perform the real structural mutation.
         // ------------------------------------------------------------------
-        let child_comparable = NodePtr::Strong(ArcPtrWrapper::new(child.clone())); // child is an Arc, clone it
+        let child_comparable = ArcPtrWrapper::new(child.clone()); // child is an Arc, clone it
         self.children
             .entry(edge_key)
             .or_default()
@@ -551,8 +589,8 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         if would_cycle {
             // Degrade to weak edge; do NOT update depths
             if let Some(ev) = edge_value.take() {
-                let weak = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child)));
-                self.children.entry(edge_key).or_default().insert(weak, ev);
+                let weak = WeakPtrWrapper::new(Arc::downgrade(&child));
+                self.weak_children.entry(edge_key).or_default().insert(weak, ev);
             }
             return InsertedEdgeKind::Weak;
         }
@@ -604,12 +642,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                     // Get children while holding the lock.
                     let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = node_guard.children
                         .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
-                        .flat_map(|dest_map| {
-                            dest_map.keys().filter_map(|node_ptr| match node_ptr {
-                                NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.as_arc().clone()),
-                                NodePtr::Weak(_) => None,
-                            })
-                        })
+                        .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                         .collect();
 
                     timeit!(format!("BFS: Node has {} children", children_arcs.len()), {});
@@ -676,12 +709,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             let node_guard_val = node_arc.read().expect("RwLock poisoned in _propagate_max_depth (getting children)"); // Renamed node_guard
             node_guard_val.children // Use node_guard_val
                 .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
-                .flat_map(|dest_map| {
-                    dest_map.keys().filter_map(|node_ptr| match node_ptr {
-                        NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.as_arc().clone()),
-                        NodePtr::Weak(_) => None,
-                    })
-                })
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
         }; // node_guard_val lock is released here.
         // NOTE: Weak edges do NOT participate in max_depth propagation.
@@ -718,7 +746,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get(edge_key)
     }
@@ -727,25 +755,40 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
     // children remains unchanged
-    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &mut self.children
+    }
+
+    /// Access weak children maps
+    pub fn weak_children(&self) -> &BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
+        &self.weak_children
+    }
+
+    pub fn weak_children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
+        &mut self.weak_children
+    }
+
+    /// Get weak children (for a specific key)
+    pub fn get_weak(
+        &self,
+        edge_key: &EK,
+    ) -> Option<&OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
+        self.weak_children.get(edge_key)
     }
 
     // is_leaf remains unchanged
     pub fn is_leaf(&self) -> bool {
-        self.children.values().all(|dest_map| {
-            dest_map.keys().all(|node_ptr| !node_ptr.is_strong())
-        })
+        self.children.is_empty()
     }
 
     /// Collects all *unique* nodes (by pointer) reachable from the given root (BFS).
@@ -767,10 +810,21 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             // Lock the node to get its children
             let node_guard = node_arc.read().expect("RwLock poisoned during BFS"); // Renamed node to node_guard
             for children_map in node_guard.children.values() { // Use node_guard
-                for node_ptr in children_map.keys() {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        let child_arc_ptr = Arc::as_ptr(&child_arc);
-                        if visited_arcs.insert(child_arc_ptr) {
+                // #[allow(clippy::iter_over_hash_type)]
+                for child_wrapper_arc in children_map.keys() { // Iterate over ArcPtrWrapper keys
+                    let child_arc = child_wrapper_arc.as_arc();
+                    let child_arc_ptr = Arc::as_ptr(child_arc);
+                    if visited_arcs.insert(child_arc_ptr) {
+                        queue.push_back(child_arc.clone());
+                    }
+                }
+            }
+            // Traverse weak children as well (upgrade; skip dangling)
+            for children_map in node_guard.weak_children.values() {
+                for weak_wrapper in children_map.keys() {
+                    if let Some(child_arc) = weak_wrapper.upgrade() {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        if visited_arcs.insert(child_ptr) {
                             queue.push_back(child_arc.clone());
                         }
                     }
@@ -832,12 +886,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             let node_guard_val = node_arc.read().expect("RwLock poisoned during has_any_cycle traversal"); // Renamed node_guard
             node_guard_val.children // Use node_guard_val
                 .values() // Iterate over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
-                .flat_map(|dest_map| {
-                    dest_map.keys().filter_map(|node_ptr| match node_ptr {
-                        NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.as_arc().clone()),
-                        NodePtr::Weak(_) => None,
-                    })
-                })
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
         }; // node_guard_val lock is released here.
 
@@ -985,20 +1034,15 @@ where
                     }
 
                     // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
-                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map.iter()
-                        .filter_map(|(node_ptr, ev)| {
-                            if let NodePtr::Strong(apw) = node_ptr {
-                                Some((apw.as_arc().clone(), ev.clone()))
-                            } else { None }
-                        })
+                    // EV needs to be Clone for this collection strategy.
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
-                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map.iter()
-                        .filter_map(|(node_ptr, ev)| {
-                            if let NodePtr::Strong(apw) = node_ptr {
-                                Some((apw.as_arc().clone(), ev.clone()))
-                            } else { None }
-                        })
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
 
@@ -1056,12 +1100,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         while let Some(node_arc) = queue.pop_front() {
             let node_guard = node_arc.read().expect("RwLock poisoned during edge count");
             for children_map in node_guard.children.values() {
-                for node_ptr in children_map.keys() {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        total_edges += 1;
-                        if visited_arcs.insert(Arc::as_ptr(&child_arc)) {
-                            queue.push_back(child_arc.clone());
-                        }
+                total_edges += children_map.len();
+                for child_wrapper_arc in children_map.keys() {
+                    let child_arc = child_wrapper_arc.as_arc();
+                    if visited_arcs.insert(Arc::as_ptr(child_arc)) {
+                        queue.push_back(child_arc.clone());
                     }
                 }
             }
@@ -1093,7 +1136,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values   : HashMap<*const RwLock<Self>, V> = HashMap::new();
         let mut done     : HashSet <*const RwLock<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
+        let mut todo     : BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
@@ -1107,14 +1150,14 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
             let depth = node_arc.read().expect("poison").max_depth;
-            todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
+            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
             // #[allow(clippy::iter_over_hash_type)]
-            for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
+            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
                 if done.contains(&ptr) { continue; }               // already processed
 
                 // Pull the merged value that all parents contributed
@@ -1122,11 +1165,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     Some(v) => v,
                     None => continue,                            // can happen if every parent’s `step` returned None
                 };
-                let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
 
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
-                    let mut guard = node_arc.write().expect("poison");
+                    let mut guard = node_arc_ptr_wrapper.as_arc().write().expect("poison");
                     process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
@@ -1135,27 +1177,22 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                 // ---------- propagate to children -------------
                 // We read children once, outside any long-lived write locks
-                let edges: Vec<(EK, EV, NodePtr<RwLock<Self>>)> = {
-                    let guard = node_arc.read().expect("poison");
+                let edges: Vec<(EK, EV, Arc<RwLock<Self>>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().read().expect("poison");
                     guard.children
                         .iter()
                         .flat_map(|(ek, dst_map)| {
-                            dst_map.iter().filter_map(move |(node_ptr, ev)| {
-                                if node_ptr.is_strong() {
-                                    Some((ek.clone(), ev.clone(), node_ptr.clone()))
-                                } else { None }
-                            })
+                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
                         })
                         .collect()
                 };
 
                 for (ek, ev, child_arc) in edges {
                     let _ = pb.update(1);
-                    let child_ptr = NodePtr::as_ptr(&child_arc);
+                    let child_ptr = Arc::as_ptr(&child_arc);
 
                     // user ‘step’ callback
                     let maybe_v = {
-                        let child_arc = child_arc.upgrade().unwrap();
                         let child_guard = child_arc.read().expect("poison");
                         step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
                     };
@@ -1166,9 +1203,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                             .or_insert(new_v);
 
                         // Queue child by its declared depth
-                        let child_arc = child_arc.upgrade().unwrap();
                         let child_depth = child_arc.read().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(child_arc)));
+                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
                     }
                 }
             }
@@ -1188,9 +1224,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     where
         V: Clone,
         S: FnMut(
-            &V, &EK, &OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>
+            &V, &EK, &OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>
         ) -> I,
-        I: IntoIterator<Item = (NodePtr<RwLock<Trie<EK, EV, T>>>, V)>,
+        I: IntoIterator<Item = (ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, V)>,
     {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler. (Same as special_map)
@@ -1216,18 +1252,17 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
                 if done.contains(&ptr) { continue; }
 
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
                     None => continue,
                 };
-                let node_arc = node_ptr_wrapper.as_arc();
 
                 let proceed = {
-                    let mut guard = node_arc.write().expect("poison");
+                    let mut guard = node_arc_ptr_wrapper.as_arc().write().expect("poison");
                     process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
@@ -1235,23 +1270,16 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 if !proceed { continue; }
 
                 // ---------- propagate to children (grouped by edge key) -------------
-                let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
-                    let guard = node_arc.read().expect("poison");
-                    guard.children.iter().map(|(ek, dst_map)| {
-                        let strong_only_map: OrderedHashMap<_, _> = dst_map.iter()
-                            .filter(|(k, _)| k.is_strong())
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        (ek.clone(), strong_only_map)
-                    }).filter(|(_, dst_map)| !dst_map.is_empty()).collect()
+                let children_by_ek: Vec<(EK, OrderedHashMap<ArcPtrWrapper<RwLock<Self>>, EV>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().read().expect("poison");
+                    guard.children.iter().map(|(ek, dst_map)| (ek.clone(), dst_map.clone())).collect()
                 };
 
                 for (ek, dest_map) in children_by_ek {
                     let _ = pb.update(dest_map.len());
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
-                    for (child_node_ptr, new_v) in new_values_for_children {
-                        let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-                        let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
+                    for (child_arc, new_v) in new_values_for_children {
+                        let child_ptr = Arc::as_ptr(&child_arc);
                         values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
                         let child_depth = child_arc.read().expect("poison").max_depth;
                         todo.entry(child_depth).or_default().insert(child_arc);
@@ -1279,6 +1307,7 @@ where
         if self.children.len() != other.children.len() {
             return false;
         }
+        if self.weak_children.len() != other.weak_children.len() { return false; }
 
         // Initialize cache for recursive calls on child Arcs.
         // This cache is passed down through all recursive calls originating from this top-level eq.
@@ -1294,32 +1323,32 @@ where
                     return false;
                 }
                 Some(other_dest_map) => {
-                    let (self_strong, self_weak): (Vec<_>, Vec<_>) = self_dest_map.iter().partition(|(k, _)| k.is_strong());
-                    let (other_strong, other_weak): (Vec<_>, Vec<_>) = other_dest_map.iter().partition(|(k, _)| k.is_strong());
-
-                    if self_strong.len() != other_strong.len() { return false; }
+                    // Number of destinations for this edge key must match.
+                    if self_dest_map.len() != other_dest_map.len() {
+                        return false;
+                    }
 
                     // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
-                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_strong
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
                         .iter()
-                        .map(|(np, ev)| (np.upgrade().unwrap(), *ev))
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
-                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_strong
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
                         .iter()
-                        .map(|(np, ev)| (np.upgrade().unwrap(), (*ev).clone()))
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
 
                     // For each child in self_child_pairs, find a matching child in other_child_pairs.
                     // A match requires equal edge values (EV) and recursively equal Trie nodes.
-                    'self_pair_loop: for (s_arc, s_ev) in self_child_pairs {
+                    'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
                         let mut found_match_for_current_self_pair = false;
                         for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
-                            if s_ev == &other_child_pairs[i].1 { // Compare EV (s_ev is &EV, other_child_pairs[i].1 is EV)
+                            if s_ev == &other_child_pairs[i].1 { // Compare EV
                                 // Edge values match, now recursively compare the pointed-to Trie nodes.
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
-                                if Trie::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, &mut comparison_cache) {
                                     other_child_pairs.remove(i); // Match found.
                                     found_match_for_current_self_pair = true;
                                     break; // Found match for current s_arc, move to next s_arc.
@@ -1336,23 +1365,32 @@ where
             }
         }
 
-        // 4. Compare weak children structure.
-        for (self_ek, self_dest_map) in &self.children {
-            if let Some(other_dest_map) = other.children.get(self_ek) {
-                let self_weak_pairs: Vec<_> = self_dest_map.iter().filter_map(|(np, ev)| if !np.is_strong() { np.upgrade().map(|arc| (arc, ev.clone())) } else { None }).collect();
-                let mut other_weak_pairs: Vec<_> = other_dest_map.iter().filter_map(|(np, ev)| if !np.is_strong() { np.upgrade().map(|arc| (arc, ev.clone())) } else { None }).collect();
+        // 4. Compare weak children structure as well (using upgraded Arcs only).
+        for (self_ek, self_dest_map) in &self.weak_children {
+            match other.weak_children.get(self_ek) {
+                None => return false,
+                Some(other_dest_map) => {
+                    // Upgrade both sides and compare only successfully upgraded edges
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                        .iter()
+                        .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
+                        .collect();
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
+                        .collect();
 
-                if self_weak_pairs.len() != other_weak_pairs.len() {
-                    return false;
-                }
+                    if self_child_pairs.len() != other_child_pairs.len() {
+                        return false;
+                    }
 
-                'self_weak_loop: for (s_arc, s_ev) in &self_weak_pairs {
+                    'self_weak_loop: for (s_arc, s_ev) in &self_child_pairs {
                         let mut found_match = false;
-                        for i in 0..other_weak_pairs.len() {
-                            if s_ev == &other_weak_pairs[i].1 {
-                                let o_arc = other_weak_pairs[i].0.clone();
+                        for i in 0..other_child_pairs.len() {
+                            if s_ev == &other_child_pairs[i].1 {
+                                let o_arc = other_child_pairs[i].0.clone();
                                 if Trie::compare_arcs_recursive(s_arc, &o_arc, &mut comparison_cache) {
-                                    other_weak_pairs.remove(i);
+                                    other_child_pairs.remove(i);
                                     found_match = true;
                                     break;
                                 }
@@ -1362,10 +1400,6 @@ where
                             return false;
                         }
                     }
-            } else {
-                // If self has this edge key but other doesn't, and there are weak edges, it's a mismatch.
-                if self_dest_map.iter().any(|(np, _)| !np.is_strong()) {
-                    return false;
                 }
             }
         }
@@ -1430,45 +1464,44 @@ where
         node.children.len().hash(state);
         for (ek, dest_map) in &node.children {
             ek.hash(state);
+            dest_map.len().hash(state);
 
-            let (strong_children, weak_children): (Vec<_>, Vec<_>) = dest_map.iter().partition(|(k, _)| k.is_strong());
-
-            // Hash strong children
-            strong_children.len().hash(state);
-            let mut strong_pair_hashes = Vec::with_capacity(strong_children.len());
-            for (node_ptr, ev) in strong_children {
+            let mut pair_hashes = Vec::with_capacity(dest_map.len());
+            for (apw, ev) in dest_map {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_guard = child_arc.read().expect("RwLock poisoned during Hash");
-                    Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
-                    strong_pair_hashes.push(pair_hasher.finish());
-                }
+                let child_guard = apw.as_arc().read().expect("RwLock poisoned during Hash");
+                Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
+                pair_hashes.push(pair_hasher.finish());
             }
-            strong_pair_hashes.sort_unstable();
-            for h in strong_pair_hashes {
+
+            pair_hashes.sort_unstable();
+            for h in pair_hashes {
                 h.hash(state);
             }
+        }
 
-            // Hash weak children
-            let weak_upgraded: Vec<_> = weak_children.iter()
-                .filter_map(|(node_ptr, ev)| node_ptr.upgrade().map(|arc| (arc, *ev)))
-                .collect();
-
-            weak_upgraded.len().hash(state);
-            let mut weak_pair_hashes = Vec::with_capacity(weak_upgraded.len());
-            for (child_arc, ev) in weak_upgraded {
-                if let Ok(child_guard) = child_arc.read() {
+        // Hash weak children (skip dangling weak refs).
+        node.weak_children.len().hash(state);
+        for (ek, dest_map) in &node.weak_children {
+            ek.hash(state);
+            let mut pair_hashes: Vec<u64> = Vec::new();
+            for (wpw, ev) in dest_map {
+                if let Some(child_arc) = wpw.upgrade() {
                     // hash pair (ev, child)
                     let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                     ev.hash(&mut pair_hasher);
+                    let child_guard = child_arc.read().expect("RwLock poisoned during Hash (weak)");
                     Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
-                    weak_pair_hashes.push(pair_hasher.finish());
+                    pair_hashes.push(pair_hasher.finish());
+                } else {
+                    // dangling weak edge ignored to keep consistency with eq which also ignores
                 }
             }
-
-            weak_pair_hashes.sort_unstable();
-            for h in weak_pair_hashes {
+            // also mix in number of included pairs
+            pair_hashes.sort_unstable();
+            (pair_hashes.len()).hash(state);
+            for h in pair_hashes {
                 h.hash(state);
             }
         }
@@ -1539,7 +1572,7 @@ where
         }
 
         let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination"); // Renamed source to source_guard
-        let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
+        let destination_wrapper = ArcPtrWrapper::new(destination.clone()); // Use ArcPtrWrapper
 
         // Check if edge already exists and try merging EV
         if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
@@ -1569,7 +1602,7 @@ where
             return self;
         }
         let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination_auto");
-        let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone()));
+        let destination_wrapper = ArcPtrWrapper::new(destination.clone());
         if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
             (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
             self.result = Some(destination);
@@ -1654,13 +1687,7 @@ where
         let children_for_this_key: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
             let source_guard = self.source_arc.read().expect("RwLock poisoned while locking source in try_children");
             if let Some(dest_map) = source_guard.children.get(&self.edge_key) {
-                dest_map.keys()
-                    .filter_map(|node_ptr| {
-                        if let NodePtr::Strong(arc_wrapper) = node_ptr {
-                            Some(arc_wrapper.as_arc().clone())
-                        } else { None }
-                    })
-                    .collect()
+                dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()).collect()
             } else {
                 Vec::new() // No children under this specific edge key
             }
@@ -1923,8 +1950,8 @@ mod tests {
         assert_eq!(retrieved_children_a.len(), 2);
         // Use Arc pointers for comparison
         let retrieved_data_a: HashSet<(&str, *const RwLock<TestTrieBasic>)> = retrieved_children_a
-            .iter() // Iterates yielding (&NodePtr<...>, &&str)
-            .map(|(node_ptr, ev_ref)| (*ev_ref, arc_ptr(&node_ptr.upgrade().unwrap()))) // Dereference ev_ref twice
+            .iter() // Iterates yielding (&ArcPtrWrapper<Mutex<...>>, &&str)
+            .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc()))) // Dereference ev_ref twice
             .collect();
         assert!(retrieved_data_a.contains(&("edge_a1", arc_ptr(&child1))));
         assert!(retrieved_data_a.contains(&("edge_a3", arc_ptr(&child3))));
@@ -1932,9 +1959,9 @@ mod tests {
         // Test get for 'b'
         let retrieved_children_b = root.children().get(&"b").expect("Failed to get child 'b'"); // Now a &BTreeMap
         assert_eq!(retrieved_children_b.len(), 1);
-        let (node_ptr, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
+        let (wrapper_arc, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
         assert_eq!(*ev_ref, "edge_b"); // Check edge value
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &child2)); // Check Arc pointer equality
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &child2)); // Check Arc pointer equality
 
         assert!(root.get(&"c").is_none());
 
@@ -1975,8 +2002,8 @@ mod tests {
             let children_map = binding.get(&"edge").unwrap(); // Now a &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
             assert_eq!(children_map.len(), 2);
             let child_data: HashSet<(&str, *const RwLock<TestTrieBasic>)> = children_map
-                .iter() // Iterating over (&NodePtr<...>, &EV)
-                .map(|(node_ptr, ev_ref)| (*ev_ref, arc_ptr(&node_ptr.upgrade().unwrap())))
+                .iter() // Iterating over (&ArcPtrWrapper<Mutex<...>>, &EV)
+                .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc())))
                 .collect();
             assert!(child_data.contains(&("val1", arc_ptr(&child1))));
             assert!(child_data.contains(&("val2", arc_ptr(&child2))));
@@ -2276,8 +2303,8 @@ mod tests {
         // - The edge must *not* be present because the insertion was rejected.
         let child_locked = child.read().unwrap();
         let has_edge_to_root = if let Some(dest_map) = child_locked.children.get("c->r") {
-            let lookup_key = NodePtr::Strong(ArcPtrWrapper::new(root.clone())); // Use NodePtr
-            dest_map.contains_key(&lookup_key)
+             let lookup_key = ArcPtrWrapper::new(root.clone()); // Use ArcPtrWrapper
+             dest_map.contains_key(&lookup_key)
          } else {
              false
          };
@@ -2599,9 +2626,9 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, edge_val);
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
         assert_eq!(dest.read().unwrap().max_depth, 1); // Depth updated by try_insert
     }
 
@@ -2624,9 +2651,9 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1); // Still one edge
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, merged_edge_val); // Merged value
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
         assert_eq!(dest.read().unwrap().max_depth, 1); // Depth should remain 1
     }
 
@@ -2650,10 +2677,10 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         // The result of merge_bitset_union(&empty, &new_edge_val) is new_edge_val
         assert_eq!(*ev, new_edge_val);
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
     }
 
     #[test]
@@ -2700,8 +2727,8 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest1));
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest1));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -2730,8 +2757,8 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest2));
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest2));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -2798,10 +2825,10 @@ mod tests {
             let s_guard = source.read().unwrap();
             let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
 
-            let ev_c1 = children_map_target_key.get(&NodePtr::Strong(ArcPtrWrapper::new(child1.clone()))).expect("Child1 should be under target_key");
+            let ev_c1 = children_map_target_key.get(&ArcPtrWrapper::new(child1.clone())).expect("Child1 should be under target_key");
             assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
-            let ev_c2 = children_map_target_key.get(&NodePtr::Strong(ArcPtrWrapper::new(child2.clone()))).expect("Child2 should be under target_key");
+            let ev_c2 = children_map_target_key.get(&ArcPtrWrapper::new(child2.clone())).expect("Child2 should be under target_key");
             assert_eq!(*ev_c2, initial_ev_c2, "Edge value for child2 should be unchanged");
 
             let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
@@ -2849,8 +2876,8 @@ mod tests {
         let s_chain_guard = source_chain.read().unwrap();
         let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
         assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
-        let (node_ptr_chain, ev_chain) = children_map_chain.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr_chain.upgrade().unwrap(), &result_node_chain), "Edge should point to the newly created node");
+        let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
         assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
     }
 
@@ -2869,8 +2896,8 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &result_node));
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -2928,8 +2955,8 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &result_node));
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -2951,8 +2978,8 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest1));
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &dest1));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -3020,8 +3047,8 @@ mod tests {
         let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (node_ptr, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &child1));
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &child1));
         assert_eq!(*ev, new_edge_val);
 
         // Ensure the value for the skipped else_create was not used
@@ -3070,10 +3097,10 @@ mod tests {
             let s_guard = source.read().unwrap();
             let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
 
-            let ev_c1 = children_map_target_key.get(&NodePtr::Strong(ArcPtrWrapper::new(child1.clone()))).expect("Child1 should be under target_key");
+            let ev_c1 = children_map_target_key.get(&ArcPtrWrapper::new(child1.clone())).expect("Child1 should be under target_key");
             assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
-            let ev_c2 = children_map_target_key.get(&NodePtr::Strong(ArcPtrWrapper::new(child2.clone()))).expect("Child2 should be under target_key");
+            let ev_c2 = children_map_target_key.get(&ArcPtrWrapper::new(child2.clone())).expect("Child2 should be under target_key");
             assert_eq!(*ev_c2, initial_ev_c2, "Edge value for child2 should be unchanged");
 
             let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
@@ -3121,8 +3148,8 @@ mod tests {
         let s_chain_guard = source_chain.read().unwrap();
         let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
         assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
-        let (node_ptr_chain, ev_chain) = children_map_chain.iter().next().unwrap();
-        assert!(Arc::ptr_eq(&node_ptr_chain.upgrade().unwrap(), &result_node_chain), "Edge should point to the newly created node");
+        let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
         assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
     }
 }
