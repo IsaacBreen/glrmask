@@ -2,27 +2,23 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
-// Import TryLockError explicitly for matching
-use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
+use std::sync::{Arc, RwLock, TryLockError};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
+use std::cell::RefCell;
 use ordered_hash_map::OrderedHashMap;
 
-
-use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
-use crate::datastructures::{ArcPtrWrapper}; // Import ArcPtrWrapper and WeakPtrWrapper
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::ArcPtrWrapper;
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
 use kdam::{tqdm, BarExt};
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::WeakPtrWrapper;
 use crate::profiler::PROGRESS_BAR_ENABLED;
-// Added for derive macro pattern
-
 
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
@@ -41,7 +37,6 @@ impl fmt::Display for CycleDetectedError {
 
 impl Error for CycleDetectedError {}
 
-
 /// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).
 /// Multiple children can exist for the same edge key. Each edge instance has a value.
 ///
@@ -52,10 +47,10 @@ impl Error for CycleDetectedError {}
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
-    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>,
     /// Weak edges: allow explicit cycles without keeping the target alive.
     /// Edges here do NOT affect max_depth and are not considered for cycle detection.
-    weak_children: BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+    weak_children: BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     /// If A -> B, then A.max_depth < B.max_depth.
@@ -70,26 +65,21 @@ where
 {
     fn to_json(&self) -> JSONNode {
         let mut nodes_json_list: Vec<JSONNode> = Vec::new();
-        // Maps the raw pointer of an Arc<Mutex<Trie>> to its index in nodes_json_list
-        let mut arc_ptr_to_idx_map: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
+        // Maps the raw pointer of an Arc<RwLock<Trie>> to its index in nodes_json_list
+        let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie<EK, EV, T>>, usize> = HashMap::new();
         // Queue for BFS traversal, storing Arcs to keep them alive and allow locking
-        let mut bfs_q: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        let mut bfs_q: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
 
-        // --- Step 1: Serialize `self` (the root node for this call) ---
-        // `self` is node at index 0.
-        // We need to store the JSON representation of `self`'s direct data.
-        // Since `self` is not an Arc here, we handle it specially as the first node.
-        // Its children, which are Arcs, will be processed via the BFS queue.
+        // Root (self) at index 0
         let root_idx = 0;
-        nodes_json_list.push(JSONNode::Null); // Placeholder for root, will be filled after processing its children.
+        nodes_json_list.push(JSONNode::Null);
 
-        let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
-        let mut root_weak_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]] for weak edges
+        let mut root_children_json_data = Vec::new();
+        let mut root_weak_children_json_data = Vec::new();
 
         for (edge_key, destinations_map) in &self.children {
             let ek_json = edge_key.to_json();
             let mut dest_map_json_array = Vec::new();
-            // #[allow(clippy::iter_over_hash_type)]
             for (child_arc_ptr_wrapper, edge_val) in destinations_map {
                 let child_arc = child_arc_ptr_wrapper.as_arc();
                 let child_arc_ptr = Arc::as_ptr(child_arc);
@@ -97,22 +87,22 @@ where
                 let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
                     Some(idx) => *idx,
                     None => {
-                        let new_idx = nodes_json_list.len(); // Next available index
+                        let new_idx = nodes_json_list.len();
                         arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
                         bfs_q.push_back(child_arc.clone());
-                        nodes_json_list.push(JSONNode::Null); // Placeholder for this new child
+                        nodes_json_list.push(JSONNode::Null);
                         new_idx
                     }
                 };
                 dest_map_json_array.push(JSONNode::Array(vec![
-                    child_idx.to_json(), // Child index
-                    edge_val.to_json(),          // Edge value
+                    child_idx.to_json(),
+                    edge_val.to_json(),
                 ]));
             }
             root_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
         }
 
-        // Serialize weak children (upgrade Weak to Arc; skip if upgrade fails)
+        // weak children (upgrade if possible)
         for (edge_key, destinations_map) in &self.weak_children {
             let ek_json = edge_key.to_json();
             let mut dest_map_json_array = Vec::new();
@@ -133,14 +123,11 @@ where
                         child_idx.to_json(),
                         edge_val.to_json(),
                     ]));
-                } else {
-                    // dangling weak ref; skip
                 }
             }
             root_weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
         }
 
-        // Fill in the root node's (self's) data
         nodes_json_list[root_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
             ("value".to_string(), self.value.to_json()),
             ("max_depth".to_string(), self.max_depth.to_json()),
@@ -148,21 +135,19 @@ where
             ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
         ]));
 
-
-        // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
+        // BFS for other nodes
         while let Some(current_arc) = bfs_q.pop_front() {
             let current_arc_ptr = Arc::as_ptr(&current_arc);
             let current_node_json_idx = *arc_ptr_to_idx_map.get(&current_arc_ptr)
                 .expect("Node in BFS queue must have an assigned index");
 
-            let node_guard = current_arc.lock().expect("Mutex poisoned during Trie serialization (BFS part)");
+            let node_guard = current_arc.read().expect("RwLock poisoned during Trie serialization (BFS part)");
             let mut current_node_children_json_bfs = Vec::new();
             let mut current_node_weak_children_json_bfs = Vec::new();
 
             for (edge_key, destinations_map) in &node_guard.children {
                 let ek_json = edge_key.to_json();
                 let mut dest_map_json_array_bfs = Vec::new();
-                // #[allow(clippy::iter_over_hash_type)]
                 for (child_arc_ptr_wrapper, edge_val) in destinations_map {
                     let child_arc = child_arc_ptr_wrapper.as_arc();
                     let child_arc_ptr = Arc::as_ptr(child_arc);
@@ -173,7 +158,7 @@ where
                             let new_idx = nodes_json_list.len();
                             arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
                             bfs_q.push_back(child_arc.clone());
-                            nodes_json_list.push(JSONNode::Null); // Placeholder
+                            nodes_json_list.push(JSONNode::Null);
                             new_idx
                         }
                     };
@@ -185,7 +170,6 @@ where
                 current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
             }
 
-            // Serialize weak children (upgrade if possible; skip otherwise)
             for (edge_key, destinations_map) in &node_guard.weak_children {
                 let ek_json = edge_key.to_json();
                 let mut dest_map_json_array_bfs = Vec::new();
@@ -206,14 +190,11 @@ where
                             child_idx.to_json(),
                             edge_val.to_json(),
                         ]));
-                    } else {
-                        // dangling weak ref; skip
                     }
                 }
                 current_node_weak_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
             }
 
-            // Fill in the data for the current node from the BFS queue
             nodes_json_list[current_node_json_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
                 ("value".to_string(), node_guard.value.to_json()),
                 ("max_depth".to_string(), node_guard.max_depth.to_json()),
@@ -244,7 +225,7 @@ where
                     return Err(format!("Root index {} is out of bounds for nodes array of length {}", root_idx, nodes_array.len()));
                 }
 
-                let mut deserialized_arcs: HashMap<usize, Arc<Mutex<Trie<EK, EV, T>>>> = HashMap::new();
+                let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie<EK, EV, T>>>> = HashMap::new();
 
                 // Pass 1: Create node shells (value, max_depth, empty children)
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
@@ -256,9 +237,9 @@ where
                             let value = T::from_json(value_json.clone())?;
                             let max_depth = usize::from_json(max_depth_json.clone())?;
 
-                            let new_node_arc = Arc::new(Mutex::new(Trie {
+                            let new_node_arc = Arc::new(RwLock::new(Trie {
                                 value,
-                                children: BTreeMap::new(), // Children populated in Pass 2
+                                children: BTreeMap::new(),
                                 weak_children: BTreeMap::new(),
                                 max_depth,
                             }));
@@ -268,14 +249,14 @@ where
                     }
                 }
 
-                // Pass 2: Link children by populating the `children` BTreeMaps
+                // Pass 2: Link children
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
                         JSONNode::Object(n_obj) => {
                             let current_node_arc = deserialized_arcs.get(&i)
                                 .ok_or_else(|| format!("Failed to find node for index {} in Pass 2", i))?
                                 .clone();
-                            let mut current_node_guard = current_node_arc.lock().unwrap();
+                            let mut current_node_guard = current_node_arc.write().unwrap();
 
                             let children_json_outer_array = n_obj.get("children")
                                 .ok_or_else(|| format!("Node at index {} missing 'children' field in Pass 2", i))?;
@@ -322,7 +303,7 @@ where
                                 _ => return Err(format!("'children' field for node {} is not an array of EK-entries", i)),
                             }
 
-                            // Link weak_children if present
+                            // weak_children if present
                             if let Some(weak_children_node) = weak_children_json_outer_array_opt {
                                 match weak_children_node {
                                     JSONNode::Array(children_ek_map_array) => {
@@ -333,7 +314,7 @@ where
                                                     let dest_map_json_array = &ek_pair[1];
 
                                                     let edge_key = EK::from_json(ek_json.clone())?;
-                                                    let mut destinations_for_this_ek: OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV> = OrderedHashMap::new();
+                                                    let mut destinations_for_this_ek: OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV> = OrderedHashMap::new();
 
                                                     match dest_map_json_array {
                                                         JSONNode::Array(dest_array_inner) => {
@@ -375,9 +356,7 @@ where
                     .ok_or_else(|| format!("Root index {} not found in deserialized_arcs map after linking", root_idx))?
                     .clone();
 
-                // The trait requires returning Self, so we clone the content of the root Arc.
-                // The shared graph structure is maintained by the Arcs held within the children maps.
-                let root_trie_content = root_arc_final.lock().unwrap().clone();
+                let root_trie_content = root_arc_final.read().unwrap().clone();
                 Ok(root_trie_content)
             }
             _ => Err("Expected JSONNode::Object for Trie graph structure".to_string()),
@@ -385,24 +364,21 @@ where
     }
 }
 
-impl<T> JSONConvertible for Arc<Mutex<T>>
+impl<T> JSONConvertible for Arc<RwLock<T>>
 where
     T: JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
-        self.lock()
-            .expect("Mutex poisoned during JSON serialization")
+        self.read()
+            .expect("RwLock poisoned during JSON serialization")
             .to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        T::from_json(node).map(|val| Arc::new(Mutex::new(val)))
+        T::from_json(node).map(|val| Arc::new(RwLock::new(val)))
     }
 }
 
-
-// Implementation block for core Trie functionality
-// Added Clone bound for EK needed in try_insert_or_merge_edge and others
 impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// Creates a new trie node with the given value and no children.
     /// The max_depth is initialized to 0.
@@ -415,32 +391,29 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         }
     }
 
-    // force_insert remains unchanged
-    pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
-        let new_node = Arc::new(Mutex::new(Trie::new(value)));
+    pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<RwLock<Trie<EK, EV, T>>> {
+        let new_node = Arc::new(RwLock::new(Trie::new(value)));
         let new_node_comparable = ArcPtrWrapper::new(new_node.clone());
         self.children.entry(edge_key).or_default().insert(new_node_comparable, edge_value);
         // Note: force_insert does NOT update max_depth or check for cycles. Use with caution.
         new_node.clone()
     }
 
-    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<Mutex<Trie<EK, EV, T>>>) {
+    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<Trie<EK, EV, T>>>) {
         let dst_comparable = ArcPtrWrapper::new(dst.clone());
         self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
     }
 
     /// Insert a weak edge explicitly. This allows cycles by design.
     /// Does NOT update max_depth and will not keep the destination alive.
-    pub fn insert_weak_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<Mutex<Trie<EK, EV, T>>>) {
+    pub fn insert_weak_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<Trie<EK, EV, T>>>) {
         let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
         self.weak_children.entry(edge_key).or_default().insert(weak, edge_value);
     }
 
     /// Convenience: create a new node and insert a weak edge to it.
-    /// Note: a weak edge to a freshly created node is usually useless unless
-    /// another strong edge also points to it; otherwise it may be dropped.
-    pub fn insert_weak_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
-        let new_node = Arc::new(Mutex::new(Trie::new(value)));
+    pub fn insert_weak_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<RwLock<Trie<EK, EV, T>>> {
+        let new_node = Arc::new(RwLock::new(Trie::new(value)));
         {
             let weak = WeakPtrWrapper::new(Arc::downgrade(&new_node));
             self.weak_children.entry(edge_key).or_default().insert(weak, edge_value);
@@ -448,146 +421,123 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         new_node
     }
 
-    // already_has_dst remains unchanged
-    pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
-        let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
+    pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
     }
 
-    pub fn already_has_dst_for_any_key(&self, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+    pub fn already_has_dst_for_any_key(&self, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.values().any(|dest_map| dest_map.contains_key(&lookup_key))
     }
 
-    // get_edge_value remains unchanged
-    pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
+    pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&EV> {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
     }
 
     /// Weak variant: check if a weak edge already exists to dst.
-    pub fn already_has_weak_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+    pub fn already_has_weak_dst(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
         let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
         self.weak_children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&weak))
     }
 
     /// Weak variant: get weak edge EV (if the weak pointer matches).
-    pub fn get_weak_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
+    pub fn get_weak_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&EV> {
         let weak = WeakPtrWrapper::new(Arc::downgrade(dst));
         self.weak_children.get(&edge_key).and_then(|dest_map| dest_map.get(&weak))
     }
 
-    // get_edge_value_mut remains unchanged
-    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&mut EV> {
+    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&mut EV> {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
     }
 
+    /// Budget to bound worst-case cycle detection work.
+    const DETECT_CYCLE_VISIT_BUDGET: usize = 1_000_000;
+
     #[time_it]
     pub fn try_insert(
         &mut self,
+        self_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
-        edge_value: &mut Option<EV>, // Changed to allow taking the value
-        child: Arc<Mutex<Trie<EK, EV, T>>>,
+        edge_value: &mut Option<EV>,
+        child: Arc<RwLock<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
-        // ------------------------------------------------------------------
-        // 1. Detect whether adding the edge would introduce a cycle.
-        //    A cycle exists iff `self` is reachable from `child`.
-        // ------------------------------------------------------------------
-        let self_ptr = self as *const Trie<EK, EV, T>;
+        // 1) Fast cycle test: if adding self -> child would create a cycle,
+        // then self must be reachable from child.
+        let self_mutex_ptr = Arc::as_ptr(self_arc);
+        let self_max_depth = self.max_depth;
+
         if !self.already_has_dst_for_any_key(&child) &&
-            Self::detect_cycle(self_ptr, &child) {
+            Self::detect_cycle(self_mutex_ptr, self_max_depth, &child) {
             return Err(CycleDetectedError);
         }
 
-        self.try_insert_unchecked(edge_key, edge_value, child)
+        self.try_insert_unchecked(self_arc, edge_key, edge_value, child)
     }
 
     #[time_it]
     pub fn try_insert_unchecked(
         &mut self,
+        self_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
-        edge_value: &mut Option<EV>, // Changed to allow taking the value
-        child: Arc<Mutex<Trie<EK, EV, T>>>,
+        edge_value: &mut Option<EV>,
+        child: Arc<RwLock<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
 
-        // ------------------------------------------------------------------
-        // 2. Update the child's max-depth *before* the edge is inserted.
-        //    This lets us rollback cleanly if `propagate_max_depth` fails
-        //    (because no structural change has been committed yet).
-        // ------------------------------------------------------------------
+        // 2) Update child's max_depth before linking edge (for clean rollback if needed)
         let candidate_depth = self.max_depth.saturating_add(1);
-        let previous_child_depth; // Store previous depth for potential rollback
+        let previous_child_depth;
         let needs_depth_update;
 
-        // Scope for child lock
         {
-            let mut child_guard = child
-                .lock()
-                .expect("Mutex poisoned while updating child's max_depth");
+            let mut child_guard = child.write().expect("RwLock poisoned while updating child's max_depth");
             previous_child_depth = child_guard.max_depth;
             needs_depth_update = candidate_depth > previous_child_depth;
             if needs_depth_update {
                 child_guard.max_depth = candidate_depth;
             }
-        } // child_guard lock released here
+        }
 
-        // If the child's depth actually changed we must propagate.
         if needs_depth_update {
-            // Propagate the update. If it fails (cycle detected during propagation),
-            // roll back the change we just made to the child's depth.
             if let Err(e) = Self::propagate_max_depth(child.clone(), candidate_depth) {
-                // Roll-back the depth change made above
-                let mut child_guard = child
-                    .lock()
-                    .expect("Mutex poisoned while rolling back max_depth");
-                // Only roll back if the depth is still what we set it to.
-                // (Another thread might have increased it further, which is fine).
+                let mut child_guard = child.write().expect("RwLock poisoned while rolling back max_depth");
                 if child_guard.max_depth == candidate_depth {
-                     child_guard.max_depth = previous_child_depth;
+                    child_guard.max_depth = previous_child_depth;
                 }
-                // We should still return the error, as a cycle was detected somewhere.
                 return Err(e);
             }
         }
 
-        // ------------------------------------------------------------------
-        // 3. All checks have passed – perform the real structural mutation.
-        // ------------------------------------------------------------------
-        let child_comparable = ArcPtrWrapper::new(child.clone()); // child is an Arc, clone it
+        // 3) Perform the mutation
+        let child_comparable = ArcPtrWrapper::new(child.clone());
         self.children
             .entry(edge_key)
             .or_default()
-            .insert(child_comparable, edge_value.take().unwrap()); // Take the value
-
+            .insert(child_comparable, edge_value.take().unwrap());
 
         Ok(())
     }
 
     /// Try to insert an edge; if it would create a strong cycle, insert it as a WEAK edge instead.
-    /// Returns whether it became Strong or Weak.
-    ///
-    /// Strong edge semantics (acyclic, affects depth) are preserved when possible.
-    /// Weak edge semantics (may create cycles, no depth propagation) are used otherwise.
     #[time_it]
     pub fn try_insert_auto(
         &mut self,
+        self_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
         edge_value: &mut Option<EV>,
-        child: Arc<Mutex<Trie<EK, EV, T>>>,
+        child: Arc<RwLock<Trie<EK, EV, T>>>,
     ) -> InsertedEdgeKind {
-        // Detect whether adding a strong edge would create a cycle
-        let self_ptr = self as *const Trie<EK, EV, T>;
-        let would_cycle;
-        // If it already has an edge to this node, it can't create a cycle.
-        if self.already_has_dst_for_any_key(&child) {
-            would_cycle = false;
+        let self_mutex_ptr = Arc::as_ptr(self_arc);
+        let self_max_depth = self.max_depth;
+
+        let would_cycle = if self.already_has_dst_for_any_key(&child) {
+            false
         } else {
-            // Check if adding this edge would create a cycle
-            would_cycle = Self::detect_cycle(self_ptr, &child);
-        }
+            Self::detect_cycle(self_mutex_ptr, self_max_depth, &child)
+        };
         if would_cycle {
-            // Degrade to weak edge; do NOT update depths
             if let Some(ev) = edge_value.take() {
                 let weak = WeakPtrWrapper::new(Arc::downgrade(&child));
                 self.weak_children.entry(edge_key).or_default().insert(weak, ev);
@@ -595,207 +545,200 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             return InsertedEdgeKind::Weak;
         }
 
-        // Otherwise, perform strong try_insert (will not fail now)
         let mut ev_opt = edge_value.take();
-        // Since we've already checked for cycles, we can use the `unchecked` variant
-        // to avoid a redundant `detect_cycle` call.
-        let _ = self.try_insert_unchecked(edge_key, &mut ev_opt, child)
+        let _ = self.try_insert_unchecked(self_arc, edge_key, &mut ev_opt, child)
             .expect("Cycle re-appeared unexpectedly during try_insert_auto strong path");
-        // If try_insert consumed the value, that's fine; if not, ev_opt may still have it.
-        // Ensure caller's Option stays updated:
         *edge_value = ev_opt;
         InsertedEdgeKind::Strong
     }
 
-    /// Returns `true` if `target_ptr` (pointer to the Trie data) is reachable from `start_arc`.
-    /// This function handles the case where `target_ptr` points to a node that is currently locked
-    /// by the calling thread (e.g., `self` in `try_insert`).
+    /// Fast cycle detection that avoids locking the target and prunes by depth.
+    /// Returns true if the node pointed by `target_mutex_ptr` is reachable from `start_arc`.
     #[time_it]
     pub fn detect_cycle(
-        target_ptr: *const Trie<EK, EV, T>,
-        start_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
+        target_mutex_ptr: *const RwLock<Trie<EK, EV, T>>,
+        target_max_depth: usize,
+        start_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
     ) -> bool {
-        // Use Arc::as_ptr to get stable pointers to the Mutex itself for visited tracking.
-        let mut visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
-
-        let start_arc_ptr = Arc::as_ptr(start_arc);
-        if visited_arcs.insert(start_arc_ptr) {
-            queue.push_back(start_arc.clone());
+        // Quick positive: identical arc
+        if Arc::as_ptr(start_arc) == target_mutex_ptr {
+            return true;
         }
 
+        // Quick negative: depth gate
+        let start_depth = match start_arc.try_read() {
+            Ok(g) => g.max_depth,
+            Err(TryLockError::WouldBlock) => {
+                // If we cannot read the start node immediately, conservatively proceed with BFS.
+                // In typical usage this won't happen for `child`.
+                0
+            }
+            Err(TryLockError::Poisoned(p)) => {
+                panic!("RwLock poisoned during cycle detection (start): {:?}", p);
+            }
+        };
+        if start_depth >= target_max_depth {
+            return false;
+        }
+
+        // BFS with depth gating and visit budget
+        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        let start_ptr = Arc::as_ptr(start_arc);
+        visited_arcs.insert(start_ptr);
+        queue.push_back(start_arc.clone());
+
+        let mut visits = 0usize;
+
         while let Some(node_arc) = queue.pop_front() {
-            // Attempt to lock the node to get its data pointer and children.
-            let lock_result = node_arc.try_lock();
+            visits += 1;
+            if visits > Self::DETECT_CYCLE_VISIT_BUDGET {
+                // In pathological cases, bail out to keep insertion responsive.
+                // Returning false degrades to strong insert unless the caller uses try_insert_auto
+                // that will choose Weak on actual cycle.
+                return false;
+            }
 
-            match lock_result {
-                Ok(node_guard) => {
-                    // Successfully locked the node.
-                    let current_data_ptr = &*node_guard as *const Trie<EK, EV, T>;
+            // Pointer match is enough to detect target without locking it.
+            let node_mutex_ptr = Arc::as_ptr(&node_arc);
+            if node_mutex_ptr == target_mutex_ptr {
+                return true;
+            }
 
-                    // Check if this node's data pointer matches the target pointer.
-                    if current_data_ptr == target_ptr {
-                        // We reached the target node. Cycle detected.
-                        return true;
-                    }
-
-                    // Get children while holding the lock.
-                    let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = node_guard.children
-                        .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
-                        .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
+            // Read current node and collect children
+            let (children_arcs, cur_depth) = {
+                let guard = node_arc.read().expect("RwLock poisoned in detect_cycle");
+                let cur_depth = guard.max_depth;
+                // Small optimization: if cur_depth >= target_max_depth, no descendants can reach target
+                if cur_depth >= target_max_depth {
+                    (Vec::new(), cur_depth)
+                } else {
+                    let v: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = guard.children
+                        .values()
+                        .flat_map(|dest_map| dest_map.keys().map(|wrap| wrap.as_arc().clone()))
                         .collect();
-
-                    timeit!(format!("BFS: Node has {} children", children_arcs.len()), {});
-
-                    // Explicitly drop the guard before potentially long operations (queueing).
-                    drop(node_guard);
-
-                    // Enqueue unvisited children.
-                    for child_arc_val in children_arcs { // Renamed child_arc
-                        let child_arc_ptr = Arc::as_ptr(&child_arc_val); // Use child_arc_val
-                        if visited_arcs.insert(child_arc_ptr) {
-                            queue.push_back(child_arc_val); // Use child_arc_val
-                        }
-                    }
+                    (v, cur_depth)
                 }
-                Err(TryLockError::WouldBlock) => {
-                    // Failed to lock because it's held elsewhere (potentially by the thread calling try_insert).
-                    // Assume this means we've reached the target node in the context of try_insert.
-                    // If detect_cycle were used elsewhere, this assumption might need revisiting.
-                    return true;
+            };
+
+            for child_arc in children_arcs {
+                let child_ptr = Arc::as_ptr(&child_arc);
+                if visited_arcs.contains(&child_ptr) {
+                    continue;
                 }
-                Err(TryLockError::Poisoned(p)) => {
-                    // A mutex was poisoned. Propagate the panic.
-                    panic!("Mutex poisoned during cycle detection: {:?}", p);
+                // Depth gate on child (read depth cheaply)
+                let pass = {
+                    let child_guard = child_arc.read().expect("RwLock poisoned reading child in detect_cycle");
+                    child_guard.max_depth <= target_max_depth
+                };
+                if pass {
+                    visited_arcs.insert(child_ptr);
+                    queue.push_back(child_arc);
                 }
             }
         }
 
-        // BFS completed without finding the target pointer. No cycle detected.
         false
     }
-
 
     /// Propagates a max_depth update to all descendant nodes, detecting cycles.
     ///
     /// Returns `Ok(())` if propagation completes successfully.
     /// Returns `Err(CycleDetectedError)`.
-    fn propagate_max_depth(node_arc: Arc<Mutex<Trie<EK, EV, T>>>, current_depth: usize) -> Result<(), CycleDetectedError> {
-        // rec_stack will contain the set of node pointers from the root of the propagation
-        // down to the current recursion level. Use Arc::as_ptr for stable pointers.
-        let mut rec_stack: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+    fn propagate_max_depth(node_arc: Arc<RwLock<Trie<EK, EV, T>>>, current_depth: usize) -> Result<(), CycleDetectedError> {
+        let mut rec_stack: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
         Self::_propagate_max_depth(node_arc, current_depth, &mut rec_stack)
     }
 
-    /// Recursive helper for propagate_max_depth, detecting cycles using Arc pointers.
-    /// Returns `Ok(())` or `Err(CycleDetectedError)`.
     fn _propagate_max_depth(
-        node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+        node_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         current_depth: usize,
-        rec_stack: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+        rec_stack: &mut HashSet<*const RwLock<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
         let node_arc_ptr = Arc::as_ptr(&node_arc);
 
-        // If this node (identified by its Arc pointer) is already in the current recursion chain, we have a cycle.
         if rec_stack.contains(&node_arc_ptr) {
             return Err(CycleDetectedError);
         }
 
-        // Add the current node to the recursion stack.
         rec_stack.insert(node_arc_ptr);
 
-        // Collect *all* child Arcs outside of the lock to avoid holding lock during recursion.
-        let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-            let node_guard_val = node_arc.lock().expect("Mutex poisoned in _propagate_max_depth (getting children)"); // Renamed node_guard
-            node_guard_val.children // Use node_guard_val
-                .values() // Iterates over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
+        let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>>> = {
+            let node_guard_val = node_arc.read().expect("RwLock poisoned in _propagate_max_depth (getting children)");
+            node_guard_val.children
+                .values()
                 .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
-        }; // node_guard_val lock is released here.
-        // NOTE: Weak edges do NOT participate in max_depth propagation.
+        };
 
-        // For each child, compute the candidate depth.
-        let candidate_depth_val = current_depth.saturating_add(1); // Renamed candidate_depth
+        let candidate_depth_val = current_depth.saturating_add(1);
         for child_arc in children_arcs {
-            // Check if the child needs updating *before* recursing.
-            let should_propagate;
-            { // Scope for child lock
-                let mut child_guard = child_arc
-                    .lock()
-                    .expect("Mutex poisoned in _propagate_max_depth (checking child depth)");
-                if candidate_depth_val > child_guard.max_depth { // Use candidate_depth_val
-                    child_guard.max_depth = candidate_depth_val; // Use candidate_depth_val
-                    should_propagate = true;
+            let should_propagate = {
+                let mut child_guard = child_arc.write().expect("RwLock poisoned in _propagate_max_depth (checking child depth)");
+                if candidate_depth_val > child_guard.max_depth {
+                    child_guard.max_depth = candidate_depth_val;
+                    true
                 } else {
-                    should_propagate = false;
+                    false
                 }
-            } // child_guard lock released here
+            };
 
             if should_propagate {
-                // Recurse. Propagate the error up if recursion detects a cycle.
-                Self::_propagate_max_depth(child_arc, candidate_depth_val, rec_stack)?; // Use candidate_depth_val
+                Self::_propagate_max_depth(child_arc, candidate_depth_val, rec_stack)?;
             }
         }
 
-        // Finished processing this node; remove from recursion stack.
         rec_stack.remove(&node_arc_ptr);
-        Ok(()) // Success for this branch
+        Ok(())
     }
 
-    // get remains unchanged
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get(edge_key)
     }
 
-    // get_mut remains unchanged
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
-    // children remains unchanged
-    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &mut self.children
     }
 
-    /// Access weak children maps
-    pub fn weak_children(&self) -> &BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn weak_children(&self) -> &BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &self.weak_children
     }
 
-    pub fn weak_children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn weak_children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &mut self.weak_children
     }
 
-    /// Get weak children (for a specific key)
     pub fn get_weak(
         &self,
         edge_key: &EK,
-    ) -> Option<&OrderedHashMap<WeakPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    ) -> Option<&OrderedHashMap<WeakPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         self.weak_children.get(edge_key)
     }
 
-    // is_leaf remains unchanged
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
     }
 
-    /// Collects all *unique* nodes (by pointer) reachable from the given root (BFS).
-    /// This method does not panic on cycles, it simply avoids revisiting nodes.
-    pub fn all_nodes(root: Arc<Mutex<Trie<EK, EV, T>>>) -> Vec<Arc<Mutex<Trie<EK, EV, T>>>> {
-        // Use Arc::as_ptr for visited tracking
-        let mut visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+    /// Collects all unique nodes (by pointer) reachable from the given root (BFS).
+    pub fn all_nodes(root: Arc<RwLock<Trie<EK, EV, T>>>) -> Vec<Arc<RwLock<Trie<EK, EV, T>>>> {
+        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
@@ -805,13 +748,11 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         }
 
         while let Some(node_arc) = queue.pop_front() {
-            result.push(node_arc.clone()); // Add the node itself to the result
+            result.push(node_arc.clone());
 
-            // Lock the node to get its children
-            let node_guard = node_arc.lock().expect("Mutex poisoned during BFS"); // Renamed node to node_guard
-            for children_map in node_guard.children.values() { // Use node_guard
-                // #[allow(clippy::iter_over_hash_type)]
-                for child_wrapper_arc in children_map.keys() { // Iterate over ArcPtrWrapper keys
+            let node_guard = node_arc.read().expect("RwLock poisoned during BFS");
+            for children_map in node_guard.children.values() {
+                for child_wrapper_arc in children_map.keys() {
                     let child_arc = child_wrapper_arc.as_arc();
                     let child_arc_ptr = Arc::as_ptr(child_arc);
                     if visited_arcs.insert(child_arc_ptr) {
@@ -819,7 +760,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                     }
                 }
             }
-            // Traverse weak children as well (upgrade; skip dangling)
             for children_map in node_guard.weak_children.values() {
                 for weak_wrapper in children_map.keys() {
                     if let Some(child_arc) = weak_wrapper.upgrade() {
@@ -830,264 +770,222 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                     }
                 }
             }
-            // node_guard lock is released here
         }
         result
     }
 
-    /// Checks if there are any cycles reachable from the given `root_arc`.
-    /// Returns `true` if a cycle is detected, `false` otherwise.
-    /// This method is useful for verifying graph integrity after complex build processes.
-    pub fn has_any_cycle(root_arc: Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
-        let mut global_visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-        let mut recursion_stack_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-        // Call the recursive helper starting with the root node.
+    pub fn has_any_cycle(root_arc: Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
+        let mut global_visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut recursion_stack_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
         Self::_has_any_cycle_recursive(root_arc, &mut global_visited_arcs, &mut recursion_stack_arcs)
     }
 
-    /// Recursive helper function for `has_any_cycle`.
-    ///
-    /// `global_visited_arcs`: Tracks all nodes that have been visited and processed across
-    ///                        all recursion branches. This prevents re-processing subgraphs
-    ///                        that are already known to be cycle-free (or whose cycles
-    ///                        would have been detected via another path).
-    /// `recursion_stack_arcs`: Tracks nodes currently in the recursion stack for the *current*
-    ///                         DFS path. A cycle is detected if we try to visit a node
-    ///                         that is already in this set.
     fn _has_any_cycle_recursive(
-        node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
-        global_visited_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
-        recursion_stack_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+        node_arc: Arc<RwLock<Trie<EK, EV, T>>>,
+        global_visited_arcs: &mut HashSet<*const RwLock<Trie<EK, EV, T>>>,
+        recursion_stack_arcs: &mut HashSet<*const RwLock<Trie<EK, EV, T>>>,
     ) -> bool {
         let node_arc_ptr = Arc::as_ptr(&node_arc);
 
-        // If the node is already in the current recursion stack, we've found a back-edge (a cycle).
         if recursion_stack_arcs.contains(&node_arc_ptr) {
-            return true; // Cycle detected
+            return true;
         }
 
-        // If the node has been globally visited AND is not in the current recursion stack,
-        // it means this node was fully processed via another path and no cycles were found
-        // originating from it *then*. We can safely return false to avoid re-exploring.
         if global_visited_arcs.contains(&node_arc_ptr) {
-            return false; // Already processed and known to be part of a cycle-free subgraph (from its perspective)
+            return false;
         }
 
-        // Add the current node to both sets:
-        // - To recursion_stack_arcs to mark it as part of the current DFS path.
-        // - To global_visited_arcs to mark it as processed, so we don't re-explore it unnecessarily
-        //   if reached from another path later.
         recursion_stack_arcs.insert(node_arc_ptr);
         global_visited_arcs.insert(node_arc_ptr);
 
-        // Lock the node to get its children.
-        // It's important to collect children Arcs first and then release the lock before recursing.
-        let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-            let node_guard_val = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal"); // Renamed node_guard
-            node_guard_val.children // Use node_guard_val
-                .values() // Iterate over HashMap<ArcPtrWrapper<Mutex<...>>, EV>
+        let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>>> = {
+            let node_guard_val = node_arc.read().expect("RwLock poisoned during has_any_cycle traversal");
+            node_guard_val.children
+                .values()
                 .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
-        }; // node_guard_val lock is released here.
+        };
 
-        // Recursively check each child.
         for child_arc in children_arcs {
             if Self::_has_any_cycle_recursive(child_arc, global_visited_arcs, recursion_stack_arcs) {
-                return true; // Cycle detected in a descendant path
+                return true;
             }
         }
 
-        // If we've processed all children of this node and found no cycles,
-        // remove it from the recursion stack (as we are "returning" up the DFS path).
-        // It remains in global_visited_arcs.
         recursion_stack_arcs.remove(&node_arc_ptr);
-
-        false // No cycle found originating from this node or its descendants along this path
+        false
     }
 }
 
-// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
-/// Panics if the mutex is poisoned. Returns None if lock fails (WouldBlock).
-/// **Use with caution:** Only use when you know a failed lock means the current thread holds it.
-/// Consider using `Arc::as_ptr` for identity checks instead if possible.
-#[allow(dead_code)] // Keep available, but node_ptr is preferred generally
-pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<*const Trie<EK, EV, T>> {
-    match node_arc.try_lock() {
+/// Panics if the lock is poisoned. Returns None if lock fails (WouldBlock).
+#[allow(dead_code)]
+pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<*const Trie<EK, EV, T>> {
+    match node_arc.try_read() {
         Ok(guard) => {
             let ptr = &*guard as *const Trie<EK, EV, T>;
             Some(ptr)
-            // Guard is dropped here, lock released
         }
         Err(TryLockError::Poisoned(p)) => {
-            panic!("Mutex poisoned when trying to get node data pointer: {:?}", p);
+            panic!("RwLock poisoned when trying to get node data pointer: {:?}", p);
         }
         Err(TryLockError::WouldBlock) => {
-            // Lock is held, likely by the current thread in specific scenarios (like cycle check).
             None
         }
     }
 }
 
-/// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
-/// Panics if the mutex is poisoned or if locking fails (blocking lock).
-/// **Use when you need the pointer and expect the lock to succeed.**
-#[allow(dead_code)] // Keep available, but Arc::as_ptr is often better for identity
-pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
-    let guard = node_arc.lock().expect("Mutex poisoned or lock failed when getting node pointer");
+#[allow(dead_code)]
+pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
+    let guard = node_arc.read().expect("RwLock poisoned or lock failed when getting node pointer");
     &*guard as *const _
 }
 
-// Add this impl block for the recursive comparison helper
 impl<EK, EV, T> Trie<EK, EV, T>
 where
-    EK: Ord, // Ord implies PartialEq + Eq
+    EK: Ord,
     EV: PartialEq + Clone,
     T: PartialEq,
 {
-    /// Recursively compares two Trie nodes wrapped in Arcs for equality.
-    ///
-    /// - `self_arc`, `other_arc`: The Arcs pointing to the Trie nodes to compare.
-    /// - `comparison_cache`: Tracks pairs of (self_node_ptr, other_node_ptr) and their comparison result (bool).
-    ///   This cache is crucial for:
-    ///     1. Efficiency: Avoid re-comparing already processed pairs.
-    ///     2. Cycle Handling: Prevents infinite recursion by pre-emptively marking a pair as true
-    ///        and updating to false only if a mismatch is found.
-    ///     3. Topology: Ensures that if NodeA in self maps to NodeX in other, this mapping is consistent.
     fn compare_arcs_recursive(
-        self_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
-        other_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
-        comparison_cache: &mut HashMap<(*const Mutex<Self>, *const Mutex<Self>), bool>,
+        self_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
+        other_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
+        comparison_cache: &mut HashMap<(*const RwLock<Self>, *const RwLock<Self>), bool>,
     ) -> bool {
         let self_ptr = Arc::as_ptr(self_arc);
         let other_ptr = Arc::as_ptr(other_arc);
 
-        // If both Arcs point to the exact same Mutex instance, they are definitionally equal in this context.
         if self_ptr == other_ptr {
             return true;
         }
 
-        // Ensure canonical cache key: (min_ptr, max_ptr).
-        // The boolean result of equality is symmetric, so order doesn't change the meaning of 'true' or 'false'.
         let (cache_key_ptr1, cache_key_ptr2) = if self_ptr < other_ptr {
             (self_ptr, other_ptr)
         } else {
             (other_ptr, self_ptr)
         };
 
-        // Check cache for prior comparison result of this specific pair.
         if let Some(&cached_result) = comparison_cache.get(&(cache_key_ptr1, cache_key_ptr2)) {
             return cached_result;
         }
 
-        // Pre-emptively mark this pair as true in the cache.
-        // If a cycle is encountered leading back to this pair, this 'true' will be returned,
-        // assuming consistency unless a mismatch is found later down the path.
-        // If any subsequent comparison fails, this cache entry will be updated to false.
         comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), true);
 
-        // Attempt to lock both nodes. If locking fails (e.g., poisoned mutex, or would block
-        // in a more complex scenario not expected here), treat them as unequal for safety.
-        let self_node_guard = match self_arc.try_lock() {
+        let self_node_guard = match self_arc.try_read() {
             Ok(g) => g,
             Err(_) => {
-                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache to reflect failure
+                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
                 return false;
             }
         };
-        let other_node_guard = match other_arc.try_lock() {
+        let other_node_guard = match other_arc.try_read() {
             Ok(g) => g,
             Err(_) => {
-                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
+                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
                 return false;
             }
         };
-        
-        // Dereference guards to get &Trie
+
         let self_node = &*self_node_guard;
         let other_node = &*other_node_guard;
 
-
-        // 1. Compare non-recursive fields: value and max_depth.
         if self_node.value != other_node.value || self_node.max_depth != other_node.max_depth {
-            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
+            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
             return false;
         }
 
-        // 2. Compare children structure (number of distinct edge keys).
         if self_node.children.len() != other_node.children.len() {
-            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
+            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
             return false;
         }
 
-        // 3. Compare children for each edge key.
         for (self_ek, self_dest_map) in &self_node.children {
             match other_node.children.get(self_ek) {
-                None => { // Edge key present in self but not in other.
-                    comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
+                None => {
+                    comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
                     return false;
                 }
                 Some(other_dest_map) => {
-                    // Number of destinations for this edge key must match.
                     if self_dest_map.len() != other_dest_map.len() {
-                        comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
+                        comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
                         return false;
                     }
 
-                    // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
-                    // EV needs to be Clone for this collection strategy.
-                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
-                        .iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
-                        .collect();
-                    
-                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
                         .iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
 
-                    // For each child in self_child_pairs, find a matching child in other_child_pairs.
-                    // A match requires equal edge values (EV) and recursively equal Trie nodes.
                     'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
                         let mut found_match_for_current_self_pair = false;
-                        for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
-                            if s_ev == &other_child_pairs[i].1 { // Compare EV (s_ev is &EV, other_child_pairs[i].1 is EV)
-                                // Edge values match, now recursively compare the pointed-to Trie nodes.
-                                // Clone o_arc for the recursive call to avoid borrow issues if remove() happens.
+                        for i in 0..other_child_pairs.len() {
+                            if s_ev == &other_child_pairs[i].1 {
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
                                 if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, comparison_cache) {
-                                    other_child_pairs.remove(i); // Match found, remove from other_list.
+                                    other_child_pairs.remove(i);
                                     found_match_for_current_self_pair = true;
-                                    break; // Found match for current s_arc, move to next s_arc.
+                                    break;
                                 }
-                                // If recursive compare is false, this o_arc is not a match. Continue inner loop.
                             }
                         }
                         if !found_match_for_current_self_pair {
-                            // No match found in other_child_pairs for the current s_arc/s_ev.
-                            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
+                            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
                             return false;
                         }
                     }
-                    // If all self_child_pairs found matches, other_child_pairs should be empty
-                    // (due to initial length check and removals). No explicit check needed here.
                 }
             }
         }
-        
-        // If all checks passed, the initial `true` assumption in the cache was correct.
-        // The cache entry (self_ptr, other_ptr) remains true.
+
+        for (self_ek, self_dest_map) in &self_node.weak_children {
+            match other_node.weak_children.get(self_ek) {
+                None => return false,
+                Some(other_dest_map) => {
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                        .iter()
+                        .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
+                        .collect();
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
+                        .collect();
+
+                    if self_child_pairs.len() != other_child_pairs.len() {
+                        return false;
+                    }
+
+                    'self_weak_loop: for (s_arc, s_ev) in &self_child_pairs {
+                        let mut found_match = false;
+                        for i in 0..other_child_pairs.len() {
+                            if s_ev == &other_child_pairs[i].1 {
+                                let o_arc = other_child_pairs[i].0.clone();
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc, comparison_cache) {
+                                    other_child_pairs.remove(i);
+                                    found_match = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !found_match {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
         true
     }
 }
 
-
-// Implementation block for special_map and related functionality
-// Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-    fn count_all_edges(root_nodes: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> usize {
-        let mut visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+    fn count_all_edges(root_nodes: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> usize {
+        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
         let mut total_edges = 0;
 
         for root in root_nodes {
@@ -1098,7 +996,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         }
 
         while let Some(node_arc) = queue.pop_front() {
-            let node_guard = node_arc.lock().expect("Mutex poisoned during edge count");
+            let node_guard = node_arc.read().expect("RwLock poisoned during edge count");
             for children_map in node_guard.children.values() {
                 total_edges += children_map.len();
                 for child_wrapper_arc in children_map.keys() {
@@ -1112,73 +1010,51 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         total_edges
     }
 
-    /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-    /// (special_map implementation remains unchanged)
     #[time_it]
     pub fn special_map<V: Clone>(
-        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
+        initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
-        // ------------------------------------------------------------------
-        //  Simple depth-driven scheduler.
-        //
-        //  The key observation is:
-        //      parent.max_depth  <  child.max_depth
-        //  for every edge (parent → child).
-        //  Therefore processing nodes strictly in ascending `max_depth`
-        //  guarantees every parent is handled before each of its children.
-        //
-        //  • `values`  – accumulated V for every discovered node
-        //  • `done`    – nodes that have already been processed
-        //  • `todo`    – min-heap keyed by max_depth
-        // ------------------------------------------------------------------
-        let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
-        let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut values   : HashMap<*const RwLock<Self>, V> = HashMap::new();
+        let mut done     : HashSet <*const RwLock<Self>>   = HashSet ::new();
+        let mut todo     : BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
-        // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
             let ptr = Arc::as_ptr(&node_arc);
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
-            let depth = node_arc.lock().expect("poison").max_depth;
+            let depth = node_arc.read().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
-        // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            // #[allow(clippy::iter_over_hash_type)]
             for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
                 let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
-                if done.contains(&ptr) { continue; }               // already processed
+                if done.contains(&ptr) { continue; }
 
-                // Pull the merged value that all parents contributed
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
-                    None => continue,                            // can happen if every parent’s `step` returned None
+                    None => continue,
                 };
 
-                // ---------- user ‘process’ callback ----------
                 let proceed = {
-                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    let mut guard = node_arc_ptr_wrapper.as_arc().write().expect("poison");
                     process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
-                if !proceed { continue; }                           // user stopped traversal at this node
+                if !proceed { continue; }
 
-                // ---------- propagate to children -------------
-                // We read children once, outside any long-lived locks
-                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
-                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                let edges: Vec<(EK, EV, Arc<RwLock<Self>>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().read().expect("poison");
                     guard.children
                         .iter()
                         .flat_map(|(ek, dst_map)| {
@@ -1191,10 +1067,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     let _ = pb.update(1);
                     let child_ptr = Arc::as_ptr(&child_arc);
 
-                    // user ‘step’ callback
                     let maybe_v = {
-                        let child_guard = child_arc.lock().expect("poison");
-                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
+                        let child_guard = child_arc.read().expect("poison");
+                        step(&agg_v, &ek, &ev, &child_guard)
                     };
                     if let Some(new_v) = maybe_v {
                         values
@@ -1202,8 +1077,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
 
-                        // Queue child by its declared depth
-                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        let child_depth = child_arc.read().expect("poison").max_depth;
                         todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
                     }
                 }
@@ -1211,12 +1085,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         }
     }
 
-    /// Performs a specialized breadth-first traversal, grouping children by edge key.
-    /// This is more efficient than `special_map` when many edges share the same key,
-    /// as the `step` function is called once per key, not once per edge.
     #[time_it]
     pub fn special_map_grouped<V, S, I>(
-        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
+        initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
@@ -1224,33 +1095,28 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     where
         V: Clone,
         S: FnMut(
-            &V, &EK, &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
+            &V, &EK, &OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>
         ) -> I,
-        I: IntoIterator<Item = (ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, V)>,
+        I: IntoIterator<Item = (ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, V)>,
     {
-        // ------------------------------------------------------------------
-        //  Simple depth-driven scheduler. (Same as special_map)
-        // ------------------------------------------------------------------
-        let mut values: HashMap<*const Mutex<Self>, V> = HashMap::new();
-        let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
-        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
+        let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
+        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
-        // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
             let ptr = Arc::as_ptr(&node_arc);
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
-            let depth = node_arc.lock().expect("poison").max_depth;
+            let depth = node_arc.read().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
-        // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
             for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
                 let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
@@ -1262,16 +1128,15 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 let proceed = {
-                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    let mut guard = node_arc_ptr_wrapper.as_arc().write().expect("poison");
                     process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
                 if !proceed { continue; }
 
-                // ---------- propagate to children (grouped by edge key) -------------
-                let children_by_ek: Vec<(EK, OrderedHashMap<ArcPtrWrapper<Mutex<Self>>, EV>)> = {
-                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                let children_by_ek: Vec<(EK, OrderedHashMap<ArcPtrWrapper<RwLock<Self>>, EV>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().read().expect("poison");
                     guard.children.iter().map(|(ek, dst_map)| (ek.clone(), dst_map.clone())).collect()
                 };
 
@@ -1281,7 +1146,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     for (child_arc, new_v) in new_values_for_children {
                         let child_ptr = Arc::as_ptr(&child_arc);
                         values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        let child_depth = child_arc.read().expect("poison").max_depth;
                         todo.entry(child_depth).or_default().insert(child_arc);
                     }
                 }
@@ -1290,92 +1155,74 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     }
 }
 
-// Implement PartialEq for Trie
 impl<EK, EV, T> PartialEq for Trie<EK, EV, T>
 where
-    EK: Ord, // Ord implies PartialEq + Eq, needed for BTreeMap keys and get
-    EV: PartialEq + Clone, // PartialEq for EV comparison, Clone for collecting pairs
-    T: PartialEq, // For self.value == other.value
+    EK: Ord,
+    EV: PartialEq + Clone,
+    T: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        // 1. Compare non-recursive fields: value and max_depth.
         if self.value != other.value || self.max_depth != other.max_depth {
             return false;
         }
 
-        // 2. Compare children structure (number of distinct edge keys).
         if self.children.len() != other.children.len() {
             return false;
         }
         if self.weak_children.len() != other.weak_children.len() { return false; }
-        
-        // Initialize cache for recursive calls on child Arcs.
-        // This cache is passed down through all recursive calls originating from this top-level eq.
-        // Type alias for pointer to Mutex<Trie<...>> for clarity.
-        type NodeMutexPtr<EKK, EVV, TT> = *const Mutex<Trie<EKK, EVV, TT>>;
-        let mut comparison_cache: HashMap<(NodeMutexPtr<EK, EV, T>, NodeMutexPtr<EK, EV, T>), bool> = HashMap::new();
 
+        type NodeLockPtr<EKK, EVV, TT> = *const RwLock<Trie<EKK, EVV, TT>>;
+        let mut comparison_cache: HashMap<(NodeLockPtr<EK, EV, T>, NodeLockPtr<EK, EV, T>), bool> = HashMap::new();
 
-        // 3. Compare children for each edge key.
         for (self_ek, self_dest_map) in &self.children {
             match other.children.get(self_ek) {
-                None => { // Edge key present in self but not in other.
+                None => {
                     return false;
                 }
                 Some(other_dest_map) => {
-                    // Number of destinations for this edge key must match.
                     if self_dest_map.len() != other_dest_map.len() {
                         return false;
                     }
 
-                    // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
-                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
-                        .iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
-                        .collect();
-                    
-                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
                         .iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
 
-                    // For each child in self_child_pairs, find a matching child in other_child_pairs.
-                    // A match requires equal edge values (EV) and recursively equal Trie nodes.
                     'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
                         let mut found_match_for_current_self_pair = false;
-                        for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
-                            if s_ev == &other_child_pairs[i].1 { // Compare EV
-                                // Edge values match, now recursively compare the pointed-to Trie nodes.
+                        for i in 0..other_child_pairs.len() {
+                            if s_ev == &other_child_pairs[i].1 {
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
                                 if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, &mut comparison_cache) {
-                                    other_child_pairs.remove(i); // Match found.
+                                    other_child_pairs.remove(i);
                                     found_match_for_current_self_pair = true;
-                                    break; // Found match for current s_arc, move to next s_arc.
+                                    break;
                                 }
                             }
                         }
                         if !found_match_for_current_self_pair {
-                            // No match found for the current s_arc/s_ev.
                             return false;
                         }
                     }
-                    // If all self_child_pairs found matches, other_child_pairs should be empty.
                 }
             }
         }
 
-        // 4. Compare weak children structure as well (using upgraded Arcs only).
         for (self_ek, self_dest_map) in &self.weak_children {
             match other.weak_children.get(self_ek) {
                 None => return false,
                 Some(other_dest_map) => {
-                    // Upgrade both sides and compare only successfully upgraded edges
-                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map
                         .iter()
                         .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
                         .collect();
-                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
                         .iter()
                         .filter_map(|(wpw, ev)| wpw.upgrade().map(|arc| (arc, ev.clone())))
                         .collect();
@@ -1403,31 +1250,26 @@ where
                 }
             }
         }
-        
-        // All checks passed.
+
         true
     }
 }
 
-// Implement Eq for Trie
 impl<EK, EV, T> Eq for Trie<EK, EV, T>
 where
-    EK: Ord, // Ord implies Eq
-    EV: Eq + Clone, // EV also needs to be Eq
-    T: Eq,         // T also needs to be Eq
+    EK: Ord,
+    EV: Eq + Clone,
+    T: Eq,
 {
 }
 
-// Implement Hash for Trie
 impl<EK, EV, T> Hash for Trie<EK, EV, T>
 where
-    EK: Ord + Hash, // Ord for BTreeMap iteration, Hash for hashing EK
-    EV: PartialEq + Clone + Hash, // From PartialEq, add Hash for EV
-    T: PartialEq + Hash,    // From PartialEq, add Hash for T
+    EK: Ord + Hash,
+    EV: PartialEq + Clone + Hash,
+    T: PartialEq + Hash,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Cache to handle cycles and shared nodes during hashing.
-        // Maps the raw data pointer of a Trie node to a marker (depth) to break cycles.
         let mut recursion_marker: HashMap<*const Trie<EK, EV, T>, usize> = HashMap::new();
         Self::hash_trie_recursive(self, state, &mut recursion_marker, 0);
     }
@@ -1435,11 +1277,10 @@ where
 
 impl<EK, EV, T> Trie<EK, EV, T>
 where
-    EK: Ord + Hash, // Ord for BTreeMap iteration, Hash for hashing EK
-    EV: PartialEq + Clone + Hash, // From PartialEq, add Hash for EV
-    T: PartialEq + Hash,    // From PartialEq, add Hash for T
+    EK: Ord + Hash,
+    EV: PartialEq + Clone + Hash,
+    T: PartialEq + Hash,
 {
-    /// Helper function to hash a &Trie instance.
     fn hash_trie_recursive<S: Hasher>(
         node: &Trie<EK, EV, T>,
         state: &mut S,
@@ -1448,19 +1289,15 @@ where
     ) {
         let node_ptr = node as *const _;
         if let Some(visited_depth) = recursion_marker.get(&node_ptr) {
-            // Node already visited. Hash its pointer and depth to break cycles
-            // and distinguish it from other nodes.
             node_ptr.hash(state);
             visited_depth.hash(state);
             return;
         }
         recursion_marker.insert(node_ptr, current_depth);
 
-        // Hash non-recursive fields.
         node.value.hash(state);
         node.max_depth.hash(state);
 
-        // Hash children.
         node.children.len().hash(state);
         for (ek, dest_map) in &node.children {
             ek.hash(state);
@@ -1470,7 +1307,7 @@ where
             for (apw, ev) in dest_map {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
-                let child_guard = apw.as_arc().lock().expect("Mutex poisoned during Hash");
+                let child_guard = apw.as_arc().read().expect("RwLock poisoned during Hash");
                 Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
                 pair_hashes.push(pair_hasher.finish());
             }
@@ -1481,24 +1318,19 @@ where
             }
         }
 
-        // Hash weak children (skip dangling weak refs).
         node.weak_children.len().hash(state);
         for (ek, dest_map) in &node.weak_children {
             ek.hash(state);
             let mut pair_hashes: Vec<u64> = Vec::new();
             for (wpw, ev) in dest_map {
                 if let Some(child_arc) = wpw.upgrade() {
-                    // hash pair (ev, child)
                     let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                     ev.hash(&mut pair_hasher);
-                    let child_guard = child_arc.lock().expect("Mutex poisoned during Hash (weak)");
+                    let child_guard = child_arc.read().expect("RwLock poisoned during Hash (weak)");
                     Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
                     pair_hashes.push(pair_hasher.finish());
-                } else {
-                    // dangling weak edge ignored to keep consistency with eq which also ignores
                 }
             }
-            // also mix in number of included pairs
             pair_hashes.sort_unstable();
             (pair_hashes.len()).hash(state);
             for h in pair_hashes {
@@ -1508,7 +1340,6 @@ where
     }
 }
 
-
 /// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
 /// Provides a chainable interface.
@@ -1516,14 +1347,14 @@ pub struct EdgeInserter<EK, EV, T, FMergeEV>
 where
     EK: Ord + Clone,
     EV: Clone,
-    T: Clone, // T needs to be Clone for else_create_destination_with_value -> Trie::new(value)
-    FMergeEV: FnMut(&mut EV, EV), // Closure to merge edge values if edge exists - Changed signature
+    T: Clone,
+    FMergeEV: FnMut(&mut EV, EV),
 {
-    source_arc: Arc<Mutex<Trie<EK, EV, T>>>, // The source node for the edge
-    edge_key: EK,                            // The key for the edge to be inserted
-    edge_value: Option<EV>,                          // The value for the edge to be inserted
-    merge_edge_value: FMergeEV,              // The function to merge edge values
-    result: Option<Arc<Mutex<Trie<EK, EV, T>>>>, // Stores the successful destination node
+    source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
+    edge_key: EK,
+    edge_value: Option<EV>,
+    merge_edge_value: FMergeEV,
+    result: Option<Arc<RwLock<Trie<EK, EV, T>>>>,
 }
 
 impl<EK, EV, T, FMergeEV> EdgeInserter<EK, EV, T, FMergeEV>
@@ -1531,20 +1362,10 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&mut EV, EV), // Changed signature
+    FMergeEV: FnMut(&mut EV, EV),
 {
-    /// Creates a new `EdgeInserter`.
-    ///
-    /// # Arguments
-    ///
-    /// * `source_arc`: The source node where the edge originates.
-    /// * `edge_key`: The key for the new edge.
-    /// * `edge_value`: The value for the new edge.
-    /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
-    ///   both by value, returning a merged value. This is only called if an edge with the same `edge_key` already
-    ///   points to the `destination` being tried.
     pub fn new(
-        source_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+        source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
@@ -1558,57 +1379,43 @@ where
         }
     }
 
-    /// Tries to establish an edge to the given `destination`.
-    ///
-    /// If an edge with the same `edge_key` already exists pointing to `destination`,
-    /// it attempts to merge the `edge_value` using the `merge_edge_value` closure.
-    /// If no such edge exists, it attempts to insert a new edge using `try_insert`.
-    ///
-    /// This operation only proceeds if a successful destination hasn't already been found.
-    /// Returns `self` to allow chaining.
-    pub fn try_destination(mut self, destination: Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
+    pub fn try_destination(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
         if self.result.is_some() {
-            return self; // Already found a destination
+            return self;
         }
 
-        let mut source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_destination"); // Renamed source to source_guard
-        let destination_wrapper = ArcPtrWrapper::new(destination.clone()); // Use ArcPtrWrapper
+        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
+        let destination_wrapper = ArcPtrWrapper::new(destination.clone());
 
-        // Check if edge already exists and try merging EV
         if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
             (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
             self.result = Some(destination);
         } else {
-            // Edge doesn't exist, try inserting. try_insert expects the value by move.
-            match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
+            match source_guard.try_insert(&self.source_arc, self.edge_key.clone(), &mut self.edge_value, destination.clone()) {
                 Ok(()) => {
-                    self.result = Some(destination); // Insert successful, destination found
+                    self.result = Some(destination);
                 }
                 Err(CycleDetectedError) => {
-                    // Cycle detected, insert failed, result remains None
                     crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
                 }
             }
         }
-        drop(source_guard); // Use source_guard
+        drop(source_guard);
         self
     }
 
-    /// Like try_destination, but if a strong cycle would be created, insert a WEAK edge instead.
-    /// This guarantees the edge exists (weak if necessary) and avoids accidental cycles.
     #[time_it]
-    pub fn try_destination_auto(mut self, destination: Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
+    pub fn try_destination_auto(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
         if self.result.is_some() {
             return self;
         }
-        let mut source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_destination_auto");
+        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination_auto");
         let destination_wrapper = ArcPtrWrapper::new(destination.clone());
         if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
             (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
             self.result = Some(destination);
         } else {
-            // Attempt strong; if cycle, degrade to weak
-            let kind = source_guard.try_insert_auto(self.edge_key.clone(), &mut self.edge_value, destination.clone());
+            let kind = source_guard.try_insert_auto(&self.source_arc, self.edge_key.clone(), &mut self.edge_value, destination.clone());
             match kind {
                 InsertedEdgeKind::Strong | InsertedEdgeKind::Weak => {
                     self.result = Some(destination);
@@ -1619,28 +1426,22 @@ where
         self
     }
 
-    /// Tries to establish an edge to any destination in the provided slice.
-    ///
-    /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
-    /// Returns `self` to allow chaining.
-    pub fn try_destinations(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+    pub fn try_destinations(mut self, destinations: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Self {
         for destination in destinations {
             if self.result.is_some() {
-                break; // Stop trying once a destination is found
+                break;
             }
-            // Need to consume and reassign self because try_destination takes self
             self = self.try_destination(destination.clone());
         }
         self
     }
 
-    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<Mutex<Trie<EK, EV, T>>>>) -> Self {
+    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>) -> Self {
         for destination in destinations {
             if self.result.is_some() {
-                break; // Stop trying once a destination is found
+                break;
             }
-            // Need to consume and reassign self because try_destination takes self
-            self = self.try_destination(destination.clone()); // destination is already Arc, clone it
+            self = self.try_destination(destination.clone());
         }
         self
     }
@@ -1648,92 +1449,57 @@ where
     pub fn try_destinations_iter_with<F, R>(mut self, destinations: F) -> Self
     where
         F: Fn() -> R,
-        R: Iterator<Item = Arc<Mutex<Trie<EK, EV, T>>>>,
+        R: Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>,
     {
         for destination in destinations() {
-            if self.result.is_some() { // Check before calling try_destination
+            if self.result.is_some() {
                 break;
             }
-            self = self.try_destination(destination.clone()); // destination is already Arc, clone it
+            self = self.try_destination(destination.clone());
         }
         self
     }
 
-
-    /// Tries to merge the edge with existing children under `self.edge_key`.
-    ///
-    /// This method identifies all children of the source node that are already
-    /// destinations for an edge with `self.edge_key`. For each such child, it
-    /// attempts to merge `self.edge_value` into the existing edge's value using
-    /// the `merge_edge_value` closure provided when the `EdgeInserter` was created.
-    /// This is done by calling `try_destination` for each identified child.
-    ///
-    /// The first child for which `try_destination` is successful (typically by merging
-    /// the edge value, as the edge `(self.edge_key, child)` already exists)
-    /// will be set as `self.result`, and no further children under this key will be tried.
-    ///
-    /// If `merge_edge_value` returns `None` for a child (causing `try_destination` to not
-    /// set a result for that child), or if no children exist under `self.edge_key`,
-    /// `self.result` remains unchanged by this method with respect to those children.
-    /// This method focuses on updating existing edges associated with `self.edge_key`.
-    ///
-    /// Returns `self` to allow chaining.
     pub fn try_children(mut self) -> Self {
         if self.result.is_some() {
             return self;
         }
 
-        // Collect children arcs that are specifically under self.edge_key.
-        let children_for_this_key: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-            let source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
+        let children_for_this_key: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
+            let source_guard = self.source_arc.read().expect("RwLock poisoned while locking source in try_children");
             if let Some(dest_map) = source_guard.children.get(&self.edge_key) {
                 dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()).collect()
             } else {
-                Vec::new() // No children under this specific edge key
+                Vec::new()
             }
-        }; // Lock is dropped here
+        };
 
-        // If there are children under this key, try them.
-        // self.try_destinations will attempt to merge the edge value.
         if !children_for_this_key.is_empty() {
             self = self.try_destinations(&children_for_this_key);
         }
-        // Return self, which may or may not have found a result.
         self
     }
 
-
-    /// If no destination has been found yet, creates a new node with the given `value`,
-    /// inserts an edge to it from the source, and sets it as the result.
-    ///
-    /// Returns `self` to allow chaining.
     pub fn else_create_destination_with_value(mut self, value: T) -> Self {
         if self.result.is_some() {
             return self;
         }
 
-        let new_node_arc = Arc::new(Mutex::new(Trie::new(value)));
-        let mut source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in else_create_with_value"); // Renamed source
+        let new_node_arc = Arc::new(RwLock::new(Trie::new(value)));
+        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
 
-        // try_insert expects the value by move, so clone here
-        match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
+        match source_guard.try_insert(&self.source_arc, self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) {
             Ok(()) => {
                 self.result = Some(new_node_arc);
             }
             Err(CycleDetectedError) => {
-                // Insert failed (e.g., cycle detected even with new node - unusual)
                 crate::debug!(1, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
-                // result remains None
             }
         }
-        drop(source_guard); // Use source_guard
+        drop(source_guard);
         self
     }
 
-    /// If no destination has been found yet, creates a new node by calling `value_fn`,
-    /// inserts an edge to it from the source, and sets it as the result.
-    ///
-    /// Returns `self` to allow chaining.
     pub fn else_create_destination_with(self, value_fn: impl FnOnce() -> T) -> Self {
         if self.result.is_some() {
             return self;
@@ -1741,11 +1507,6 @@ where
         self.else_create_destination_with_value(value_fn())
     }
 
-    /// If no destination has been found yet, creates a new node with the default value (`T::default()`),
-    /// inserts an edge to it from the source, and sets it as the result.
-    ///
-    /// Requires `T: Default`.
-    /// Returns `self` to allow chaining.
     pub fn else_create_destination(self) -> Self
     where
         T: Default,
@@ -1756,141 +1517,80 @@ where
         self.else_create_destination_with_value(T::default())
     }
 
-
-    /// Returns the resulting destination node, if one was found or created.
-    pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+    pub fn into_option(self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
         self.result
     }
 
-    pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+    pub fn clone_into_option(&self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
         self.result.clone()
     }
 
-    /// Returns the resulting destination node, panicking if none was found or created.
-    pub fn unwrap(self) -> Arc<Mutex<Trie<EK, EV, T>>> {
+    pub fn unwrap(self) -> Arc<RwLock<Trie<EK, EV, T>>> {
         self.result.expect("EdgeInserter::unwrap() called but no destination was found or created")
     }
 
-    /// Returns the resulting destination node, panicking with the given message if none was found or created.
-    pub fn expect(self, msg: &str) -> Arc<Mutex<Trie<EK, EV, T>>> {
+    pub fn expect(self, msg: &str) -> Arc<RwLock<Trie<EK, EV, T>>> {
         self.result.expect(msg)
     }
 }
 
-
-// Optional: Add a convenience method to Trie to create an EdgeInserter easily.
 impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
-    /// Creates an `EdgeInserter` to help add an edge starting from this node.
-    ///
-    /// This provides a convenient entry point for the chainable insertion pattern.
-    ///
-    /// # Arguments
-    /// * `edge_key`: The key for the new edge.
-    /// * `edge_value`: The value for the new edge.
-    /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
-    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
-    ///   or `None` otherwise. This is only called by `EdgeInserter::try_destination` if an edge
-    ///   with the same `edge_key` already points to the destination being tried.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::sync::{Arc, Mutex};
-    /// use crate::datastructures::trie::Trie; // Assuming Trie is in this module
-    /// use crate::datastructures::trie::EdgeInserter; // Also need EdgeInserter
-    /// use crate::datastructures::hybrid_bitset::HybridBitset; // Need HybridBitset
-    /// use std::iter::FromIterator; // For collect
-    ///
-    /// #[derive(Debug, Clone, Default)] // Need Default for else_create
-    /// struct NodeValue { /* ... */ }
-    ///
-    /// // Example merge function for edge values (e.g., HybridBitset)
-    /// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) { // Note the &mut and move
-    ///     *existing |= new; // Use reference for the OR operation
-    /// }
-    ///
-    /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
-    /// let root_node: Arc<Mutex<Trie<String, HybridBitset, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
-    ///
-    /// // Create a HybridBitset to use as edge value
-    /// let new_edge_value: HybridBitset = vec![].into_iter().collect();
-    ///
-    /// let potential_destinations: Vec<Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>> = vec![/* ... */];
-    ///
-    /// let new_or_existing_node = { // Use a block to drop the temporary mutex guard
-    ///     let root_guard = root_node.lock().unwrap(); // Get a guard to call insert_edge
-    ///     // We must pass the merge function closure that takes &mut EV, EV
-    ///     root_guard.insert_edge("key".to_string(), new_edge_value.clone(), merge_bitset_union) // Clone edge_value for EdgeInserter to own
-    ///         .try_destinations(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
-    ///         .else_create() // Or else_create_with(...) or else_create_with_value(...)
-    ///         .unwrap()
-    /// };
-    /// // root_node (Arc<Mutex>) is an Arc<Mutex> and can be used further.
-    /// ```
     pub fn insert_edge<FMergeEV>(
-        &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<Mutex>.
+        &self,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
     ) -> EdgeInserter<EK, EV, T, FMergeEV>
     where
-         FMergeEV: FnMut(&mut EV, EV), // Changed signature
+         FMergeEV: FnMut(&mut EV, EV),
     {
-            EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
-        }
+        EdgeInserter::new(Arc::new(RwLock::new(self.clone())), edge_key, edge_value, merge_edge_value)
     }
+}
 
-/// Attempts to establish an edge from `source` to a single `destination`,
-/// optionally merging edge values if an edge already exists.
-/// Returns `Some(Arc<Mutex<Trie<...>>>)` if merge or insert succeeded,
-/// or `None` if merge failed or a cycle was detected.
 pub fn try_destination<EK, EV, T, FMergeEV>(
-    source: Arc<Mutex<Trie<EK, EV, T>>>,
+    source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
-    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+    destination: Arc<RwLock<Trie<EK, EV, T>>>,
     merge_edge_value: FMergeEV,
-) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&mut EV, EV), // Changed signature
+    FMergeEV: FnMut(&mut EV, EV),
 {
     EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
         .try_destination(destination)
         .into_option()
 }
 
-/// Attempts to establish an edge from `source` to any of the provided `destinations`,
-/// returning the first successful one (merge or insert), or `None` if all attempts failed.
 pub fn try_destination_with<EK, EV, T, FMergeEV>(
-    source: Arc<Mutex<Trie<EK, EV, T>>>,
+    source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
-    destinations: &[Arc<Mutex<Trie<EK, EV, T>>>],
+    destinations: &[Arc<RwLock<Trie<EK, EV, T>>>],
     merge_edge_value: FMergeEV,
-) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&mut EV, EV), // Changed signature
+    FMergeEV: FnMut(&mut EV, EV),
 {
     EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
         .try_destinations(destinations)
         .into_option()
 }
 
-/// Attempts to establish an edge from `source` to a single `destination`.
-/// If a strong cycle would be created, it inserts a WEAK edge instead.
 pub fn try_destination_auto<EK, EV, T, FMergeEV>(
-    source: Arc<Mutex<Trie<EK, EV, T>>>,
+    source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
-    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+    destination: Arc<RwLock<Trie<EK, EV, T>>>,
     merge_edge_value: FMergeEV,
-) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
     EV: Clone,
@@ -1909,210 +1609,108 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::collections::{HashSet, HashMap};
-    use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset for tests
-    use std::iter::FromIterator; // For collect
+    use crate::datastructures::hybrid_bitset::HybridBitset;
+    use std::iter::FromIterator;
 
-    // Use concrete types for merge tests
     type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
-    type TestNodeMerge = Arc<Mutex<TestTrieMerge>>;
-    // Use simpler types for basic tests
+    type TestNodeMerge = Arc<RwLock<TestTrieMerge>>;
     type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-    type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
+    type TestNodeBasic = Arc<RwLock<TestTrieBasic>>;
 
-    // Use concrete types for EdgeInserter tests
-    type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
-    type TestNodeEI = Arc<Mutex<TestTrieEI>>;
+    type TestTrieEI = Trie<&'static str, HybridBitset, String>;
+    type TestNodeEI = Arc<RwLock<TestTrieEI>>;
 
-    // Helper to get Arc pointer for tests
-    fn arc_ptr<N>(arc: &Arc<Mutex<N>>) -> *const Mutex<N> {
+    fn arc_ptr<N>(arc: &Arc<RwLock<N>>) -> *const RwLock<N> {
         Arc::as_ptr(arc)
     }
 
     #[test]
     fn test_try_insertion_and_retrieval() {
-        let root_node: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3))); // Another child for 'a'
+        let root_node: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let child3: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
 
-        { // Scope for mutable borrow of root
-            let mut root = root_node.lock().unwrap();
-            root.try_insert("a", &mut Some("edge_a1"), child1.clone()).expect("Insert failed");
-            root.try_insert("b", &mut Some( "edge_b"), child2.clone()).expect("Insert failed");
-            root.try_insert("a", &mut Some("edge_a3"), child3.clone()).expect("Insert failed"); // Insert second child for 'a'
-        } // root lock released
+        {
+            let mut root = root_node.write().unwrap();
+            root.try_insert(&root_node, "a", &mut Some("edge_a1"), child1.clone()).expect("Insert failed");
+            root.try_insert(&root_node, "b", &mut Some("edge_b"), child2.clone()).expect("Insert failed");
+            root.try_insert(&root_node, "a", &mut Some("edge_a3"), child3.clone()).expect("Insert failed");
+        }
 
-        // Scope for read-only borrow of root
-        let root = root_node.lock().unwrap();
+        let root = root_node.read().unwrap();
 
-        // Test get for 'a'
-        let retrieved_children_a = root.get(&"a").expect("Failed to get children for 'a'"); // Now a &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+        let retrieved_children_a = root.get(&"a").expect("Failed to get children for 'a'");
         assert_eq!(retrieved_children_a.len(), 2);
-        // Use Arc pointers for comparison
-        let retrieved_data_a: HashSet<(&str, *const Mutex<TestTrieBasic>)> = retrieved_children_a
-            .iter() // Iterates yielding (&ArcPtrWrapper<Mutex<...>>, &&str)
-            .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc()))) // Dereference ev_ref twice
+        let retrieved_data_a: HashSet<(&str, *const RwLock<TestTrieBasic>)> = retrieved_children_a
+            .iter()
+            .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc())))
             .collect();
         assert!(retrieved_data_a.contains(&("edge_a1", arc_ptr(&child1))));
         assert!(retrieved_data_a.contains(&("edge_a3", arc_ptr(&child3))));
 
-        // Test get for 'b'
-        let retrieved_children_b = root.children().get(&"b").expect("Failed to get child 'b'"); // Now a &BTreeMap
+        let retrieved_children_b = root.children().get(&"b").expect("Failed to get child 'b'");
         assert_eq!(retrieved_children_b.len(), 1);
-        let (wrapper_arc, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
-        assert_eq!(*ev_ref, "edge_b"); // Check edge value
-        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &child2)); // Check Arc pointer equality
+        let (wrapper_arc, ev_ref) = retrieved_children_b.iter().next().unwrap();
+        assert_eq!(*ev_ref, "edge_b");
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &child2));
 
         assert!(root.get(&"c").is_none());
 
-        // Test children iterator order (BTreeMap ensures sorted order of keys 'a', 'b')
         let children_keys: Vec<_> = root.children().keys().cloned().collect();
         assert_eq!(children_keys, vec!["a", "b"]);
         assert_eq!(root.children().get("a").unwrap().len(), 2);
         assert_eq!(root.children().get("b").unwrap().len(), 1);
 
-        // Test is_leaf
         assert!(!root.is_leaf());
-        // Drop root lock before locking children
         drop(root);
-        assert!(child1.lock().unwrap().is_leaf());
-        assert!(child2.lock().unwrap().is_leaf());
-        assert!(child3.lock().unwrap().is_leaf());
+        assert!(child1.read().unwrap().is_leaf());
+        assert!(child2.read().unwrap().is_leaf());
+        assert!(child3.read().unwrap().is_leaf());
     }
 
     #[test]
     fn test_multiple_children_same_edge_key() {
-        // Structure:
-        //      root (0) --"edge", "val1"--> child1 (1)
-        //           |
-        //            -----"edge", "val2"--> child2 (2)
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
 
         {
-            let mut r = root.lock().unwrap();
-            r.try_insert("edge", &mut Some("val1"), child1.clone()).unwrap();
-            r.try_insert("edge", &mut Some("val2"), child2.clone()).unwrap();
-        } // root lock released
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "edge", &mut Some("val1"), child1.clone()).unwrap();
+            r.try_insert(&root, "edge", &mut Some("val2"), child2.clone()).unwrap();
+        }
 
-        // Check retrieval - lock root again
         {
-            let binding = root.lock().unwrap();
-            let children_map = binding.get(&"edge").unwrap(); // Now a &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+            let binding = root.read().unwrap();
+            let children_map = binding.get(&"edge").unwrap();
             assert_eq!(children_map.len(), 2);
-            let child_data: HashSet<(&str, *const Mutex<TestTrieBasic>)> = children_map
-                .iter() // Iterating over (&ArcPtrWrapper<Mutex<...>>, &EV)
+            let child_data: HashSet<(&str, *const RwLock<TestTrieBasic>)> = children_map
+                .iter()
                 .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc())))
                 .collect();
             assert!(child_data.contains(&("val1", arc_ptr(&child1))));
             assert!(child_data.contains(&("val2", arc_ptr(&child2))));
-        } // root lock released
+        }
 
-        // Check all_nodes - call *after* releasing lock
         let all = Trie::all_nodes(root.clone());
-        assert_eq!(all.len(), 3); // root, child1, child2
+        assert_eq!(all.len(), 3);
         let all_ptrs: HashSet<_> = all.iter().map(arc_ptr).collect();
         assert!(all_ptrs.contains(&arc_ptr(&root)));
         assert!(all_ptrs.contains(&arc_ptr(&child1)));
         assert!(all_ptrs.contains(&arc_ptr(&child2)));
 
-        // Check special_map
         let mut processed_node_values = Vec::new();
         let mut computed_values = Vec::new();
-        let mut edge_info_at_step = Vec::new(); // Store (EK, EV) seen by step
+        let mut edge_info_at_step = Vec::new();
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: add one, ignore edge info
             |parent_val, ek, ev, _child_node| {
                  edge_info_at_step.push((ek.clone(), ev.clone()));
                  Some(parent_val + 1)
             },
-            |current, new| *current = new, // merge: replace
-            |node, computed_val| { // process: always continue
-                processed_node_values.push(node.value);
-                computed_values.push(*computed_val);
-                true
-            },
-        );
-
-        // Expected processing order: 0, then (1, 2) in some order based on depth.
-        assert_eq!(processed_node_values.len(), 3);
-        assert!(processed_node_values.contains(&0));
-        assert!(processed_node_values.contains(&1));
-        assert!(processed_node_values.contains(&2));
-        // Depth 0 nodes processed first
-        assert_eq!(processed_node_values[0], 0);
-        // Depth 1 nodes processed next (order not guaranteed for equal depth)
-        let depth1_nodes: HashSet<_> = processed_node_values[1..].iter().cloned().collect();
-        assert!(depth1_nodes.contains(&1));
-        assert!(depth1_nodes.contains(&2));
-
-
-        // Expected computed values: root = 100, child1 = 101, child2 = 101.
-        assert_eq!(computed_values.len(), 3);
-        assert_eq!(computed_values[0], 100);
-        let results_map: HashMap<i32, i32> = processed_node_values.iter().cloned().zip(computed_values.iter().cloned()).collect();
-        assert_eq!(results_map.get(&0), Some(&100));
-        assert_eq!(results_map.get(&1), Some(&101));
-        assert_eq!(results_map.get(&2), Some(&101));
-
-        // Check edge info captured by step
-        assert_eq!(edge_info_at_step.len(), 2); // 2 edges traversed from root
-        assert!(edge_info_at_step.contains(&("edge", "val1")));
-        assert!(edge_info_at_step.contains(&("edge", "val2")));
-    }
-
-
-    #[test]
-    fn test_special_map_bfs_order_with_edges() {
-        // Structure:
-        //      root (0)
-        //       /       \
-        // ("r->c1","e1") ("r->c2","e2")
-        //     /           \
-        //   c1 (1)       c2 (2)
-        //      |
-        // ("c1->gc","e3")
-        //      |
-        //   gc (3)
-        //
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
-
-        {
-            let mut r = root.lock().unwrap();
-            r.try_insert("r->c1", &mut Some("e1"), child1.clone()).unwrap();
-            r.try_insert("r->c2", &mut Some("e2"), child2.clone()).unwrap();
-        }
-        {
-            let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1->gc", &mut Some("e3"), grandchild.clone()).unwrap();
-        }
-         // No edge from c2 to grandchild in this test setup, removed the line below
-        // {
-        //     let mut c2 = child2.lock().unwrap();
-        //     c2.try_insert("c2->gc", &mut Some("e4"), grandchild.clone()).unwrap();
-        // }
-
-
-        let mut processed_node_values = Vec::new();
-        let mut computed_values = Vec::new();
-        let mut edge_info_at_step = Vec::new(); // Store (EK, EV) seen by step
-
-        Trie::special_map(
-            vec![(root.clone(), 100)],
-            // step: add one, record edge info
-            |parent_val, ek, ev, _child_node| {
-                edge_info_at_step.push((ek.clone(), ev.clone()));
-                Some(parent_val + 1)
-            },
-            // merge: replace
-            |current, new| { *current = new; },
-            // process: always continue
+            |current, new| *current = new,
             |node, computed_val| {
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
@@ -2120,28 +1718,77 @@ mod tests {
             },
         );
 
-        // Check processing order (by depth)
-        // Depth 0: root (0)
-        // Depth 1: child1 (1), child2 (2) - order depends on heap
-        // Depth 2: grandchild (3)
+        assert_eq!(processed_node_values.len(), 3);
+        assert!(processed_node_values.contains(&0));
+        assert!(processed_node_values.contains(&1));
+        assert!(processed_node_values.contains(&2));
+        assert_eq!(processed_node_values[0], 0);
+        let depth1_nodes: HashSet<_> = processed_node_values[1..].iter().cloned().collect();
+        assert!(depth1_nodes.contains(&1));
+        assert!(depth1_nodes.contains(&2));
+
+        assert_eq!(computed_values.len(), 3);
+        assert_eq!(computed_values[0], 100);
+        let results_map: HashMap<i32, i32> = processed_node_values.iter().cloned().zip(computed_values.iter().cloned()).collect();
+        assert_eq!(results_map.get(&0), Some(&100));
+        assert_eq!(results_map.get(&1), Some(&101));
+        assert_eq!(results_map.get(&2), Some(&101));
+
+        assert_eq!(edge_info_at_step.len(), 2);
+        assert!(edge_info_at_step.contains(&("edge", "val1")));
+        assert!(edge_info_at_step.contains(&("edge", "val2")));
+    }
+
+    #[test]
+    fn test_special_map_bfs_order_with_edges() {
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
+
+        {
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "r->c1", &mut Some("e1"), child1.clone()).unwrap();
+            r.try_insert(&root, "r->c2", &mut Some("e2"), child2.clone()).unwrap();
+        }
+        {
+            let mut c1 = child1.write().unwrap();
+            c1.try_insert(&child1, "c1->gc", &mut Some("e3"), grandchild.clone()).unwrap();
+        }
+
+        let mut processed_node_values = Vec::new();
+        let mut computed_values = Vec::new();
+        let mut edge_info_at_step = Vec::new();
+
+        Trie::special_map(
+            vec![(root.clone(), 100)],
+            |parent_val, ek, ev, _child_node| {
+                edge_info_at_step.push((ek.clone(), ev.clone()));
+                Some(parent_val + 1)
+            },
+            |current, new| { *current = new; },
+            |node, computed_val| {
+                processed_node_values.push(node.value);
+                computed_values.push(*computed_val);
+                true
+            },
+        );
+
         assert_eq!(processed_node_values.len(), 4);
-        assert_eq!(processed_node_values[0], 0); // Root (depth 0) is first
+        assert_eq!(processed_node_values[0], 0);
         let depth1_nodes: HashSet<_> = processed_node_values[1..3].iter().cloned().collect();
         assert!(depth1_nodes.contains(&1));
         assert!(depth1_nodes.contains(&2));
-        assert_eq!(processed_node_values[3], 3); // Grandchild (depth 2) is last
+        assert_eq!(processed_node_values[3], 3);
 
-
-        // Check computed values
         let results_map: HashMap<i32, i32> = processed_node_values.iter().cloned()
             .zip(computed_values.iter().cloned()).collect();
         assert_eq!(results_map.get(&0), Some(&100));
         assert_eq!(results_map.get(&1), Some(&101));
         assert_eq!(results_map.get(&2), Some(&101));
-        assert_eq!(results_map.get(&3), Some(&102)); // Reached from c1 (101+1)
+        assert_eq!(results_map.get(&3), Some(&102));
 
-        // Check edge info captured by step
-        assert_eq!(edge_info_at_step.len(), 3); // 3 edges traversed (r->c1, r->c2, c1->gc)
+        assert_eq!(edge_info_at_step.len(), 3);
         assert!(edge_info_at_step.contains(&("r->c1", "e1")));
         assert!(edge_info_at_step.contains(&("r->c2", "e2")));
         assert!(edge_info_at_step.contains(&("c1->gc", "e3")));
@@ -2149,40 +1796,29 @@ mod tests {
 
     #[test]
     fn test_all_nodes_diamond() {
-        // Diamond structure:
-        //       root
-        //      /    \
-        // ("r1","e1") ("r2","e2")
-        //    /        \
-        // child1    child2
-        //    \        /
-        // ("c1","e3") ("c2","e4")
-        //      \    /
-        //    grandchild
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
 
         {
-            let mut r = root.lock().unwrap();
-            r.try_insert("r1", &mut Some("e1"), child1.clone()).unwrap();
-            r.try_insert("r2", &mut Some("e2"), child2.clone()).unwrap();
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "r1", &mut Some("e1"), child1.clone()).unwrap();
+            r.try_insert(&root, "r2", &mut Some("e2"), child2.clone()).unwrap();
         }
         {
-            let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1", &mut Some("e3"), grandchild.clone()).unwrap();
+            let mut c1 = child1.write().unwrap();
+            c1.try_insert(&child1, "c1", &mut Some("e3"), grandchild.clone()).unwrap();
         }
         {
-            let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2", &mut Some("e4"), grandchild.clone()).unwrap(); // Diamond
+            let mut c2 = child2.write().unwrap();
+            c2.try_insert(&child2, "c2", &mut Some("e4"), grandchild.clone()).unwrap();
         }
 
         let all_nodes = Trie::all_nodes(root.clone());
 
-        // Should find 4 unique nodes.
         assert_eq!(all_nodes.len(), 4);
-        let node_ptrs: HashSet<_> = all_nodes.iter().map(arc_ptr).collect(); // Use arc_ptr
+        let node_ptrs: HashSet<_> = all_nodes.iter().map(arc_ptr).collect();
         assert_eq!(node_ptrs.len(), 4);
         assert!(node_ptrs.contains(&arc_ptr(&root)));
         assert!(node_ptrs.contains(&arc_ptr(&child1)));
@@ -2192,47 +1828,42 @@ mod tests {
 
     #[test]
     fn test_special_map_diamond_merge_max() {
-        // Diamond structure
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
 
-        // Build the structure
         {
-            let mut r = root.lock().unwrap();
-            r.try_insert("r->c1", &mut Some("edge1"), child1.clone()).unwrap();
-            r.try_insert("r->c2", &mut Some("edge2"), child2.clone()).unwrap();
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "r->c1", &mut Some("edge1"), child1.clone()).unwrap();
+            r.try_insert(&root, "r->c2", &mut Some("edge2"), child2.clone()).unwrap();
         }
         {
-            let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1->gc", &mut Some("edge3"), grandchild.clone()).unwrap();
+            let mut c1 = child1.write().unwrap();
+            c1.try_insert(&child1, "c1->gc", &mut Some("edge3"), grandchild.clone()).unwrap();
         }
         {
-            let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2->gc", &mut Some("edge4"), grandchild.clone()).unwrap();
+            let mut c2 = child2.write().unwrap();
+            c2.try_insert(&child2, "c2->gc", &mut Some("edge4"), grandchild.clone()).unwrap();
         }
 
-        // Check max_depths after insertion
-        assert_eq!(root.lock().unwrap().max_depth, 0);
-        assert_eq!(child1.lock().unwrap().max_depth, 1);
-        assert_eq!(child2.lock().unwrap().max_depth, 1);
-        assert_eq!(grandchild.lock().unwrap().max_depth, 2);
+        assert_eq!(root.read().unwrap().max_depth, 0);
+        assert_eq!(child1.read().unwrap().max_depth, 1);
+        assert_eq!(child2.read().unwrap().max_depth, 1);
+        assert_eq!(grandchild.read().unwrap().max_depth, 2);
 
-        let processed_nodes = Arc::new(Mutex::new(HashMap::<i32, i32>::new()));
+        let processed_nodes = Arc::new(RwLock::new(HashMap::<i32, i32>::new()));
         let process_count = Arc::new(AtomicUsize::new(0));
 
         Trie::special_map(
-            vec![(root.clone(), 100)], // Start at root
-            // step: increment value, ignore edges
+            vec![(root.clone(), 100)],
             |p_val, _ek, _ev, _child_node| Some(p_val + 1),
-            // merge: take max value
             |current_v, new_v| *current_v = (*current_v).max(new_v),
-            { // process: always continue
+            {
                 let processed_nodes = processed_nodes.clone();
                 let process_count = process_count.clone();
                 move |node, final_v| {
-                    let mut map = processed_nodes.lock().unwrap();
+                    let mut map = processed_nodes.write().unwrap();
                     map.insert(node.value, *final_v);
                     process_count.fetch_add(1, Ordering::SeqCst);
                     true
@@ -2240,30 +1871,28 @@ mod tests {
             }
         );
 
-        // Assertions
-        let final_results = processed_nodes.lock().unwrap();
-        assert_eq!(process_count.load(Ordering::SeqCst), 4, "Should process 4 unique nodes");
+        let final_results = processed_nodes.read().unwrap();
+        assert_eq!(process_count.load(Ordering::SeqCst), 4);
         assert_eq!(final_results.get(&0), Some(&100));
         assert_eq!(final_results.get(&1), Some(&101));
         assert_eq!(final_results.get(&2), Some(&101));
-        assert_eq!(final_results.get(&3), Some(&102)); // gc gets max(101+1, 101+1) = 102
+        assert_eq!(final_results.get(&3), Some(&102));
     }
-
 
     #[test]
     fn test_empty_trie() {
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(42)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(42)));
         let nodes = Trie::all_nodes(root.clone());
         assert_eq!(nodes.len(), 1);
         assert!(Arc::ptr_eq(&nodes[0], &root));
-        assert!(root.lock().unwrap().is_leaf()); // Lock needed here
+        assert!(root.read().unwrap().is_leaf());
 
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
             |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
-            |node, v| { // process: always continue
+            |node, v| {
                 assert_eq!(node.value, 42);
                 assert_eq!(*v, 100);
                 processed = true;
@@ -2275,161 +1904,131 @@ mod tests {
 
     #[test]
     fn test_cycle_detection_on_try_insert() {
-        // Cycle:  root -> child -> root
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
 
-        // Insert root -> child
         let insert1_result = {
-            let mut r = root.lock().unwrap();
-            r.try_insert("r->c", &mut Some("e1"), child.clone())
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "r->c", &mut Some("e1"), child.clone())
         };
         assert!(insert1_result.is_ok());
-        assert_eq!(child.lock().unwrap().max_depth, 1);
-        assert_eq!(root.lock().unwrap().max_depth, 0);
+        assert_eq!(child.read().unwrap().max_depth, 1);
+        assert_eq!(root.read().unwrap().max_depth, 0);
 
-        // Attempt insert child -> root
         let insert2_result = {
-            let mut c = child.lock().unwrap();
-            // This insert should call detect_cycle(child_ptr, &root), which should detect the cycle.
-            c.try_insert("c->r", &mut Some("e2"), root.clone())
+            let mut c = child.write().unwrap();
+            c.try_insert(&child, "c->r", &mut Some("e2"), root.clone())
         };
 
-        // Assert that cycle detection returned an error
         assert!(insert2_result.is_err());
         assert_eq!(insert2_result.err(), Some(CycleDetectedError));
 
-        // Check state after failed insertion:
-        // - The edge must *not* be present because the insertion was rejected.
-        let child_locked = child.lock().unwrap();
+        let child_locked = child.read().unwrap();
         let has_edge_to_root = if let Some(dest_map) = child_locked.children.get("c->r") {
-             let lookup_key = ArcPtrWrapper::new(root.clone()); // Use ArcPtrWrapper
+             let lookup_key = ArcPtrWrapper::new(root.clone());
              dest_map.contains_key(&lookup_key)
          } else {
              false
          };
-        assert!(!has_edge_to_root, "Edge that would introduce a cycle should NOT be present");
+        assert!(!has_edge_to_root);
 
-        // - Max depths should be unchanged from before the failed insertion attempt.
-        assert_eq!(root.lock().unwrap().max_depth, 0);
+        assert_eq!(root.read().unwrap().max_depth, 0);
         assert_eq!(child_locked.max_depth, 1);
 
         println!("Done testing cycle detection on try_insert");
     }
 
-
     #[test]
     fn test_cycle_all_nodes_no_panic() {
-        // Cycle:  root -> child -> root.
-        // Manually create cycle without insert's propagation.
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
 
-        // Manually create links
-        root.lock().unwrap().force_insert_to_node("r->c", "e1", &child);
-        child.lock().unwrap().force_insert_to_node("c->r", "e2", &root);
-        // Manually set depths (optional for all_nodes logic)
-        root.lock().unwrap().max_depth = 0;
-        child.lock().unwrap().max_depth = 1;
+        root.write().unwrap().force_insert_to_node("r->c", "e1", &child);
+        child.write().unwrap().force_insert_to_node("c->r", "e2", &root);
+        root.write().unwrap().max_depth = 0;
+        child.write().unwrap().max_depth = 1;
 
         let all_nodes = Trie::all_nodes(root.clone());
 
-        // Should detect both nodes exactly once.
         assert_eq!(all_nodes.len(), 2);
-        let node_ptrs: HashSet<_> = all_nodes.iter().map(arc_ptr).collect(); // Use arc_ptr
+        let node_ptrs: HashSet<_> = all_nodes.iter().map(arc_ptr).collect();
         assert_eq!(node_ptrs.len(), 2);
         assert!(node_ptrs.contains(&arc_ptr(&root)));
         assert!(node_ptrs.contains(&arc_ptr(&child)));
     }
 
-     #[test]
+    #[test]
     fn test_has_any_cycle() {
-        // No cycle
-        let root1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
-        root1.lock().unwrap().force_insert_to_node("a", "e1", &child1);
-        root1.lock().unwrap().force_insert_to_node("b", "e2", &child2);
-        child1.lock().unwrap().force_insert_to_node("c", "e3", &grandchild);
-        child2.lock().unwrap().force_insert_to_node("d", "e4", &grandchild); // Diamond
+        let root1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
+        root1.write().unwrap().force_insert_to_node("a", "e1", &child1);
+        root1.write().unwrap().force_insert_to_node("b", "e2", &child2);
+        child1.write().unwrap().force_insert_to_node("c", "e3", &grandchild);
+        child2.write().unwrap().force_insert_to_node("d", "e4", &grandchild);
         assert!(!Trie::has_any_cycle(root1.clone()));
 
-        // Simple cycle: root2 -> child3 -> root2
-        let root2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(10)));
-        let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(11)));
-        root2.lock().unwrap().force_insert_to_node("x", "e5", &child3);
-        child3.lock().unwrap().force_insert_to_node("y", "e6", &root2);
+        let root2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(10)));
+        let child3: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(11)));
+        root2.write().unwrap().force_insert_to_node("x", "e5", &child3);
+        child3.write().unwrap().force_insert_to_node("y", "e6", &root2);
         assert!(Trie::has_any_cycle(root2.clone()));
 
-        // Larger cycle: root3 -> A -> B -> C -> A
-        let root3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(20)));
-        let node_a: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(21)));
-        let node_b: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(22)));
-        let node_c: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(23)));
-        root3.lock().unwrap().force_insert_to_node("r->a", "e7", &node_a);
-        node_a.lock().unwrap().force_insert_to_node("a->b", "e8", &node_b);
-        node_b.lock().unwrap().force_insert_to_node("b->c", "e9", &node_c);
-        node_c.lock().unwrap().force_insert_to_node("c->a", "e10", &node_a); // Cycle C -> A
+        let root3: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(20)));
+        let node_a: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(21)));
+        let node_b: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(22)));
+        let node_c: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(23)));
+        root3.write().unwrap().force_insert_to_node("r->a", "e7", &node_a);
+        node_a.write().unwrap().force_insert_to_node("a->b", "e8", &node_b);
+        node_b.write().unwrap().force_insert_to_node("b->c", "e9", &node_c);
+        node_c.write().unwrap().force_insert_to_node("c->a", "e10", &node_a);
         assert!(Trie::has_any_cycle(root3.clone()));
 
-        // Cycle with unconnected node: root4 -> A -> B -> A; C (unconnected)
-        let root4: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(30)));
-        let node_a2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(31)));
-        let node_b2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(32)));
-        let node_c2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(33))); // Unconnected to root4
-        root4.lock().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
-        node_a2.lock().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
-        node_b2.lock().unwrap().force_insert_to_node("b->a", "e13", &node_a2); // Cycle B -> A
+        let root4: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(30)));
+        let node_a2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(31)));
+        let node_b2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(32)));
+        let node_c2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(33)));
+        root4.write().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
+        node_a2.write().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
+        node_b2.write().unwrap().force_insert_to_node("b->a", "e13", &node_a2);
         assert!(Trie::has_any_cycle(root4.clone()));
 
-        // Disconnected graph with a cycle: root5 (linear chain), root6 (cycle)
-        let root5: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(40)));
-        let node_d: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(41)));
-        root5.lock().unwrap().force_insert_to_node("r->d", "e14", &node_d);
-        // Separately, a cycle structure
-        let root6_in_cycle: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(50)));
-        let node_e: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(51)));
-        root6_in_cycle.lock().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
-        node_e.lock().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle); // Cycle
-        // Checking from root5 should NOT find the cycle
+        let root5: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(40)));
+        let node_d: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(41)));
+        root5.write().unwrap().force_insert_to_node("r->d", "e14", &node_d);
+        let root6_in_cycle: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(50)));
+        let node_e: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(51)));
+        root6_in_cycle.write().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
+        node_e.write().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle);
         assert!(!Trie::has_any_cycle(root5.clone()));
-        // Checking from root6_in_cycle SHOULD find the cycle
         assert!(Trie::has_any_cycle(root6_in_cycle.clone()));
     }
 
-
     #[test]
     fn test_cycle_special_map_no_panic_limited_processing() {
-        // Cycle: root -> child -> root.
-        // Manually create cycle.
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
 
-        // Manually create links
-        root.lock().unwrap().force_insert_to_node("r->c", "e1", &child);
-        child.lock().unwrap().force_insert_to_node("c->r", "e2", &root);
-        // Manually set depths. These are crucial for special_map's readiness check.
-        root.lock().unwrap().max_depth = 0; // Initial node, depth 0
-        child.lock().unwrap().max_depth = 1; // Child reachable at depth 1
+        root.write().unwrap().force_insert_to_node("r->c", "e1", &child);
+        child.write().unwrap().force_insert_to_node("c->r", "e2", &root);
+        root.write().unwrap().max_depth = 0;
+        child.write().unwrap().max_depth = 1;
 
         let mut processed_vals = Vec::new();
         let mut computed_vals = Vec::new();
 
         Trie::special_map(
-            vec![(root.clone(), 100)], // Start at root
-            |p, _ek, _ev, _n| Some(p + 1), // Step: increment
-            |cur, new| *cur = (*cur).max(new), // Merge: max
-            |node, v| { // process: always continue
+            vec![(root.clone(), 100)],
+            |p, _ek, _ev, _n| Some(p + 1),
+            |cur, new| *cur = (*cur).max(new),
+            |node, v| {
                 processed_vals.push(node.value);
                 computed_vals.push(*v);
                 true
             },
         );
 
-        // Expected behavior: Root processed (V=100), Child processed (V=101).
-        // The cycle back to root doesn't re-process root because root is in `done`.
-        // The new depth-based scheduler should handle this gracefully.
         assert_eq!(processed_vals.len(), 2);
         assert!(processed_vals.contains(&0));
         assert!(processed_vals.contains(&1));
@@ -2442,45 +2041,40 @@ mod tests {
 
     #[test]
     fn test_special_map_stop_processing() {
-        // Structure:
-        //      root (0) --e1,e2--> c1(1), c2(2)
-        //      c1(1) --e3--> gc1(3)
-        //      c2(2) --e4--> gc2(4)
-        // Process returns false for c1, true otherwise.
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let grandchild1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
-        let grandchild2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(4)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let grandchild1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
+        let grandchild2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(4)));
 
         {
-            let mut r = root.lock().unwrap();
-            r.try_insert("r->c1", &mut Some("edge1"), child1.clone()).unwrap();
-            r.try_insert("r->c2", &mut Some("edge2"), child2.clone()).unwrap();
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "r->c1", &mut Some("edge1"), child1.clone()).unwrap();
+            r.try_insert(&root, "r->c2", &mut Some("edge2"), child2.clone()).unwrap();
         }
         {
-            let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1->gc", &mut Some("edge3"), grandchild1.clone()).unwrap();
+            let mut c1 = child1.write().unwrap();
+            c1.try_insert(&child1, "c1->gc", &mut Some("edge3"), grandchild1.clone()).unwrap();
         }
         {
-            let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2->gc", &mut Some("edge4"), grandchild2.clone()).unwrap();
+            let mut c2 = child2.write().unwrap();
+            c2.try_insert(&child2, "c2->gc", &mut Some("edge4"), grandchild2.clone()).unwrap();
         }
 
-        let processed_nodes = Arc::new(Mutex::new(HashSet::<i32>::new()));
-        let computed_values = Arc::new(Mutex::new(HashMap::<i32, i32>::new()));
+        let processed_nodes = Arc::new(RwLock::new(HashSet::<i32>::new()));
+        let computed_values = Arc::new(RwLock::new(HashMap::<i32, i32>::new()));
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value
-            |current_v, new_v| *current_v = new_v, // merge: replace
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1),
+            |current_v, new_v| *current_v = new_v,
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
                 move |node, final_v| {
-                    processed_nodes.lock().unwrap().insert(node.value);
-                    computed_values.lock().unwrap().insert(node.value, *final_v);
-                    if node.value == 1 { // Stop processing children if node value is 1 (child1)
+                    processed_nodes.write().unwrap().insert(node.value);
+                    computed_values.write().unwrap().insert(node.value, *final_v);
+                    if node.value == 1 {
                         false
                     } else {
                         true
@@ -2489,109 +2083,80 @@ mod tests {
             }
         );
 
-        let final_processed = processed_nodes.lock().unwrap();
-        let final_values = computed_values.lock().unwrap();
+        let final_processed = processed_nodes.read().unwrap();
+        let final_values = computed_values.read().unwrap();
 
-        // Expected processed nodes: 0, 1, 2, 4. Node 3 should be skipped because propagation stopped at node 1.
         assert_eq!(final_processed.len(), 4);
         assert!(final_processed.contains(&0));
-        assert!(final_processed.contains(&1)); // Processed, but stopped propagation
-        assert!(final_processed.contains(&2)); // Processed, continued propagation
-        assert!(!final_processed.contains(&3)); // gc1 should NOT be processed
-        assert!(final_processed.contains(&4)); // gc2 should be processed
+        assert!(final_processed.contains(&1));
+        assert!(final_processed.contains(&2));
+        assert!(!final_processed.contains(&3));
+        assert!(final_processed.contains(&4));
 
-        // Check computed values
         assert_eq!(final_values.get(&0), Some(&100));
         assert_eq!(final_values.get(&1), Some(&101));
         assert_eq!(final_values.get(&2), Some(&101));
-        assert_eq!(final_values.get(&3), None);      // Not processed
-        assert_eq!(final_values.get(&4), Some(&102)); // Processed via child2
+        assert_eq!(final_values.get(&3), None);
+        assert_eq!(final_values.get(&4), Some(&102));
     }
 
     #[test]
     fn test_special_map_step_returns_none() {
-        // Structure:
-        //      root (0) --"keep"--> c1(1)
-        //           |
-        //           --"skip"--> c2(2) --"keep"--> gc2(3)
-        // Step returns None if edge key is "skip".
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
-        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
-        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
-        let grandchild2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+        let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(2)));
+        let grandchild2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(3)));
 
         {
-            let mut r = root.lock().unwrap();
-            r.try_insert("keep", &mut Some("e1"), child1.clone()).unwrap();
-            r.try_insert("skip", &mut Some("e2"), child2.clone()).unwrap();
+            let mut r = root.write().unwrap();
+            r.try_insert(&root, "keep", &mut Some("e1"), child1.clone()).unwrap();
+            r.try_insert(&root, "skip", &mut Some("e2"), child2.clone()).unwrap();
         }
         {
-            let mut c2 = child2.lock().unwrap();
-            c2.try_insert("keep", &mut Some("e3"), grandchild2.clone()).unwrap();
+            let mut c2 = child2.write().unwrap();
+            c2.try_insert(&child2, "keep", &mut Some("e3"), grandchild2.clone()).unwrap();
         }
 
-        let processed_nodes = Arc::new(Mutex::new(HashSet::<i32>::new()));
-        let computed_values = Arc::new(Mutex::new(HashMap::<i32, i32>::new()));
+        let processed_nodes = Arc::new(RwLock::new(HashSet::<i32>::new()));
+        let computed_values = Arc::new(RwLock::new(HashMap::<i32, i32>::new()));
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: increment value only if edge key is "keep"
             |p_val, ek, _ev, _child_node| {
                 if *ek == "keep" {
                     Some(p_val + 1)
                 } else {
-                    None // Skip this edge
+                    None
                 }
             },
-            |current_v, new_v| *current_v = new_v, // merge: replace
+            |current_v, new_v| *current_v = new_v,
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
                 move |node, final_v| {
-                    processed_nodes.lock().unwrap().insert(node.value);
-                    computed_values.lock().unwrap().insert(node.value, *final_v);
-                    true // Always continue processing if node is reached
+                    processed_nodes.write().unwrap().insert(node.value);
+                    computed_values.write().unwrap().insert(node.value, *final_v);
+                    true
                 }
             }
         );
 
-        let final_processed = processed_nodes.lock().unwrap();
-        let final_values = computed_values.lock().unwrap();
+        let final_processed = processed_nodes.read().unwrap();
+        let final_values = computed_values.read().unwrap();
 
-        // Expected processed nodes: 0, 1. Node 2 is skipped because step for root->child2 returns None. Node 3 is not reached as its parent (node 2) is not processed.
         assert_eq!(final_processed.clone(), vec![0, 1].into_iter().collect());
 
-        // Check computed values
         assert_eq!(final_values.get(&0), Some(&100));
         assert_eq!(final_values.get(&1), Some(&101));
-        assert_eq!(final_values.get(&2), None); // Not processed
-        assert_eq!(final_values.get(&3), None); // Not reached, as c2 is not processed
+        assert_eq!(final_values.get(&2), None);
+        assert_eq!(final_values.get(&3), None);
     }
 
-
-    // --- Tests for insert_or_merge_edge ---
-
-    // Helper merge functions for tests
-    // Merge edge value (Vec<i32>): Append new vec to existing if existing is not empty
-    fn merge_ev_append(existing_ev: &mut Vec<i32>, new_ev: Vec<i32>) { // Changed existing_ev to &Vec<i32>
-        existing_ev.extend(new_ev.iter().copied()); // Use iter().copied()
+    // merge helpers
+    fn merge_ev_append(existing_ev: &mut Vec<i32>, new_ev: Vec<i32>) {
+        existing_ev.extend(new_ev.iter().copied());
     }
 
-    // Merge node value (String): Append new string if existing contains "mergeable"
-    //
-    // NOTE:
-    // The sentinel strings used throughout the tests include both
-    // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
-    // The original helper simply checked `contains("mergeable")`, which means
-    // `"child_not_mergeable"` was (incorrectly) considered merge-able because
-    // it still contains the substring `"mergeable"`.
-    //
-    // To align the helper’s behaviour with the test‐case expectations we now:
-    //   1. Require that the value contains `"mergeable"`, *and*
-    //   2. Explicitly reject any value that contains `"not_mergeable"`.
-    //
-    // This makes values like `"child_mergeable"` merge, while
-    // `"child_not_mergeable"` (and similar) do NOT merge.
     fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
         if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
             Some(format!("{}|{}", existing_nv, new_nv))
@@ -2600,131 +2165,107 @@ mod tests {
         }
     }
 
-    // test_insert_or_merge_edge_detects_cycle removed as try_insert_or_merge_edge
-    // doesn't attempt to re-insert an existing node in a way that would trigger
-    // cycle detection based on the node itself being passed again. Cycle detection
-    // relies on the try_insert call in Pass 3 when creating a *new* edge/node.
-
-    // --- Tests for EdgeInserter ---
-
-    // Helper merge function for EdgeInserter tests: Union HybridBitset
     fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) {
-        *existing |= new // Use reference for the OR operation
+        *existing |= new
     }
 
     #[test]
     fn test_ei_try_destination_success_new_edge() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
         let edge_val: HybridBitset = vec![1].into_iter().collect();
-
 
         let inserter = EdgeInserter::new(source.clone(), "key", edge_val.clone(), merge_bitset_union);
         let result_node = inserter.try_destination(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, edge_val);
         assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
-        assert_eq!(dest.lock().unwrap().max_depth, 1); // Depth updated by try_insert
+        assert_eq!(dest.read().unwrap().max_depth, 1);
     }
 
     #[test]
     fn test_ei_try_destination_success_merge_ev() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
         let initial_edge_val: HybridBitset = vec![10].into_iter().collect();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
         let merged_edge_val: HybridBitset = vec![1, 10].into_iter().collect();
 
-        // Pre-insert edge
-        source.lock().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
-        assert_eq!(dest.lock().unwrap().max_depth, 1); // Check initial depth
+        source.write().unwrap().try_insert(&source, "key", &mut Some(initial_edge_val), dest.clone()).unwrap();
+        assert_eq!(dest.read().unwrap().max_depth, 1);
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter.try_destination(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1); // Still one edge
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
+        assert_eq!(children_map.len(), 1);
         let (wrapper_arc, ev) = children_map.iter().next().unwrap();
-        assert_eq!(*ev, merged_edge_val); // Merged value
+        assert_eq!(*ev, merged_edge_val);
         assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
-        assert_eq!(dest.lock().unwrap().max_depth, 1); // Depth should remain 1
+        assert_eq!(dest.read().unwrap().max_depth, 1);
     }
 
     #[test]
     fn test_ei_try_destination_fail_merge_ev() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
-        // Pre-insert edge with empty HybridBitset
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
         let initial_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        source.lock().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
+        source.write().unwrap().try_insert(&source, "key", &mut Some(initial_edge_val), dest.clone()).unwrap();
 
-        // In this case, merge_bitset_union will always return Some, so merge should succeed.
-        // To test a failing merge, we'd need a different merge function or EV type.
-        // Let's repurpose this to test a successful merge where existing is empty.
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_opt = inserter.try_destination(dest.clone()).into_option();
 
-        assert!(result_opt.is_some()); // Merge succeeded
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert!(result_opt.is_some());
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (wrapper_arc, ev) = children_map.iter().next().unwrap();
-        // The result of merge_bitset_union(&empty, &new_edge_val) is new_edge_val
         assert_eq!(*ev, new_edge_val);
         assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
     }
 
     #[test]
     fn test_ei_try_destination_fail_cycle() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
-         let dummy_edge_val = HybridBitset::zeros();
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
+        let dummy_edge_val = HybridBitset::zeros();
 
-        // Create cycle manually for test setup
-        dest.lock().unwrap().force_insert_to_node("dest_to_src", dummy_edge_val.clone(), &source); // dest -> source edge
-        //source.lock().unwrap().force_insert_to_node("src_to_dest", dummy_edge_val.clone(), &dest); // source -> dest edge - this is what we are trying to insert
+        dest.write().unwrap().force_insert_to_node("dest_to_src", dummy_edge_val.clone(), &source);
 
-        // Now try inserting source -> dest again using EdgeInserter
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
         let inserter = EdgeInserter::new(source.clone(), "src_to_dest", new_edge_val.clone(), merge_bitset_union);
-        // This will call try_insert which should detect the cycle
         let result_opt = inserter.try_destination(dest.clone()).into_option();
 
-        assert!(result_opt.is_none()); // Cycle detected, insert failed
+        assert!(result_opt.is_none());
     }
-
 
     #[test]
     fn test_ei_try_slice_success() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
-        let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
+        let dest2: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest2".to_string())));
+        let dest3: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest3".to_string())));
         let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        // Setup: dest2 -> source creates a cycle if we try source -> dest2
-        dest2.lock().unwrap().force_insert_to_node("d2->s", dummy_edge_val.clone(), &source);
+        dest2.write().unwrap().force_insert_to_node("d2->s", dummy_edge_val.clone(), &source);
 
         let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // try(dest1) -> OK
-        // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
-        // try(dest3) -> Skipped
         let result_node = inserter.try_destinations(&destinations).unwrap();
 
-        assert!(Arc::ptr_eq(&result_node, &dest1)); // Should succeed with dest1
-        let s = source.lock().unwrap();
+        assert!(Arc::ptr_eq(&result_node, &dest1));
+        let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (wrapper_arc, ev) = children_map.iter().next().unwrap();
@@ -2734,27 +2275,22 @@ mod tests {
 
     #[test]
     fn test_ei_try_slice_success_later() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
-        let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
+        let dest2: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest2".to_string())));
+        let dest3: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest3".to_string())));
         let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-
-        // Setup: dest1 -> source creates a cycle if we try source -> dest1
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+        dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
         let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // try(dest1) -> Cycle Error
-        // try(dest2) -> OK
-        // try(dest3) -> Skipped
         let result_node = inserter.try_destinations(&destinations).unwrap();
 
-        assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
-        let s = source.lock().unwrap();
+        assert!(Arc::ptr_eq(&result_node, &dest2));
+        let s = source.read().unwrap();
         let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (wrapper_arc, ev) = children_map.iter().next().unwrap();
@@ -2764,52 +2300,44 @@ mod tests {
 
     #[test]
     fn test_ei_try_slice_fail_all() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
+        let dest2: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest2".to_string())));
         let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        // Setup: Both destinations cause cycles
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
-        dest2.lock().unwrap().force_insert_to_node("d2->s", dummy_edge_val.clone(), &source);
+        dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+        dest2.write().unwrap().force_insert_to_node("d2->s", dummy_edge_val.clone(), &source);
 
         let destinations = [dest1.clone(), dest2.clone()];
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_opt = inserter.try_destinations(&destinations).into_option();
 
-        assert!(result_opt.is_none()); // All attempts failed
-        assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
+        assert!(result_opt.is_none());
+        assert!(source.read().unwrap().get(&"key").is_none());
     }
 
     #[test]
     fn test_ei_try_children_success_merge() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
-        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-        let child_other_key: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child_other_key".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child1".to_string())));
+        let child2: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child2".to_string())));
+        let child_other_key: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child_other_key".to_string())));
 
         let edge_key = "target_key";
         let initial_ev_c1: HybridBitset = vec![10].into_iter().collect();
         let initial_ev_c2: HybridBitset = vec![20].into_iter().collect();
         let new_ev_for_inserter: HybridBitset = vec![1].into_iter().collect();
-        let merged_ev_c1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
+        let merged_ev_c1: HybridBitset = vec![1, 10].into_iter().collect();
 
-        // Setup:
-        // source --(target_key, initial_ev_c1)--> child1
-        // source --(target_key, initial_ev_c2)--> child2
-        // source --("other_key", dummy_ev)--> child_other_key
         {
-            let mut s = source.lock().unwrap();
-            s.try_insert(edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
-            s.try_insert(edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
-            s.try_insert("other_key", &mut Some(HybridBitset::zeros()), child_other_key.clone()).unwrap();
+            let mut s = source.write().unwrap();
+            s.try_insert(&source, edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
+            s.try_insert(&source, edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
+            s.try_insert(&source, "other_key", &mut Some(HybridBitset::zeros()), child_other_key.clone()).unwrap();
         }
 
-        // 1. Test successful merge with the first child under the key.
-        //    EdgeInserter is created with source, target_key, and new_ev_for_inserter.
-        //    merge_bitset_union should merge new_ev_for_inserter into initial_ev_c1.
         let inserter = EdgeInserter::new(source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union);
         let result_node_opt = inserter.try_children().into_option();
 
@@ -2817,12 +2345,8 @@ mod tests {
         let result_node = result_node_opt.unwrap();
         assert!(Arc::ptr_eq(&result_node, &child1), "Result should be child1");
 
-        // Check edge values:
-        // Edge to child1 should be merged.
-        // Edge to child2 should be unchanged (because merge with child1 succeeded first).
-        // Edge to child_other_key should be unchanged.
         {
-            let s_guard = source.lock().unwrap();
+            let s_guard = source.read().unwrap();
             let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
 
             let ev_c1 = children_map_target_key.get(&ArcPtrWrapper::new(child1.clone())).expect("Child1 should be under target_key");
@@ -2833,47 +2357,37 @@ mod tests {
 
             let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
             assert_eq!(children_map_other_key.len(), 1, "Should be one child under other_key");
-            // You could also check the value of the edge to child_other_key if necessary.
         }
 
-        // 2. Test when merge_edge_value fails for all children under the key.
-        //    (This test needs a merge function that can fail or a different EV type,
-        //     merge_bitset_union always succeeds by design).
-        //    Re-using this section to verify the initial state for part 3 is correct.
-        let source_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_nm".to_string())));
-        let child1_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_nm".to_string())));
-        let edge_key_nm = "nm_key"; // "nm" for "no merge"
+        let source_nm: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source_nm".to_string())));
+        let child1_nm: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child1_nm".to_string())));
+        let edge_key_nm = "nm_key";
         let initial_ev_nm: HybridBitset = vec![50].into_iter().collect();
         let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
-        source_nm.lock().unwrap().try_insert(edge_key_nm, &mut Some(initial_ev_nm.clone()), child1_nm.clone()).unwrap();
+        source_nm.write().unwrap().try_insert(&source_nm, edge_key_nm, &mut Some(initial_ev_nm.clone()), child1_nm.clone()).unwrap();
 
-        // Check edge value for child1_nm is unchanged - this is now done in part 3.
-
-        // 3. Test when no children exist under the specified edge_key.
-        let source_empty: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_empty".to_string())));
-        let edge_key_empty = "empty_key"; // This key has no children in source_empty
+        let source_empty: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source_empty".to_string())));
+        let edge_key_empty = "empty_key";
         let new_ev_inserter_empty: HybridBitset = vec![7].into_iter().collect();
 
         let inserter_empty = EdgeInserter::new(source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union);
         let result_node_empty_opt = inserter_empty.try_children().into_option();
         assert!(result_node_empty_opt.is_none(), "try_children should return None if no children under the key");
 
-        // 4. Test chaining with else_create: try_children (no children under key) -> else_create
-        let source_chain: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_chain".to_string())));
-        let edge_key_chain = "chain_key"; // No children under this key initially in source_chain
+        let source_chain: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source_chain".to_string())));
+        let edge_key_chain = "chain_key";
         let new_ev_chain: HybridBitset = vec![8].into_iter().collect();
         let created_val = "created_node_via_fallback".to_string();
 
         let inserter_chain = EdgeInserter::new(source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union);
         let result_node_chain = inserter_chain
-            .try_children() // Will do nothing as no children under "chain_key"
-            .else_create_destination_with_value(created_val.clone()) // This should execute
+            .try_children()
+            .else_create_destination_with_value(created_val.clone())
             .unwrap();
 
-        assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
-        // Check that an edge was created to this new node
-        let s_chain_guard = source_chain.lock().unwrap();
+        assert_eq!(result_node_chain.read().unwrap().value, created_val, "Fallback node should be created with correct value");
+        let s_chain_guard = source_chain.read().unwrap();
         let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
         assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
         let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
@@ -2883,18 +2397,16 @@ mod tests {
 
     #[test]
     fn test_ei_else_create_with_value() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // No try calls, should go straight to else_create
         let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
-        assert_eq!(result_node.lock().unwrap().value, "created");
-        assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(result_node.read().unwrap().value, "created");
+        assert_eq!(result_node.read().unwrap().max_depth, 1);
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (ca, ev) = children_map.iter().next().unwrap();
         assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
@@ -2903,10 +2415,9 @@ mod tests {
 
     #[test]
     fn test_ei_else_create_with() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
         let created_flag = Arc::new(AtomicUsize::new(0));
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let flag_clone = created_flag.clone();
@@ -2915,45 +2426,42 @@ mod tests {
             "created_via_fn".to_string()
         }).unwrap();
 
-        assert_eq!(created_flag.load(Ordering::SeqCst), 1); // Closure was called
-        assert_eq!(result_node.lock().unwrap().value, "created_via_fn");
-        assert_eq!(result_node.lock().unwrap().max_depth, 1);
+        assert_eq!(created_flag.load(Ordering::SeqCst), 1);
+        assert_eq!(result_node.read().unwrap().value, "created_via_fn");
+        assert_eq!(result_node.read().unwrap().max_depth, 1);
     }
 
     #[test]
     fn test_ei_else_create_default() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // String::default() is ""
         let result_node = inserter.else_create_destination().unwrap();
 
-        assert_eq!(result_node.lock().unwrap().value, ""); // Default value
-        assert_eq!(result_node.lock().unwrap().max_depth, 1);
+        assert_eq!(result_node.read().unwrap().value, "");
+        assert_eq!(result_node.read().unwrap().max_depth, 1);
     }
 
     #[test]
     fn test_ei_chaining_try_then_else() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
         let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+        dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter
-            .try_destination(dest1.clone()) // Fails (cycle)
-            .else_create_destination_with_value("fallback".to_string()) // Executes
+            .try_destination(dest1.clone())
+            .else_create_destination_with_value("fallback".to_string())
             .unwrap();
 
-        assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
+        assert_eq!(result_node.read().unwrap().value, "fallback");
         assert!(!Arc::ptr_eq(&result_node, &dest1));
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (ca, ev) = children_map.iter().next().unwrap();
         assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
@@ -2962,21 +2470,20 @@ mod tests {
 
     #[test]
     fn test_ei_chaining_try_success_skips_else() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter
-            .try_destination(dest1.clone()) // Succeeds
-            .else_create_destination_with_value("fallback".to_string()) // Should be skipped
+            .try_destination(dest1.clone())
+            .else_create_destination_with_value("fallback".to_string())
             .unwrap();
 
-        assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
-        assert_eq!(result_node.lock().unwrap().value, "dest1");
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert!(Arc::ptr_eq(&result_node, &dest1));
+        assert_eq!(result_node.read().unwrap().value, "dest1");
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (ca, ev) = children_map.iter().next().unwrap();
         assert!(Arc::ptr_eq(ca.as_arc(), &dest1));
@@ -2986,102 +2493,86 @@ mod tests {
     #[test]
     #[should_panic(expected = "EdgeInserter::unwrap() called but no destination was found or created")]
     fn test_ei_unwrap_panic() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
         let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+        dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // Try fails, no else_create called
-        inserter.try_destination(dest1.clone()).unwrap(); // Panic here
+        inserter.try_destination(dest1.clone()).unwrap();
     }
 
     #[test]
     fn test_ei_get() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest1".to_string())));
         let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+        dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
 
-        // Try fails
         let inserter_after_try = inserter.try_destination(dest1.clone());
         assert!(inserter_after_try.clone_into_option().is_none());
 
-        // Now use else_create
         let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
         let result_opt = inserter_after_else.into_option();
         assert!(result_opt.is_some());
-        assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
+        assert_eq!(result_opt.unwrap().read().unwrap().value, "fallback");
     }
 
     #[test]
     fn test_ei_chaining_stops_after_success() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string()))); // This one succeeds
-        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child1".to_string())));
+        let child2: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child2".to_string())));
         let new_node_val_if_created = "new_node_val".to_string();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
 
         let destinations_for_slice = vec![child2.clone()];
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter
-            .try_destination(child1.clone()) // This succeeds, result is set to child1
-            // try_slice, else_create_with_value should now have no effect
-            .try_destinations(&destinations_for_slice) // Should be skipped
-            .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
+            .try_destination(child1.clone())
+            .try_destinations(&destinations_for_slice)
+            .else_create_destination_with_value(new_node_val_if_created.clone())
             .unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
 
-        // Check only the edge to child1 was added
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
         let (ca, ev) = children_map.iter().next().unwrap();
         assert!(Arc::ptr_eq(ca.as_arc(), &child1));
         assert_eq!(*ev, new_edge_val);
 
-        // Ensure the value for the skipped else_create was not used
-        assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
+        assert_ne!(result_node.read().unwrap().value, new_node_val_if_created);
     }
 
-     #[test]
+    #[test]
     fn test_ei_try_children_new_logic() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
-        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-        let child_other_key: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child_other_key".to_string())));
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child1".to_string())));
+        let child2: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child2".to_string())));
+        let child_other_key: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child_other_key".to_string())));
 
         let edge_key = "target_key";
         let initial_ev_c1: HybridBitset = vec![10].into_iter().collect();
         let initial_ev_c2: HybridBitset = vec![20].into_iter().collect();
         let new_ev_for_inserter: HybridBitset = vec![1].into_iter().collect();
-        let merged_ev_c1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
+        let merged_ev_c1: HybridBitset = vec![1, 10].into_iter().collect();
 
-        // Setup:
-        // source --(target_key, initial_ev_c1)--> child1
-        // source --(target_key, initial_ev_c2)--> child2
-        // source --("other_key", dummy_ev)--> child_other_key
         {
-            let mut s = source.lock().unwrap();
-            s.try_insert(edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
-            s.try_insert(edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
-            s.try_insert("other_key", &mut Some(HybridBitset::zeros()), child_other_key.clone()).unwrap();
+            let mut s = source.write().unwrap();
+            s.try_insert(&source, edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
+            s.try_insert(&source, edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
+            s.try_insert(&source, "other_key", &mut Some(HybridBitset::zeros()), child_other_key.clone()).unwrap();
         }
 
-        // 1. Test successful merge with the first child under the key.
-        //    EdgeInserter is created with source, target_key, and new_ev_for_inserter.
-        //    merge_bitset_union should merge new_ev_for_inserter into initial_ev_c1.
         let inserter = EdgeInserter::new(source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union);
         let result_node_opt = inserter.try_children().into_option();
 
@@ -3089,12 +2580,8 @@ mod tests {
         let result_node = result_node_opt.unwrap();
         assert!(Arc::ptr_eq(&result_node, &child1), "Result should be child1, got {:?} and {:?}", result_node, child1);
 
-        // Check edge values:
-        // Edge to child1 should be merged.
-        // Edge to child2 should be unchanged (because merge with child1 succeeded first).
-        // Edge to child_other_key should be unchanged.
         {
-            let s_guard = source.lock().unwrap();
+            let s_guard = source.read().unwrap();
             let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
 
             let ev_c1 = children_map_target_key.get(&ArcPtrWrapper::new(child1.clone())).expect("Child1 should be under target_key");
@@ -3105,47 +2592,37 @@ mod tests {
 
             let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
             assert_eq!(children_map_other_key.len(), 1, "Should be one child under other_key");
-            // You could also check the value of the edge to child_other_key if necessary.
         }
 
-        // 2. Test when merge_edge_value fails for all children under the key.
-        //    (This test needs a merge function that can fail or a different EV type,
-        //     merge_bitset_union always succeeds by design).
-        //    Re-using this section to verify the initial state for part 3 is correct.
-        let source_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_nm".to_string())));
-        let child1_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_nm".to_string())));
-        let edge_key_nm = "nm_key"; // "nm" for "no merge"
+        let source_nm: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source_nm".to_string())));
+        let child1_nm: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("child1_nm".to_string())));
+        let edge_key_nm = "nm_key";
         let initial_ev_nm: HybridBitset = vec![50].into_iter().collect();
         let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
-        source_nm.lock().unwrap().try_insert(edge_key_nm, &mut Some(initial_ev_nm.clone()), child1_nm.clone()).unwrap();
+        source_nm.write().unwrap().try_insert(&source_nm, edge_key_nm, &mut Some(initial_ev_nm.clone()), child1_nm.clone()).unwrap();
 
-        // Check edge value for child1_nm is unchanged - this is now done in part 3.
-
-        // 3. Test when no children exist under the specified edge_key.
-        let source_empty: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_empty".to_string())));
-        let edge_key_empty = "empty_key"; // This key has no children in source_empty
+        let source_empty: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source_empty".to_string())));
+        let edge_key_empty = "empty_key";
         let new_ev_inserter_empty: HybridBitset = vec![7].into_iter().collect();
 
         let inserter_empty = EdgeInserter::new(source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union);
         let result_node_empty_opt = inserter_empty.try_children().into_option();
         assert!(result_node_empty_opt.is_none(), "try_children should return None if no children under the key");
 
-        // 4. Test chaining with else_create: try_children (no children under key) -> else_create
-        let source_chain: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_chain".to_string())));
-        let edge_key_chain = "chain_key"; // No children under this key initially in source_chain
+        let source_chain: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source_chain".to_string())));
+        let edge_key_chain = "chain_key";
         let new_ev_chain: HybridBitset = vec![8].into_iter().collect();
         let created_val = "created_node_via_fallback".to_string();
 
         let inserter_chain = EdgeInserter::new(source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union);
         let result_node_chain = inserter_chain
-            .try_children() // Will do nothing as no children under "chain_key"
-            .else_create_destination_with_value(created_val.clone()) // This should execute
+            .try_children()
+            .else_create_destination_with_value(created_val.clone())
             .unwrap();
 
-        assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
-        // Check that an edge was created to this new node
-        let s_chain_guard = source_chain.lock().unwrap();
+        assert_eq!(result_node_chain.read().unwrap().value, created_val, "Fallback node should be created with correct value");
+        let s_chain_guard = source_chain.read().unwrap();
         let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
         assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
         let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
