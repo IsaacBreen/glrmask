@@ -414,6 +414,8 @@ impl GrammarConstraint {
             initial_values_for_map.push((trie1_root.clone(), glr_state));
         }
 
+        let trie2_end = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end(), )));
+
         Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
@@ -447,6 +449,22 @@ impl GrammarConstraint {
             |precomputed_node_data, glr_s| {
                 let active_llm_tokens = glr_s.active_state.stack.acc.union_llm_tokens();
                 let keep_going = !active_llm_tokens.is_empty();
+                if precomputed_node_data.value.end {
+                    crate::debug!(3, "Trie2: Found end state for GLR state");
+                    for gss_root in glr_s.active_state.stack.get_roots() {
+                        let active_llm_tokens_for_root = gss_root.acc.union_llm_tokens();
+                        for trie2_node in gss_root.acc.trie2_nodes.iter() {
+                            let mut inserter = EdgeInserter::new(
+                                trie2_node.as_arc().clone(),
+                                (0, None),
+                                active_llm_tokens_for_root.clone(),
+                                |e, n| *e |= n,
+                            );
+                            inserter = inserter.try_destination(trie2_end.clone());
+                            inserter.expect("Failed to insert end edge into Trie2 node");
+                        }
+                    }
+                }
                 keep_going
             },
         );
