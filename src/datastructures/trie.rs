@@ -664,7 +664,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
         rec_stack.insert(node_arc_ptr);
 
-        let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>>> = {
+        let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
             let node_guard_val = node_arc.read().expect("RwLock poisoned in _propagate_max_depth (getting children)");
             node_guard_val.children
                 .values()
@@ -798,7 +798,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         recursion_stack_arcs.insert(node_arc_ptr);
         global_visited_arcs.insert(node_arc_ptr);
 
-        let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>>> = {
+        let children_arcs: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
             let node_guard_val = node_arc.read().expect("RwLock poisoned during has_any_cycle traversal");
             node_guard_val.children
                 .values()
