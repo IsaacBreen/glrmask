@@ -1549,8 +1549,19 @@ pub fn format_acc(
     let union_terminals_str = format_disallowed_terminals(&node.acc.terminals_union, "Term(U)");
     let intersection_terminals_str =
         format_disallowed_terminals(&node.acc.terminals_intersection, "Term(I)");
+    let trie2_nodes_str = if node.acc.trie2_nodes.is_empty() {
+        "Trie2(Nodes: None)".to_string()
+    } else {
+        format!("Trie2(Nodes: {})", node.acc.trie2_nodes.len())
+    };
 
-    format!("[{}, {}, {}, {}]", union_llm_str, intersection_llm_str, union_terminals_str, intersection_terminals_str)
+    format!("[{}, {}, {}, {}, {}]",
+        union_llm_str,
+        intersection_llm_str,
+        union_terminals_str,
+        intersection_terminals_str,
+        trie2_nodes_str
+    )
 }
 
 
