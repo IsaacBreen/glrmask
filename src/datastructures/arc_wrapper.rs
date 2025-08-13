@@ -23,6 +23,20 @@ impl<T> NodePtr<T> {
         }
     }
 
+    pub fn upgrade_wrapper(&self) -> Option<ArcPtrWrapper<T>> {
+        match self {
+            NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.clone()),
+            NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().map(ArcPtrWrapper::new),
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        match self {
+            NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()),
+            NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()),
+        }
+    }
+
     /// Returns the raw pointer as a `usize` for comparison and hashing.
     pub fn as_ptr_usize(&self) -> usize {
         match self {
