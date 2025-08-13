@@ -24,7 +24,7 @@ use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recurs
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
 use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::{EdgeInserter, Trie, NodePtr};
+use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
@@ -37,6 +37,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use kdam::tqdm;
 use profiler_macro::{time_it, timeit};
+use crate::datastructures::arc_wrapper::NodePtr;
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -611,7 +612,7 @@ struct Precomputer<'r> {
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to the set of LLM tokens that can pass through it.
     tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>,
-    end_node:       ArcPtrWrapper<RwLock<PrecomputeNode>>,
+    end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
 }
 
 impl<'r> Precomputer<'r> {
