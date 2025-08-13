@@ -831,21 +831,21 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
-pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+pub type PruneAndTransformRecursiveMemo = HashMap<ArcPtrWrapper<GSSNode>, Option<Arc<GSSNode>>>;
 
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) -> Option<Arc<GSSNode>> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(cached_result) = memo.get(&node_ptr) {
+    let node_wrapper = ArcPtrWrapper::new(node_arc.clone());
+    if let Some(cached_result) = memo.get(&node_wrapper) {
         return cached_result.clone();
     }
 
     match closure(node_arc.as_ref()) {
         None => { // Prune this node
-            memo.insert(node_ptr, None);
+            memo.insert(node_wrapper, None);
             None
         }
         Some((mut new_local_acc, continue_recursion)) => {
@@ -873,7 +873,7 @@ fn prune_and_transform_recursive(
                     }
                 }
                 if new_predecessors_set.is_empty() && !node_arc.predecessors.is_empty() {
-                    memo.insert(node_ptr, None);
+                    memo.insert(node_wrapper.clone(), None);
                     return None;
                 }
                 process_predecessors(&new_predecessors_set)
@@ -884,7 +884,7 @@ fn prune_and_transform_recursive(
             let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
 
             let result_arc = Arc::new(transformed_node);
-            memo.insert(node_ptr, Some(result_arc.clone()));
+            memo.insert(node_wrapper, Some(result_arc.clone()));
             Some(result_arc)
         }
     }
