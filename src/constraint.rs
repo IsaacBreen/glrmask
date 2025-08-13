@@ -44,7 +44,7 @@ use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
-use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED};
+use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -380,7 +380,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc= "Precomputing Trie 2") {
+        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable= !PROGRESS_BAR_ENABLED) {
             if let Some(trie2_root) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
                 precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
                 continue;
