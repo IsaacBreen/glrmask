@@ -264,7 +264,8 @@ fn test_constraint_expression() {
         token_name_map,
         7, // max_llm_token_id should be 7 for IDs 0-6
     );
-    // constraint.dump_precomputed(); // Commented out dump for cleaner test output
+    constraint.dump_precomputed(); // Commented out dump for cleaner test output
+    constraint.dump_precomputed2(); // Commented out dump for cleaner test output
 
     // Initial state and step
     let mut state = constraint.init();
