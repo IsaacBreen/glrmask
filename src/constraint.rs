@@ -451,8 +451,9 @@ impl GrammarConstraint {
                 if precomputed_node_data.value.end {
                     crate::debug!(3, "Trie2: Found end state for GLR state");
                     for gss_root in glr_s.active_state.stack.get_roots() {
-                        let active_llm_tokens_for_root = gss_root.acc.union_llm_tokens();
-                        for trie2_node in gss_root.acc.trie2_nodes.iter() {
+                        let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
+                        let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
+                        for trie2_node in gss_root_acc.trie2_nodes.iter() {
                             let mut inserter = EdgeInserter::new(
                                 trie2_node.as_arc().clone(),
                                 (0, None),
