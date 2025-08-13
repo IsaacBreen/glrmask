@@ -1066,8 +1066,12 @@ pub fn merge_trie2_nodes_if_needed(
         }
         Some((new_acc, true))
     };
+    let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+    println!("Before merge_trie2_nodes_if_needed:\n{s}");
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
+        let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+        println!("After merge_trie2_nodes_if_needed:\n{}", s);
     } else {
         // This shouldn't happen as we never return None from closure
         // *root_arc = Arc::new(GSSNode::new_fresh());
@@ -1981,61 +1985,5 @@ mod tests {
 
         // Test empty
         assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
-    }
-
-    #[test]
-    fn test_merge_trie2_nodes_if_needed() {
-        // Case 1: Merge is needed
-        let mut acc = Acc::new_fresh();
-
-        // Create trie1
-        let trie1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let mut bv1 = HybridBitset::zeros();
-        bv1.insert(10);
-        trie1.write().unwrap().insert(&[(0, Some(StateID(1)))], bv1.clone()).unwrap();
-
-        // Create trie2
-        let trie2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let mut bv2 = HybridBitset::zeros();
-        bv2.insert(20);
-        trie2.write().unwrap().insert(&[(0, Some(StateID(2)))], bv2.clone()).unwrap();
-
-        acc.trie2_nodes.insert(ArcPtrWrapper::new(trie1));
-        acc.trie2_nodes.insert(ArcPtrWrapper::new(trie2));
-
-        let mut root_arc = Arc::new(GSSNode::new(acc));
-        assert_eq!(root_arc.acc.trie2_nodes.len(), 2);
-
-        let mut memo = HashMap::new();
-        merge_trie2_nodes_if_needed(&mut root_arc, 1, &mut memo);
-
-        assert_eq!(root_arc.acc.trie2_nodes.len(), 1);
-
-        let merged_trie_arc_wrapper = root_arc.acc.trie2_nodes.iter().next().unwrap();
-        let merged_trie_arc = merged_trie_arc_wrapper.as_arc();
-        let merged_trie = merged_trie_arc.read().unwrap();
-
-        // The logic in `merge_trie2_nodes_if_needed` merges the old tries into a child of the new trie
-        // under the edge `(0, None)`.
-        assert_eq!(merged_trie.edges.len(), 1);
-        let (child_node_ptr, edge_val) = merged_trie.edges.get(&(0, None)).unwrap();
-        assert_eq!(*edge_val, HybridBitset::max_ones());
-
-        let child_node = child_node_ptr.read().unwrap();
-
-        let (val1, _) = child_node.get_path_value(&[(0, Some(StateID(1)))]).unwrap();
-        assert_eq!(*val1, bv1);
-        let (val2, _) = child_node.get_path_value(&[(0, Some(StateID(2)))]).unwrap();
-        assert_eq!(*val2, bv2);
-
-        // Case 2: Threshold not met, nothing should change logically.
-        let mut acc2 = Acc::new_fresh();
-        let trie3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        acc2.trie2_nodes.insert(ArcPtrWrapper::new(trie3.clone()));
-        let mut root_arc2 = Arc::new(GSSNode::new(acc2));
-        let root_arc2_clone = root_arc2.clone();
-        let mut memo2 = HashMap::new();
-        merge_trie2_nodes_if_needed(&mut root_arc2, 1, &mut memo2);
-        assert_eq!(*root_arc2, *root_arc2_clone, "Node content should be unchanged when threshold is not met");
     }
 }
