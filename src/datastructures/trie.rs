@@ -1777,6 +1777,40 @@ where
         self
     }
 
+    /// Tries to establish a weak edge to the given `destination`.
+    ///
+    /// This operation does not perform cycle checks and does not update `max_depth`.
+    /// If an edge (strong or weak) with the same `edge_key` already exists pointing to `destination`,
+    /// it merges the `edge_value` using the `merge_edge_value` closure. An existing strong edge
+    /// will remain strong.
+    /// If no such edge exists, it inserts a new weak edge.
+    ///
+    /// This operation only proceeds if a successful destination hasn't already been found.
+    /// Returns `self` to allow chaining.
+    pub fn to_destination_weakly(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
+        if self.result.is_some() {
+            return self; // Already found a destination
+        }
+
+        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in to_destination_weakly");
+
+        // Use a strong wrapper for lookup, as it will match a weak or strong ptr in the map
+        // due to pointer-based equality.
+        let lookup_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone()));
+
+        if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_wrapper)) {
+            // An edge (strong or weak) to this destination already exists. Merge the value.
+            (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
+            self.result = Some(destination);
+        } else {
+            // No edge to this destination exists under this key. Insert a new weak one.
+            source_guard.insert_weak_to_node(self.edge_key.clone(), self.edge_value.take().unwrap(), &destination);
+            self.result = Some(destination);
+        }
+        drop(source_guard);
+        self
+    }
+
     /// Tries to establish an edge to any destination in the provided slice.
     ///
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
@@ -3315,5 +3349,57 @@ mod tests {
         let (node_ptr_chain, ev_chain) = children_map_chain.iter().next().unwrap();
         assert!(Arc::ptr_eq(&node_ptr_chain.upgrade().unwrap(), &result_node_chain), "Edge should point to the newly created node");
         assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
+    }
+
+    #[test]
+    fn test_ei_to_destination_weakly() {
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
+        let edge_val: HybridBitset = vec![1].into_iter().collect();
+
+        // 1. Insert a new weak edge
+        let inserter = EdgeInserter::new(source.clone(), "key_weak", edge_val.clone(), merge_bitset_union);
+        let result_node = inserter.to_destination_weakly(dest.clone()).unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &dest));
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key_weak").unwrap();
+        assert_eq!(children_map.len(), 1);
+        let (node_ptr, ev) = children_map.iter().next().unwrap();
+        assert!(!node_ptr.is_strong()); // Check it's a weak edge
+        assert_eq!(*ev, edge_val);
+        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest));
+        assert_eq!(dest.read().unwrap().max_depth, 0); // Depth NOT updated for weak insert
+        drop(s);
+
+        // 2. Merge with existing weak edge
+        let new_edge_val: HybridBitset = vec![2].into_iter().collect();
+        let merged_val: HybridBitset = vec![1, 2].into_iter().collect();
+        let inserter2 = EdgeInserter::new(source.clone(), "key_weak", new_edge_val, merge_bitset_union);
+        inserter2.to_destination_weakly(dest.clone()).unwrap();
+
+        let s2 = source.read().unwrap();
+        let children_map2 = s2.get(&"key_weak").unwrap();
+        assert_eq!(children_map2.len(), 1);
+        let (node_ptr2, ev2) = children_map2.iter().next().unwrap();
+        assert!(!node_ptr2.is_strong());
+        assert_eq!(*ev2, merged_val);
+        drop(s2);
+
+        // 3. Merge with existing strong edge (should keep it strong)
+        let strong_edge_val: HybridBitset = vec![10].into_iter().collect();
+        source.write().unwrap().try_insert("key_strong", &mut Some(strong_edge_val.clone()), dest.clone()).unwrap();
+
+        let new_edge_val_for_strong: HybridBitset = vec![11].into_iter().collect();
+        let merged_strong_val: HybridBitset = vec![10, 11].into_iter().collect();
+        let inserter3 = EdgeInserter::new(source.clone(), "key_strong", new_edge_val_for_strong, merge_bitset_union);
+        inserter3.to_destination_weakly(dest.clone()).unwrap();
+
+        let s3 = source.read().unwrap();
+        let children_map3 = s3.get(&"key_strong").unwrap();
+        assert_eq!(children_map3.len(), 1);
+        let (node_ptr3, ev3) = children_map3.iter().next().unwrap();
+        assert!(node_ptr3.is_strong()); // Should remain strong
+        assert_eq!(*ev3, merged_strong_val);
     }
 }
