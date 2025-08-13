@@ -645,7 +645,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                         .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                         .collect();
 
-                    timeit!(format!("BFS: Node has {} children", children_arcs.len()));
+                    timeit!(format!("BFS: Node has {} children", children_arcs.len()), {});
 
                     // Explicitly drop the guard before potentially long operations (queueing).
                     drop(node_guard);
