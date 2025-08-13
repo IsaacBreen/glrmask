@@ -31,7 +31,8 @@ pub type TerminalBV = HybridBitset;
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
+type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>
+>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
@@ -736,66 +737,6 @@ impl GSSNode {
     }
 }
 
-
-impl<'a> GSSPeek<'a> {
-    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
-
-    pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
-
-    /// Returns the combined `Acc` of the parent and the predecessor.
-    pub fn resolved_acc(&self) -> Acc {
-        Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)
-    }
-
-    /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
-    pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
-        &self.parent_arc.acc.llm_tokens_union & &self.predecessor_node.acc.llm_tokens_union
-    }
-
-    /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
-    /// resolved against the parent's `Acc`.
-    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
-        let resolved_acc = self.resolved_acc();
-        if *self.predecessor_node.acc == resolved_acc {
-            return self.predecessor_node.clone();
-        }
-        Arc::new(GSSNode::new_with_map(Arc::new(resolved_acc), self.predecessor_node.predecessors.clone()))
-    }
-
-    /// Pushes a new state onto the resolved predecessor.
-    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let mut resolved_acc = self.resolved_acc();
-        resolved_acc.trie2_nodes.clear();
-        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
-    }
-
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        self.isolated_parent().as_ref().push(edge_value)
-    }
-    pub fn popn(&self, len: usize) -> GSSPopper {
-        let isolated_parent = self.isolated_parent();
-        let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
-        popper.popn(len);
-        popper
-    }
-
-    /// Creates a new `GSSNode` that represents only the path segment of this peek.
-    /// The new node has the parent's `Acc` and a single predecessor (the one from this peek).
-    pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        let new_acc = Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc);
-
-        if self.parent_arc.num_predecessors() == 1 && *self.parent_arc.acc == new_acc {
-            return self.parent_arc.clone();
-        }
-
-        Arc::new(GSSNode::new_with_single_predecessor(
-            self.predecessor_node.clone(),
-            self.edge_value.clone(),
-            new_acc
-        ))
-    }
-}
-
 // Trait implementations for GSSNode
 impl Hash for GSSNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -863,25 +804,43 @@ fn prune_and_transform_recursive(
                 }
             }
             let new_node_predecessors_map = if continue_recursion {
-                let mut new_predecessors_set = NodeSet::new();
+                let mut new_predecessors_map = NodeMap::new();
                 for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                    for pred_vec in preds_by_depth.values() {
-                        for pred_arc in pred_vec {
-                            if let Some(new_pred_arc) =
+                    let mut new_preds_by_depth_for_edge = BTreeMap::new();
+                    for (depth, pred_vec) in preds_by_depth {
+                        let new_pred_vec: Vec<_> = pred_vec
+                            .iter()
+                            .filter_map(|pred_arc| {
                                 prune_and_transform_recursive(pred_arc, closure, memo)
-                            {
-                                new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
-                            }
+                            })
+                            .collect();
+
+                        if !new_pred_vec.is_empty() {
+                            new_preds_by_depth_for_edge.insert(*depth, new_pred_vec);
                         }
                     }
+                    if !new_preds_by_depth_for_edge.is_empty() {
+                        new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth_for_edge);
+                    }
                 }
-                if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
+
+                if new_predecessors_map.is_empty() && !node_arc.predecessors.is_empty() {
                     memo.insert(node_ptr, None);
                     return None;
                 }
-                process_predecessors(&new_predecessors_set)
+                new_predecessors_map
             } else { // Don't recurse, keep existing predecessors.
-                node_arc.predecessors.clone()
+                let mut new_predecessors_map = node_arc.predecessors.clone();
+                for preds_by_depth in new_predecessors_map.values_mut() {
+                    for pred_vec in preds_by_depth.values_mut() {
+                        for pred_arc in pred_vec {
+                            let mut new_acc = Acc::narrow(&pred_arc.acc, &new_local_acc);
+                            new_acc.needs_push_down = true;
+                            *pred_arc = Arc::new(GSSNode::new_with_map(Arc::new(new_acc), pred_arc.predecessors.clone()));
+                        }
+                    }
+                }
+                new_predecessors_map
             };
 
             let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
@@ -1940,50 +1899,50 @@ mod tests {
     }
 
     #[test]
-    fn test_get_roots() {
-        let acc1 = Arc::new(mock_acc(1));
-        let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
-        let acc2 = Arc::new(mock_acc(2));
-        let leaf2 = Arc::new(GSSNode::new((*acc2).clone()));
+    fn test_prune_and_transform_noop_does_not_merge_distinct_predecessors() {
+        // This test checks for a bug where prune_and_transform_recursive with a no-op
+        // closure would still modify the GSS by merging structurally distinct predecessor
+        // nodes that happen to share the same edge value and depth.
 
-        let acc_b = Arc::new(mock_acc(3));
-        let b = Arc::new(GSSNode::new_with_single_predecessor(leaf1.clone(), mock_edge(1), (*acc_b).clone()));
+        // 1. Create two distinct leaf nodes.
+        let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+        let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
 
-        let acc_c = Arc::new(mock_acc(4));
-        let c = Arc::new(GSSNode::new_with_single_predecessor(leaf2.clone(), mock_edge(2), (*acc_c).clone()));
+        // 2. Create two intermediate nodes that are structurally different because they
+        // have different predecessors.
+        let intermediate1 = Arc::new(leaf1.push(mock_edge(10)));
+        let intermediate2 = Arc::new(leaf2.push(mock_edge(10)));
+        assert_ne!(*intermediate1, *intermediate2, "Intermediates should be structurally different");
+        assert_eq!(intermediate1.max_depth, 1);
+        assert_eq!(intermediate2.max_depth, 1);
 
-        let mut preds_map = NodeMap::new();
-        preds_map.entry(mock_edge(10)).or_default().insert(b.dest_key(), vec![b.clone()]);
-        preds_map.entry(mock_edge(20)).or_default().insert(c.dest_key(), vec![c.clone()]);
-        let acc_root = Arc::new(mock_acc(5));
-        let root = GSSNode::new_with_map(acc_root.clone(), preds_map);
+        // 3. Manually construct a root node that has both intermediates as predecessors
+        // under the same edge value and at the same depth. This structure is key to
+        // reproducing the bug. The `Vec` in the NodeMap contains multiple distinct nodes.
+        let mut root_preds = NodeMap::new();
+        root_preds
+            .entry(mock_edge(100))
+            .or_default()
+            .insert(1, vec![intermediate1.clone(), intermediate2.clone()]);
 
-        // Test from root
-        let roots = get_roots(std::iter::once(&root));
-        let mut expected = BTreeSet::new();
-        let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
-        expected.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc1 });
-        let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
-        expected.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2.clone() });
-        assert_eq!(roots, expected);
+        let root = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), root_preds));
+        assert_eq!(root.num_predecessors(), 2);
 
-        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
-        // because its initial `fresh` acc has a wider union of possibilities.
-        let roots_multi = get_roots(vec![&root, b.as_ref()]);
-        let mut expected_multi = BTreeSet::new();
-        let path_acc_b_l1 = Arc::new(Acc::narrow(&acc_b, &acc1));
-        expected_multi.insert(RootItem { node: leaf1.as_ref(), path_acc: path_acc_b_l1 });
-        expected_multi.insert(RootItem { node: leaf2.as_ref(), path_acc: path_acc2 });
-        assert_eq!(roots_multi, expected_multi);
+        // 4. Run prune_and_transform_recursive with a no-op closure.
+        // This should not change the structure of the GSS at all.
+        let mut memo = HashMap::new();
+        let new_root_opt = prune_and_transform_recursive(
+            &root,
+            &|node| Some(((*node.acc).clone(), true)), // No-op: keep node, recurse
+            &mut memo,
+        );
 
-        // Test from leaves
-        let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
-        let mut expected_leaves = BTreeSet::new();
-        expected_leaves.insert(RootItem { node: leaf1.as_ref(), path_acc: acc1.clone() });
-        expected_leaves.insert(RootItem { node: leaf2.as_ref(), path_acc: acc2.clone() });
-        assert_eq!(roots_leaves, expected_leaves);
-
-        // Test empty
-        assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
+        // 5. Assert that the structure is unchanged.
+        let new_root = new_root_opt.expect("Root should not be pruned");
+        
+        // Check full equality for good measure. This is the most important check.
+        // With the bug, this fails because the new_root will have its predecessors merged.
+        assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
+        assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
     }
 }
