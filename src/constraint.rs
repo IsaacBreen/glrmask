@@ -2086,6 +2086,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
             |glr_s, (k, expected_state_id_opt ), dest_map| {
+                crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
                 let mut out_gsss = Vec::new();
                 let popped = glr_s.active_state.stack.popn(*k);
                 for popper_item in popped.iter() {
@@ -2122,7 +2123,10 @@ impl<'a> GrammarConstraintState<'a> {
                 let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !glr_active_tokens.is_empty();
                 if precomputed_node_data.value.end {
+                    crate::debug!(4, "Precomputed node data is an end node, adding active tokens {:?} to final mask", glr_active_tokens);
                     *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                } else {
+                    crate::debug!(4, "Precomputed node data is not an end node, active tokens: {:?}", glr_active_tokens);
                 }
                 keep_going
             },
