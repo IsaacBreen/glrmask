@@ -895,9 +895,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             ).to_destination_weakly(new_trie2_node_arc.as_arc().clone());
                             inserter.expect("GLRParserState::reduce_and_goto: merge insert failed");
                         }
-                        });
                         // Replace the list of Trie-2 nodes with a single merged node.
-                        acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)];
+                        acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
+                        });
                     } else {
                         acc.trie2_nodes = trie2_nodes.into_iter().collect();
                     }
