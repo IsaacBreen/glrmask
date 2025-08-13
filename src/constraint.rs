@@ -370,6 +370,7 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
+        crate::debug!(2, "Precomputing Trie 2...");
         let mut precomputed2 = BTreeMap::new();
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> =
