@@ -1262,6 +1262,197 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     }
 }
 
+impl<EK, EV, T> Trie<EK, EV, T>
+where
+    EK: Ord + Clone,
+{
+    /// Attempts to convert all reachable weak edges into strong edges, where doing so
+    /// will not introduce a cycle in the strong-edge subgraph.
+    ///
+    /// This function traverses the graph reachable from the given set of roots, following
+    /// both strong and weak edges for traversal, and for every weak edge (src --ek--> dst)
+    /// attempts to:
+    ///   1) Check that promoting it to a strong edge would not create a cycle
+    ///      (i.e., there is no strong path from `dst` back to `src`).
+    ///   2) If safe, update `dst.max_depth` to at least `src.max_depth + 1` and
+    ///      propagate max_depth to descendants via strong edges.
+    ///   3) Replace the weak edge key with a strong edge key in `src.children`.
+    ///
+    /// Returns the number of edges that were promoted from weak to strong.
+    ///
+    /// Notes:
+    /// - Promotion is greedy. If a promotion is not possible at the moment due to an
+    ///   existing strong cycle, subsequent promotions cannot make it possible later
+    ///   (promotions only add strong edges, never remove).
+    /// - The traversal visits nodes reachable via both strong and weak edges so that
+    ///   it can consider promoting weak edges deeper in the graph as well.
+    /// - This function is conservative with RwLock usage to avoid deadlocks:
+    ///   it does not hold a write-lock on `src` while running the (potentially wide)
+    ///   max-depth propagation from `dst`.
+    pub fn promote_weak_edges_to_strong(
+        root_nodes: &[Arc<RwLock<Trie<EK, EV, T>>>],
+    ) -> usize {
+        // Visit all nodes reachable through either strong or weak edges.
+        let mut visited: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        for root in root_nodes {
+            let ptr = Arc::as_ptr(root);
+            if visited.insert(ptr) {
+                queue.push_back(root.clone());
+            }
+        }
+
+        let mut promotions = 0usize;
+
+        while let Some(src_arc) = queue.pop_front() {
+            // Collect neighbors (for traversal) and weak edges (for potential promotion)
+            let (neighbors, weak_edges): (Vec<Arc<RwLock<Trie<EK, EV, T>>>>, Vec<(EK, Arc<RwLock<Trie<EK, EV, T>>>)>) = {
+                let src_guard = src_arc.read().expect("RwLock poisoned during weak-edge promotion scan");
+                let mut neigh = Vec::new();
+                let mut weak = Vec::new();
+                for (ek, dest_map) in &src_guard.children {
+                    for (node_ptr, _ev) in dest_map {
+                        if let Some(child_arc) = node_ptr.upgrade() {
+                            // Traverse both strong and weak edges
+                            neigh.push(child_arc.clone());
+                            // Record weak edges for possible promotion
+                            if !node_ptr.is_strong() {
+                                weak.push((ek.clone(), child_arc));
+                            }
+                        }
+                    }
+                }
+                (neigh, weak)
+            };
+
+            // Enqueue neighbors for traversal (both strong and weak destinations)
+            for n in neighbors {
+                let ptr = Arc::as_ptr(&n);
+                if visited.insert(ptr) {
+                    queue.push_back(n);
+                }
+            }
+
+            // For every weak edge src --ek--> dst, try to promote to strong.
+            for (ek, dst_arc) in weak_edges {
+                // Quick cycle check: would making (src -> dst) strong create a cycle?
+                // A cycle would exist iff `src` is reachable from `dst` via strong edges.
+                let src_data_ptr = node_ptr(&src_arc);
+                if Self::detect_cycle(src_data_ptr, &dst_arc) {
+                    // Would create a cycle; skip.
+                    continue;
+                }
+
+                // We will:
+                //  1) Read src.max_depth (requires write lock for subsequent structural update anyway)
+                //  2) Raise dst.max_depth if needed and propagate to descendants
+                //  3) Replace weak key by strong key in src.children[ek]
+                //
+                // To avoid races:
+                //  - Hold a write lock on src while we structurally edit its children map.
+                //  - It's safe to hold the write lock on src while propagating from dst,
+                //    because the new strong edge is not yet installed, and therefore
+                //    the propagation from dst cannot reach src through strong edges
+                //    (which would be a cycle we already checked against).
+                let mut src_guard = match src_arc.write() {
+                    Ok(g) => g,
+                    Err(_) => continue, // If poisoned or temporarily unavailable, skip this edge.
+                };
+
+                // Verify the weak edge still exists and hasn't been promoted already.
+                let dest_map = match src_guard.children.get_mut(&ek) {
+                    Some(m) => m,
+                    None => continue, // Edge key gone
+                };
+
+                let target_ptr = Arc::as_ptr(&dst_arc) as usize;
+                let has_strong_already = dest_map
+                    .iter()
+                    .any(|(k, _)| k.is_strong() && k.as_ptr_usize() == target_ptr);
+                if has_strong_already {
+                    // Someone else promoted it already; nothing to do.
+                    continue;
+                }
+                let has_matching_weak = dest_map
+                    .iter()
+                    .any(|(k, _)| !k.is_strong() && k.as_ptr_usize() == target_ptr);
+                if !has_matching_weak {
+                    // Weak entry disappeared (or destination dropped); skip.
+                    continue;
+                }
+
+                // Compute required depth for dst.
+                let candidate_depth = src_guard.max_depth.saturating_add(1);
+
+                // Update dst.max_depth if needed, and propagate to its descendants.
+                // Keep previous depth to allow rollback on failure (very unlikely here).
+                let previous_child_depth;
+                let needs_update;
+                {
+                    let mut child_guard = match dst_arc.write() {
+                        Ok(g) => g,
+                        Err(_) => continue, // Child temporarily unavailable; skip.
+                    };
+                    previous_child_depth = child_guard.max_depth;
+                    needs_update = candidate_depth > previous_child_depth;
+                    if needs_update {
+                        child_guard.max_depth = candidate_depth;
+                    }
+                } // child write lock dropped here
+
+                if needs_update {
+                    if let Err(_e) = Self::propagate_max_depth(dst_arc.clone(), candidate_depth) {
+                        // Roll back child's depth and skip promotion.
+                        if let Ok(mut child_guard) = dst_arc.write() {
+                            if child_guard.max_depth == candidate_depth {
+                                child_guard.max_depth = previous_child_depth;
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // Replace the weak key with a strong key in src.children[ek].
+                // We must actually replace the key (not only the value), since the key's
+                // variant (Weak vs Strong) affects algorithms like serialization and traversal.
+                //
+                // OrderedHashMap::insert with an equal key would typically only replace the value,
+                // keeping the original key. Therefore we rebuild the map for this `ek` by moving
+                // entries out and reinserting, substituting the target entry's key with a Strong key.
+                let dest_map = src_guard
+                    .children
+                    .get_mut(&ek)
+                    .expect("dest_map must still exist after earlier borrow");
+
+                let mut old_map = std::mem::take(dest_map);
+                let mut did_convert = false;
+                for (k, v) in old_map.into_iter() {
+                    if k.as_ptr_usize() == target_ptr {
+                        // Reinsert with a Strong key (always), preserving the EV.
+                        // Note: if the entry was already Strong (shouldn't happen due to checks),
+                        // this is idempotent.
+                        dest_map.insert(NodePtr::Strong(ArcPtrWrapper::new(dst_arc.clone())), v);
+                        // Count conversion only if the old key was Weak
+                        if !k.is_strong() {
+                            did_convert = true;
+                        }
+                    } else {
+                        dest_map.insert(k, v);
+                    }
+                }
+
+                if did_convert {
+                    promotions += 1;
+                }
+                // src_guard (write) drops here at end of scope loop
+            }
+        }
+
+        promotions
+    }
+}
+
 // Implement PartialEq for Trie
 impl<EK, EV, T> PartialEq for Trie<EK, EV, T>
 where
