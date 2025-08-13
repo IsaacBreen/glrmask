@@ -10,7 +10,7 @@ const PROFILER_CORRECTION: Duration = Duration::from_nanos(0);
 pub const PROFILING_ENABLED: bool = true;
 
 /// Controls detailed GSS logging. If false, `log_gss` and `print_gss_forest` are disabled.
-pub const GSS_LOGGING_ENABLED: bool = true;
+pub const GSS_LOGGING_ENABLED: bool = false;
 
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
