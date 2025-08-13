@@ -1688,7 +1688,7 @@ mod tests {
         assert_eq!(pop_result.paths.len(), 0);
         assert_eq!(pop_result.below_bottom.len(), 1);
         // We reached the bottom exactly (depth 0).
-        let combined_acc = pop_result.below_bottom.get(&0).unwrap();
+        let combined_acc = pop_result.below_bottom.get(&1).unwrap();
 
         // `pushed.acc` (same as `root.acc`) allows all but 1.
         // The intersection should allow all but 1.
@@ -1740,12 +1740,12 @@ mod tests {
         let pushed = Arc::new(root.push(mock_edge(10)));
         let mut popper = pushed.popn(1); // Reaches bottom (depth 0)
         assert!(popper.paths.is_empty());
-        assert!(popper.below_bottom.get(&0).is_some());
-        let acc0 = popper.below_bottom.get(&0).unwrap().clone();
+        assert!(popper.below_bottom.get(&1).is_some());
+        let acc0 = popper.below_bottom.get(&1).unwrap().clone();
         // Shift down by 2 more pops.
         popper.popn(2);
-        assert!(popper.below_bottom.get(&0).is_none());
-        let acc2 = popper.below_bottom.get(&2).unwrap().clone();
+        assert!(popper.below_bottom.get(&1).is_none());
+        let acc2 = popper.below_bottom.get(&3).unwrap().clone();
         assert_eq!(*acc0, *acc2);
     }
 
@@ -1763,7 +1763,7 @@ mod tests {
         let popper = parent.popn(1);
         assert!(popper.paths.is_empty());
         assert_eq!(popper.below_bottom.len(), 1);
-        let acc_below = popper.below_bottom.get(&0).unwrap();
+        let acc_below = popper.below_bottom.get(&1).unwrap();
         // Union should be all tokens allowed (since each root disallows a different single token).
         assert_eq!(acc_below.llm_tokens_union, HybridBitset::max_ones());
         // Intersection should disallow both 1 and 2.
