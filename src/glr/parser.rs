@@ -823,6 +823,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
+            crate::debug!(4, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
             let mut states_to_push: BTreeMap<StateID, (BTreeSet<StateID>, bool)> = BTreeMap::new();
             for (source_state_id, row) in &self.parser.table {
                 let mut final_goto_state_ids_for_source = BTreeSet::new();
