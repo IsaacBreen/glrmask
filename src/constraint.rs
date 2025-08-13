@@ -372,10 +372,47 @@ impl GrammarConstraint {
     ) -> Precomputed2 {
         let mut precomputed2 = BTreeMap::new();
 
-        // TODO: compute initial nodes and values
-        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
+        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> =
+            Vec::new();
+        if let Some(p) = parser {
+            for (tokenizer_state_id, trie1_root) in precomputed {
+                let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
+                    PrecomputedNodeContents::no_end(),
+                )));
+                precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
 
-        todo!("Compute initial values for map in precompute2");
+                let mut gss_nodes_to_merge = Vec::new();
+
+                for state_id in p.table.keys() {
+                    let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(
+                        PrecomputedNodeContents::no_end(),
+                    )));
+
+                    let mut inserter = EdgeInserter::new(
+                        trie2_root.clone(),
+                        (0, Some(*state_id)),
+                        LLMTokenBV::max_ones(),
+                        |e, n| *e |= n,
+                    );
+                    inserter = inserter.try_destination(new_trie2_node.clone());
+                    inserter.expect("Failed to insert initial edge into Trie2 root");
+
+                    let mut acc = Acc::new_fresh();
+                    acc.trie2_nodes
+                        .insert(ArcPtrWrapper::new(new_trie2_node));
+                    let gss_root = GSSNode::new(acc);
+                    let gss_node =
+                        gss_root.push(ParseStateEdgeContent { state_id: *state_id });
+                    gss_nodes_to_merge.push(Arc::new(gss_node));
+                }
+
+                let merged_gss = GSSNode::merge_many_with_depth(gss_nodes_to_merge, 1);
+                let parse_state = ParseState { stack: merged_gss };
+                let glr_state = p.init_glr_parser_from_parse_state(parse_state);
+
+                initial_values_for_map.push((trie1_root.clone(), glr_state));
+            }
+        }
 
         Trie::special_map_grouped(
             initial_values_for_map,
