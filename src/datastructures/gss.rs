@@ -694,11 +694,12 @@ impl GSSNode {
 
     fn narrow_with_acc(node: &mut Arc<GSSNode>, acc: &Acc) {
         let mut new_acc = Acc::narrow(&node.acc, acc);
-        let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
-                          new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
-                          new_acc.terminals_union != node.acc.terminals_union ||
-                          new_acc.terminals_intersection != node.acc.terminals_intersection ||
-                          new_acc.trie2_nodes != node.acc.trie2_nodes;
+        // let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
+        //                   new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
+        //                   new_acc.terminals_union != node.acc.terminals_union ||
+        //                   new_acc.terminals_intersection != node.acc.terminals_intersection ||
+        //                   new_acc.trie2_nodes != node.acc.trie2_nodes;
+        let acc_changed = *node.acc != new_acc;
 
         if !acc_changed {
             return;
@@ -850,11 +851,12 @@ fn prune_and_transform_recursive(
         }
         Some((mut new_local_acc, continue_recursion)) => {
             if !continue_recursion {
-                let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
-                                  new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
-                                  new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-                                  new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
-                                 new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
+                // let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
+                //                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
+                //                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
+                //                   new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
+                //                  new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
+                let acc_changed = *node_arc.acc != new_local_acc;
                 if acc_changed {
                     new_local_acc.needs_push_down = true;
                 }
