@@ -1107,12 +1107,48 @@ pub fn fuse_predecessors_recursive(
 
 // --- Analysis and Debugging ---
 
+/// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
+pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<Arc<GSSNode>> {
+    let mut roots = BTreeSet::new();
+    let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
+    let mut visited: HashSet<*const GSSNode> = HashSet::new();
+
+    for node in nodes {
+        // We have to clone the node to get an owned Arc<GSSNode>.
+        // This is potentially inefficient if the caller already has an Arc,
+        // but the interface with `&GSSNode` is consistent with other analysis functions.
+        let node_arc = Arc::new(node.clone());
+        let node_ptr = Arc::as_ptr(&node_arc);
+        if visited.insert(node_ptr) {
+            queue.push_back(node_arc);
+        }
+    }
+
+    while let Some(node_arc) = queue.pop_front() {
+        if node_arc.is_root() {
+            roots.insert(node_arc);
+        } else {
+            for predecessor_arc in node_arc.predecessors.values().flat_map(|m| m.values()).flat_map(|v| v.iter()) {
+                let predecessor_ptr = Arc::as_ptr(predecessor_arc);
+                if visited.insert(predecessor_ptr) {
+                    queue.push_back(predecessor_arc.clone());
+                }
+            }
+        }
+    }
+    roots
+}
+
 impl GSSNode {
     pub fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();
         reset_llm_tokens(&mut node_arc, &mut memo);
         *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+    }
+
+    pub fn get_roots(&self) -> BTreeSet<Arc<GSSNode>> {
+        get_roots(std::iter::once(self))
     }
 }
 
@@ -1820,5 +1856,37 @@ mod tests {
             stats
         );
         assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+    }
+
+    #[test]
+    fn test_get_roots() {
+        let leaf1 = Arc::new(GSSNode::new(empty_acc()));
+        let leaf2 = Arc::new(GSSNode::new(empty_acc()));
+        let b = leaf1.push(mock_edge(1));
+        let c = leaf2.push(mock_edge(2));
+
+        let mut root1 = b.push(mock_edge(10));
+        let root2 = c.push(mock_edge(20));
+        root1.merge_with_depth(1, &root2);
+        let root = root1;
+
+        // Test method on GSSNode
+        let roots_from_method = root.get_roots();
+        let mut expected_roots = BTreeSet::new();
+        expected_roots.insert(leaf1.clone());
+        expected_roots.insert(leaf2.clone());
+        assert_eq!(roots_from_method, expected_roots);
+
+        // Test standalone function
+        let roots_from_func = get_roots(vec![&root, &b]);
+        assert_eq!(roots_from_func, expected_roots);
+
+        // Test with roots as input
+        let roots_from_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+        assert_eq!(roots_from_leaves, expected_roots);
+
+        // Test with empty input
+        let no_roots: Vec<&GSSNode> = vec![];
+        assert!(get_roots(no_roots).is_empty());
     }
 }
