@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
-pub use crate::types::{TerminalID};
+pub use crate::types::TerminalID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::time_it;
@@ -278,7 +278,7 @@ impl JSONConvertible for Goto {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StateID(pub usize);
 
 impl JSONConvertible for StateID {
@@ -450,7 +450,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     for (item_set, row) in stage_3_table {
         let mut reduces = BTreeMap::new();
 
-        for (terminal, item_set) in row.reduces {
+        for (terminal, item_set) in item_set {
             let mut prod_ids = BTreeSet::new();
             for item in item_set {
                 let prod_id = production_ids.get(&*item.production).unwrap();
@@ -732,6 +732,104 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     stage_8_table
 }
 
+/// Pre-computes the complex GOTO logic for substring parsing reductions that pop below the stack.
+///
+/// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
+/// states would be if a reduction for that non-terminal occurred, and we could start
+/// from *any* state in the automaton (as is the case for substring parsing).
+///
+/// This avoids a very expensive runtime loop over all table states.
+pub fn stage_9(
+    table: &Table,
+    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+) -> (
+    BTreeMap<(NonTerminalID, TerminalID), BTreeMap<StateID, (BTreeSet<StateID>, bool)>>, // phase1
+    BTreeMap<(NonTerminalID, TerminalID), BTreeMap<StateID, (BTreeSet<StateID>, bool)>>, // phase2
+) {
+    let mut substring_gotos_phase1 = BTreeMap::new();
+    let mut substring_gotos_phase2 = BTreeMap::new();
+
+    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
+    let all_terminal_ids: Vec<_> = terminal_map.right_values().copied().collect();
+
+    for &nt_id in &all_nt_ids {
+        for &token_id in &all_terminal_ids {
+            // Compute for phase 1 (without default reduces)
+            let states_to_push_p1 = compute_states_to_push(table, nt_id, token_id, |row| &row.shifts_and_reduces_without_default_reduce);
+            if !states_to_push_p1.is_empty() {
+                substring_gotos_phase1.insert((nt_id, token_id), states_to_push_p1);
+            }
+
+            // Compute for phase 2 (with full action map)
+            let states_to_push_p2 = compute_states_to_push(table, nt_id, token_id, |row| &row.shifts_and_reduces_full);
+            if !states_to_push_p2.is_empty() {
+                substring_gotos_phase2.insert((nt_id, token_id), states_to_push_p2);
+            }
+        }
+    }
+
+    (substring_gotos_phase1, substring_gotos_phase2)
+}
+
+/// Helper for `stage_9`: Computes the `states_to_push` map for a given initial non-terminal and lookahead.
+fn compute_states_to_push<F>(
+    table: &Table,
+    initial_nt: NonTerminalID,
+    token_id: TerminalID,
+    action_selector: F,
+) -> BTreeMap<StateID, (BTreeSet<StateID>, bool)>
+where
+    F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> + Copy,
+{
+    let mut states_to_push = BTreeMap::new();
+    for (&source_state_id, _row) in table {
+        let (final_states, accepted) = compute_unit_reduction_chain(table, source_state_id, initial_nt, token_id, action_selector);
+        // Only store entries if they result in new states or an accept action.
+        if !final_states.is_empty() || accepted {
+            states_to_push.insert(source_state_id, (final_states, accepted));
+        }
+    }
+    states_to_push
+}
+
+/// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
+fn compute_unit_reduction_chain<F>(
+    table: &Table,
+    source_state_id: StateID,
+    initial_nt: NonTerminalID,
+    token_id: TerminalID,
+    action_selector: F,
+) -> (BTreeSet<StateID>, bool)
+where
+    F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+{
+    let mut final_goto_state_ids_for_source = BTreeSet::new();
+    let mut accepted = false;
+    let mut current_nt_local = initial_nt;
+    let row = &table[&source_state_id];
+
+    loop {
+        if let Some(goto) = row.gotos.get(&current_nt_local) {
+            if goto.accept {
+                accepted = true;
+            }
+            if let Some(goto_state_id) = goto.state_id {
+                let next_row = &table[&goto_state_id];
+                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+                    current_nt_local = *next_nt;
+                    continue; // Follow the unit-reduction chain.
+                }
+                // Not a unit reduction, this is a final state for this chain.
+                final_goto_state_ids_for_source.insert(goto_state_id);
+            }
+        }
+        // End of chain (no GOTO, no further state, or not a unit reduction).
+        break;
+    }
+    (final_goto_state_ids_for_source, accepted)
+}
+
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
 ///
 /// This function takes a table and a list of compatible state pairs. It merges these
@@ -912,6 +1010,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
+
+    crate::debug!(2, "Stage 9: Precomputing substring gotos");
+    let (substring_gotos_phase1, substring_gotos_phase2) = stage_9(&stage_8_table, &non_terminal_map, &terminal_map);
+
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
 
@@ -922,7 +1024,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id, substring_gotos_phase1, substring_gotos_phase2)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {

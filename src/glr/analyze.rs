@@ -1,4 +1,3 @@
-use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
@@ -769,3 +768,4 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
     todo!()
 }
+

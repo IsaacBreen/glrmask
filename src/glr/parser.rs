@@ -23,7 +23,7 @@ use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce};
+use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce, stage_9};
 use crate::datastructures::trie::EdgeInserter;
 
 /// A trait to provide a lazily-evaluated `expect`.
@@ -173,6 +173,9 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
+    // Precomputed tables for substring parsing reductions.
+    pub(crate) substring_gotos_phase1: BTreeMap<(NonTerminalID, TerminalID), BTreeMap<StateID, (BTreeSet<StateID>, bool)>>,
+    pub(crate) substring_gotos_phase2: BTreeMap<(NonTerminalID, TerminalID), BTreeMap<StateID, (BTreeSet<StateID>, bool)>>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -186,6 +189,7 @@ impl JSONConvertible for GLRParser {
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
         // Do not serialize self.actions
         JSONNode::Object(obj)
     }
@@ -193,8 +197,8 @@ impl JSONConvertible for GLRParser {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let stage_7_table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
-                                       .and_then(Table::from_json)?;
+                let table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
+                                 .and_then(Table::from_json)?;
                 let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                      .and_then(Vec::<Production>::from_json)?;
                 // For backwards compatibility, we can read and ignore it.
@@ -210,14 +214,20 @@ impl JSONConvertible for GLRParser {
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
+
+                let (substring_gotos_phase1, substring_gotos_phase2) =
+                    stage_9(&table, &non_terminal_map, &terminal_map);
+
                 Ok(GLRParser {
-                    table: stage_7_table,
+                    table,
                     productions,
                     terminal_map,
                     non_terminal_map,
                     item_set_map,
                     start_state_id,
                     ignore_terminal_id,
+                    substring_gotos_phase1,
+                    substring_gotos_phase2,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -228,13 +238,15 @@ impl JSONConvertible for GLRParser {
 impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GLRParser")
-            .field("stage_7_table", &self.table)
+            .field("table", &self.table)
             .field("productions", &self.productions)
             .field("terminal_map", &self.terminal_map)
             .field("non_terminal_map", &self.non_terminal_map)
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
             .field("ignore_terminal_id", &self.ignore_terminal_id)
+            .field("substring_gotos_phase1_size", &self.substring_gotos_phase1.len())
+            .field("substring_gotos_phase2_size", &self.substring_gotos_phase2.len())
             .finish()
     }
 }
@@ -247,7 +259,9 @@ impl PartialEq for GLRParser {
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
         self.start_state_id == other.start_state_id &&
-        self.ignore_terminal_id == other.ignore_terminal_id
+        self.ignore_terminal_id == other.ignore_terminal_id &&
+        self.substring_gotos_phase1 == other.substring_gotos_phase1 &&
+        self.substring_gotos_phase2 == other.substring_gotos_phase2
     }
 }
 
@@ -255,7 +269,7 @@ impl Eq for GLRParser {}
 
 impl GLRParser {
     pub fn new(
-        stage_7_table: Table,
+        table: Table,
         productions: Vec<Production>,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
@@ -263,6 +277,8 @@ impl GLRParser {
         start_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
         ignore_terminal_id: Option<TerminalID>,
+        substring_gotos_phase1: BTreeMap<(NonTerminalID, TerminalID), BTreeMap<StateID, (BTreeSet<StateID>, bool)>>,
+        substring_gotos_phase2: BTreeMap<(NonTerminalID, TerminalID), BTreeMap<StateID, (BTreeSet<StateID>, bool)>>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -274,13 +290,15 @@ impl GLRParser {
             .collect();
 
         Self {
-            table: stage_7_table,
+            table,
             productions,
             terminal_map,
             non_terminal_map,
             item_set_map,
             start_state_id,
             ignore_terminal_id,
+            substring_gotos_phase1,
+            substring_gotos_phase2,
         }
     }
 
@@ -657,6 +675,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
+        use_full_action_map: bool,
     ) where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
@@ -677,7 +696,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             ..
                         } => {
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
+                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, use_full_action_map);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
                                 if let Some(ref mut r_map) = reduce_map {
@@ -698,7 +717,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
+                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, use_full_action_map);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
                                         if let Some(ref mut r_map) = reduce_map {
@@ -728,6 +747,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Some(phase2_todo),
                 shifted_states_todo,
                 |row| &row.shifts_and_reduces_without_default_reduce,
+                false, // Not using full action map
             );
         });
     }
@@ -742,6 +762,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 None,
                 shifted_states_todo,
                 |row| &row.shifts_and_reduces_full,
+                true, // Using full action map
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
         });
@@ -755,6 +776,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
         token_id: TerminalID,
         action_selector: &F,
+        use_full_action_map: bool,
     ) -> Arc<GSSNode>
     where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
@@ -824,80 +846,62 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // accumulated along these paths to create a new virtual root to push onto.
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-            let mut states_to_push: BTreeMap<StateID, (BTreeSet<StateID>, bool)> = BTreeMap::new();
-            for (source_state_id, row) in &self.parser.table {
-                let mut final_goto_state_ids_for_source = BTreeSet::new();
-                let mut accepted = false;
-                let mut current_nt_local = nt;
-                loop {
-                    if let Some(goto) = row.gotos.get(&current_nt_local) {
-                        if goto.accept {
-                            crate::debug!(6, "Accepting with NT '{}' from source state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt_local).unwrap(), source_state_id);
-                            self.accepted = true;
-                            accepted = true;
-                        }
-                        if let Some(goto_state_id) = goto.state_id {
-                            let next_row = &self.parser.table[&goto_state_id];
-                            if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
-                                current_nt_local = *next_nt;
-                                continue;
-                            } else {
-                                final_goto_state_ids_for_source.insert(goto_state_id);
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                states_to_push.insert(*source_state_id, (final_goto_state_ids_for_source, accepted));
-            }
-            crate::debug!(6, "States to push after reduction: {:?}", states_to_push);
-            let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
-            for (k, acc_arc) in popper.below_bottom {
-                crate::debug!(6, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
-                let mut acc: Acc = acc_arc.as_ref().clone();
-                let active_llm_tokens = acc.union_llm_tokens();
-                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                for (source_state_id, (final_goto_state_ids_for_source, accepted)) in &states_to_push {
-                    if !final_goto_state_ids_for_source.is_empty() {
-                        // Handle pop and read state
-                        let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-                        for existing_trie2_node in &trie2_nodes {
-                            let mut inserter = EdgeInserter::new(
-                                existing_trie2_node.as_arc().clone(),
-                                (k, Some(*source_state_id)),
-                                active_llm_tokens.clone(),
-                                |e, n| *e |= n,
-                            );
-                            inserter = inserter.try_destination(new_trie2_node.clone());
-                            inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                        }
-                        let mut acc2 = acc.clone();
-                        acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
-                        let new_gss0 = GSSNode::new(acc2);
-                        let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                        let new_gss2 = new_gss1.push_many(final_goto_state_ids_for_source.iter().map(|sid| ParseStateEdgeContent { state_id: *sid }).collect());
-                        out.push(new_gss2);
-                    }
+            
+            let precomputed_map = if use_full_action_map {
+                &self.parser.substring_gotos_phase2
+            } else {
+                &self.parser.substring_gotos_phase1
+            };
 
-                    // ACTUALLY no we don't accept...
-                    // Handle accept
-                    // if *accepted {
-                    //     crate::debug!(4, "Accepting with NT '{}' from source state {:?}. Pushing to {} trie 2 nodes", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), source_state_id, trie2_nodes.len());
-                    //     for existing_trie2_node in &trie2_nodes {
-                    //         let mut end_inserter = EdgeInserter::new(
-                    //             existing_trie2_node.as_arc().clone(),
-                    //             (k, Some(*source_state_id)),
-                    //             active_llm_tokens.clone(),
-                    //             |e, n| *e |= n,
-                    //         );
-                    //         end_inserter = end_inserter.try_destination(new_trie2_end.clone());
-                    //         end_inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed for end");
-                    //     }
-                    // }
+            if let Some(states_to_push) = precomputed_map.get(&(nt, token_id)) {
+                crate::debug!(6, "States to push after reduction (precomputed): {:?}", states_to_push);
+                let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
+                for (k, acc_arc) in popper.below_bottom {
+                    crate::debug!(6, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
+                    let mut acc: Acc = acc_arc.as_ref().clone();
+                    let active_llm_tokens = acc.union_llm_tokens();
+                    let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                    for (source_state_id, (final_goto_state_ids_for_source, accepted)) in states_to_push {
+                        if !final_goto_state_ids_for_source.is_empty() {
+                            // Handle pop and read state
+                            let new_trie2_node: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+                            for existing_trie2_node in &trie2_nodes {
+                                let mut inserter = EdgeInserter::new(
+                                    existing_trie2_node.as_arc().clone(),
+                                    (k, Some(*source_state_id)),
+                                    active_llm_tokens.clone(),
+                                    |e, n| *e |= n,
+                                );
+                                inserter = inserter.try_destination(new_trie2_node.clone());
+                                inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                            }
+                            let mut acc2 = acc.clone();
+                            acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                            let new_gss0 = GSSNode::new(acc2);
+                            let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                            let new_gss2 = new_gss1.push_many(final_goto_state_ids_for_source.iter().map(|sid| ParseStateEdgeContent { state_id: *sid }).collect());
+                            out.push(new_gss2);
+                        }
+
+                        if *accepted {
+                            self.accepted = true;
+                        }
+                        // ACTUALLY no we don't accept...
+                        // Handle accept
+                        // if *accepted {
+                        //     crate::debug!(4, "Accepting with NT '{}' from source state {:?}. Pushing to {} trie 2 nodes", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), source_state_id, trie2_nodes.len());
+                        //     for existing_trie2_node in &trie2_nodes {
+                        //         let mut end_inserter = EdgeInserter::new(
+                        //             existing_trie2_node.as_arc().clone(),
+                        //             (k, Some(*source_state_id)),
+                        //             active_llm_tokens.clone(),
+                        //             |e, n| *e |= n,
+                        //         );
+                        //         end_inserter = end_inserter.try_destination(new_trie2_end.clone());
+                        //         end_inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed for end");
+                        //     }
+                        // }
+                    }
                 }
             }
         }
@@ -1464,4 +1468,3 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
-

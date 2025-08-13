@@ -1,5 +1,5 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use crate::glr::analyze::remove_productions_with_undefined_nonterminals;
 use crate::interface::display_productions;
 
@@ -266,4 +266,3 @@ pub fn simplify_grammar_for_test_case(
 
     (current_productions, final_start_id)
 }
-
