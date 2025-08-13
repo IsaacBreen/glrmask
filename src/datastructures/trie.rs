@@ -1001,7 +1001,7 @@ where
                 return false;
             }
         };
-        
+
         // Dereference guards to get &Trie
         let self_node = &*self_node_guard;
         let other_node = &*other_node_guard;
@@ -1039,7 +1039,7 @@ where
                         .iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
-                    
+
                     let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
                         .iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
@@ -1074,7 +1074,7 @@ where
                 }
             }
         }
-        
+
         // If all checks passed, the initial `true` assumption in the cache was correct.
         // The cache entry (self_ptr, other_ptr) remains true.
         true
@@ -1308,7 +1308,7 @@ where
             return false;
         }
         if self.weak_children.len() != other.weak_children.len() { return false; }
-        
+
         // Initialize cache for recursive calls on child Arcs.
         // This cache is passed down through all recursive calls originating from this top-level eq.
         // Type alias for pointer to Mutex<Trie<...>> for clarity.
@@ -1333,7 +1333,7 @@ where
                         .iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
-                    
+
                     let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
                         .iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
@@ -1403,7 +1403,7 @@ where
                 }
             }
         }
-        
+
         // All checks passed.
         true
     }
