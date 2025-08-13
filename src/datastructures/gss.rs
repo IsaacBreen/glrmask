@@ -488,17 +488,30 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
             if nodes_to_merge.len() <= 1 {
                 *target_preds_vec = nodes_to_merge;
             } else {
-                let mut iter = nodes_to_merge.into_iter();
-                let first = iter.next().unwrap();
-                let mut merged = first.as_ref().clone();
-                for other in iter {
-                    merged._merge(&other, merge_depth - 1);
+                let (root_nodes, non_root_nodes): (Vec<_>, Vec<_>) =
+                    nodes_to_merge.into_iter().partition(|n| n.is_root());
+
+                let mut final_nodes = Vec::new();
+
+                // Merge non-root nodes together
+                if !non_root_nodes.is_empty() {
+                    let mut iter = non_root_nodes.into_iter();
+                    let first = iter.next().unwrap();
+                    let mut merged = first.as_ref().clone();
+                    for other in iter {
+                        merged._merge(&other, merge_depth - 1);
+                    }
+                    let mut merged_arc = Arc::new(merged);
+                    if merged_arc == first {
+                        merged_arc = first;
+                    }
+                    final_nodes.push(merged_arc);
                 }
-                let mut merged = Arc::new(merged);
-                if merged == first {
-                    merged = first;
-                }
-                *target_preds_vec = vec![merged];
+
+                // Per user request, do not merge root nodes. Keep them separate.
+                final_nodes.extend(root_nodes);
+
+                *target_preds_vec = final_nodes;
             }
         }
     }
@@ -629,6 +642,13 @@ impl GSSNode {
 
     // #[time_it]
     fn _merge(&mut self, other: &Self, merge_depth: usize) {
+        if self.is_root() != other.is_root() {
+            // Merging a root and a non-root node is not well-defined
+            // as it would lose the "root-ness" property of one of them.
+            // We refuse to perform this merge. The caller should handle this case
+            // by keeping the nodes separate if they need to be combined.
+            return;
+        }
         if self == other { return; }
 
         if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
