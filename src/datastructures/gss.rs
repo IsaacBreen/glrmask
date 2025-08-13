@@ -863,23 +863,33 @@ fn prune_and_transform_recursive(
                 }
             }
             let new_node_predecessors_map = if continue_recursion {
-                let mut new_predecessors_set = NodeSet::new();
+                let mut new_predecessors_map = NodeMap::new();
+                let mut has_any_predecessor = false;
                 for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                    for pred_vec in preds_by_depth.values() {
+                    let mut new_preds_by_depth = BTreeMap::new();
+                    for (depth, pred_vec) in preds_by_depth {
+                        let mut new_pred_vec = Vec::new();
                         for pred_arc in pred_vec {
                             if let Some(new_pred_arc) =
                                 prune_and_transform_recursive(pred_arc, closure, memo)
                             {
-                                new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
+                                new_pred_vec.push(new_pred_arc);
                             }
                         }
+                        if !new_pred_vec.is_empty() {
+                            has_any_predecessor = true;
+                            new_preds_by_depth.insert(*depth, new_pred_vec);
+                        }
+                    }
+                    if !new_preds_by_depth.is_empty() {
+                        new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
                     }
                 }
-                if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
+                if !has_any_predecessor && !node_arc.predecessors.is_empty() {
                     memo.insert(node_ptr, None);
                     return None;
                 }
-                process_predecessors(&new_predecessors_set)
+                new_predecessors_map
             } else { // Don't recurse, keep existing predecessors.
                 node_arc.predecessors.clone()
             };
