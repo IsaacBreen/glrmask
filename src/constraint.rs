@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use std::sync::RwLock;
 use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
@@ -12,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
 use std::fmt::{self, Display, Formatter};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::cell::RefCell;
 
 use bimap::BiBTreeMap;
@@ -49,8 +50,8 @@ const MERGE_THRESHOLD: usize = 20;
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
-pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
-pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode2>>>;
+pub type Precomputed = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>;
+pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
@@ -78,15 +79,15 @@ impl GrammarConstraint {
         assert_eq!(self.precomputed.len(), other.precomputed.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
             assert_eq!(sid1, sid2);
-            let node1 = arc1.lock().unwrap();
-            let node2 = arc2.lock().unwrap();
+            let node1 = arc1.read().unwrap();
+            let node2 = arc2.read().unwrap();
             assert_eq!(*node1, *node2);
         }
         assert_eq!(self.precomputed2.len(), other.precomputed2.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
             assert_eq!(sid1, sid2);
-            let node1 = arc1.lock().unwrap();
-            let node2 = arc2.lock().unwrap();
+            let node1 = arc1.read().unwrap();
+            let node2 = arc2.read().unwrap();
             assert_eq!(*node1, *node2);
         }
         assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
@@ -335,7 +336,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
+    ) -> BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>> {
         let mut helper = Precomputer::new(
             tokenizer,
             parser,
@@ -360,7 +361,7 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
-        precomputed: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+        precomputed: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
@@ -373,9 +374,9 @@ impl GrammarConstraint {
     ) -> Precomputed2 {
         crate::debug!(2, "Precomputing Trie 2...");
         let mut precomputed2 = BTreeMap::new();
-        let mut memo: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, Arc<Mutex<_>>> = HashMap::new();
+        let mut memo: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, Arc<RwLock<_>>> = HashMap::new();
 
-        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> =
+        let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
         for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc= "Precomputing Trie 2") {
@@ -383,7 +384,7 @@ impl GrammarConstraint {
                 precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
                 continue;
             }
-            let trie2_root = Arc::new(Mutex::new(PrecomputeNode2::new(
+            let trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
                 PrecomputedNodeContents::no_end(),
             )));
             precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
@@ -391,7 +392,7 @@ impl GrammarConstraint {
             let mut gss_nodes_to_merge = Vec::new();
 
             for state_id in parser.table.keys() {
-                let new_trie2_node = Arc::new(Mutex::new(PrecomputeNode2::new(
+                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
                     PrecomputedNodeContents::no_end(),
                 )));
 
@@ -423,7 +424,7 @@ impl GrammarConstraint {
 
         }
 
-        let trie2_end = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end(), )));
+        let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::end(), )));
 
         crate::debug!(2, "Running special_map_grouped for Trie 2 precomputation");
         Trie::special_map_grouped(
@@ -600,7 +601,7 @@ struct Precomputer<'r> {
     parser:           Option<&'r GLRParser>,
     llm_vocab:        Option<Arc<LLMVocab>>,
     vocab:            VocabPrefixTree,
-    roots:            BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+    roots:            BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
@@ -609,8 +610,8 @@ struct Precomputer<'r> {
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
-    tags:             RefCell<HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
-    end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
+    tags:             RefCell<HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>>,
+    end_node:       ArcPtrWrapper<RwLock<PrecomputeNode>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -637,7 +638,7 @@ impl<'r> Precomputer<'r> {
         for sid in tokenizer.iter_states() {
             roots.insert(
                 sid,
-                Arc::new(Mutex::new(PrecomputeNode::new(
+                Arc::new(RwLock::new(PrecomputeNode::new(
                     PrecomputedNodeContents::no_end(),
                 ))),
             );
@@ -666,7 +667,7 @@ impl<'r> Precomputer<'r> {
             terminal_follow_map, // Store the map
             ignore_terminal_id,
             tags: RefCell::new(Default::default()),
-            end_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
+            end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
 
@@ -709,7 +710,7 @@ impl<'r> Precomputer<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
@@ -738,7 +739,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Optimizing precomputed trie via substring parser");
 
         // Collect all unique nodes from all roots to process each node only once.
-        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
         let mut seen_nodes = HashSet::new();
         for root_arc in self.roots.values() {
             for node in Trie::all_nodes(root_arc.clone()) {
@@ -757,9 +758,9 @@ impl<'r> Precomputer<'r> {
         );
 
         // Try to find an existing end node in the whole graph to reuse.
-        let mut existing_end_node: Option<Arc<Mutex<PrecomputeNode>>> = None;
+        let mut existing_end_node: Option<Arc<RwLock<PrecomputeNode>>> = None;
         for n in &all_nodes {
-            if n.lock().unwrap().value.end {
+            if n.read().unwrap().value.end {
                 existing_end_node = Some(n.clone());
                 break;
             }
@@ -769,8 +770,8 @@ impl<'r> Precomputer<'r> {
         for node_arc in &all_nodes {
             pb.inc(1);
             // Snapshot the outgoing edges so we can run analyses without holding the lock.
-            let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>)> = {
-                let guard = node_arc.lock().expect("poison");
+            let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>)> = {
+                let guard = node_arc.read().expect("poison");
                 guard.children()
                     .iter()
                     .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
@@ -790,7 +791,7 @@ impl<'r> Precomputer<'r> {
 
                 // Build initial values: for each child under this edge, create a GLR
                 // substring state, step with `gtid`, restrict tokens by child's BV.
-                let mut initial_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
+                let mut initial_values: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> = Vec::new();
                 for (child_wrapper, edge_bv) in dest_map_snapshot.iter() {
                     let mut glr = self.parser.unwrap().init_glr_substring_parser(self.llm_vocab.clone());
                     glr.process_token(gtid); // GrammarTokenID is the same underlying type
@@ -821,7 +822,7 @@ impl<'r> Precomputer<'r> {
                 // an end-node destination, add a None-edge to an end node with `must_mask`,
                 // and subtract `must_mask` from the start-edge tokens.
                 {
-                    let mut node_guard = node_arc.lock().expect("poison");
+                    let mut node_guard = node_arc.write().expect("poison");
 
                     // Get the mutable destination map for this grammar edge; it may have been
                     // removed by earlier iterations, so recheck existence.
@@ -831,7 +832,7 @@ impl<'r> Precomputer<'r> {
                     };
 
                     // 1) Intersect each child's BV with `can_mask`. Collect empties to remove.
-                    let mut to_remove: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = Vec::new();
+                    let mut to_remove: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = Vec::new();
                     for (child_w, bv) in dest_map_mut.iter_mut() {
                         *bv &= &can_mask;
                         if bv.is_empty() {
@@ -851,7 +852,7 @@ impl<'r> Precomputer<'r> {
                     // 2) If this edge already goes to an end node, do not add a None shortcut.
                     let mut has_end_dest = false;
                     for (child_w, _bv) in dest_map_mut.iter() {
-                        if child_w.as_arc().lock().unwrap().value.end {
+                        if child_w.as_arc().read().unwrap().value.end {
                             has_end_dest = true;
                             break;
                         }
@@ -859,7 +860,7 @@ impl<'r> Precomputer<'r> {
 
                     if !has_end_dest && !must_mask.is_empty() {
                         // Subtract must_mask from the start-edge BVs.
-                        let mut to_remove2: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = Vec::new();
+                        let mut to_remove2: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = Vec::new();
                         for (child_w, bv) in dest_map_mut.iter_mut() {
                             *bv -= &must_mask;
                             if bv.is_empty() {
@@ -875,10 +876,10 @@ impl<'r> Precomputer<'r> {
 
                         // Add (None; must_mask) -> end node
                         // Reuse an existing end node if possible; otherwise, create one.
-                        let end_arc: Arc<Mutex<PrecomputeNode>> = if let Some(ref existing) = existing_end_node {
+                        let end_arc: Arc<RwLock<PrecomputeNode>> = if let Some(ref existing) = existing_end_node {
                             existing.clone()
                         } else {
-                            let new_end = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())));
+                            let new_end = Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::end())));
                             existing_end_node = Some(new_end.clone());
                             new_end
                         };
@@ -905,13 +906,13 @@ impl<'r> Precomputer<'r> {
     //   - merge_intersection = true:  AND tokens across all ends (tokens that MUST succeed).
     fn walk_subtree_and_collect_mask(
         &self,
-        initial: &[(Arc<Mutex<PrecomputeNode>>, GLRParserState)],
+        initial: &[(Arc<RwLock<PrecomputeNode>>, GLRParserState)],
         merge_intersection: bool,
     ) -> LLMTokenBV {
         use crate::datastructures::trie::Trie;
 
         // Build fresh vector (special_map_grouped consumes values).
-        let mut initials: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::with_capacity(initial.len());
+        let mut initials: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> = Vec::with_capacity(initial.len());
         for (n, s) in initial {
             initials.push((n.clone(), s.clone()));
         }
@@ -925,7 +926,7 @@ impl<'r> Precomputer<'r> {
             // step: given current GLR state, edge key (Option<GrammarTokenID>), and grouped destinations,
             // produce next (child, GLR state) items.
             |glr_s, grammar_token_opt, dest_map| {
-                let mut out: Vec<(ArcPtrWrapper<Mutex<PrecomputeNode>>, GLRParserState)> = Vec::new();
+                let mut out: Vec<(ArcPtrWrapper<RwLock<PrecomputeNode>>, GLRParserState)> = Vec::new();
 
                 match grammar_token_opt {
                     Some(gtid) => {
@@ -1014,8 +1015,8 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Replacing ignore token edges with None edges...");
 
         // 1. Collect all unique nodes.
-        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
-        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        let mut seen: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
+        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
         for root in self.roots.values() {
             for arc in Trie::all_nodes(root.clone()) {
                 let ptr = Arc::as_ptr(&arc);
@@ -1027,7 +1028,7 @@ impl<'r> Precomputer<'r> {
 
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
-            let mut node_guard = node_arc.lock().expect("poison");
+            let mut node_guard = node_arc.write().expect("poison");
             
             // Check if there are any edges with the ignore token key.
             let ignore_key = Some(ignore_tid);
@@ -1063,11 +1064,11 @@ impl<'r> Precomputer<'r> {
     fn simplify_none_edges(&mut self) {
         crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
 
-        let root_node_ptrs: HashSet<*const Mutex<PrecomputeNode>> = self.roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+        let root_node_ptrs: HashSet<*const RwLock<PrecomputeNode>> = self.roots.values().map(|arc| Arc::as_ptr(arc)).collect();
 
         // 1) Collect all unique nodes reachable from any root
-        let mut seen: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
-        let mut all_nodes: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+        let mut seen: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
+        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
         for root in self.roots.values() {
             for arc in Trie::all_nodes(root.clone()) {
                 let ptr = Arc::as_ptr(&arc);
@@ -1077,7 +1078,7 @@ impl<'r> Precomputer<'r> {
             }
         }
         // Map pointer -> Arc for quick retrieval
-        let mut arc_by_ptr: HashMap<*const Mutex<PrecomputeNode>, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+        let mut arc_by_ptr: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
         for n in &all_nodes {
             arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
         }
@@ -1087,18 +1088,18 @@ impl<'r> Precomputer<'r> {
         //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
         //    - none_union[B] = union of all bv2 for None edges from B
         let mut incoming: HashMap<
-            *const Mutex<PrecomputeNode>,
-            Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
+            *const RwLock<PrecomputeNode>,
+            Vec<(Arc<RwLock<PrecomputeNode>>, Option<GrammarTokenID>, LLMTokenBV)>
         > = HashMap::new();
         let mut none_edges_from: HashMap<
-            *const Mutex<PrecomputeNode>,
-            Vec<(Arc<Mutex<PrecomputeNode>>, LLMTokenBV)>
+            *const RwLock<PrecomputeNode>,
+            Vec<(Arc<RwLock<PrecomputeNode>>, LLMTokenBV)>
         > = HashMap::new();
-        let mut none_union: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+        let mut none_union: HashMap<*const RwLock<PrecomputeNode>, LLMTokenBV> = HashMap::new();
 
         for src_arc in &all_nodes {
             let src_ptr = Arc::as_ptr(src_arc);
-            let guard = src_arc.lock().expect("poison");
+            let guard = src_arc.read().expect("poison");
             // Record all outgoing edges for incoming map
             for (ek, dest_map) in guard.children().iter() {
                 for (child_wrap, ev_bv) in dest_map.iter() {
@@ -1140,7 +1141,7 @@ impl<'r> Precomputer<'r> {
                     // Not a root and no predecessors means it's an unreachable internal node.
                     // It's safe to remove its outgoing None edges.
                     if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-                        let mut b_guard = b_arc.lock().expect("poison");
+                        let mut b_guard = b_arc.write().expect("poison");
                         b_guard.children_mut().remove(&None);
                     }
                     continue;
@@ -1163,7 +1164,7 @@ impl<'r> Precomputer<'r> {
                     continue;
                 }
 
-                let mut a_guard = a_arc.lock().expect("poison");
+                let mut a_guard = a_arc.write().expect("poison");
                 let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
 
                 // Add/merge edges to each C with per-child mask
@@ -1194,7 +1195,7 @@ impl<'r> Precomputer<'r> {
 
             // Finally, remove all None edges out of B
             {
-                let mut b_guard = b_arc.lock().expect("poison");
+                let mut b_guard = b_arc.write().expect("poison");
                 b_guard.children_mut().remove(&None);
             }
         }
@@ -1268,7 +1269,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
         // A cache of nodes to the set of "live" LLM tokens reachable from them.
-        let mut live_tokens_cache: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
+        let mut live_tokens_cache: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
 
         // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
         // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
@@ -1304,8 +1305,8 @@ impl<'r> Precomputer<'r> {
     /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
     fn get_live_tokens_and_prune(
         &self,
-        node_wrapper: ArcPtrWrapper<Mutex<PrecomputeNode>>,
-        live_tokens_cache: &mut HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
+        node_wrapper: ArcPtrWrapper<RwLock<PrecomputeNode>>,
+        live_tokens_cache: &mut HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>,
     ) -> LLMTokenBV {
         // If we've already computed the live tokens for this node, return the cached result.
         if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
@@ -1319,8 +1320,8 @@ impl<'r> Precomputer<'r> {
         let node_arc = node_wrapper.as_arc();
 
         // We must collect children before recursing to avoid holding the lock.
-        let children_to_check: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = {
-            let node_guard = node_arc.lock().unwrap();
+        let children_to_check: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = {
+            let node_guard = node_arc.read().unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
 
@@ -1332,7 +1333,7 @@ impl<'r> Precomputer<'r> {
         // Now that the cache is populated for all children, we can prune the current node.
         let mut live_tokens_for_this_node = LLMTokenBV::zeros();
         {
-            let mut node_guard = node_arc.lock().unwrap();
+            let mut node_guard = node_arc.write().unwrap();
 
             // A node is live if it's an end node itself. The tokens that end here are
             // on the edges pointing to this node.
@@ -1383,11 +1384,11 @@ impl<'r> Precomputer<'r> {
 
     fn merge_nodes(&mut self) {
         crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
-        let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+        let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
         
         for (_tokenizer_state_id, root_arc_ref) in &self.roots {
             crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p}", root_arc_ref);
-            let node_content = root_arc_ref.lock().unwrap().clone();
+            let node_content = root_arc_ref.read().unwrap().clone();
             crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p} lock acquired, content: {:?}", root_arc_ref, node_content);
             // This will associate node_content with root_arc_ref.clone().
             // If node_content was already in the map, its associated Arc gets updated to root_arc_ref.clone().
@@ -1398,7 +1399,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs");
         for (_tokenizer_state_id, root_arc_in_self_roots_mut) in &mut self.roots {
             crate::debug!(3, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs: Root {:p}", root_arc_in_self_roots_mut);
-            let current_content = root_arc_in_self_roots_mut.lock().unwrap().clone();
+            let current_content = root_arc_in_self_roots_mut.read().unwrap().clone();
             if let Some(canonical_arc) = content_to_canonical_arc_map.get(&current_content) {
                 crate::debug!(3, "Merging nodes: canonical Arc found for {:?}, updating root to {:p}", current_content, canonical_arc);
                 *root_arc_in_self_roots_mut = canonical_arc.clone();
@@ -1419,7 +1420,7 @@ impl<'r> Precomputer<'r> {
         token_name_map: &BiBTreeMap<Terminal, usize>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         internal_max_llm_token: usize,
-    ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
+    ) -> BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>> {
 
         calculate_final_stats(&self.roots, &mut self.stats);
         print_precompute_stats(&self.stats, token_name_map);
@@ -1432,15 +1433,15 @@ impl<'r> Precomputer<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>,
         >,
-        no_go: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
+        no_go: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
+            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>>> = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
@@ -1504,14 +1505,14 @@ impl<'r> Precomputer<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.lock().unwrap().value.end));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read().unwrap().value.end));
 
                             if true {
-                                let children_of_src: Vec<_> = if true { src_node_wrapper.lock().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect() }
-                                else { src_node_wrapper.lock().unwrap().children().get(&Some(terminal_id)).cloned().unwrap_or_default().keys().cloned().collect() };
+                                let children_of_src: Vec<_> = if true { src_node_wrapper.read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect() }
+                                else { src_node_wrapper.read().unwrap().children().get(&Some(terminal_id)).cloned().unwrap_or_default().keys().cloned().collect() };
                                 let tags = self.tags.borrow();
                                 let eligible_children = children_of_src.iter().filter(|child_wrapper| {
-                                    tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_wrapper.lock().unwrap().value.end
+                                    tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_wrapper.read().unwrap().value.end
                                 }).map(|w| w.as_arc().clone());
                                 inserter = inserter.try_destinations_iter(eligible_children);
                                 drop(tags);
@@ -1556,13 +1557,13 @@ impl<'r> Precomputer<'r> {
 
     fn merge_handles(
         &self,
-        set: &OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-    ) -> OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> {
+        set: &OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>,
+    ) -> OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>> {
         if set.len() <= self.merge_threshold {
             return set.clone();
         }
 
-        let merged_node_arc = Arc::new(Mutex::new(PrecomputeNode::new( 
+        let merged_node_arc = Arc::new(RwLock::new(PrecomputeNode::new( 
             PrecomputedNodeContents::no_end(),
         )));
 
@@ -1712,9 +1713,9 @@ impl<'a> GrammarConstraintState<'a> {
             successful: usize,
         }
 
-        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
+        let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
 
-        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
+        let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
@@ -1795,7 +1796,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut num_end = 0;
                 let mut num_non_end = 0;
                 for child_node_trie_data in dest_map.keys() {
-                    if child_node_trie_data.as_arc().lock().unwrap().value.end {
+                    if child_node_trie_data.as_arc().read().unwrap().value.end {
                         num_end += 1;
                     } else {
                         num_non_end += 1;
@@ -1836,7 +1837,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut glr_s = glr_s.clone();
 
                     if let Some(gtid) = grammar_token_opt {
-                        let mut counts_guard = step_counts_clone1.lock().unwrap();
+                        let mut counts_guard = step_counts_clone1.write().unwrap();
                         let entry = counts_guard.entry(*gtid).or_default();
                         entry.total += 1;
 
@@ -1879,7 +1880,7 @@ impl<'a> GrammarConstraintState<'a> {
                             continue;
                         }
 
-                        if child_node_trie_data.as_arc().lock().unwrap().value.end {
+                        if child_node_trie_data.as_arc().read().unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                             crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
                             // timeit!("get_mask final_mask update", {
@@ -1920,7 +1921,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 num_outgoing_edges_that_lead_to_non_end_nodes += 1
                             } else {
                                 for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
-                                    if !child_node_trie_data.as_arc().lock().unwrap().value.end {
+                                    if !child_node_trie_data.as_arc().read().unwrap().value.end {
                                         num_outgoing_edges_that_lead_to_non_end_nodes += 1;
                                         break;
                                     }
@@ -1968,7 +1969,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::print_summary_flat();
         
-        let counts = step_counts.lock().unwrap();
+        let counts = step_counts.read().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
             sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
@@ -2059,9 +2060,9 @@ impl<'a> GrammarConstraintState<'a> {
             successful: usize,
         }
 
-        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
+        let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
 
-        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode2>>, GLRParserState<'a>)> = Vec::new();
+        let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode2>>, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
@@ -2171,7 +2172,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::print_summary_flat();
 
-        let counts = step_counts.lock().unwrap();
+        let counts = step_counts.read().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
             sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));

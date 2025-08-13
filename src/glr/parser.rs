@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::RwLock;
 use crate::datastructures::ArcPtrWrapper;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -613,7 +613,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: std::collections::HashMap<BelowBottomCacheKey, ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
+    below_bottom_cache: std::collections::HashMap<BelowBottomCacheKey, ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -915,7 +915,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
                             let new_trie2_node = trie2_dst_nodes
                                 .entry(*source_state_id)
-                                .or_insert_with(|| Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                                .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
                                 .clone();
                             self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 

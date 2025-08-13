@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::fmt::{Debug, Write};
@@ -88,7 +88,7 @@ pub struct Acc {
     pub terminals_union: HybridL2Bitset,
     pub terminals_intersection: HybridL2Bitset,
     pub needs_push_down: bool,
-    pub trie2_nodes: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode2>>>,
+    pub trie2_nodes: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
 }
 
 impl Acc {

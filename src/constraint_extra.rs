@@ -5,7 +5,7 @@ use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use bitvec::prelude::BitVec;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use bimap::BiBTreeMap;
@@ -78,7 +78,7 @@ fn format_bv_with_tokens(
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
 pub fn dump_precompute_trie_recursive(
-    node_arc: &Arc<Mutex<PrecomputeNode>>,
+    node_arc: &Arc<RwLock<PrecomputeNode>>,
     prefix: String,
     visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -88,7 +88,7 @@ pub fn dump_precompute_trie_recursive(
     let children_to_visit;
 
     {
-        let node = node_arc.lock().expect("Mutex poisoned during dump");
+        let node = node_arc.read().expect("RwLock poisoned during dump");
         // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
@@ -122,7 +122,7 @@ pub fn dump_precompute_trie_recursive(
         let is_visited;
         let is_end_node;
         {
-            let child_node = child_arc.lock().unwrap();
+            let child_node = child_arc.read().unwrap();
             child_ptr = &*child_node as *const PrecomputeNode;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.end;
@@ -165,7 +165,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_ptr;
             let root_info;
             {
-                let root_node = root_node_trie.lock().unwrap();
+                let root_node = root_node_trie.read().unwrap();
                 root_ptr = &*root_node as *const PrecomputeNode;
                 root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
             }
@@ -194,7 +194,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_ptr;
             let root_info;
             {
-                let root_node = root_node_trie.lock().unwrap();
+                let root_node = root_node_trie.read().unwrap();
                 root_ptr = &*root_node as *const PrecomputeNode2;
                 root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
             }
@@ -219,14 +219,14 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 }
 
 pub fn dump_precompute_trie2_recursive(
-    node_arc: &Arc<Mutex<PrecomputeNode2>>,
+    node_arc: &Arc<RwLock<PrecomputeNode2>>,
     prefix: String,
     visited: &mut HashSet<*const PrecomputeNode2>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) {
     let children_to_visit = {
-        let node = node_arc.lock().expect("Mutex poisoned during dump");
+        let node = node_arc.read().expect("RwLock poisoned during dump");
         node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
@@ -243,7 +243,7 @@ pub fn dump_precompute_trie2_recursive(
         let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
 
         let (child_ptr, child_info, is_visited, is_end_node) = {
-            let child_node = child_arc.lock().unwrap();
+            let child_node = child_arc.read().unwrap();
             let ptr = &*child_node as *const PrecomputeNode2;
             (ptr, format!("Node {:p} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
         };
@@ -399,19 +399,19 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
 }
 
 pub fn calculate_final_stats(
-    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
     stats: &mut PrecomputeStats,
 ) {
     crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
 
     // Custom implementation of all_nodes using *const PrecomputeNode for visited set
-    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
-    let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = BTreeMap::new();
+    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
     let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
 
     while let Some(node_arc) = queue.pop_front() {
         let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.lock().unwrap();
+            let node_guard = node_arc.read().unwrap();
             let ptr = &*node_guard as *const PrecomputeNode;
             let children = node_guard.children()
                 .values()
@@ -433,7 +433,7 @@ pub fn calculate_final_stats(
     let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
         .values()
         .map(|arc| {
-            let guard = arc.lock().unwrap();
+            let guard = arc.read().unwrap();
             &*guard as *const PrecomputeNode
         })
         .collect();
@@ -458,7 +458,7 @@ pub fn calculate_final_stats(
     stats.final_total_ranges_in_bvs = 0;
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+        let node_guard = node_arc.read().expect("RwLock poisoned during final stats calculation");
 
         // New logic for non-root internal and leaf nodes
         if !root_node_pointers.contains(node_ptr) {

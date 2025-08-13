@@ -908,7 +908,7 @@ fn test_precompute_a_plus_tokenizer() {
     // --- Verification ---
     // assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
     let initial_state_id = tokenizer.initial_state_id();
-    let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state").lock().unwrap();
+    let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state").read().unwrap();
 
     // 1. Check root node's clean_end
     let root_value = &root_node.value;
@@ -923,7 +923,7 @@ fn test_precompute_a_plus_tokenizer() {
     assert_eq!(destinations.len(), 1, "Should be one destination for the edge");
     let (child_arc_wrapper, edge_bv) = destinations.iter().next().unwrap();
     assert_eq!(*edge_bv, expected_tokens, "Edge token bitset is incorrect");
-    let child_node = child_arc_wrapper.as_arc().lock().unwrap();
+    let child_node = child_arc_wrapper.as_arc().read().unwrap();
     assert!(child_node.is_leaf(), "Child node should be a leaf after pruning");
     // assert_eq!(*child_node.value.clean_end.as_ref().unwrap(), expected_tokens, "Clean_end bitset is incorrect");
 }
@@ -983,7 +983,7 @@ fn test_precompute_x_eq() {
     let initial_state_id = tokenizer.initial_state_id();
     let root_arc = constraint.precomputed.get(&initial_state_id)
         .expect("No precomputed trie for initial tokenizer state");
-    let root_node = root_arc.lock().unwrap();
+    let root_node = root_arc.read().unwrap();
 
     // The root node should have two outgoing edge keys: one for 'X' (from LLM token "x")
     // and one for 'SPACE' (from LLM token " =").
@@ -1003,7 +1003,7 @@ fn test_precompute_x_eq() {
     assert_eq!(x_dests.len(), 1, "Should be one destination for 'X' edge");
     let (x_dest_wrapper, x_edge_bv) = x_dests.iter().next().unwrap();
     assert_eq!(*x_edge_bv, HybridBitset::from_iter(vec![x_llm_id]), "Edge for 'X' has wrong LLM token bitset");
-    let x_dest_node = x_dest_wrapper.as_arc().lock().unwrap();
+    let x_dest_node = x_dest_wrapper.as_arc().read().unwrap();
     assert!(x_dest_node.value.end, "Destination for 'X' edge should be an end node");
     drop(x_dest_node);
 
@@ -1012,7 +1012,7 @@ fn test_precompute_x_eq() {
     assert_eq!(space_dests.len(), 1, "Should be one destination for 'SPACE' edge");
     let (space_dest_wrapper, space_edge_bv) = space_dests.iter().next().unwrap();
     assert_eq!(*space_edge_bv, HybridBitset::from_iter(vec![space_equals_llm_id]), "Edge for 'SPACE' has wrong LLM token bitset");
-    let node_after_space = space_dest_wrapper.as_arc().lock().unwrap();
+    let node_after_space = space_dest_wrapper.as_arc().read().unwrap();
     assert!(!node_after_space.value.end, "Destination for 'SPACE' should not be an end node");
 
     // 3. Verify the node after 'SPACE'
@@ -1021,7 +1021,7 @@ fn test_precompute_x_eq() {
     assert_eq!(*equals_edge_key, Some(equals_tid), "Edge from intermediate node should be for 'EQUALS'");
     let (equals_dest_wrapper, equals_edge_bv) = equals_dests.iter().next().unwrap();
     assert_eq!(*equals_edge_bv, HybridBitset::from_iter(vec![space_equals_llm_id]), "Edge for 'EQUALS' has wrong LLM token bitset");
-    let equals_dest_node = equals_dest_wrapper.as_arc().lock().unwrap();
+    let equals_dest_node = equals_dest_wrapper.as_arc().read().unwrap();
     assert!(equals_dest_node.value.end, "Destination for 'EQUALS' edge should be an end node");
 
     // 4. Check that the two end nodes are the same instance
