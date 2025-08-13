@@ -391,7 +391,7 @@ impl GrammarConstraint {
                 let mut inserter = EdgeInserter::new(
                     trie2_root.clone(),
                     (0, Some(*state_id)),
-                    LLMTokenBV::max_ones(),
+                    LLMTokenBV::ones(internal_max_llm_token + 1),
                     |e, n| *e |= n,
                 );
                 inserter = inserter.try_destination(new_trie2_node.clone());

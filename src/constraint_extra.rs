@@ -237,7 +237,6 @@ pub fn dump_precompute_trie2_recursive(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) {
-    println!("here");
     let children_to_visit = {
         let node = node_arc.lock().expect("Mutex poisoned during dump");
         node.children().iter().flat_map(|(edge_key, dest_map)| {
