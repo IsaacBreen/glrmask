@@ -450,7 +450,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     for (item_set, row) in stage_3_table {
         let mut reduces = BTreeMap::new();
 
-        for (terminal, item_set) in item_set {
+        for (terminal, item_set) in row.reduces {
             let mut prod_ids = BTreeSet::new();
             for item in item_set {
                 let prod_id = production_ids.get(&*item.production).unwrap();
