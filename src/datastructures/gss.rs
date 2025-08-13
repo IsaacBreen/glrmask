@@ -1106,37 +1106,15 @@ pub fn fuse_predecessors_recursive(
 }
 
 // --- Analysis and Debugging ---
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RootItem<'a> {
+    pub node: &'a GSSNode,
+    pub path_acc: Arc<Acc>,
+}
 
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
-pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<Arc<GSSNode>> {
-    let mut roots = BTreeSet::new();
-    let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
-    let mut visited: HashSet<*const GSSNode> = HashSet::new();
-
-    for node in nodes {
-        // We have to clone the node to get an owned Arc<GSSNode>.
-        // This is potentially inefficient if the caller already has an Arc,
-        // but the interface with `&GSSNode` is consistent with other analysis functions.
-        let node_arc = Arc::new(node.clone());
-        let node_ptr = Arc::as_ptr(&node_arc);
-        if visited.insert(node_ptr) {
-            queue.push_back(node_arc);
-        }
-    }
-
-    while let Some(node_arc) = queue.pop_front() {
-        if node_arc.is_root() {
-            roots.insert(node_arc);
-        } else {
-            for predecessor_arc in node_arc.predecessors.values().flat_map(|m| m.values()).flat_map(|v| v.iter()) {
-                let predecessor_ptr = Arc::as_ptr(predecessor_arc);
-                if visited.insert(predecessor_ptr) {
-                    queue.push_back(predecessor_arc.clone());
-                }
-            }
-        }
-    }
-    roots
+pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeSet<RootItem<'a>> {
+    todo!()
 }
 
 impl GSSNode {
@@ -1147,7 +1125,7 @@ impl GSSNode {
         *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
     }
 
-    pub fn get_roots(&self) -> BTreeSet<Arc<GSSNode>> {
+    pub fn get_roots(&self) -> BTreeSet<RootItem<'_>> {
         get_roots(std::iter::once(self))
     }
 }
