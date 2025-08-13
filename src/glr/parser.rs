@@ -857,7 +857,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             crate::debug!(4, "States to push after reduction: {:?}", states_to_push);
             let new_trie2_end: Arc<Mutex<PrecomputeNode2>> = Arc::new(Mutex::new(PrecomputeNode2::new(PrecomputedNodeContents::end())));
             for (k, acc_arc) in popper.below_bottom {
-                crate::debug!(4, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
+                crate::debug!(6, "Processing popped below bottom for k={} with acc.trie2_nodes: {:?}", k, acc_arc.trie2_nodes);
                 let mut acc: Acc = acc_arc.as_ref().clone();
                 let active_llm_tokens = acc.union_llm_tokens();
                 let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
