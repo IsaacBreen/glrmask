@@ -896,10 +896,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             inserter.expect("GLRParserState::reduce_and_goto: merge insert failed");
                         }
                         // Replace the list of Trie-2 nodes with a single merged node.
-                        acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
+                        trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
                         });
-                    } else {
-                        acc.trie2_nodes = trie2_nodes.into_iter().collect();
                     }
                     for (source_state_id, (final_goto_state_ids_for_source, accepted)) in states_to_push {
                         // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
