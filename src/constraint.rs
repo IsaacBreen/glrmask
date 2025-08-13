@@ -467,6 +467,11 @@ impl GrammarConstraint {
             },
             // process_fn
             |precomputed_node_data, glr_s| {
+                crate::datastructures::gss::merge_trie2_nodes_if_needed(
+                    &mut glr_s.active_state.stack,
+                    MERGE_THRESHOLD,
+                    &mut HashMap::new(),
+                );
                 let active_llm_tokens = glr_s.active_state.stack.acc.union_llm_tokens();
                 let keep_going = !active_llm_tokens.is_empty();
                 if precomputed_node_data.value.end {

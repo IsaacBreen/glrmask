@@ -877,28 +877,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for (k, acc_arc) in popper.below_bottom {
                     let mut acc: Acc = acc_arc.as_ref().clone();
                     let active_llm_tokens = acc.union_llm_tokens();
-                    let mut trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                    const MERGE_THRESHOLD: usize = 10;
-                    if trie2_nodes.len() > MERGE_THRESHOLD {
-                        // Make (0, None) edge to a new node.
-                        timeit!("GLRParserState::reduce_and_goto: Merging Trie-2 nodes", {
-                        let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-                        let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
-                        for existing_trie2_node in &trie2_nodes {
-                            timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
-                            // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
-                            let inserter = EdgeInserter::new(
-                                existing_trie2_node.as_arc().clone(),
-                                (0, None),
-                                active_llm_tokens.clone(),
-                                |e, n| *e |= n,
-                            ).to_destination_weakly(new_trie2_node_arc.as_arc().clone());
-                            inserter.expect("GLRParserState::reduce_and_goto: merge insert failed");
-                        }
-                        // Replace the list of Trie-2 nodes with a single merged node.
-                        trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
-                        });
-                    }
+                    let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                     for (source_state_id, (final_goto_state_ids_for_source, accepted)) in states_to_push {
                         // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                         let cache_key = BelowBottomCacheKey {
