@@ -1108,12 +1108,12 @@ pub fn merge_trie2_nodes_if_needed(
         }
         Some((new_acc, true))
     };
-    let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-    println!("Before merge_trie2_nodes_if_needed:\n{s}");
+    // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+    // println!("Before merge_trie2_nodes_if_needed:\n{s}");
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
-        let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-        println!("After merge_trie2_nodes_if_needed:\n{}", s);
+        // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+        // println!("After merge_trie2_nodes_if_needed:\n{}", s);
     } else {
         // This shouldn't happen as we never return None from closure
         // *root_arc = Arc::new(GSSNode::new_fresh());
