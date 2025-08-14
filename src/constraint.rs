@@ -438,6 +438,7 @@ impl GrammarConstraint {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
+                crate::debug!(3, "Trie2: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
                 let mut glr_s = current_glr_state.clone();
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token(*gt);
@@ -450,10 +451,17 @@ impl GrammarConstraint {
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
                     // Restrict the GLR state to the LLM tokens allowed on this edge.
+                    crate::debug!(3, "Trie2: Restricting GLR state to edge bitset: {:?}", edge_bv);
                     allow_only_llm_tokens_and_prune_arc(
                         &mut glr_s_copy.active_state.stack,
                         edge_bv,
                         &mut HashMap::new(),
+                    );
+                    glr_s_copy.log_gss(
+                        "Trie2: After restricting GLR state to edge bitset",
+                        TerminalID(0),
+                        false,
+                        false,
                     );
                     out.push((
                         dst_node_wrapper.clone(),
