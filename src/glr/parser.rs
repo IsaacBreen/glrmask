@@ -873,8 +873,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
 
-            let goto_state_id = self.parser.substring_state_id;
-            crate::debug!(6, "State to push after reduction (precomputed): {:?}", goto_state_id);
+            crate::debug!(6, "State to push after reduction (precomputed): {:?}", self.parser.substring_state_id);
             let mut trie2_dst_nodes = HashMap::new();
             for (k, acc_arc) in popper.below_bottom {
                 let mut acc: Acc = acc_arc.as_ref().clone();
@@ -932,7 +931,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
                 let new_gss0 = GSSNode::new(acc2);
                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
-                let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
                 out.push(new_gss2);
             }
         }
