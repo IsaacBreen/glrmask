@@ -2174,7 +2174,11 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // merge_fn
             |glr_s1, glr_s2| {
+                crate::debug!(4, "Merging two GLR states");
+                glr_s1.log_gss("Before merge", TerminalID(0), false, false);
+                glr_s2.log_gss("Merging with", TerminalID(0), false, false);
                 glr_s1.merge_with(glr_s2);
+                glr_s1.log_gss("After merge", TerminalID(0), false, false);
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
