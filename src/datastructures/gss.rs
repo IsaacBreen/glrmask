@@ -663,9 +663,7 @@ impl GSSNode {
                     unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
                     unified_preds_by_depth.insert(depth, unified_pred_vec);
                 }
-                if !unified_preds_by_depth.is_empty() {
-                    unified_predecessors.insert(edge_val, unified_preds_by_depth);
-                }
+                unified_predecessors.insert(edge_val, unified_preds_by_depth);
             }
             unified_predecessors
         } else {
