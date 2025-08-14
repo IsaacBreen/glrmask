@@ -157,33 +157,6 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SubstringGoto {
-    pub source_state_id: StateID,
-    pub goto_state_id: Option<StateID>,
-    pub accept: bool,
-}
-
-impl JSONConvertible for SubstringGoto {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("source_state_id".to_string(), self.source_state_id.to_json());
-        obj.insert("goto_state_id".to_string(), self.goto_state_id.to_json());
-        obj.insert("accept".to_string(), self.accept.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(SubstringGoto {
-                source_state_id: StateID::from_json(obj.remove("source_state_id").ok_or_else(|| "Missing field source_state_id for SubstringGoto".to_string())?)?,
-                goto_state_id: Option::<StateID>::from_json(obj.remove("goto_state_id").ok_or_else(|| "Missing field goto_state_id for SubstringGoto".to_string())?)?,
-                accept: bool::from_json(obj.remove("accept").ok_or_else(|| "Missing field accept for SubstringGoto".to_string())?)?,
-            }),
-            _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
-        }
-    }
-}
-
 pub type ShiftsAndReducesWithoutDefaultReduce = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 
@@ -404,6 +377,135 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     }
 
     transitions
+}
+
+/// Build, for each nonterminal, the special item set “post-goto” K_post(NT):
+/// 1) Gather items with the dot before NT (duplicated over FOLLOW(LHS)) ⇒ K_pre(NT)
+/// 2) GOTO on NT ⇒ K_post(NT)
+pub fn build_substring_special_itemsets(
+    productions: &[Production],
+) -> BTreeMap<NonTerminal, BTreeSet<Item>> {
+    // Precompute things closure() and follow() need.
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    }
+
+    let lalr_mode = match LR_MODE {
+        LRMode::LALR | LRMode::LALR_EX_GOTO => true,
+        LRMode::LR1 => false,
+    };
+
+    // 1) Build K_pre(NT) per NT = items with dot before NT, duplicated over FOLLOW(LHS).
+    let mut k_pre_by_nt: BTreeMap<NonTerminal, BTreeSet<Item>> = BTreeMap::new();
+    for p in productions {
+        let follow_of_lhs = follow_sets
+            .get(&p.lhs)
+            .cloned()
+            .unwrap_or_default(); // BTreeSet<Option<Terminal>>
+
+        for (i, sym) in p.rhs.iter().enumerate() {
+            if let Symbol::NonTerminal(nt) = sym {
+                for la in &follow_of_lhs {
+                    let item = Item {
+                        production: Arc::new(p.clone()),
+                        dot_position: i,
+                        lookahead: la.clone(),
+                    };
+                    k_pre_by_nt.entry(nt.clone()).or_default().insert(item);
+                }
+            }
+        }
+    }
+
+    // 2) K_post(NT) = compute_goto(split_on_dot(closure(K_pre(NT)))[NT])
+    let mut out: BTreeMap<NonTerminal, BTreeSet<Item>> = BTreeMap::new();
+    for (nt, k_pre) in k_pre_by_nt {
+        if k_pre.is_empty() {
+            continue;
+        }
+        let closure_pre = compute_closure(
+            &k_pre,
+            &prods_by_lhs,
+            &first_sets,
+            &nullable_nonterminals,
+            &follow_sets,
+            lalr_mode,
+        );
+        let splits_pre = split_on_dot(&closure_pre);
+        if let Some(items_in_split_for_nt) = splits_pre.get(&Some(Symbol::NonTerminal(nt.clone()))) {
+            let k_post = compute_goto(items_in_split_for_nt);
+            if !k_post.is_empty() {
+                out.insert(nt.clone(), k_post);
+            }
+        }
+    }
+
+    out
+}
+
+/// Insert the special item sets (K_post(NT)) into Stage 1’s table so they flow through
+/// stages 2..8 like normal states. Returns the NT → K_post(NT) mapping.
+pub fn augment_stage_1_with_substring_states(
+    productions: &[Production],
+    stage_1_table: &mut Stage1Table,
+) -> BTreeMap<NonTerminal, BTreeSet<Item>> {
+    let k_post_by_nt = build_substring_special_itemsets(productions);
+
+    // Precompute for closure
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    }
+
+    let lalr_mode = match LR_MODE {
+        LRMode::LALR | LRMode::LALR_EX_GOTO => true,
+        LRMode::LR1 => false,
+    };
+
+    for (_nt, k_post) in &k_post_by_nt {
+        if stage_1_table.contains_key(k_post) {
+            continue; // already present
+        }
+        let closure_post = compute_closure(
+            k_post,
+            &prods_by_lhs,
+            &first_sets,
+            &nullable_nonterminals,
+            &follow_sets,
+            lalr_mode,
+        );
+        let splits_post = split_on_dot(&closure_post); // This is the Stage1Row payload
+        stage_1_table.insert(k_post.clone(), splits_post);
+    }
+
+    k_post_by_nt
+}
+
+/// Returns a map NonTerminalID → bool indicating which nonterminals
+/// have at least one state whose GOTO on that NT has accept=true.
+pub fn compute_substring_accept_map(
+    table: &Table,
+) -> BTreeMap<NonTerminalID, bool> {
+    let mut out = BTreeMap::new();
+    for row in table.values() {
+        for (nt_id, goto) in &row.gotos {
+            if goto.accept {
+                out.insert(*nt_id, true);
+            } else {
+                out.entry(*nt_id).or_insert(false);
+            }
+        }
+    }
+    out
 }
 
 fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
@@ -762,80 +864,6 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     stage_8_table
 }
 
-/// Pre-computes the complex GOTO logic for substring parsing reductions that pop below the stack.
-///
-/// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
-/// states would be if a reduction for that non-terminal occurred, and we could start
-/// from *any* state in the automaton (as is the case for substring parsing).
-///
-/// This avoids a very expensive runtime loop over all table states.
-pub fn stage_9(
-    table: &Table,
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> BTreeMap<NonTerminalID, Vec<SubstringGoto>> {
-    let mut substring_gotos = BTreeMap::new();
-
-    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
-
-    for &nt_id in &all_nt_ids {
-        let mut gotos_for_nt = Vec::new();
-        for (&source_state_id, row) in table {
-            if let Some(goto) = row.gotos.get(&nt_id) {
-                if goto.state_id.is_some() || goto.accept {
-                    gotos_for_nt.push(SubstringGoto {
-                        source_state_id,
-                        goto_state_id: goto.state_id,
-                        accept: goto.accept,
-                    });
-                }
-            }
-        }
-
-        if !gotos_for_nt.is_empty() {
-            substring_gotos.insert(nt_id, gotos_for_nt);
-        }
-    }
-
-    substring_gotos
-}
-
-/// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
-fn compute_unit_reduction_chain<F>(
-    table: &Table,
-    source_state_id: StateID,
-    initial_nt: NonTerminalID,
-    token_id: TerminalID,
-    action_selector: F,
-) -> (BTreeSet<StateID>, bool)
-where
-    F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-{
-    let mut final_goto_state_ids_for_source = BTreeSet::new();
-    let mut accepted = false;
-    let mut current_nt_local = initial_nt;
-    let row = &table[&source_state_id];
-
-    loop {
-        if let Some(goto) = row.gotos.get(&current_nt_local) {
-            if goto.accept {
-                accepted = true;
-            }
-            if let Some(goto_state_id) = goto.state_id {
-                let next_row = &table[&goto_state_id];
-                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
-                    current_nt_local = *next_nt;
-                    continue; // Follow the unit-reduction chain.
-                }
-                // Not a unit reduction, this is a final state for this chain.
-                final_goto_state_ids_for_source.insert(goto_state_id);
-            }
-        }
-        // End of chain (no GOTO, no further state, or not a unit reduction).
-        break;
-    }
-    (final_goto_state_ids_for_source, accepted)
-}
-
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
 ///
 /// This function takes a table and a list of compatible state pairs. It merges these
@@ -993,7 +1021,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions);
+    let mut stage_1_table = stage_1(&productions);
+    // Augment with one special “substring” state per nonterminal:
+    let substring_itemsets_by_nt = augment_stage_1_with_substring_states(&productions, &mut stage_1_table);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
@@ -1013,15 +1043,24 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
+
+    let substring_state_by_nt: BTreeMap<NonTerminalID, StateID> = substring_itemsets_by_nt
+        .into_iter()
+        .filter_map(|(nt, itemset)| {
+            let nt_id = non_terminal_map.get_by_left(&nt)?;
+            let sid = item_set_map.get_by_left(&itemset)?;
+            Some((*nt_id, *sid))
+        })
+        .collect();
+
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
 
-    crate::debug!(2, "Stage 9: Precomputing substring gotos");
-    let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
+    let final_table = stage_8_table;
+    let substring_accept_by_nt = compute_substring_accept_map(&final_table);
 
     crate::debug!(2, "Finalizing table");
-    let final_table = stage_8_table;
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
@@ -1030,7 +1069,11 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id, substring_gotos)
+    crate::glr::parser::GLRParser::new(
+        final_table, productions, terminal_map, non_terminal_map,
+        item_set_map, start_state_id, actions, ignore_terminal_id,
+        substring_state_by_nt, substring_accept_by_nt,
+    )
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
