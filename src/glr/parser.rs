@@ -873,76 +873,82 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
 
-            crate::debug!(6, "State to push after reduction (precomputed): {:?}", self.parser.substring_state_id);
-            let mut trie2_dst_nodes = HashMap::new();
-            for (k, acc_arc) in popper.below_bottom {
-                let mut acc: Acc = acc_arc.as_ref().clone();
-                let active_llm_tokens = acc.union_llm_tokens();
-                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
-                let cache_key = BelowBottomCacheKey {
-                    nonterminal_id: nt,
-                    // source_state_id: goto_info.source_state_id,
-                    acc: acc.clone(),
-                };
 
-                // If we have seen this exact situation before, reuse the cached Trie-2 node
-                if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
-                    timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
+            let goto = self.parser.table
+                .get(&self.parser.substring_state_id).expect("GLRParserState::reduce_and_goto: No row found for substring state")
+                .gotos.get(&nt).expect("GLRParserState::reduce_and_goto: No goto found for NT");
+
+            if goto.accept {
+                // crate::debug!(4, "Accepting with NT '{}' in substring state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), self.parser.substring_state_id);
+                // self.accepted = true;
+            }
+
+            if let Some(goto_state_id) = goto.state_id {
+                crate::debug!(6, "State to push after reduction (precomputed): {:?}", self.parser.substring_state_id);
+                let mut trie2_dst_nodes = HashMap::new();
+                for (k, acc_arc) in popper.below_bottom {
+                    let mut acc: Acc = acc_arc.as_ref().clone();
+                    let active_llm_tokens = acc.union_llm_tokens();
+                    let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                    // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
+                    let cache_key = BelowBottomCacheKey {
+                        nonterminal_id: nt,
+                        // source_state_id: goto_info.source_state_id,
+                        acc: acc.clone(),
+                    };
+
+                    // If we have seen this exact situation before, reuse the cached Trie-2 node
+                    if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                        timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
+                        for existing_trie2_node in &trie2_nodes {
+                            timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
+                            // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
+                            let inserter = EdgeInserter::new(
+                                existing_trie2_node.as_arc().clone(),
+                                (k, Some(self.parser.substring_state_id)),
+                                active_llm_tokens.clone(),
+                                |e, n| *e |= n,
+                            ).to_destination_weakly(cached_trie2_node.as_arc().clone());
+                            inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                        }
+                        });
+
+                        // IMPORTANT: No need to push a new GSS node here.
+                        // It would be equivalent to the one created when this key was first seen.
+                        continue;
+                    }
+                    // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
+                    let new_trie2_node = trie2_dst_nodes
+                        .entry(self.parser.substring_state_id)
+                        .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                        .clone();
+                    self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
+
+                    timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
                     for existing_trie2_node in &trie2_nodes {
-                        timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
-                        // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
+                        // Allow cycles to be represented as WEAK edges if they occur.
+                        timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
                         let inserter = EdgeInserter::new(
                             existing_trie2_node.as_arc().clone(),
                             (k, Some(self.parser.substring_state_id)),
                             active_llm_tokens.clone(),
                             |e, n| *e |= n,
-                        ).to_destination_weakly(cached_trie2_node.as_arc().clone());
-                        inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                        ).try_destination_auto(new_trie2_node.clone());
+                        inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                     }
                     });
 
-                    // IMPORTANT: No need to push a new GSS node here.
-                    // It would be equivalent to the one created when this key was first seen.
-                    continue;
+                    let mut acc2 = acc.clone();
+                    acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                    let new_gss0 = GSSNode::new(acc2);
+                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
+                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                    out.push(new_gss2);
                 }
-                // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
-                let new_trie2_node = trie2_dst_nodes
-                    .entry(self.parser.substring_state_id)
-                    .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
-                    .clone();
-                self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
-
-                timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
-                for existing_trie2_node in &trie2_nodes {
-                    // Allow cycles to be represented as WEAK edges if they occur.
-                    timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
-                    let inserter = EdgeInserter::new(
-                        existing_trie2_node.as_arc().clone(),
-                        (k, Some(self.parser.substring_state_id)),
-                        active_llm_tokens.clone(),
-                        |e, n| *e |= n,
-                    ).try_destination_auto(new_trie2_node.clone());
-                    inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                }
-                });
-
-                let goto_state_id = self.parser.table
-                    .get(&self.parser.substring_state_id)
-                    .and_then(|row| row.gotos.get(&nt))
-                    .and_then(|goto| goto.state_id)
-                    .expect("GLRParserState::reduce_and_goto: No goto state ID found for substring state");
-
-                let mut acc2 = acc.clone();
-                acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
-                let new_gss0 = GSSNode::new(acc2);
-                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
-                let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
-                out.push(new_gss2);
             }
         }
         });
- 
+
         if out.is_empty() {
             Arc::new(GSSNode::new_fresh())
         } else if out.len() == 1 {

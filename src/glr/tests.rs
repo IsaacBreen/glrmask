@@ -803,6 +803,7 @@ fn test_substring_parser_simple() {
     // Grammar: S -> a S b | c
     // Language: a^n c b^n
     let productions = vec![
+        prod("S'", vec![nt("S")]), // Start rule
         prod("S", vec![t("a"), nt("S"), t("b")]),
         prod("S", vec![t("c")]),
     ];
