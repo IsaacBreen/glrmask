@@ -876,11 +876,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             let goto = self.parser.table
                 .get(&self.parser.substring_state_id).expect("GLRParserState::reduce_and_goto: No row found for substring state")
-                .gotos.get(&nt).expect(format!(
-                    "GLRParserState::reduce_and_goto: No goto found for NT '{}' in substring state {:?}",
-                    self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
-                    self.parser.substring_state_id
-                ).as_str());
+                .gotos.get(&nt).expect_else(|| {
+                    format!("GLRParserState::reduce_and_goto: Goto not found for NT '{}' in substring state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), self.parser.substring_state_id)
+                });
 
             if goto.accept {
                 // crate::debug!(4, "Accepting with NT '{}' in substring state {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), self.parser.substring_state_id);
