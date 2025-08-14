@@ -583,11 +583,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
 
 fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let start_production_id = 0;
-    let end_item = Item {
-        production: Arc::new(productions[start_production_id].clone()),
-        dot_position: productions[start_production_id].rhs.len(),
-        lookahead: None,
-    };
+    let initial_item = Item { production: Arc::new(productions[start_production_id].clone()), dot_position: 0, lookahead: None };
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
@@ -645,8 +641,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
             let state_id = Some(*item_set_map.get_by_left(&next_item_set).unwrap());
-            let accept = next_item_set.contains(&end_item);
-            let goto = Goto { state_id, accept };
+            let goto = Goto { state_id, accept: false };
             gotos.insert(non_terminal_id, goto);
         }
 
