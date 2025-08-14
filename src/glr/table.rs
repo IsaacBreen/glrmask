@@ -962,21 +962,16 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, item_set_map) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
-
-    // Determine start state and set its accept action
-    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-    stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-
-    // Determine the special substring state ID
-    let substring_state_id = *item_set_map.get_by_left(&special_substring_item_set).unwrap();
-
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
-
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
+
+    // Determine start state
+    let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+    // Determine the special substring state ID
+    let substring_state_id = *item_set_map.get_by_left(&special_substring_item_set).unwrap();
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
