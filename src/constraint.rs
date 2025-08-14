@@ -2221,7 +2221,9 @@ impl<'a> GrammarConstraintState<'a> {
             print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
         }
 
+        crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
 
         crate::debug!(2, "Done computing mask");
         let t1 = std::time::Instant::now();
