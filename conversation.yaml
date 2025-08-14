@@ -1099,41 +1099,83 @@ local_system:
                   None
               }
               Some((mut new_local_acc, continue_recursion)) => {
+                  // Case 1: Do not recurse; only possibly adjust local acc.
                   if !continue_recursion {
-                      // let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
-                      //                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
-                      //                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-                      //                   new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
-                      //                  new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
                       let acc_changed = *node_arc.acc != new_local_acc;
                       if acc_changed {
+                          // Mark for push down so children get narrowed later.
                           new_local_acc.needs_push_down = true;
+                          let transformed_node =
+                              GSSNode::new_with_map(Arc::new(new_local_acc), node_arc.predecessors.clone());
+                          let result_arc = Arc::new(transformed_node);
+                          memo.insert(node_ptr, Some(result_arc.clone()));
+                          return Some(result_arc);
+                      } else {
+                          // No changes at all.
+                          memo.insert(node_ptr, Some(node_arc.clone()));
+                          return Some(node_arc.clone());
                       }
                   }
-                  let new_node_predecessors_map = if continue_recursion {
-                      let mut new_predecessors_set = NodeSet::new();
-                      for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                          for pred_vec in preds_by_depth.values() {
-                              for pred_arc in pred_vec {
-                                  if let Some(new_pred_arc) =
-                                      prune_and_transform_recursive(pred_arc, closure, memo)
-                                  {
-                                      new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
+
+                  // Case 2: Recurse into children. Preserve the original predecessor structure.
+                  // Important: Do not canonicalize/merge here; a no-op transform should be a no-op.
+                  let mut any_child_changed = false;
+                  let mut had_any_pred = false;
+
+                  // Build a new NodeMap mirroring the existing shape.
+                  let mut new_predecessors_map: NodeMap = BTreeMap::new();
+
+                  for (edge_val, preds_by_depth) in &node_arc.predecessors {
+                      let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                      for (dest_key, pred_vec) in preds_by_depth {
+                          let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
+                          for pred_arc in pred_vec {
+                              had_any_pred = true;
+                              match prune_and_transform_recursive(pred_arc, closure, memo) {
+                                  Some(new_pred_arc) => {
+                                      if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                          any_child_changed = true;
+                                      }
+                                      new_vec.push(new_pred_arc);
+                                  }
+                                  None => {
+                                      // Child was pruned.
+                                      any_child_changed = true;
                                   }
                               }
                           }
+                          if !new_vec.is_empty() {
+                              new_preds_by_depth.insert(*dest_key, new_vec);
+                          }
                       }
-                      if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
-                          memo.insert(node_ptr, None);
-                          return None;
+                      if !new_preds_by_depth.is_empty() {
+                          new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
                       }
-                      process_predecessors(&new_predecessors_set)
-                  } else { // Don't recurse, keep existing predecessors.
-                      node_arc.predecessors.clone()
-                  };
+                  }
 
-                  let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
+                  // If all predecessors were pruned away, and this node originally had any predecessors,
+                  // prune this node too (consistent with previous behavior).
+                  let new_has_any_pred = new_predecessors_map
+                      .values()
+                      .any(|by_depth| by_depth.values().any(|v| !v.is_empty()));
+                  if !new_has_any_pred && had_any_pred {
+                      memo.insert(node_ptr, None);
+                      return None;
+                  }
 
+                  // Decide whether anything changed at this node.
+                  let acc_changed = *node_arc.acc != new_local_acc;
+                  if !acc_changed && !any_child_changed {
+                      // No changes at all: return the original arc to preserve identity and structure.
+                      memo.insert(node_ptr, Some(node_arc.clone()));
+                      return Some(node_arc.clone());
+                  }
+
+                  // Some change happened: rebuild the node with the same predecessor shape (no merging).
+                  // Note: When recursing, we don't set needs_push_down even if acc changed; that flag is
+                  // used for the non-recursing path to defer narrowing into children.
+                  let transformed_node =
+                      GSSNode::new_with_map(Arc::new(new_local_acc), new_predecessors_map);
                   let result_arc = Arc::new(transformed_node);
                   memo.insert(node_ptr, Some(result_arc.clone()));
                   Some(result_arc)
@@ -1188,7 +1230,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -1206,7 +1248,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -1314,15 +1356,15 @@ local_system:
               }
               Some((new_acc, true))
           };
-          let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-          println!("Before merge_trie2_nodes_if_needed:\n{s}");
+          // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+          // println!("Before merge_trie2_nodes_if_needed:\n{s}");
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
-              let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-              println!("After merge_trie2_nodes_if_needed:\n{}", s);
+              // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              // println!("After merge_trie2_nodes_if_needed:\n{}", s);
           } else {
               // This shouldn't happen as we never return None from closure
-              // *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -3378,41 +3420,83 @@ local_system:
                   None
               }
               Some((mut new_local_acc, continue_recursion)) => {
+                  // Case 1: Do not recurse; only possibly adjust local acc.
                   if !continue_recursion {
-                      // let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
-                      //                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
-                      //                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-                      //                   new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
-                      //                  new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
                       let acc_changed = *node_arc.acc != new_local_acc;
                       if acc_changed {
+                          // Mark for push down so children get narrowed later.
                           new_local_acc.needs_push_down = true;
+                          let transformed_node =
+                              GSSNode::new_with_map(Arc::new(new_local_acc), node_arc.predecessors.clone());
+                          let result_arc = Arc::new(transformed_node);
+                          memo.insert(node_ptr, Some(result_arc.clone()));
+                          return Some(result_arc);
+                      } else {
+                          // No changes at all.
+                          memo.insert(node_ptr, Some(node_arc.clone()));
+                          return Some(node_arc.clone());
                       }
                   }
-                  let new_node_predecessors_map = if continue_recursion {
-                      let mut new_predecessors_set = NodeSet::new();
-                      for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                          for pred_vec in preds_by_depth.values() {
-                              for pred_arc in pred_vec {
-                                  if let Some(new_pred_arc) =
-                                      prune_and_transform_recursive(pred_arc, closure, memo)
-                                  {
-                                      new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
+
+                  // Case 2: Recurse into children. Preserve the original predecessor structure.
+                  // Important: Do not canonicalize/merge here; a no-op transform should be a no-op.
+                  let mut any_child_changed = false;
+                  let mut had_any_pred = false;
+
+                  // Build a new NodeMap mirroring the existing shape.
+                  let mut new_predecessors_map: NodeMap = BTreeMap::new();
+
+                  for (edge_val, preds_by_depth) in &node_arc.predecessors {
+                      let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                      for (dest_key, pred_vec) in preds_by_depth {
+                          let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
+                          for pred_arc in pred_vec {
+                              had_any_pred = true;
+                              match prune_and_transform_recursive(pred_arc, closure, memo) {
+                                  Some(new_pred_arc) => {
+                                      if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                          any_child_changed = true;
+                                      }
+                                      new_vec.push(new_pred_arc);
+                                  }
+                                  None => {
+                                      // Child was pruned.
+                                      any_child_changed = true;
                                   }
                               }
                           }
+                          if !new_vec.is_empty() {
+                              new_preds_by_depth.insert(*dest_key, new_vec);
+                          }
                       }
-                      if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
-                          memo.insert(node_ptr, None);
-                          return None;
+                      if !new_preds_by_depth.is_empty() {
+                          new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
                       }
-                      process_predecessors(&new_predecessors_set)
-                  } else { // Don't recurse, keep existing predecessors.
-                      node_arc.predecessors.clone()
-                  };
+                  }
 
-                  let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
+                  // If all predecessors were pruned away, and this node originally had any predecessors,
+                  // prune this node too (consistent with previous behavior).
+                  let new_has_any_pred = new_predecessors_map
+                      .values()
+                      .any(|by_depth| by_depth.values().any(|v| !v.is_empty()));
+                  if !new_has_any_pred && had_any_pred {
+                      memo.insert(node_ptr, None);
+                      return None;
+                  }
 
+                  // Decide whether anything changed at this node.
+                  let acc_changed = *node_arc.acc != new_local_acc;
+                  if !acc_changed && !any_child_changed {
+                      // No changes at all: return the original arc to preserve identity and structure.
+                      memo.insert(node_ptr, Some(node_arc.clone()));
+                      return Some(node_arc.clone());
+                  }
+
+                  // Some change happened: rebuild the node with the same predecessor shape (no merging).
+                  // Note: When recursing, we don't set needs_push_down even if acc changed; that flag is
+                  // used for the non-recursing path to defer narrowing into children.
+                  let transformed_node =
+                      GSSNode::new_with_map(Arc::new(new_local_acc), new_predecessors_map);
                   let result_arc = Arc::new(transformed_node);
                   memo.insert(node_ptr, Some(result_arc.clone()));
                   Some(result_arc)
@@ -3467,7 +3551,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -3485,7 +3569,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -3593,15 +3677,15 @@ local_system:
               }
               Some((new_acc, true))
           };
-          let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-          println!("Before merge_trie2_nodes_if_needed:\n{s}");
+          // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+          // println!("Before merge_trie2_nodes_if_needed:\n{s}");
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
-              let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-              println!("After merge_trie2_nodes_if_needed:\n{}", s);
+              // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              // println!("After merge_trie2_nodes_if_needed:\n{}", s);
           } else {
               // This shouldn't happen as we never return None from closure
-              // *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -5686,41 +5770,83 @@ messages:
                   None
               }
               Some((mut new_local_acc, continue_recursion)) => {
+                  // Case 1: Do not recurse; only possibly adjust local acc.
                   if !continue_recursion {
-                      // let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
-                      //                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
-                      //                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-                      //                   new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
-                      //                  new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
                       let acc_changed = *node_arc.acc != new_local_acc;
                       if acc_changed {
+                          // Mark for push down so children get narrowed later.
                           new_local_acc.needs_push_down = true;
+                          let transformed_node =
+                              GSSNode::new_with_map(Arc::new(new_local_acc), node_arc.predecessors.clone());
+                          let result_arc = Arc::new(transformed_node);
+                          memo.insert(node_ptr, Some(result_arc.clone()));
+                          return Some(result_arc);
+                      } else {
+                          // No changes at all.
+                          memo.insert(node_ptr, Some(node_arc.clone()));
+                          return Some(node_arc.clone());
                       }
                   }
-                  let new_node_predecessors_map = if continue_recursion {
-                      let mut new_predecessors_set = NodeSet::new();
-                      for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                          for pred_vec in preds_by_depth.values() {
-                              for pred_arc in pred_vec {
-                                  if let Some(new_pred_arc) =
-                                      prune_and_transform_recursive(pred_arc, closure, memo)
-                                  {
-                                      new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
+
+                  // Case 2: Recurse into children. Preserve the original predecessor structure.
+                  // Important: Do not canonicalize/merge here; a no-op transform should be a no-op.
+                  let mut any_child_changed = false;
+                  let mut had_any_pred = false;
+
+                  // Build a new NodeMap mirroring the existing shape.
+                  let mut new_predecessors_map: NodeMap = BTreeMap::new();
+
+                  for (edge_val, preds_by_depth) in &node_arc.predecessors {
+                      let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                      for (dest_key, pred_vec) in preds_by_depth {
+                          let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
+                          for pred_arc in pred_vec {
+                              had_any_pred = true;
+                              match prune_and_transform_recursive(pred_arc, closure, memo) {
+                                  Some(new_pred_arc) => {
+                                      if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                          any_child_changed = true;
+                                      }
+                                      new_vec.push(new_pred_arc);
+                                  }
+                                  None => {
+                                      // Child was pruned.
+                                      any_child_changed = true;
                                   }
                               }
                           }
+                          if !new_vec.is_empty() {
+                              new_preds_by_depth.insert(*dest_key, new_vec);
+                          }
                       }
-                      if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
-                          memo.insert(node_ptr, None);
-                          return None;
+                      if !new_preds_by_depth.is_empty() {
+                          new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
                       }
-                      process_predecessors(&new_predecessors_set)
-                  } else { // Don't recurse, keep existing predecessors.
-                      node_arc.predecessors.clone()
-                  };
+                  }
 
-                  let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
+                  // If all predecessors were pruned away, and this node originally had any predecessors,
+                  // prune this node too (consistent with previous behavior).
+                  let new_has_any_pred = new_predecessors_map
+                      .values()
+                      .any(|by_depth| by_depth.values().any(|v| !v.is_empty()));
+                  if !new_has_any_pred && had_any_pred {
+                      memo.insert(node_ptr, None);
+                      return None;
+                  }
 
+                  // Decide whether anything changed at this node.
+                  let acc_changed = *node_arc.acc != new_local_acc;
+                  if !acc_changed && !any_child_changed {
+                      // No changes at all: return the original arc to preserve identity and structure.
+                      memo.insert(node_ptr, Some(node_arc.clone()));
+                      return Some(node_arc.clone());
+                  }
+
+                  // Some change happened: rebuild the node with the same predecessor shape (no merging).
+                  // Note: When recursing, we don't set needs_push_down even if acc changed; that flag is
+                  // used for the non-recursing path to defer narrowing into children.
+                  let transformed_node =
+                      GSSNode::new_with_map(Arc::new(new_local_acc), new_predecessors_map);
                   let result_arc = Arc::new(transformed_node);
                   memo.insert(node_ptr, Some(result_arc.clone()));
                   Some(result_arc)
@@ -5775,7 +5901,7 @@ messages:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -5793,7 +5919,7 @@ messages:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -5901,15 +6027,15 @@ messages:
               }
               Some((new_acc, true))
           };
-          let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-          println!("Before merge_trie2_nodes_if_needed:\n{s}");
+          // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+          // println!("Before merge_trie2_nodes_if_needed:\n{s}");
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
-              let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
-              println!("After merge_trie2_nodes_if_needed:\n{}", s);
+              // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              // println!("After merge_trie2_nodes_if_needed:\n{}", s);
           } else {
               // This shouldn't happen as we never return None from closure
-              // *root_arc = Arc::new(GSSNode::new_fresh());
+              unreachable!();
           }
       }
 
@@ -6874,196 +7000,88 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: |2+
-
-      The GSS structure should be identical after a no-op transform
-      Left:  GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inn ...
-
-      Right: GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inn ...
-
-      <Click to see difference>
-
-      thread 'datastructures::gss::tests::test_prune_and_transform_noop_does_not_merge_distinct_predecessors' panicked at src/datastructures/gss.rs:2034:9:
-      assertion `left == right` failed: The GSS structure should be identical after a no-op transform
-        left: GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {ParseStateEdgeContent { state_id: StateID(100) }: {1: [GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=0, 2..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=0, 2..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {ParseStateEdgeContent { state_id: StateID(10) }: {0: [GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=0, 2..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=0, 2..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {}, hash_key_cache: 16785675820296250961, max_depth: 0 }]}}, hash_key_cache: 14957784388745891388, max_depth: 1 }, GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=1, 3..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=1, 3..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {ParseStateEdgeContent { state_id: StateID(10) }: {0: [GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=1, 3..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=1, 3..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {}, hash_key_cache: 12950490463756274367, max_depth: 0 }]}}, hash_key_cache: 315097855454007646, max_depth: 1 }]}}, hash_key_cache: 4274629716597796545, max_depth: 2 }
-       right: GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {ParseStateEdgeContent { state_id: StateID(100) }: {1: [GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=0, 3..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {ParseStateEdgeContent { state_id: StateID(10) }: {0: [GSSNode { acc: Acc { llm_tokens_union: HybridBitset { inner: 0..=18446744073709551615 }, llm_tokens_intersection: HybridBitset { inner: 0..=0, 3..=18446744073709551615 }, terminals_union: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, terminals_intersection: HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) }, needs_push_down: false, trie2_nodes: {} }, predecessors: {}, hash_key_cache: 18270381530133405971, max_depth: 0 }]}}, hash_key_cache: 11721495173465883267, max_depth: 1 }]}}, hash_key_cache: 10385134081696162547, max_depth: 2 }
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/panicking.rs:697:5
-         1: core::panicking::panic_fmt
-                   at /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:387:5
-         4: sep1::datastructures::gss::tests::test_prune_and_transform_noop_does_not_merge_distinct_predecessors
-                   at ./src/datastructures/gss.rs:2034:9
-         5: sep1::datastructures::gss::tests::test_prune_and_transform_noop_does_not_merge_distinct_predecessors::{{closure}}
-                   at ./src/datastructures/gss.rs:1991:76
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/ops/function.rs:250:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
+  - user: |-
+      There's an issue with this code. Think about what happens if a gss like A --(0)--> B --(1)--> C (where A is the top node) is merged with A --(0)--> B. In the first tree, B is a root node - a 'bottom' node. In the second tree, B is the bottom node. But when they're merged, is this distinction kept?
+      Add a test for it. Use `is_root`.
     metadata:
-  - user: Fix this.
-    metadata:
-  - assistant: |-
+  - assistant: |
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index f5b2a41..b7d2c3d 100644
+      index 9910a27..6368d62 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -715,50 +715,110 @@ pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSS
-       fn prune_and_transform_recursive(
-           node_arc: &Arc<GSSNode>,
-           closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
-           memo: &mut PruneAndTransformRecursiveMemo,
-       ) -> Option<Arc<GSSNode>> {
-           let node_ptr = Arc::as_ptr(node_arc);
-           if let Some(cached_result) = memo.get(&node_ptr) {
-               return cached_result.clone();
+      @@ -1466,6 +1466,48 @@ mod tests {
+               assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
            }
-       
-           match closure(node_arc.as_ref()) {
-               None => { // Prune this node
-                   memo.insert(node_ptr, None);
-                   None
-               }
-      -        Some((mut new_local_acc, continue_recursion)) => {
-      -            if !continue_recursion {
-      -                // let acc_changed = new_local_acc.llm_tokens_union != node_arc.acc.llm_tokens_union ||
-      -                //                   new_local_acc.llm_tokens_intersection != node_arc.acc.llm_tokens_intersection ||
-      -                //                   new_local_acc.terminals_union != node_arc.acc.terminals_union ||
-      -                //                   new_local_acc.terminals_intersection != node_arc.acc.terminals_intersection ||
-      -                //                  new_local_acc.trie2_nodes != node_arc.acc.trie2_nodes;
-      -                let acc_changed = *node_arc.acc != new_local_acc;
-      -                if acc_changed {
-      -                    new_local_acc.needs_push_down = true;
-      -                }
-      -            }
-      -            let new_node_predecessors_map = if continue_recursion {
-      -                let mut new_predecessors_set = NodeSet::new();
-      -                for (edge_val, preds_by_depth) in &node_arc.predecessors {
-      -                    for pred_vec in preds_by_depth.values() {
-      -                        for pred_arc in pred_vec {
-      -                            if let Some(new_pred_arc) =
-      -                                prune_and_transform_recursive(pred_arc, closure, memo)
-      -                            {
-      -                                new_predecessors_set.insert((new_pred_arc, edge_val.clone()));
-      -                            }
-      -                        }
-      -                    }
-      -                }
-      -                if new_predecessors_set.is_empty() && !node_arc.predecessors.values().all(|preds_by_depth| preds_by_depth.is_empty()) {
-      -                    memo.insert(node_ptr, None);
-      -                    return None;
-      -                }
-      -                process_predecessors(&new_predecessors_set)
-      -            } else { // Don't recurse, keep existing predecessors.
-      -                node_arc.predecessors.clone()
-      -            };
-      -
-      -            let transformed_node = GSSNode::new_with_map(Arc::new(new_local_acc), new_node_predecessors_map);
-      -
-      -            let result_arc = Arc::new(transformed_node);
-      -            memo.insert(node_ptr, Some(result_arc.clone()));
-      -            Some(result_arc)
-      -        }
-      +        Some((mut new_local_acc, continue_recursion)) => {
-      +            // Case 1: Do not recurse; only possibly adjust local acc.
-      +            if !continue_recursion {
-      +                let acc_changed = *node_arc.acc != new_local_acc;
-      +                if acc_changed {
-      +                    // Mark for push down so children get narrowed later.
-      +                    new_local_acc.needs_push_down = true;
-      +                    let transformed_node =
-      +                        GSSNode::new_with_map(Arc::new(new_local_acc), node_arc.predecessors.clone());
-      +                    let result_arc = Arc::new(transformed_node);
-      +                    memo.insert(node_ptr, Some(result_arc.clone()));
-      +                    return Some(result_arc);
-      +                } else {
-      +                    // No changes at all.
-      +                    memo.insert(node_ptr, Some(node_arc.clone()));
-      +                    return Some(node_arc.clone());
-      +                }
-      +            }
       +
-      +            // Case 2: Recurse into children. Preserve the original predecessor structure.
-      +            // Important: Do not canonicalize/merge here; a no-op transform should be a no-op.
-      +            let mut any_child_changed = false;
-      +            let mut had_any_pred = false;
+      +    #[test]
+      +    fn test_merge_keeps_root_and_nonroot_predecessors_separate() {
+      +        // Build a chain A --(0)--> B --(1)--> C (A is the top node)
+      +        // and merge with A --(0)--> B (where B is a bottom/root node).
+      +        //
+      +        // After merging at A, we must keep the distinction between:
+      +        // - B that has its own predecessor (non-root), and
+      +        // - B that is a root/bottom node.
+      +        // Specifically, A's predecessors under edge 0 should include both forms.
       +
-      +            // Build a new NodeMap mirroring the existing shape.
-      +            let mut new_predecessors_map: NodeMap = BTreeMap::new();
+      +        // C: bottom/root
+      +        let c = Arc::new(GSSNode::new(empty_acc()));
+      +        assert!(c.is_root());
       +
-      +            for (edge_val, preds_by_depth) in &node_arc.predecessors {
-      +                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
-      +                for (dest_key, pred_vec) in preds_by_depth {
-      +                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
-      +                    for pred_arc in pred_vec {
-      +                        had_any_pred = true;
-      +                        match prune_and_transform_recursive(pred_arc, closure, memo) {
-      +                            Some(new_pred_arc) => {
-      +                                if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
-      +                                    any_child_changed = true;
-      +                                }
-      +                                new_vec.push(new_pred_arc);
-      +                            }
-      +                            None => {
-      +                                // Child was pruned.
-      +                                any_child_changed = true;
-      +                            }
-      +                        }
-      +                    }
-      +                    if !new_vec.is_empty() {
-      +                        new_preds_by_depth.insert(*dest_key, new_vec);
-      +                    }
-      +                }
-      +                if !new_preds_by_depth.is_empty() {
-      +                    new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
-      +                }
-      +            }
+      +        // B via C (non-root, has a predecessor)
+      +        let b_via_c = Arc::new(GSSNode::new_with_single_predecessor(
+      +            c.clone(),
+      +            mock_edge(1),
+      +            empty_acc(),
+      +        ));
+      +        assert!(!b_via_c.is_root());
       +
-      +            // If all predecessors were pruned away, and this node originally had any predecessors,
-      +            // prune this node too (consistent with previous behavior).
-      +            let new_has_any_pred = new_predecessors_map
-      +                .values()
-      +                .any(|by_depth| by_depth.values().any(|v| !v.is_empty()));
-      +            if !new_has_any_pred && had_any_pred {
-      +                memo.insert(node_ptr, None);
-      +                return None;
-      +            }
+      +        // A1 has predecessor B via C on edge 0
+      +        let mut a1 = GSSNode::new_with_single_predecessor(
+      +            b_via_c.clone(),
+      +            mock_edge(0),
+      +            empty_acc(),
+      +        );
       +
-      +            // Decide whether anything changed at this node.
-      +            let acc_changed = *node_arc.acc != new_local_acc;
-      +            if !acc_changed && !any_child_changed {
-      +                // No changes at all: return the original arc to preserve identity and structure.
-      +                memo.insert(node_ptr, Some(node_arc.clone()));
-      +                return Some(node_arc.clone());
-      +            }
+      +        // B root (bottom)
+      +        let b_root = Arc::new(GSSNode::new(empty_acc()));
+      +        assert!(b_root.is_root());
       +
-      +            // Some change happened: rebuild the node with the same predecessor shape (no merging).
-      +            // Note: When recursing, we don't set needs_push_down even if acc changed; that flag is
-      +            // used for the non-recursing path to defer narrowing into children.
-      +            let transformed_node =
-      +                GSSNode::new_with_map(Arc::new(new_local_acc), new_predecessors_map);
-      +            let result_arc = Arc::new(transformed_node);
-      +            memo.insert(node_ptr, Some(result_arc.clone()));
-      +            Some(result_arc)
+      +        // A2 has predecessor B root on edge 0
+      +        let a2 = GSSNode::new_with_single_predecessor(b_root.clone(), mock_edge(0), empty_acc());
+      +
+      +        // Merge: A1 ⊔ A2
+      +        a1.merge_with_depth(1, &a2);
+      +
+      +        // After merging, A should have two distinct predecessors under edge 0:
+      +        // one is_root() and one not is_root().
+      +        assert_eq!(a1.num_predecessors(), 2, "Merged A should have exactly two predecessors");
+      +
+      +        let preds_by_edge0 = a1.predecessors().get(&mock_edge(0)).expect("Edge 0 missing after merge");
+      +        // Flatten all predecessor arcs under edge 0 across depths
+      +        let mut preds: Vec<Arc<GSSNode>> = Vec::new();
+      +        for (_depth, vecs) in preds_by_edge0 {
+      +            preds.extend(vecs.iter().cloned());
       +        }
-           }
+      +        assert_eq!(preds.len(), 2, "Expected exactly two predecessor nodes on edge 0");
+      +
+      +        let num_roots = preds.iter().filter(|n| n.is_root()).count();
+      +        let num_nonroots = preds.iter().filter(|n| !n.is_root()).count();
+      +        assert_eq!(num_roots, 1, "Exactly one predecessor should be a root (bottom) node");
+      +        assert_eq!(num_nonroots, 1, "Exactly one predecessor should be a non-root (has its own predecessor)");
+      +
+      +        // Additionally, verify the two different depths (dest keys) are present:
+      +        // - 0 for the root B,
+      +        // - 1 for B that has C as a predecessor.
+      +        assert!(preds_by_edge0.contains_key(&0), "Should contain dest key 0 (root B)");
+      +        assert!(preds_by_edge0.contains_key(&1), "Should contain dest key 1 (B with predecessor)");
+      +    }
        }
        
-      ```
+       ```
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
 ...
