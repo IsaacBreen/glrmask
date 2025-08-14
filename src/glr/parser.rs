@@ -464,9 +464,9 @@ impl GLRParser {
                         } else {
                             write!(f, "{}", lookahead_strs.join(", "))?;
                         }
-                        writeln!(f, "}}")?;
+                        write!(f, "}}")?;
                     }
-                    write!(f, "]")?;
+                    writeln!(f, "]")?;
                 }
             }
         } else {
