@@ -14,6 +14,7 @@ use crate::interface::display_productions;
 // Added for derive macro pattern
 
 
+// Stage tables and final table types
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
 type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
@@ -22,6 +23,7 @@ type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
 pub(crate) type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
 type Stage7Table = BTreeMap<StateID, Stage7Row>;
 type Stage8Table = BTreeMap<StateID, Row>;
+// The final table type that the parser uses
 pub type Table = BTreeMap<StateID, Row>;
 
 
@@ -586,6 +588,115 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
+/// Extends Stage 1 with special "substring" seed states: one per non-terminal.
+///
+/// For each non-terminal `N`, we create a kernel item set that contains every item
+/// `[X -> α • N β, la]` for all productions `X -> ...` where `N` appears at some position.
+/// The lookaheads `la` are taken to be every element of FOLLOW(X).
+///
+/// We then run a BFS (like Stage 1) starting from these new kernels and insert all
+/// resulting rows into the existing Stage 1 table. This ensures that every GOTO/SHIFT
+/// target reachable from these kernels is also materialized as a kernel (table key),
+/// so it will be assigned a StateID later (Stage 7).
+///
+/// Returns a map from NonTerminal to the exact kernel item set we inserted for it.
+fn extend_stage_1_with_substring_states(
+    stage_1_table: &mut Stage1Table,
+    productions: &[Production],
+) -> BTreeMap<NonTerminal, BTreeSet<Item>> {
+    // --- Precompute sets for closure ---
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    // Group productions by LHS for compute_closure performance.
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    }
+
+    // All non-terminals that appear anywhere (LHS or RHS).
+    let mut all_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
+    for p in productions {
+        all_nonterminals.insert(p.lhs.clone());
+        for s in &p.rhs {
+            if let Symbol::NonTerminal(nt) = s {
+                all_nonterminals.insert(nt.clone());
+            }
+        }
+    }
+
+    // Build a kernel item set for each non-terminal:
+    // items are X -> α • N β, with lookaheads from FOLLOW(X).
+    let mut kernels_by_nt: BTreeMap<NonTerminal, BTreeSet<Item>> = BTreeMap::new();
+    for p in productions {
+        let lhs = p.lhs.clone();
+        let follow_of_lhs: BTreeSet<Option<Terminal>> = follow_sets.get(&lhs).cloned().unwrap_or_default();
+        for (i, sym) in p.rhs.iter().enumerate() {
+            if let Symbol::NonTerminal(nt) = sym {
+                let kernel = kernels_by_nt.entry(nt.clone()).or_default();
+                for la in &follow_of_lhs {
+                    kernel.insert(Item {
+                        production: std::sync::Arc::new(p.clone()),
+                        dot_position: i,
+                        lookahead: la.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Initialize visited_kernels with the kernels already present in the existing Stage 1 table.
+    let mut visited_kernels: BTreeSet<BTreeSet<Item>> = stage_1_table.keys().cloned().collect();
+    let mut worklist: VecDeque<BTreeSet<Item>> = VecDeque::new();
+
+    // Push new kernels to the worklist and record them (we still record them even if
+    // an "equivalent" kernel exists, since equality depends on Arc pointer identity).
+    let mut inserted_kernel_map: BTreeMap<NonTerminal, BTreeSet<Item>> = BTreeMap::new();
+    for (nt, kernel) in kernels_by_nt {
+        // Always enqueue, but skip if "equal" kernel already present by pointer identity.
+        if visited_kernels.insert(kernel.clone()) {
+            worklist.push_back(kernel.clone());
+        }
+        inserted_kernel_map.insert(nt, kernel);
+    }
+
+    // BFS like stage_1: compute closure, split, and insert rows;
+    // enqueue GOTO kernels discovered via splits.
+    while let Some(item_set) = worklist.pop_front() {
+        // Decide if we run the LALR lookahead widening for this kernel.
+        let lalr_mode = match LR_MODE {
+            LRMode::LALR => true,
+            LRMode::LR1 => false,
+            LRMode::LALR_EX_GOTO => {
+                // Reuse the heuristic from stage_1: if any item got here via a shift (prev terminal), do LR(1).
+                let mut do_lalr = true;
+                for item in &item_set {
+                    if matches!(item.prev(), Some((Symbol::Terminal(_), _))) {
+                        do_lalr = false;
+                        break;
+                    }
+                }
+                do_lalr
+            }
+        };
+
+        let closure = compute_closure(
+            &item_set,
+            &prods_by_lhs,
+            &first_sets,
+            &nullable_nonterminals,
+            &follow_sets,
+            lalr_mode,
+        );
+        let splits = split_on_dot(&closure);
+        let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+        stage_1_table.insert(item_set, row);
+    }
+
+    inserted_kernel_map
+}
+
 fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let start_production_id = 0;
     let mut item_set_map = BiBTreeMap::new();
@@ -993,7 +1104,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions);
+    let mut stage_1_table = stage_1(&productions);
+    // Insert special substring seed states between Stage 1 and Stage 2.
+    crate::debug!(2, "Extending Stage 1 with substring seed states (one per non-terminal).");
+    let substring_nt_kernels = extend_stage_1_with_substring_states(&mut stage_1_table, &productions);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
@@ -1017,8 +1131,22 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
 
-    crate::debug!(2, "Stage 9: Precomputing substring gotos");
-    let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
+    // Build mapping from NonTerminalID -> StateID for the special substring "pre" states
+    let mut substring_nt_state_ids: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+    for (nt, kernel_item_set) in &substring_nt_kernels {
+        if let (Some(nt_id), Some(state_id)) = (
+            non_terminal_map.get_by_left(nt),
+            item_set_map.get_by_left(kernel_item_set),
+        ) {
+            substring_nt_state_ids.insert(*nt_id, *state_id);
+        } else {
+            crate::debug!(
+                2,
+                "Warning: Could not map substring kernel for non-terminal '{}' to a state ID.",
+                nt.0
+            );
+        }
+    }
 
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
@@ -1030,7 +1158,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id, substring_gotos)
+    // We keep substring_gotos for compatibility (unused by new logic), pass empty.
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id, BTreeMap::new(), substring_nt_state_ids)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
