@@ -1630,31 +1630,12 @@ pub fn format_acc(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-        if *bv == HybridBitset::max_ones() {
-            return format!("{}(All)", label);
-        }
-        if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-            const MAX_TO_SHOW: usize = 5;
-            let total_tokens = bv.len();
-            let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                .map(|internal_id| {
-                    bimap.get_by_right(&internal_id)
-                        .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                        .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-                        .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
-                })
-                .collect();
+    // Avoid unused-parameter warnings now that we print the raw bitset.
+    let _ = (original_internal_bimap, llm_token_map);
 
-            let samples_str = token_samples.join(", ");
-            if total_tokens > MAX_TO_SHOW {
-                format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-            } else {
-                format!("{}([{}])", label, samples_str)
-            }
-        } else {
-            format!("{}({} tokens)", label, bv.len())
-        }
+    // Show the bitset itself instead of only counts or samples.
+    let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+        format!("{}({:?})", label, bv)
     };
 
     let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
