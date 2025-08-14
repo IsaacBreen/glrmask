@@ -1144,7 +1144,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
         match LR_MODE {
-            LRMode::LR1 | LRMode::LALR_EX_GOTO => {
+            LRMode::LR1 | LRMode::LALR_EX_SHIFT => {
                 if Some(token_id) == self.parser.ignore_terminal_id {
                     timeit!("GLRParserState::has_action_for::ignore_token", {
                         crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
