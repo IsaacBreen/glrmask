@@ -583,6 +583,11 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
 
 fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let start_production_id = 0;
+    let end_item = Item {
+        production: Arc::new(productions[start_production_id].clone()),
+        dot_position: productions[start_production_id].rhs.len(),
+        lookahead: None,
+    };
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
@@ -639,10 +644,9 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
-            let goto = Goto {
-                state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
-                accept: false,
-            };
+            let state_id = Some(*item_set_map.get_by_left(&next_item_set).unwrap());
+            let accept = next_item_set.contains(&end_item);
+            let goto = Goto { state_id, accept };
             gotos.insert(non_terminal_id, goto);
         }
 
@@ -972,11 +976,6 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
     // Determine the special substring state ID
     let substring_state_id = *item_set_map.get_by_left(&special_substring_item_set).unwrap();
-
-    // Set accept
-    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-    final_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
