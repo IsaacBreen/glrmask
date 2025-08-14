@@ -101,10 +101,10 @@ pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<Non
         .collect()
 }
 
-pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
+pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     crate::debug!(3, "Computing first sets for non-terminals");
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
+    let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
     // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
     for p in productions {
@@ -126,33 +126,18 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
 
             let old_size = first_sets.get(lhs).unwrap().len();
 
-            let mut all_rhs_are_nullable = true;
             for symbol in rhs {
-                match symbol {
-                    Symbol::Terminal(t) => {
-                        first_sets.get_mut(lhs).unwrap().insert(Some(t.clone()));
-                        all_rhs_are_nullable = false;
+                if let Symbol::NonTerminal(nt) = symbol {
+                    let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
+                    first_sets.get_mut(lhs).unwrap().extend(first_nt);
+
+                    if !nullable_nonterminals.contains(nt) {
                         break;
                     }
-                    Symbol::NonTerminal(nt) => {
-                        let first_nt = first_sets.get(nt).cloned().unwrap_or_default();
-                        // Add all non-epsilon elements from FIRST(nt) to FIRST(lhs)
-                        for terminal_opt in &first_nt {
-                            if terminal_opt.is_some() {
-                                first_sets.get_mut(lhs).unwrap().insert(terminal_opt.clone());
-                            }
-                        }
-
-                        if !nullable_nonterminals.contains(nt) {
-                            all_rhs_are_nullable = false;
-                            break;
-                        }
-                    }
+                } else if let Symbol::Terminal(t) = symbol { // Added this case
+                    first_sets.get_mut(lhs).unwrap().insert(t.clone());
+                    break;
                 }
-            }
-
-            if all_rhs_are_nullable {
-                first_sets.get_mut(lhs).unwrap().insert(None);
             }
 
             if first_sets.get(lhs).unwrap().len() != old_size {
@@ -166,7 +151,7 @@ pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeM
 
 pub fn compute_follow_sets_for_nonterminals(
     productions: &[Production],
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
     crate::debug!(3, "Computing follow sets for non-terminals");
@@ -210,7 +195,7 @@ pub fn compute_follow_sets_for_nonterminals(
                             }
                             Symbol::NonTerminal(nt_next) => {
                                 let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
-                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().filter(|t| t.is_some()).cloned());
+                                follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned().map(Some));
 
                                 if !nullable_nonterminals.contains(nt_next) {
                                     suffix_is_nullable = false;
@@ -239,7 +224,7 @@ pub fn compute_follow_sets_for_nonterminals(
 #[time_it]
 fn compute_first_set_for_item(
     item: &Item,
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
 ) -> BTreeSet<Option<Terminal>> {
@@ -253,7 +238,7 @@ fn compute_first_set_for_item(
 
 fn _compute_first_set_for_item(
     item: &Item,
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
 ) -> BTreeSet<Option<Terminal>> {
@@ -268,11 +253,13 @@ fn _compute_first_set_for_item(
                 BTreeSet::from([Some(t)])
             }
             Symbol::NonTerminal(nt) => {
-                let mut first_set = first_sets.get(&nt).cloned().unwrap_or_default();
+                let mut first_set: BTreeSet<_> = first_sets.get(&nt).cloned().unwrap_or_default()
+                    .into_iter()
+                    .map(Some)
+                    .collect();
 
                 if nullable_nonterminals.contains(&nt) {
                     // If the non-terminal is nullable, we also need to include the firsts for the next item
-                    first_set.remove(&None);
                     let next_firsts = _compute_first_set_for_item(
                         &next_item,
                         first_sets,
@@ -297,7 +284,7 @@ fn _compute_first_set_for_item(
 pub fn compute_closure<'a>(
     items: &BTreeSet<Item>,
     prods_by_lhs: &BTreeMap<NonTerminal, Vec<&'a Production>>,
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
     lalr_mode: bool,
