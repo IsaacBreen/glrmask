@@ -1878,31 +1878,12 @@ local_system:
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
       ) -> String {
-          let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-              if *bv == HybridBitset::max_ones() {
-                  return format!("{}(All)", label);
-              }
-              if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-                  const MAX_TO_SHOW: usize = 5;
-                  let total_tokens = bv.len();
-                  let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                      .map(|internal_id| {
-                          bimap.get_by_right(&internal_id)
-                              .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                              .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-                              .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
-                      })
-                      .collect();
+          // Avoid unused-parameter warnings now that we print the raw bitset.
+          let _ = (original_internal_bimap, llm_token_map);
 
-                  let samples_str = token_samples.join(", ");
-                  if total_tokens > MAX_TO_SHOW {
-                      format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-                  } else {
-                      format!("{}([{}])", label, samples_str)
-                  }
-              } else {
-                  format!("{}({} tokens)", label, bv.len())
-              }
+          // Show the bitset itself instead of only counts or samples.
+          let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+              format!("{}({:?})", label, bv)
           };
 
           let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
@@ -4199,31 +4180,12 @@ local_system:
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
       ) -> String {
-          let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-              if *bv == HybridBitset::max_ones() {
-                  return format!("{}(All)", label);
-              }
-              if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-                  const MAX_TO_SHOW: usize = 5;
-                  let total_tokens = bv.len();
-                  let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                      .map(|internal_id| {
-                          bimap.get_by_right(&internal_id)
-                              .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                              .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-                              .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
-                      })
-                      .collect();
+          // Avoid unused-parameter warnings now that we print the raw bitset.
+          let _ = (original_internal_bimap, llm_token_map);
 
-                  let samples_str = token_samples.join(", ");
-                  if total_tokens > MAX_TO_SHOW {
-                      format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-                  } else {
-                      format!("{}([{}])", label, samples_str)
-                  }
-              } else {
-                  format!("{}({} tokens)", label, bv.len())
-              }
+          // Show the bitset itself instead of only counts or samples.
+          let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+              format!("{}({:?})", label, bv)
           };
 
           let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
@@ -4661,7 +4623,7 @@ system:
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -6549,31 +6511,12 @@ messages:
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
       ) -> String {
-          let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-              if *bv == HybridBitset::max_ones() {
-                  return format!("{}(All)", label);
-              }
-              if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-                  const MAX_TO_SHOW: usize = 5;
-                  let total_tokens = bv.len();
-                  let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-                      .map(|internal_id| {
-                          bimap.get_by_right(&internal_id)
-                              .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                              .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-                              .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
-                      })
-                      .collect();
+          // Avoid unused-parameter warnings now that we print the raw bitset.
+          let _ = (original_internal_bimap, llm_token_map);
 
-                  let samples_str = token_samples.join(", ");
-                  if total_tokens > MAX_TO_SHOW {
-                      format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-                  } else {
-                      format!("{}([{}])", label, samples_str)
-                  }
-              } else {
-                  format!("{}({} tokens)", label, bv.len())
-              }
+          // Show the bitset itself instead of only counts or samples.
+          let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+              format!("{}({:?})", label, bv)
           };
 
           let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
@@ -7000,64 +6943,52 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: Modify this so that GSS acc printing shows the bitset itself, not just how
-      many tokens are in it.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index 3d5f0a9..7a2f0c1 100644
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1063,33 +1063,13 @@ pub fn format_acc(
-           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-           llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-       ) -> String {
-      -    let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-      -        if *bv == HybridBitset::max_ones() {
-      -            return format!("{}(All)", label);
-      -        }
-      -        if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-      -            const MAX_TO_SHOW: usize = 5;
-      -            let total_tokens = bv.len();
-      -            let token_samples: Vec<_> = bv.iter().take(MAX_TO_SHOW)
-      -                .map(|internal_id| {
-      -                    bimap.get_by_right(&internal_id)
-      -                        .and_then(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-      -                        .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-      -                        .unwrap_or_else(|| format!("<internal_id:{}>", internal_id))
-      -                })
-      -                .collect();
-      -
-      -            let samples_str = token_samples.join(", ");
-      -            if total_tokens > MAX_TO_SHOW {
-      -                format!("{}({} tokens: [{}, ...])", label, total_tokens, samples_str)
-      -            } else {
-      -                format!("{}([{}])", label, samples_str)
-      -            }
-      -        } else {
-      -            format!("{}({} tokens)", label, bv.len())
-      -        }
-      -    };
-      +    // Avoid unused-parameter warnings now that we print the raw bitset.
-      +    let _ = (original_internal_bimap, llm_token_map);
-      +
-      +    // Show the bitset itself instead of only counts or samples.
-      +    let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-      +        format!("{}({:?})", label, bv)
-      +    };
-       
-           let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
-               if allowed_terminals.is_empty() {
+  - user: |-
       ```
+      [DEBUG 18:53:10.124 3] src/glr/parser.rs:1301: GSS (4 nodes):
+      GSS Forest (Max Nodes: 18446744073709551615):
+      Root 0: Node 0 (depth 1) [LLM(U)(HybridBitset { inner: 0..=0 }), LLM(I)(HybridBitset { inner: 0..=0 }), Disallowed Term(U)(None), Disallowed Term(I)(None), Trie2(Nodes: None)]
+        ├── Edge StateID(0) -> Node 1 (depth 0) [LLM(U)(HybridBitset { inner: 0..=18446744073709551615 }), LLM(I)(HybridBitset { inner: 0..=18446744073709551615 }), Disallowed Term(U)(None), Disallowed Term(I)(None), Trie2(Nodes: 1)]
+      ...
+      ```
+      Modify the GSS acc printing so that instead of displaying just the number of trie 2 nodes, it shows their pointers (if there's a reasonable number of them).
+    metadata:
+  - assistant: ''
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      No assistant message found to apply changes from.
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Git apply failed. Fallback to LLM apply:
+      No assistant message found to apply changes from.
 
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/arc_wrapper.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/gss.rs"
+        }
+      ]
+      Found 2 code blocks with filepaths in attempt 1.
+      Received code for required file: src/datastructures/arc_wrapper.rs
+      Received code for required file: src/datastructures/gss.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/datastructures/gss.rs
+      Successfully replaced file: src/datastructures/arc_wrapper.rs
     metadata:
 ...
