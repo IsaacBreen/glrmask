@@ -466,7 +466,7 @@ impl GLRParser {
                         }
                         writeln!(f, "}}")?;
                     }
-                    writeln!(f, "]")?;
+                    write!(f, "]")?;
                 }
             }
         } else {
