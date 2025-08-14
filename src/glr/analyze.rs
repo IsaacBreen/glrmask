@@ -525,7 +525,7 @@ pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Term
                         Symbol::NonTerminal(next_nt) => {
                             // The next symbol is a non-terminal. Add its FIRST set.
                             if let Some(first_set_for_next_nt) = first_sets.get(next_nt) {
-                                terminal_follows.entry(t.clone()).or_default()
+                                terminal_follows
                                     .entry(t.clone())
                                     .or_default()
                                     .extend(first_set_for_next_nt.iter().cloned());
