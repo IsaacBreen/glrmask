@@ -927,11 +927,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
                 });
 
+                let goto_state_id = self.parser.table
+                    .get(&self.parser.substring_state_id)
+                    .and_then(|row| row.gotos.get(&nt))
+                    .and_then(|goto| goto.state_id)
+                    .expect("GLRParserState::reduce_and_goto: No goto state ID found for substring state");
+
                 let mut acc2 = acc.clone();
                 acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
                 let new_gss0 = GSSNode::new(acc2);
                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
-                let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
+                let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                 out.push(new_gss2);
             }
         }
