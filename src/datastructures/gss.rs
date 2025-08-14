@@ -406,53 +406,6 @@ fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
     hasher.finish()
 }
 
-/// Merge a list of predecessor nodes while refusing to merge root (bottom) nodes.
-/// - Root nodes (nodes with no predecessors) are preserved as separate entries.
-/// - Non-root nodes are merged together (respecting the given merge depth) into a single node.
-/// - The resulting vector is deduplicated for roots by pointer and sorted by pointer for determinism.
-fn merge_nodes_preserving_roots(
-    nodes_to_merge: Vec<Arc<GSSNode>>,
-    merge_depth: usize,
-) -> Vec<Arc<GSSNode>> {
-    if nodes_to_merge.is_empty() {
-        return nodes_to_merge;
-    }
-    // At depth 0, higher-level logic shouldn't be merging; return as-is.
-    if merge_depth == 0 {
-        return nodes_to_merge;
-    }
-
-    let mut roots: Vec<Arc<GSSNode>> = Vec::new();
-    let mut non_roots: Vec<Arc<GSSNode>> = Vec::new();
-    for n in nodes_to_merge {
-        if n.is_root() {
-            roots.push(n);
-        } else {
-            non_roots.push(n);
-        }
-    }
-
-    // Deduplicate root nodes by pointer.
-    roots.sort_by_key(|a| Arc::as_ptr(a) as usize);
-    roots.dedup_by_key(|a| Arc::as_ptr(a));
-
-    let mut result: Vec<Arc<GSSNode>> = Vec::new();
-    if !non_roots.is_empty() {
-        let mut iter = non_roots.into_iter();
-        let first = iter.next().unwrap();
-        let mut merged_val = (*first).clone();
-        for other in iter {
-            merged_val._merge(&other, merge_depth - 1);
-        }
-        let mut merged_arc = Arc::new(merged_val);
-        if *merged_arc == *first { merged_arc = first; }
-        result.push(merged_arc);
-    }
-    result.extend(roots);
-    result.sort_by_key(|a| Arc::as_ptr(a) as usize);
-    result
-}
-
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
 // #[time_it]
@@ -468,20 +421,27 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     }
 
     let mut result: NodeMap = BTreeMap::new();
-    for ((edge_val, dest_key), mut pred_arcs) in grouped {
+    for ((edge_val, dest_key), pred_arcs) in grouped {
         if pred_arcs.is_empty() {
             continue;
         }
 
-        let final_nodes: Vec<Arc<GSSNode>> = if pred_arcs.len() == 1 {
-            pred_arcs.drain(..).collect()
+        let mut iter = pred_arcs.into_iter();
+        let first = iter.next().unwrap();
+
+        let final_node = if iter.len() == 0 {
+            first
         } else {
-            merge_nodes_preserving_roots(pred_arcs, 1)
+            let mut merged_node = (*first).clone();
+            for other_arc in iter {
+                merged_node.merge_with_depth(1, &other_arc);
+            }
+            Arc::new(merged_node)
         };
         result
             .entry(edge_val)
             .or_default()
-            .insert(dest_key, final_nodes);
+            .insert(dest_key, vec![final_node]);
     }
     result
 }
@@ -525,9 +485,21 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
                 nodes_to_merge.extend(target_preds_vec.drain(..));
             }
 
-            // Refuse to merge root nodes; merge only non-root nodes into a single entry.
-            let merged_vec = merge_nodes_preserving_roots(nodes_to_merge, merge_depth);
-            *target_preds_vec = merged_vec;
+            if nodes_to_merge.len() <= 1 {
+                *target_preds_vec = nodes_to_merge;
+            } else {
+                let mut iter = nodes_to_merge.into_iter();
+                let first = iter.next().unwrap();
+                let mut merged = first.as_ref().clone();
+                for other in iter {
+                    merged._merge(&other, merge_depth - 1);
+                }
+                let mut merged = Arc::new(merged);
+                if merged == first {
+                    merged = first;
+                }
+                *target_preds_vec = vec![merged];
+            }
         }
     }
 }
@@ -1192,23 +1164,24 @@ pub fn fuse_predecessors_recursive(
         grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
     }
 
-    // 3. For each edge value, merge predecessors associated with it while refusing to merge roots.
+    // 3. For each edge value, merge all predecessors associated with it into a single node.
     let mut new_predecessors_set = NodeSet::new();
-    for (edge_val, mut pred_arcs_to_merge) in grouped_by_edge {
-        if pred_arcs_to_merge.is_empty() {
-            continue;
-        }
+    for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
+        if pred_arcs_to_merge.is_empty() { continue; }
 
-        let final_arcs: Vec<Arc<GSSNode>> = if pred_arcs_to_merge.len() == 1 {
-            vec![pred_arcs_to_merge.remove(0)]
+        let mut iter = pred_arcs_to_merge.into_iter();
+        let first = iter.next().unwrap();
+
+        let final_pred_arc = if iter.len() == 0 {
+            first
         } else {
-            merge_nodes_preserving_roots(pred_arcs_to_merge, 1)
+            let mut merged_node = (*first).clone();
+            for other_arc in iter {
+                merged_node.merge_with_depth(1, &other_arc);
+            }
+            Arc::new(merged_node)
         };
-
-        // Insert all resulting arcs (one for merged non-roots, plus any root nodes).
-        for arc in final_arcs {
-            new_predecessors_set.insert((arc, edge_val.clone()));
-        }
+        new_predecessors_set.insert((final_pred_arc, edge_val));
     }
 
     // 4. Rebuild the current node with the new, fused set of predecessors.

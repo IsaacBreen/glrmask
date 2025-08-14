@@ -2324,69 +2324,6 @@ local_system:
               assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
               assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
           }
-          
-          #[test]
-          fn test_merge_keeps_root_and_nonroot_predecessors_separate() {
-              // Build a chain A --(0)--> B --(1)--> C (A is the top node)
-              // and merge with A --(0)--> B (where B is a bottom/root node).
-              //
-              // After merging at A, we must keep the distinction between:
-              // - B that has its own predecessor (non-root), and
-              // - B that is a root/bottom node.
-              // Specifically, A's predecessors under edge 0 should include both forms.
-
-              // C: bottom/root
-              let c = Arc::new(GSSNode::new(empty_acc()));
-              assert!(c.is_root());
-
-              // B via C (non-root, has a predecessor)
-              let b_via_c = Arc::new(GSSNode::new_with_single_predecessor(
-                  c.clone(),
-                  mock_edge(1),
-                  empty_acc(),
-              ));
-              assert!(!b_via_c.is_root());
-
-              // A1 has predecessor B via C on edge 0
-              let mut a1 = GSSNode::new_with_single_predecessor(
-                  b_via_c.clone(),
-                  mock_edge(0),
-                  empty_acc(),
-              );
-
-              // B root (bottom)
-              let b_root = Arc::new(GSSNode::new(empty_acc()));
-              assert!(b_root.is_root());
-
-              // A2 has predecessor B root on edge 0
-              let a2 = GSSNode::new_with_single_predecessor(b_root.clone(), mock_edge(0), empty_acc());
-
-              // Merge: A1 ⊔ A2
-              a1.merge_with_depth(1, &a2);
-
-              // After merging, A should have two distinct predecessors under edge 0:
-              // one is_root() and one not is_root().
-              assert_eq!(a1.num_predecessors(), 2, "Merged A should have exactly two predecessors");
-
-              let preds_by_edge0 = a1.predecessors().get(&mock_edge(0)).expect("Edge 0 missing after merge");
-              // Flatten all predecessor arcs under edge 0 across depths
-              let mut preds: Vec<Arc<GSSNode>> = Vec::new();
-              for (_depth, vecs) in preds_by_edge0 {
-                  preds.extend(vecs.iter().cloned());
-              }
-              assert_eq!(preds.len(), 2, "Expected exactly two predecessor nodes on edge 0");
-
-              let num_roots = preds.iter().filter(|n| n.is_root()).count();
-              let num_nonroots = preds.iter().filter(|n| !n.is_root()).count();
-              assert_eq!(num_roots, 1, "Exactly one predecessor should be a root (bottom) node");
-              assert_eq!(num_nonroots, 1, "Exactly one predecessor should be a non-root (has its own predecessor)");
-
-              // Additionally, verify the two different depths (dest keys) are present:
-              // - 0 for the root B,
-              // - 1 for B that has C as a predecessor.
-              assert!(preds_by_edge0.contains_key(&0), "Should contain dest key 0 (root B)");
-              assert!(preds_by_edge0.contains_key(&1), "Should contain dest key 1 (B with predecessor)");
-          }
       }
   prev_file_contents:
     src/datastructures/arc_wrapper.rs: |
@@ -4707,69 +4644,6 @@ local_system:
               // With the bug, this fails because the new_root will have its predecessors merged.
               assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
               assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
-          }
-          
-          #[test]
-          fn test_merge_keeps_root_and_nonroot_predecessors_separate() {
-              // Build a chain A --(0)--> B --(1)--> C (A is the top node)
-              // and merge with A --(0)--> B (where B is a bottom/root node).
-              //
-              // After merging at A, we must keep the distinction between:
-              // - B that has its own predecessor (non-root), and
-              // - B that is a root/bottom node.
-              // Specifically, A's predecessors under edge 0 should include both forms.
-
-              // C: bottom/root
-              let c = Arc::new(GSSNode::new(empty_acc()));
-              assert!(c.is_root());
-
-              // B via C (non-root, has a predecessor)
-              let b_via_c = Arc::new(GSSNode::new_with_single_predecessor(
-                  c.clone(),
-                  mock_edge(1),
-                  empty_acc(),
-              ));
-              assert!(!b_via_c.is_root());
-
-              // A1 has predecessor B via C on edge 0
-              let mut a1 = GSSNode::new_with_single_predecessor(
-                  b_via_c.clone(),
-                  mock_edge(0),
-                  empty_acc(),
-              );
-
-              // B root (bottom)
-              let b_root = Arc::new(GSSNode::new(empty_acc()));
-              assert!(b_root.is_root());
-
-              // A2 has predecessor B root on edge 0
-              let a2 = GSSNode::new_with_single_predecessor(b_root.clone(), mock_edge(0), empty_acc());
-
-              // Merge: A1 ⊔ A2
-              a1.merge_with_depth(1, &a2);
-
-              // After merging, A should have two distinct predecessors under edge 0:
-              // one is_root() and one not is_root().
-              assert_eq!(a1.num_predecessors(), 2, "Merged A should have exactly two predecessors");
-
-              let preds_by_edge0 = a1.predecessors().get(&mock_edge(0)).expect("Edge 0 missing after merge");
-              // Flatten all predecessor arcs under edge 0 across depths
-              let mut preds: Vec<Arc<GSSNode>> = Vec::new();
-              for (_depth, vecs) in preds_by_edge0 {
-                  preds.extend(vecs.iter().cloned());
-              }
-              assert_eq!(preds.len(), 2, "Expected exactly two predecessor nodes on edge 0");
-
-              let num_roots = preds.iter().filter(|n| n.is_root()).count();
-              let num_nonroots = preds.iter().filter(|n| !n.is_root()).count();
-              assert_eq!(num_roots, 1, "Exactly one predecessor should be a root (bottom) node");
-              assert_eq!(num_nonroots, 1, "Exactly one predecessor should be a non-root (has its own predecessor)");
-
-              // Additionally, verify the two different depths (dest keys) are present:
-              // - 0 for the root B,
-              // - 1 for B that has C as a predecessor.
-              assert!(preds_by_edge0.contains_key(&0), "Should contain dest key 0 (root B)");
-              assert!(preds_by_edge0.contains_key(&1), "Should contain dest key 1 (B with predecessor)");
           }
       }
   diffs_applied_this_send: true
@@ -7121,69 +6995,6 @@ messages:
               assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
               assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
           }
-          
-          #[test]
-          fn test_merge_keeps_root_and_nonroot_predecessors_separate() {
-              // Build a chain A --(0)--> B --(1)--> C (A is the top node)
-              // and merge with A --(0)--> B (where B is a bottom/root node).
-              //
-              // After merging at A, we must keep the distinction between:
-              // - B that has its own predecessor (non-root), and
-              // - B that is a root/bottom node.
-              // Specifically, A's predecessors under edge 0 should include both forms.
-
-              // C: bottom/root
-              let c = Arc::new(GSSNode::new(empty_acc()));
-              assert!(c.is_root());
-
-              // B via C (non-root, has a predecessor)
-              let b_via_c = Arc::new(GSSNode::new_with_single_predecessor(
-                  c.clone(),
-                  mock_edge(1),
-                  empty_acc(),
-              ));
-              assert!(!b_via_c.is_root());
-
-              // A1 has predecessor B via C on edge 0
-              let mut a1 = GSSNode::new_with_single_predecessor(
-                  b_via_c.clone(),
-                  mock_edge(0),
-                  empty_acc(),
-              );
-
-              // B root (bottom)
-              let b_root = Arc::new(GSSNode::new(empty_acc()));
-              assert!(b_root.is_root());
-
-              // A2 has predecessor B root on edge 0
-              let a2 = GSSNode::new_with_single_predecessor(b_root.clone(), mock_edge(0), empty_acc());
-
-              // Merge: A1 ⊔ A2
-              a1.merge_with_depth(1, &a2);
-
-              // After merging, A should have two distinct predecessors under edge 0:
-              // one is_root() and one not is_root().
-              assert_eq!(a1.num_predecessors(), 2, "Merged A should have exactly two predecessors");
-
-              let preds_by_edge0 = a1.predecessors().get(&mock_edge(0)).expect("Edge 0 missing after merge");
-              // Flatten all predecessor arcs under edge 0 across depths
-              let mut preds: Vec<Arc<GSSNode>> = Vec::new();
-              for (_depth, vecs) in preds_by_edge0 {
-                  preds.extend(vecs.iter().cloned());
-              }
-              assert_eq!(preds.len(), 2, "Expected exactly two predecessor nodes on edge 0");
-
-              let num_roots = preds.iter().filter(|n| n.is_root()).count();
-              let num_nonroots = preds.iter().filter(|n| !n.is_root()).count();
-              assert_eq!(num_roots, 1, "Exactly one predecessor should be a root (bottom) node");
-              assert_eq!(num_nonroots, 1, "Exactly one predecessor should be a non-root (has its own predecessor)");
-
-              // Additionally, verify the two different depths (dest keys) are present:
-              // - 0 for the root B,
-              // - 1 for B that has C as a predecessor.
-              assert!(preds_by_edge0.contains_key(&0), "Should contain dest key 0 (root B)");
-              assert!(preds_by_edge0.contains_key(&1), "Should contain dest key 1 (B with predecessor)");
-          }
       }
 
       ```
@@ -7191,182 +7002,86 @@ messages:
       filename: src/datastructures/gss.rs
   - user: |-
       There's an issue with this code. Think about what happens if a gss like A --(0)--> B --(1)--> C (where A is the top node) is merged with A --(0)--> B. In the first tree, B is a root node - a 'bottom' node. In the second tree, B is the bottom node. But when they're merged, is this distinction kept?
-      Fix this by refusing to merge root nodes.
+      Add a test for it. Use `is_root`.
     metadata:
-  - assistant: |-
+  - assistant: |
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index 7e9a875..c6b8e28 100644
+      index 9910a27..6368d62 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -214,6 +214,46 @@ fn compute_hash_key(predecessors: &NodeMap, acc: &Acc) -> u64 {
-           hasher.finish()
+      @@ -1466,6 +1466,48 @@ mod tests {
+               assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
+           }
+      +
+      +    #[test]
+      +    fn test_merge_keeps_root_and_nonroot_predecessors_separate() {
+      +        // Build a chain A --(0)--> B --(1)--> C (A is the top node)
+      +        // and merge with A --(0)--> B (where B is a bottom/root node).
+      +        //
+      +        // After merging at A, we must keep the distinction between:
+      +        // - B that has its own predecessor (non-root), and
+      +        // - B that is a root/bottom node.
+      +        // Specifically, A's predecessors under edge 0 should include both forms.
+      +
+      +        // C: bottom/root
+      +        let c = Arc::new(GSSNode::new(empty_acc()));
+      +        assert!(c.is_root());
+      +
+      +        // B via C (non-root, has a predecessor)
+      +        let b_via_c = Arc::new(GSSNode::new_with_single_predecessor(
+      +            c.clone(),
+      +            mock_edge(1),
+      +            empty_acc(),
+      +        ));
+      +        assert!(!b_via_c.is_root());
+      +
+      +        // A1 has predecessor B via C on edge 0
+      +        let mut a1 = GSSNode::new_with_single_predecessor(
+      +            b_via_c.clone(),
+      +            mock_edge(0),
+      +            empty_acc(),
+      +        );
+      +
+      +        // B root (bottom)
+      +        let b_root = Arc::new(GSSNode::new(empty_acc()));
+      +        assert!(b_root.is_root());
+      +
+      +        // A2 has predecessor B root on edge 0
+      +        let a2 = GSSNode::new_with_single_predecessor(b_root.clone(), mock_edge(0), empty_acc());
+      +
+      +        // Merge: A1 ⊔ A2
+      +        a1.merge_with_depth(1, &a2);
+      +
+      +        // After merging, A should have two distinct predecessors under edge 0:
+      +        // one is_root() and one not is_root().
+      +        assert_eq!(a1.num_predecessors(), 2, "Merged A should have exactly two predecessors");
+      +
+      +        let preds_by_edge0 = a1.predecessors().get(&mock_edge(0)).expect("Edge 0 missing after merge");
+      +        // Flatten all predecessor arcs under edge 0 across depths
+      +        let mut preds: Vec<Arc<GSSNode>> = Vec::new();
+      +        for (_depth, vecs) in preds_by_edge0 {
+      +            preds.extend(vecs.iter().cloned());
+      +        }
+      +        assert_eq!(preds.len(), 2, "Expected exactly two predecessor nodes on edge 0");
+      +
+      +        let num_roots = preds.iter().filter(|n| n.is_root()).count();
+      +        let num_nonroots = preds.iter().filter(|n| !n.is_root()).count();
+      +        assert_eq!(num_roots, 1, "Exactly one predecessor should be a root (bottom) node");
+      +        assert_eq!(num_nonroots, 1, "Exactly one predecessor should be a non-root (has its own predecessor)");
+      +
+      +        // Additionally, verify the two different depths (dest keys) are present:
+      +        // - 0 for the root B,
+      +        // - 1 for B that has C as a predecessor.
+      +        assert!(preds_by_edge0.contains_key(&0), "Should contain dest key 0 (root B)");
+      +        assert!(preds_by_edge0.contains_key(&1), "Should contain dest key 1 (B with predecessor)");
+      +    }
        }
        
-      +/// Merge a list of predecessor nodes while refusing to merge root (bottom) nodes.
-      +/// - Root nodes (nodes with no predecessors) are preserved as separate entries.
-      +/// - Non-root nodes are merged together (respecting the given merge depth) into a single node.
-      +/// - The resulting vector is deduplicated for roots by pointer and sorted by pointer for determinism.
-      +fn merge_nodes_preserving_roots(
-      +    nodes_to_merge: Vec<Arc<GSSNode>>,
-      +    merge_depth: usize,
-      +) -> Vec<Arc<GSSNode>> {
-      +    if nodes_to_merge.is_empty() {
-      +        return nodes_to_merge;
-      +    }
-      +    // At depth 0, higher-level logic shouldn't be merging; return as-is.
-      +    if merge_depth == 0 {
-      +        return nodes_to_merge;
-      +    }
-      +
-      +    let mut roots: Vec<Arc<GSSNode>> = Vec::new();
-      +    let mut non_roots: Vec<Arc<GSSNode>> = Vec::new();
-      +    for n in nodes_to_merge {
-      +        if n.is_root() {
-      +            roots.push(n);
-      +        } else {
-      +            non_roots.push(n);
-      +        }
-      +    }
-      +
-      +    // Deduplicate root nodes by pointer.
-      +    roots.sort_by_key(|a| Arc::as_ptr(a) as usize);
-      +    roots.dedup_by_key(|a| Arc::as_ptr(a));
-      +
-      +    let mut result: Vec<Arc<GSSNode>> = Vec::new();
-      +    if !non_roots.is_empty() {
-      +        let mut iter = non_roots.into_iter();
-      +        let first = iter.next().unwrap();
-      +        let mut merged_val = (*first).clone();
-      +        for other in iter {
-      +            merged_val._merge(&other, merge_depth - 1);
-      +        }
-      +        let mut merged_arc = Arc::new(merged_val);
-      +        if *merged_arc == *first { merged_arc = first; }
-      +        result.push(merged_arc);
-      +    }
-      +    result.extend(roots);
-      +    result.sort_by_key(|a| Arc::as_ptr(a) as usize);
-      +    result
-      +}
-      +
-       /// Processes a set of incoming predecessors, grouping them by depth and edge,
-       /// and merging nodes that share the same edge to create a canonical `NodeMap`.
-       // #[time_it]
-      @@ -234,23 +274,14 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
-           }
-       
-           let mut result: NodeMap = BTreeMap::new();
-      -    for ((edge_val, dest_key), pred_arcs) in grouped {
-      +    for ((edge_val, dest_key), mut pred_arcs) in grouped {
-               if pred_arcs.is_empty() {
-                   continue;
-               }
-       
-      -        let mut iter = pred_arcs.into_iter();
-      -        let first = iter.next().unwrap();
-      -
-      -        let final_node = if iter.len() == 0 {
-      -            first
-      -        } else {
-      -            let mut merged_node = (*first).clone();
-      -            for other_arc in iter {
-      -                merged_node.merge_with_depth(1, &other_arc);
-      -            }
-      -            Arc::new(merged_node)
-      -        };
-      +        let final_nodes: Vec<Arc<GSSNode>> = if pred_arcs.len() == 1 {
-      +            pred_arcs.drain(..).collect()
-      +        } else {
-      +            merge_nodes_preserving_roots(pred_arcs, 1)
-      +        };
-               result
-                   .entry(edge_val)
-                   .or_default()
-      -            .insert(dest_key, vec![final_node]);
-      +            .insert(dest_key, final_nodes);
-           }
-           result
-       }
-      @@ -304,25 +335,13 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
-                       }
-                   }
-       
-      -            let mut nodes_to_merge = source_preds_vec;
-      +            let mut nodes_to_merge = source_preds_vec;
-                   if !target_preds_vec.is_empty() {
-                       nodes_to_merge.extend(target_preds_vec.drain(..));
-                   }
-       
-      -            if nodes_to_merge.len() <= 1 {
-      -                *target_preds_vec = nodes_to_merge;
-      -            } else {
-      -                let mut iter = nodes_to_merge.into_iter();
-      -                let first = iter.next().unwrap();
-      -                let mut merged = first.as_ref().clone();
-      -                for other in iter {
-      -                    merged._merge(&other, merge_depth - 1);
-      -                }
-      -                let mut merged = Arc::new(merged);
-      -                if merged == first {
-      -                    merged = first;
-      -                }
-      -                *target_preds_vec = vec![merged];
-      -            }
-      +            // Refuse to merge root nodes; merge only non-root nodes into a single entry.
-      +            let merged_vec = merge_nodes_preserving_roots(nodes_to_merge, merge_depth);
-      +            *target_preds_vec = merged_vec;
-               }
-           }
-       }
-      @@ -839,21 +858,23 @@ pub fn fuse_predecessors_recursive(
-               grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
-           }
-       
-      -    // 3. For each edge value, merge all predecessors associated with it into a single node.
-      +    // 3. For each edge value, merge predecessors associated with it while refusing to merge roots.
-           let mut new_predecessors_set = NodeSet::new();
-      -    for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
-      -        if pred_arcs_to_merge.is_empty() { continue; }
-      +    for (edge_val, mut pred_arcs_to_merge) in grouped_by_edge {
-      +        if pred_arcs_to_merge.is_empty() {
-      +            continue;
-      +        }
-       
-      -        let mut iter = pred_arcs_to_merge.into_iter();
-      -        let first = iter.next().unwrap();
-      +        let final_arcs: Vec<Arc<GSSNode>> = if pred_arcs_to_merge.len() == 1 {
-      +            vec![pred_arcs_to_merge.remove(0)]
-      +        } else {
-      +            merge_nodes_preserving_roots(pred_arcs_to_merge, 1)
-      +        };
-       
-      -        let final_pred_arc = if iter.len() == 0 {
-      -            first
-      -        } else {
-      -            let mut merged_node = (*first).clone();
-      -            for other_arc in iter {
-      -                merged_node.merge_with_depth(1, &other_arc);
-      -            }
-      -            Arc::new(merged_node)
-      -        };
-      -        new_predecessors_set.insert((final_pred_arc, edge_val));
-      +        // Insert all resulting arcs (one for merged non-roots, plus any root nodes).
-      +        for arc in final_arcs {
-      +            new_predecessors_set.insert((arc, edge_val.clone()));
-      +        }
-           }
-       
-           // 4. Rebuild the current node with the new, fused set of predecessors.
-      ```
+       ```
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
 ...
