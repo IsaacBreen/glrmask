@@ -736,17 +736,30 @@ local_system:
                   if nodes_to_merge.len() <= 1 {
                       *target_preds_vec = nodes_to_merge;
                   } else {
-                      let mut iter = nodes_to_merge.into_iter();
-                      let first = iter.next().unwrap();
-                      let mut merged = first.as_ref().clone();
-                      for other in iter {
-                          merged._merge(&other, merge_depth - 1);
+                      let (root_nodes, non_root_nodes): (Vec<_>, Vec<_>) =
+                          nodes_to_merge.into_iter().partition(|n| n.is_root());
+
+                      let mut final_nodes = Vec::new();
+
+                      // Merge non-root nodes together
+                      if !non_root_nodes.is_empty() {
+                          let mut iter = non_root_nodes.into_iter();
+                          let first = iter.next().unwrap();
+                          let mut merged = first.as_ref().clone();
+                          for other in iter {
+                              merged._merge(&other, merge_depth - 1);
+                          }
+                          let mut merged_arc = Arc::new(merged);
+                          if merged_arc == first {
+                              merged_arc = first;
+                          }
+                          final_nodes.push(merged_arc);
                       }
-                      let mut merged = Arc::new(merged);
-                      if merged == first {
-                          merged = first;
-                      }
-                      *target_preds_vec = vec![merged];
+
+                      // Per user request, do not merge root nodes. Keep them separate.
+                      final_nodes.extend(root_nodes);
+
+                      *target_preds_vec = final_nodes;
                   }
               }
           }
@@ -877,6 +890,13 @@ local_system:
 
           // #[time_it]
           fn _merge(&mut self, other: &Self, merge_depth: usize) {
+              if self.is_root() != other.is_root() {
+                  // Merging a root and a non-root node is not well-defined
+                  // as it would lose the "root-ness" property of one of them.
+                  // We refuse to perform this merge. The caller should handle this case
+                  // by keeping the nodes separate if they need to be combined.
+                  return;
+              }
               if self == other { return; }
 
               if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
@@ -3057,17 +3077,30 @@ local_system:
                   if nodes_to_merge.len() <= 1 {
                       *target_preds_vec = nodes_to_merge;
                   } else {
-                      let mut iter = nodes_to_merge.into_iter();
-                      let first = iter.next().unwrap();
-                      let mut merged = first.as_ref().clone();
-                      for other in iter {
-                          merged._merge(&other, merge_depth - 1);
+                      let (root_nodes, non_root_nodes): (Vec<_>, Vec<_>) =
+                          nodes_to_merge.into_iter().partition(|n| n.is_root());
+
+                      let mut final_nodes = Vec::new();
+
+                      // Merge non-root nodes together
+                      if !non_root_nodes.is_empty() {
+                          let mut iter = non_root_nodes.into_iter();
+                          let first = iter.next().unwrap();
+                          let mut merged = first.as_ref().clone();
+                          for other in iter {
+                              merged._merge(&other, merge_depth - 1);
+                          }
+                          let mut merged_arc = Arc::new(merged);
+                          if merged_arc == first {
+                              merged_arc = first;
+                          }
+                          final_nodes.push(merged_arc);
                       }
-                      let mut merged = Arc::new(merged);
-                      if merged == first {
-                          merged = first;
-                      }
-                      *target_preds_vec = vec![merged];
+
+                      // Per user request, do not merge root nodes. Keep them separate.
+                      final_nodes.extend(root_nodes);
+
+                      *target_preds_vec = final_nodes;
                   }
               }
           }
@@ -3198,6 +3231,13 @@ local_system:
 
           // #[time_it]
           fn _merge(&mut self, other: &Self, merge_depth: usize) {
+              if self.is_root() != other.is_root() {
+                  // Merging a root and a non-root node is not well-defined
+                  // as it would lose the "root-ness" property of one of them.
+                  // We refuse to perform this merge. The caller should handle this case
+                  // by keeping the nodes separate if they need to be combined.
+                  return;
+              }
               if self == other { return; }
 
               if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
@@ -4661,7 +4701,7 @@ system:
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - gf
   commit_message_model:
@@ -5407,17 +5447,30 @@ messages:
                   if nodes_to_merge.len() <= 1 {
                       *target_preds_vec = nodes_to_merge;
                   } else {
-                      let mut iter = nodes_to_merge.into_iter();
-                      let first = iter.next().unwrap();
-                      let mut merged = first.as_ref().clone();
-                      for other in iter {
-                          merged._merge(&other, merge_depth - 1);
+                      let (root_nodes, non_root_nodes): (Vec<_>, Vec<_>) =
+                          nodes_to_merge.into_iter().partition(|n| n.is_root());
+
+                      let mut final_nodes = Vec::new();
+
+                      // Merge non-root nodes together
+                      if !non_root_nodes.is_empty() {
+                          let mut iter = non_root_nodes.into_iter();
+                          let first = iter.next().unwrap();
+                          let mut merged = first.as_ref().clone();
+                          for other in iter {
+                              merged._merge(&other, merge_depth - 1);
+                          }
+                          let mut merged_arc = Arc::new(merged);
+                          if merged_arc == first {
+                              merged_arc = first;
+                          }
+                          final_nodes.push(merged_arc);
                       }
-                      let mut merged = Arc::new(merged);
-                      if merged == first {
-                          merged = first;
-                      }
-                      *target_preds_vec = vec![merged];
+
+                      // Per user request, do not merge root nodes. Keep them separate.
+                      final_nodes.extend(root_nodes);
+
+                      *target_preds_vec = final_nodes;
                   }
               }
           }
@@ -5548,6 +5601,13 @@ messages:
 
           // #[time_it]
           fn _merge(&mut self, other: &Self, merge_depth: usize) {
+              if self.is_root() != other.is_root() {
+                  // Merging a root and a non-root node is not well-defined
+                  // as it would lose the "root-ness" property of one of them.
+                  // We refuse to perform this merge. The caller should handle this case
+                  // by keeping the nodes separate if they need to be combined.
+                  return;
+              }
               if self == other { return; }
 
               if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
@@ -7002,95 +7062,69 @@ messages:
       filename: src/datastructures/gss.rs
   - user: |-
       There's an issue with this code. Think about what happens if a gss like A --(0)--> B --(1)--> C (where A is the top node) is merged with A --(0)--> B. In the first tree, B is a root node - a 'bottom' node. In the second tree, B is the bottom node. But when they're merged, is this distinction kept?
-      Fix this by refusing to merge root nodes at any time.
-    metadata:
-  - user: Fix this.
+      Add a test for it. Use `is_root`.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed your code and the issue you've described. Merging GSS nodes where one represents the bottom of a stack (a root node) and another is an intermediate node can indeed lead to losing the critical "root-ness" distinction. This can cause incorrect parser behavior down the line.
-
-      To fix this, I've implemented your suggestion to refuse merging root nodes with non-root nodes. Here are the changes:
-
-      1.  **`_merge()` Guard:** I've added a check at the beginning of the `_merge` function. It now immediately returns if you attempt to merge a root node with a non-root node. This prevents high-level merge operations from incorrectly combining nodes with different structural roles.
-
-      2.  **`merge_node_maps()` Logic:** I've updated `merge_node_maps` to handle this correctly. When it collects a list of predecessor nodes to merge, it now partitions them into "root" and "non-root" groups.
-          *   The non-root nodes are merged together into a single node as before.
-          *   The root nodes are kept separate and are not merged with the non-root group or with each other, preserving their distinct "bottom-of-the-stack" status for each path.
-
-      These changes ensure that the structural distinction between stack-terminating paths and intermediate paths is always maintained during merges.
-
-      Here are the diffs for the modified file:
-
       ```diff
+      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
+      index 2ea7d0e..0d0c5e9 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -568,18 +568,30 @@
-                   if nodes_to_merge.len() <= 1 {
-                       *target_preds_vec = nodes_to_merge;
-                   } else {
-      -                let mut iter = nodes_to_merge.into_iter();
-      -                let first = iter.next().unwrap();
-      -                let mut merged = first.as_ref().clone();
-      -                for other in iter {
-      -                    merged._merge(&other, merge_depth - 1);
-      +                let (root_nodes, non_root_nodes): (Vec<_>, Vec<_>) =
-      +                    nodes_to_merge.into_iter().partition(|n| n.is_root());
-      +
-      +                let mut final_nodes = Vec::new();
-      +
-      +                // Merge non-root nodes together
-      +                if !non_root_nodes.is_empty() {
-      +                    let mut iter = non_root_nodes.into_iter();
-      +                    let first = iter.next().unwrap();
-      +                    let mut merged = first.as_ref().clone();
-      +                    for other in iter {
-      +                        merged._merge(&other, merge_depth - 1);
-      +                    }
-      +                    let mut merged_arc = Arc::new(merged);
-      +                    if merged_arc == first {
-      +                        merged_arc = first;
-      +                    }
-      +                    final_nodes.push(merged_arc);
-                       }
-      -                let mut merged = Arc::new(merged);
-      -                if merged == first {
-      -                    merged = first;
-      -                }
-      -                *target_preds_vec = vec![merged];
-      +
-      +                // Per user request, do not merge root nodes. Keep them separate.
-      +                final_nodes.extend(root_nodes);
-      +
-      +                *target_preds_vec = final_nodes;
-                   }
-               }
+      @@ -1482,6 +1482,48 @@ mod tests {
+               // With the bug, this fails because the new_root will have its predecessors merged.
+               assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
+               assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
            }
-      @@ -680,6 +692,13 @@
-       
-           // #[time_it]
-           fn _merge(&mut self, other: &Self, merge_depth: usize) {
-      +        if self.is_root() != other.is_root() {
-      +            // Merging a root and a non-root node is not well-defined
-      +            // as it would lose the "root-ness" property of one of them.
-      +            // We refuse to perform this merge. The caller should handle this case
-      +            // by keeping the nodes separate if they need to be combined.
-      +            return;
+      +
+      +    #[test]
+      +    fn test_merge_preserves_rootness_of_predecessors() {
+      +        // Build C (bottom/root)
+      +        let c = Arc::new(GSSNode::new(empty_acc()));
+      +        assert!(c.is_root(), "C should be a root (bottom) node");
+      +
+      +        // Build B_nonroot by pushing on C => B_nonroot has a predecessor (C), so it's NOT a root
+      +        let b_nonroot = Arc::new(c.push(mock_edge(1)));
+      +        assert!(!b_nonroot.is_root(), "B_nonroot should NOT be a root node");
+      +        assert_eq!(b_nonroot.max_depth(), 1, "B_nonroot depth should be 1");
+      +
+      +        // Build B_root as a fresh root node (no predecessors)
+      +        let b_root = Arc::new(GSSNode::new(empty_acc()));
+      +        assert!(b_root.is_root(), "B_root should be a root node");
+      +        assert_eq!(b_root.max_depth(), 0, "B_root depth should be 0");
+      +
+      +        // A1 --(0)--> B_nonroot --(1)--> C
+      +        let mut a1 = GSSNode::new_with_single_predecessor(b_nonroot.clone(), mock_edge(0), empty_acc());
+      +        // A2 --(0)--> B_root
+      +        let a2 = GSSNode::new_with_single_predecessor(b_root.clone(), mock_edge(0), empty_acc());
+      +
+      +        // Merge the two variants of A
+      +        a1.merge_with_depth(1, &a2);
+      +
+      +        // After merging, A's predecessors under edge 0 should contain BOTH:
+      +        // - a non-root B at depth 1
+      +        // - a root B at depth 0
+      +        let preds_by_depth = a1.predecessors().get(&mock_edge(0)).expect("edge 0 missing after merge");
+      +
+      +        // We expect both dest_keys 0 (root B) and 1 (non-root B) to be present
+      +        assert!(preds_by_depth.contains_key(&0), "Expected a root predecessor at depth key 0");
+      +        assert!(preds_by_depth.contains_key(&1), "Expected a non-root predecessor at depth key 1");
+      +
+      +        let mut saw_root = false;
+      +        let mut saw_non_root = false;
+      +        for (dk, vec) in preds_by_depth {
+      +            assert_eq!(vec.len(), 1, "Each depth bucket should contain exactly one predecessor");
+      +            if vec[0].is_root() { saw_root = true; assert_eq!(*dk, 0, "Root predecessor must be at depth key 0"); }
+      +            else { saw_non_root = true; assert_eq!(*dk, 1, "Non-root predecessor must be at depth key 1"); }
       +        }
-               if self == other { return; }
+      +        assert!(saw_root && saw_non_root, "Merged node should have both root and non-root predecessors preserved");
+      +        assert_eq!(a1.num_predecessors(), 2, "Should have exactly two predecessors after merge");
+      +    }
+       }
        
-               if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
-
-      ```
-
-      I didn't find any necessary changes for `src/datastructures/arc_wrapper.rs`. The fix is entirely contained within the GSS logic. Let me know if you have any other questions
+       ```
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
 ...
