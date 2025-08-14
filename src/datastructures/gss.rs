@@ -955,7 +955,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        unreachable!();
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -1036,7 +1036,7 @@ pub fn prune_disallowed_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        unreachable!();
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -1078,7 +1078,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        unreachable!();
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
@@ -1116,7 +1116,7 @@ pub fn merge_trie2_nodes_if_needed(
         // println!("After merge_trie2_nodes_if_needed:\n{}", s);
     } else {
         // This shouldn't happen as we never return None from closure
-        // unreachable!();
+        unreachable!();
     }
 }
 
