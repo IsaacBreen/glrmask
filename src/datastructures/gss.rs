@@ -1635,7 +1635,13 @@ pub fn format_acc(
 
     // Show the bitset itself instead of only counts or samples.
     let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
-        format!("{}({:?})", label, bv)
+        if bv.is_empty() {
+            format!("{}(none)", label)
+        } else if *bv == HybridBitset::max_ones() {
+            format!("{}(all)", label)
+        } else {
+            format!("{}({:?})", label, bv)
+        }
     };
 
     let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
@@ -1689,10 +1695,31 @@ pub fn format_acc(
     let union_terminals_str = format_disallowed_terminals(&node.acc.terminals_union, "Term(U)");
     let intersection_terminals_str =
         format_disallowed_terminals(&node.acc.terminals_intersection, "Term(I)");
-    let trie2_nodes_str = if node.acc.trie2_nodes.is_empty() {
-        "Trie2(Nodes: None)".to_string()
-    } else {
-        format!("Trie2(Nodes: {})", node.acc.trie2_nodes.len())
+    // Show pointers for trie2 nodes if there aren't too many; otherwise show a count with a sample.
+    let trie2_nodes_str = {
+        const MAX_PTRS_TO_SHOW: usize = 5;
+        let n = node.acc.trie2_nodes.len();
+        if n == 0 {
+            "Trie2(Nodes: None)".to_string()
+        } else if n <= MAX_PTRS_TO_SHOW {
+            let ptrs: Vec<String> = node
+                .acc
+                .trie2_nodes
+                .iter()
+                .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
+                .collect();
+            format!("Trie2(Nodes: [{}])", ptrs.join(", "))
+        } else {
+            let ptrs_sample: Vec<String> = node
+                .acc
+                .trie2_nodes
+                .iter()
+                .take(MAX_PTRS_TO_SHOW)
+                .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
+                .collect();
+            let remaining = n - MAX_PTRS_TO_SHOW;
+            format!("Trie2(Nodes: {} [first {}: {}, ...; +{} more])", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining)
+        }
     };
 
     format!("[{}, {}, {}, {}, {}]",
