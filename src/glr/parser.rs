@@ -945,7 +945,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 }
             }
-            let merged = GSSNode::merge_many_with_depth(1, below_zero);
+            let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
+                timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
+                    GSSNode::merge_many_with_depth(1, below_zero)
+                })
+            });
             out.push(merged);
         }
         });
