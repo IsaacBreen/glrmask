@@ -102,6 +102,7 @@ pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<Non
 }
 
 pub fn compute_first_sets_for_nonterminals(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+    // TODO: should this account for EOF? Return `BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>`?
     crate::debug!(3, "Computing first sets for non-terminals");
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
