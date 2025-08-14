@@ -966,12 +966,17 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
     crate::debug!(2, "Finalizing table");
-    let final_table = stage_8_table;
+    let mut final_table = stage_8_table;
 
     // Determine start state
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
     // Determine the special substring state ID
     let substring_state_id = *item_set_map.get_by_left(&special_substring_item_set).unwrap();
+
+    // Set accept
+    let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+    final_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+
 
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
