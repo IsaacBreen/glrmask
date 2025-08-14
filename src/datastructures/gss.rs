@@ -580,7 +580,7 @@ impl GSSNode {
         self.predecessors.is_empty()
     }
 
-    pub fn merge_many_with_depth(nodes: impl IntoIterator<Item = Arc<GSSNode>>, merge_depth: usize) -> Arc<GSSNode> {
+    pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
         let mut iter = nodes.into_iter();
         if let Some(first) = iter.next() {
             let mut merged = first.as_ref().clone();
