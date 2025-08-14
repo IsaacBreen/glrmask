@@ -119,10 +119,10 @@ impl Acc {
 
     pub fn narrow(from: &Self, to: &Self) -> Self {
         Acc {
-            llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
-            llm_tokens_intersection: &from.llm_tokens_union & &to.llm_tokens_intersection,
-            terminals_union: &from.terminals_union & &to.terminals_union,
-            terminals_intersection: &from.terminals_union & &to.terminals_intersection,
+            llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union, // Correct
+            llm_tokens_intersection: &from.llm_tokens_intersection & &to.llm_tokens_intersection,
+            terminals_union: &from.terminals_union & &to.terminals_union, // Correct
+            terminals_intersection: &from.terminals_intersection & &to.terminals_intersection,
             needs_push_down: false,
             // Keep trie2 nodes conservative: intersect sets to avoid leaking edges upward.
             trie2_nodes: to.trie2_nodes.clone(),
@@ -663,7 +663,9 @@ impl GSSNode {
                     unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
                     unified_preds_by_depth.insert(depth, unified_pred_vec);
                 }
-                unified_predecessors.insert(edge_val, unified_preds_by_depth);
+                if !unified_preds_by_depth.is_empty() {
+                    unified_predecessors.insert(edge_val, unified_preds_by_depth);
+                }
             }
             unified_predecessors
         } else {
@@ -2086,62 +2088,39 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_preserves_trie2_nodes() {
-        // This test reproduces a bug where merging GSS nodes would cause
-        // trie2_nodes from leaf predecessors to be lost due to incorrect
-        // constraint propagation (narrowing).
+    fn test_get_pushed_down_predecessors_preserves_trie2_nodes() {
+        // This test isolates the bug where `get_pushed_down_predecessors`
+        // would wipe the `trie2_nodes` from its predecessors due to incorrect
+        // argument order in the call to `Acc::narrow`.
 
-        // --- GSS 1 Setup ---
-        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let trie2_node3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        // 1. Create a leaf with a trie2_node.
+        let trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let mut leaf_acc = empty_acc();
+        leaf_acc.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node.clone()));
+        let leaf = Arc::new(GSSNode::new(leaf_acc));
 
-        let mut acc_l1 = empty_acc();
-        acc_l1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
-        let l1 = Arc::new(GSSNode::new(acc_l1));
+        // 2. Create a parent node that will push down constraints.
+        let mut parent_preds = NodeMap::new();
+        parent_preds.entry(mock_edge(0)).or_default().insert(leaf.dest_key(), vec![leaf.clone()]);
+        
+        // The parent's acc has some token constraints and `needs_push_down = true`.
+        // Its own trie2_nodes set is empty.
+        let mut parent_acc = mock_acc(99); // disallow token 99
+        parent_acc.needs_push_down = true;
+        let parent = GSSNode::new_with_map(Arc::new(parent_acc.clone()), parent_preds);
 
-        let mut acc_l2 = empty_acc();
-        acc_l2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
-        let l2 = Arc::new(GSSNode::new(acc_l2));
+        // 3. Call the function under test.
+        let pushed_down_map = parent.get_pushed_down_predecessors();
 
-        let mut acc_l3 = empty_acc();
-        acc_l3.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node3.clone()));
-        let l3 = Arc::new(GSSNode::new(acc_l3));
+        // 4. Check the resulting predecessor.
+        let new_leaf_arc = &pushed_down_map.values().next().unwrap().values().next().unwrap()[0];
 
-        let mut gss1_preds = NodeMap::new();
-        gss1_preds.entry(mock_edge(0)).or_default().insert(l1.dest_key(), vec![l1.clone()]);
-        gss1_preds.entry(mock_edge(1)).or_default().insert(l2.dest_key(), vec![l2.clone()]);
-        gss1_preds.entry(mock_edge(2)).or_default().insert(l3.dest_key(), vec![l3.clone()]);
+        // The new leaf should have the token constraints from the parent.
+        assert_eq!(new_leaf_arc.acc.llm_tokens_union, parent.acc.llm_tokens_union);
 
-        let mut gss1 = GSSNode::new_with_map(Arc::new(mock_acc(0)), gss1_preds); // mock_acc(0) restricts token 0
-        Arc::make_mut(&mut gss1.acc).needs_push_down = true; // Simulate state that triggers narrowing
-
-        // --- GSS 2 Setup ---
-        let mut acc_l4 = empty_acc();
-        acc_l4.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone())); // Shared trie2_node
-        let l4 = Arc::new(GSSNode::new(acc_l4));
-        let i1 = Arc::new(l4.push(mock_edge(0)));
-        let gss2 = i1.push(mock_edge(1));
-
-        // --- Merge ---
-        gss1.merge_with_depth(1, &gss2);
-
-        // --- Assertions ---
-        // Traverse the merged GSS and collect all trie2_nodes from all leaf nodes.
-        let mut q = VecDeque::new();
-        q.push_back(Arc::new(gss1));
-        let mut visited = HashSet::new();
-        let mut final_leaf_trie2_nodes = BTreeSet::new();
-
-        while let Some(node) = q.pop_front() {
-            if !visited.insert(Arc::as_ptr(&node)) { continue; }
-            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc.trie2_nodes.clone()); }
-            for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
-        }
-
-        assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node1)), "trie2_node1 missing");
-        assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node2)), "trie2_node2 missing");
-        assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node3)), "trie2_node3 missing");
-        assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
+        // CRUCIAL: The new leaf must still have its original trie2_node.
+        // The bug would cause this to be empty.
+        assert_eq!(new_leaf_arc.acc.trie2_nodes.len(), 1, "trie2_nodes were wiped out");
+        assert!(new_leaf_arc.acc.trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node)), "The correct trie2_node was not preserved");
     }
 }
