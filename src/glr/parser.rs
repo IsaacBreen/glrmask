@@ -5,8 +5,8 @@ use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGoto};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal, literal};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
 use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
@@ -21,7 +21,7 @@ use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::glr::automaton::compute_closure;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce, stage_9};
 use crate::datastructures::trie::EdgeInserter;
@@ -172,9 +172,9 @@ pub struct GLRParser {
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
+    pub substring_state_id: StateID,
+    pub substring_item_set: BTreeSet<Item>,
     pub ignore_terminal_id: Option<TerminalID>,
-    // Precomputed tables for substring parsing reductions.
-    pub(crate) substring_gotos: BTreeMap<NonTerminalID, Vec<SubstringGoto>>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -187,9 +187,9 @@ impl JSONConvertible for GLRParser {
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+        obj.insert("substring_state_id".to_string(), self.substring_state_id.to_json());
+        obj.insert("substring_item_set".to_string(), self.substring_item_set.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
-        // Do not serialize self.actions
         JSONNode::Object(obj)
     }
 
@@ -210,11 +210,13 @@ impl JSONConvertible for GLRParser {
                                       .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
                 let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
                                         .and_then(StateID::from_json)?;
+                let substring_state_id = obj.remove("substring_state_id").ok_or_else(|| "Missing field substring_state_id".to_string())
+                                            .and_then(StateID::from_json)?;
+                let substring_item_set = obj.remove("substring_item_set").ok_or_else(|| "Missing field substring_item_set".to_string())
+                                            .and_then(|n| BTreeSet::<Item>::from_json(n))?;
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
-
-                let substring_gotos = stage_9(&table, &non_terminal_map);
 
                 Ok(GLRParser {
                     table,
@@ -223,8 +225,9 @@ impl JSONConvertible for GLRParser {
                     non_terminal_map,
                     item_set_map,
                     start_state_id,
+                    substring_state_id,
+                    substring_item_set,
                     ignore_terminal_id,
-                    substring_gotos,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -241,8 +244,9 @@ impl Debug for GLRParser {
             .field("non_terminal_map", &self.non_terminal_map)
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
+            .field("substring_state_id", &self.substring_state_id)
+            .field("substring_item_set_size", &self.substring_item_set.len())
             .field("ignore_terminal_id", &self.ignore_terminal_id)
-            .field("substring_gotos_size", &self.substring_gotos.len())
             .finish()
     }
 }
@@ -255,8 +259,9 @@ impl PartialEq for GLRParser {
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
         self.start_state_id == other.start_state_id &&
-        self.ignore_terminal_id == other.ignore_terminal_id &&
-        self.substring_gotos == other.substring_gotos
+        self.substring_state_id == other.substring_state_id &&
+        self.substring_item_set == other.substring_item_set &&
+        self.ignore_terminal_id == other.ignore_terminal_id
     }
 }
 
@@ -272,7 +277,8 @@ impl GLRParser {
         start_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
         ignore_terminal_id: Option<TerminalID>,
-        substring_gotos: BTreeMap<NonTerminalID, Vec<SubstringGoto>>,
+        substring_state_id: StateID,
+        substring_item_set: BTreeSet<Item>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -290,8 +296,9 @@ impl GLRParser {
             non_terminal_map,
             item_set_map,
             start_state_id,
+            substring_state_id,
+            substring_item_set,
             ignore_terminal_id,
-            substring_gotos,
         }
     }
 
@@ -621,7 +628,6 @@ pub struct GLRParserState<'a> { // No longer generic
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BelowBottomCacheKey {
     nonterminal_id: NonTerminalID,
-    source_state_id: StateID,
     // k: usize,
     // Important: this Acc must have trie2_nodes cleared before being placed here.
     acc: Acc,
@@ -863,7 +869,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
-        timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
+        timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", { // TODO: this is slow
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
             
@@ -874,12 +880,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let mut acc: Acc = acc_arc.as_ref().clone();
                     let active_llm_tokens = acc.union_llm_tokens();
                     let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                    for goto_info in gotos_for_nt {
+                    for goto_info in gotos_for_nt { // TODO: this is slow
                         // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                         let cache_key = BelowBottomCacheKey {
                             nonterminal_id: nt,
-                            source_state_id: goto_info.source_state_id,
-                            // k,
+                            // source_state_id: goto_info.source_state_id,
                             acc: acc.clone(),
                         };
 
@@ -891,7 +896,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
                                 let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
-                                    (k, Some(goto_info.source_state_id)),
+                                    (k, Some(self.parser.substring_state_id)),
                                     active_llm_tokens.clone(),
                                     |e, n| *e |= n,
                                 ).to_destination_weakly(cached_trie2_node.as_arc().clone());
@@ -910,7 +915,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let Some(goto_state_id) = goto_info.goto_state_id {
                             // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
                             let new_trie2_node = trie2_dst_nodes
-                                .entry(goto_info.source_state_id)
+                                .entry(self.parser.substring_state_id)
                                 .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
                                 .clone();
                             self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
@@ -921,7 +926,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
                                 let inserter = EdgeInserter::new(
                                     existing_trie2_node.as_arc().clone(),
-                                    (k, Some(goto_info.source_state_id)),
+                                    (k, Some(self.parser.substring_state_id)),
                                     active_llm_tokens.clone(),
                                     |e, n| *e |= n,
                                 ).try_destination_auto(new_trie2_node.clone());
@@ -932,7 +937,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let mut acc2 = acc.clone();
                             acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
                             let new_gss0 = GSSNode::new(acc2);
-                            let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                            let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.substring_state_id });
                             let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                             out.push(new_gss2);
                         }
