@@ -866,7 +866,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-            timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+            timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, self.parser.substring_gotos.get(&nt).unwrap().len()), {});
 
             if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
                 crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
