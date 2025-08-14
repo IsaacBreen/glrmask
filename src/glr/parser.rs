@@ -871,6 +871,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 &self.parser.substring_gotos_phase1
             };
 
+            timeit!(format!("GLRParserState::reduce_and_goto: Precomputing states to push. {} items", precomputed_map.get(&(nt, token_id)).map_or(0, |m| m.len())), {});
             if let Some(states_to_push) = precomputed_map.get(&(nt, token_id)) {
                 crate::debug!(6, "States to push after reduction (precomputed): {:?}", states_to_push);
                 let mut trie2_dst_nodes = HashMap::new();
