@@ -581,7 +581,8 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> (Stage7Table, BiBTreeMap<BTreeSet<Item>, StateID>) {
+fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+    let start_production_id = 0;
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
@@ -900,6 +901,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Removing productions with undefined non-terminals");
     println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
     let start_production_id = 0;
+    let initial_item = Item { production: Arc::new(productions[start_production_id].clone()), dot_position: 0, lookahead: None };
+    let initial_item_set = BTreeSet::from([initial_item]);
+
     let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     // productions = simplify_grammar(&mut productions);
 
@@ -960,9 +964,6 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(6, &stage_7_table);
 
     // Determine start state and set its accept action
-    let start_production_id = 0;
-    let initial_item = Item { production: Arc::new(productions[start_production_id].clone()), dot_position: 0, lookahead: None };
-    let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
     let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
     stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
