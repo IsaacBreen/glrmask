@@ -342,6 +342,21 @@ type Stage7Result = (
     StateID,
 );
 
+fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+    let mut row = BTreeMap::new();
+
+    for (symbol, items_in_split) in &splits {
+        row.insert(symbol.clone(), items_in_split.clone());
+        if symbol.is_some() {
+            let goto_set = compute_goto(items_in_split);
+            if visited_kernels.insert(goto_set.clone()) {
+                worklist.push_back(goto_set);
+            }
+        }
+    }
+    row
+}
+
 #[time_it]
 fn stage_1(productions: &[Production]) -> Stage1Result {
     let start_production_id = 0;
@@ -385,17 +400,8 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
         };
         let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
         let splits = split_on_dot(&closure);
-        let mut row = BTreeMap::new();
 
-        for (symbol, items_in_split) in &splits {
-            row.insert(symbol.clone(), items_in_split.clone());
-            if symbol.is_some() {
-                let goto_set = compute_goto(items_in_split);
-                if visited_kernels.insert(goto_set.clone()) {
-                    worklist.push_back(goto_set);
-                }
-            }
-        }
+        let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
 
         transitions.insert(item_set, row);
     }
