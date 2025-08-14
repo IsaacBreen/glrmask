@@ -899,6 +899,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
     println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
+    let start_production_id = 0;
     let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     // productions = simplify_grammar(&mut productions);
 
