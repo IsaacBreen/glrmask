@@ -694,7 +694,7 @@ impl GSSNode {
     }
 
     fn narrow_with_acc(node: &mut Arc<GSSNode>, acc: &Acc) {
-        let mut new_acc = Acc::narrow(&node.acc, acc);
+        let mut new_acc = Acc::narrow(acc, &node.acc);
         // let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
         //                   new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
         //                   new_acc.terminals_union != node.acc.terminals_union ||
@@ -2083,5 +2083,65 @@ mod tests {
         // With the bug, this fails because the new_root will have its predecessors merged.
         assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
         assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
+    }
+
+    #[test]
+    fn test_merge_preserves_trie2_nodes() {
+        // This test reproduces a bug where merging GSS nodes would cause
+        // trie2_nodes from leaf predecessors to be lost due to incorrect
+        // constraint propagation (narrowing).
+
+        // --- GSS 1 Setup ---
+        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+
+        let mut acc_l1 = empty_acc();
+        acc_l1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
+        let l1 = Arc::new(GSSNode::new(acc_l1));
+
+        let mut acc_l2 = empty_acc();
+        acc_l2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
+        let l2 = Arc::new(GSSNode::new(acc_l2));
+
+        let mut acc_l3 = empty_acc();
+        acc_l3.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node3.clone()));
+        let l3 = Arc::new(GSSNode::new(acc_l3));
+
+        let mut gss1_preds = NodeMap::new();
+        gss1_preds.entry(mock_edge(0)).or_default().insert(l1.dest_key(), vec![l1.clone()]);
+        gss1_preds.entry(mock_edge(1)).or_default().insert(l2.dest_key(), vec![l2.clone()]);
+        gss1_preds.entry(mock_edge(2)).or_default().insert(l3.dest_key(), vec![l3.clone()]);
+
+        let mut gss1 = GSSNode::new_with_map(Arc::new(mock_acc(0)), gss1_preds); // mock_acc(0) restricts token 0
+        Arc::make_mut(&mut gss1.acc).needs_push_down = true; // Simulate state that triggers narrowing
+
+        // --- GSS 2 Setup ---
+        let mut acc_l4 = empty_acc();
+        acc_l4.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone())); // Shared trie2_node
+        let l4 = Arc::new(GSSNode::new(acc_l4));
+        let i1 = Arc::new(l4.push(mock_edge(0)));
+        let gss2 = i1.push(mock_edge(1));
+
+        // --- Merge ---
+        gss1.merge_with_depth(1, &gss2);
+
+        // --- Assertions ---
+        // Traverse the merged GSS and collect all trie2_nodes from all leaf nodes.
+        let mut q = VecDeque::new();
+        q.push_back(Arc::new(gss1));
+        let mut visited = HashSet::new();
+        let mut final_leaf_trie2_nodes = BTreeSet::new();
+
+        while let Some(node) = q.pop_front() {
+            if !visited.insert(Arc::as_ptr(&node)) { continue; }
+            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc.trie2_nodes.clone()); }
+            for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
+        }
+
+        assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node1)), "trie2_node1 missing");
+        assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node2)), "trie2_node2 missing");
+        assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node3)), "trie2_node3 missing");
+        assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
     }
 }
