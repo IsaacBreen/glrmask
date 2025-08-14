@@ -867,6 +867,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
             timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, self.parser.substring_gotos.get(&nt).unwrap().len()), {});
+            let mut below_zero = Vec::new();
 
             if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
                 crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
@@ -935,7 +936,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let new_gss0 = GSSNode::new(acc2);
                             let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                             let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
-                            out.push(new_gss2);
+                            below_zero.push(Arc::new(new_gss2));
                         }
 
                         if goto_info.accept {
@@ -944,6 +945,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 }
             }
+            let merged = GSSNode::merge_many_with_depth(1, below_zero);
+            out.push(merged.as_ref().clone());
         }
         });
  

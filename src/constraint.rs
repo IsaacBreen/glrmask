@@ -421,7 +421,7 @@ impl GrammarConstraint {
                 gss_nodes_to_merge.push(Arc::new(gss_node));
             }
 
-            let merged_gss = GSSNode::merge_many_with_depth(gss_nodes_to_merge, 1);
+            let merged_gss = GSSNode::merge_many_with_depth(1, gss_nodes_to_merge);
             let parse_state = ParseState { stack: merged_gss };
             let glr_state = parser.init_glr_parser_from_parse_state(parse_state);
 
@@ -2170,7 +2170,7 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
-                let out_gss = GSSNode::merge_many_with_depth(out_gsss, 1);
+                let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
                     let mut out_gss_filtered = out_gss.clone();
