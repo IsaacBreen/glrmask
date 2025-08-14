@@ -712,6 +712,7 @@ fn test_ignore_token() {
 
     let ignore_terminal_id = Some(tid_ws);
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), ignore_terminal_id);
+    println!("Parser: {}", parser);
     assert_eq!(parser.ignore_terminal_id, ignore_terminal_id);
 
     let mut token_name_map = BiBTreeMap::new();
