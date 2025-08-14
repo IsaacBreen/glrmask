@@ -106,7 +106,7 @@ impl Item {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LRMode {
     LALR,
-    LALR_EX_SHIFT,
+    LALR_EX_SHIFT_STATES,
     LR1,
 }
 

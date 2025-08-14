@@ -1974,7 +1974,7 @@ impl<'a> GrammarConstraintState<'a> {
                         let mut do_phase3 = false;
                         do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
                         do_phase3 |= match LR_MODE {
-                            LRMode::LR1 | LRMode::LALR_EX_SHIFT => false,
+                            LRMode::LR1 | LRMode::LALR_EX_SHIFT_STATES => false,
                             LRMode::LALR => true,
                         };
                         // do_phase3 |= true;

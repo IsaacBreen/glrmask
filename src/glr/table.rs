@@ -385,7 +385,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
         let lalr_mode = match LR_MODE {
             LRMode::LALR => true,
             LRMode::LR1 => false,
-            LRMode::LALR_EX_SHIFT => {
+            LRMode::LALR_EX_SHIFT_STATES => {
                 // Ensure we can't get to this state from a shift.
                 let mut do_lalr = true;
                 for item in &item_set {
