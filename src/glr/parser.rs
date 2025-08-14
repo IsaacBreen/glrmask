@@ -834,7 +834,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         } else {
                             // It's not a len-1 reduce. This is our final state for this chain.
                             let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                            out.push(new_gss_node);
+                            out.push(Arc::new(new_gss_node));
                             // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
                             break; // Exit the fast loop for this path
                         }
@@ -946,22 +946,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
             let merged = GSSNode::merge_many_with_depth(1, below_zero);
-            out.push(merged.as_ref().clone());
+            out.push(merged);
         }
         });
- 
-        if out.is_empty() {
-            Arc::new(GSSNode::new_fresh())
-        } else if out.len() == 1 {
-            Arc::new(out.into_iter().next().unwrap())
-        } else {
-            let mut out_iter = out.into_iter();
-            let mut out_node = out_iter.next().unwrap();
-            for next_node in out_iter {
-                out_node.merge_with_depth(1, &next_node);
-            }
-            Arc::new(out_node)
-        }
+
+        GSSNode::merge_many_with_depth(1, out)
     }
 
     #[time_it("GLRParserState::process_token")]
