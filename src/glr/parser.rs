@@ -835,7 +835,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // It's not a len-1 reduce. This is our final state for this chain.
                             let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                             out.push(new_gss_node);
-                            timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
+                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
                             break; // Exit the fast loop for this path
                         }
                     } else {
@@ -866,7 +866,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
         if any_below_bottom {
             crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-            
+            timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+
             if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
                 crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
                 let mut trie2_dst_nodes = HashMap::new();
