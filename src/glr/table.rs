@@ -645,6 +645,13 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
             gotos.insert(non_terminal_id, goto);
         }
 
+        if item_set.contains(&initial_item) {
+            // If the initial item is in this set, we need to accept in the start nonterminal's goto action.
+            let start_nonterminal = &productions[start_production_id].lhs;
+            let start_non_terminal_id = *non_terminal_map.get_by_left(&start_nonterminal).expect(&format!("Start non-terminal '{}' not found in map", start_nonterminal));
+            gotos.entry(start_non_terminal_id).or_default().accept = true;
+        }
+
         stage_7_table.insert(state_id, Stage7Row {
             shifts_and_reduces_full,
             gotos,
