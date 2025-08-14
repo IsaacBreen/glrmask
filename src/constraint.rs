@@ -471,6 +471,7 @@ impl GrammarConstraint {
                 out
             },
             |glr_s1, glr_s2| {
+                crate::debug!(4, "Trie2: Merging GLR states");
                 glr_s1.log_gss("Before merge...", TerminalID(0), false, false);
                 glr_s2.log_gss("...with", TerminalID(0), false, false);
                 glr_s1.merge_with(glr_s2);
@@ -487,9 +488,16 @@ impl GrammarConstraint {
                 let keep_going = !active_llm_tokens.is_empty();
                 if precomputed_node_data.value.end {
                     crate::debug!(3, "Trie2: Found end state for GLR state");
+                    glr_s.log_gss(
+                        "Trie2: Found end state for GLR state",
+                        TerminalID(0),
+                        false,
+                        false,
+                    );
                     for gss_root in glr_s.active_state.stack.get_roots() {
                         let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
+                        crate::debug!(4, "Trie2: Inserting end edge into Trie2 node with active LLM tokens: {:?}", active_llm_tokens_for_root);
                         for trie2_node in gss_root_acc.trie2_nodes.iter() {
                             let mut inserter = EdgeInserter::new(
                                 trie2_node.as_arc().clone(),
