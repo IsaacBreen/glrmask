@@ -688,7 +688,7 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
                 }
             };
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } => {
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, production_ids } => {
                     let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
                     entry.0 += 1;
                     entry.1.extend(production_ids.iter().cloned());
