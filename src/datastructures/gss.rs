@@ -1765,7 +1765,7 @@ pub fn format_acc(
                 .acc
                 .trie2_nodes
                 .iter()
-                .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
+                .map(|wrapper| format!("{:p}", { let ptr = Arc::as_ptr(wrapper.as_arc()) as *const PrecomputeNode2; ptr}))
                 .collect();
             Some(format!("Trie2(n={}, [{}])", n, ptrs.join(", ")))
         } else {
