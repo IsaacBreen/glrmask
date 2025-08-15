@@ -994,6 +994,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState::new();
         for state in shifted_states_todo {
+            crate::debug!(5, "Merging shifted state into active state");
+            let mut glr_s = self.clone();
+            glr_s.active_state = state.clone();
+            glr_s.log_gss("Phase1/2-shifted", token_id, false, false);
             next_active.merge(state);
         }
         self.active_state = next_active;
@@ -1445,9 +1449,9 @@ impl ParseState { // No longer generic
         //     std::mem::swap(self, &mut other);
         // }
         // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
-        // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
         // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
-        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        // Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
     }
 }
 

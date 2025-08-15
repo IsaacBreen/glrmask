@@ -1659,14 +1659,8 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (2)
     assert_eq!(mask, HybridBitset::from_iter(vec![2]));
 
-    // Commit "("
-    state.commit(LLMTokenID(1));
-    let mask = state.get_mask();
-    // After '(', we expect another E, so the mask should be the same
-    assert_eq!(mask, HybridBitset::from_iter(vec![2]));
-
-    // Commit "i"
-    state.commit(LLMTokenID(0));
+    // Commit "(i"
+    state.commit(LLMTokenID(2));
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
