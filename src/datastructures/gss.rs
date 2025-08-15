@@ -454,16 +454,38 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
         for (dest_key, source_preds_vec) in source_preds_by_depth {
             let target_preds_vec = target_preds_by_depth.entry(dest_key).or_default();
 
+            // TODO: ...I mean come on
+            //  clean this up
+            if merge_depth == 0 {
+                if *target_preds_vec == source_preds_vec {
+                    continue;
+                } else if target_preds_vec.len() == 1 && source_preds_vec.len() > 1 {
+                    if source_preds_vec.contains(&target_preds_vec[0]) {
+                        *target_preds_vec = source_preds_vec;
+                        continue;
+                    } else {
+                        target_preds_vec.extend(source_preds_vec);
+                        continue;
+                    }
+                } else if target_preds_vec.len() > 1 && source_preds_vec.len() == 1 {
+                    if target_preds_vec.contains(&source_preds_vec[0]) {
+                        continue;
+                    } else {
+                        target_preds_vec.extend(source_preds_vec);
+                        continue;
+                    }
+                } else {
+                    target_preds_vec.extend(source_preds_vec);
+                    continue;
+                }
+            }
+
             let mut nodes_to_merge = source_preds_vec;
             if !target_preds_vec.is_empty() {
                 nodes_to_merge.extend(target_preds_vec.drain(..));
             }
 
             if nodes_to_merge.len() <= 1 {
-                *target_preds_vec = nodes_to_merge;
-            } else if merge_depth == 0 {
-                // When not merging deeply, just combine the lists of predecessors.
-                // Duplicates are possible but are handled by structural unification later if needed.
                 *target_preds_vec = nodes_to_merge;
             } else {
                 let mut iter = nodes_to_merge.into_iter();
@@ -472,11 +494,11 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
                 for other in iter {
                     merged._merge(&other, merge_depth - 1);
                 }
-                let mut merged_arc = Arc::new(merged);
-                if merged_arc == first {
-                    merged_arc = first;
+                let mut merged = Arc::new(merged);
+                if merged == first {
+                    merged = first;
                 }
-                *target_preds_vec = vec![merged_arc];
+                *target_preds_vec = vec![merged];
             }
         }
     }
