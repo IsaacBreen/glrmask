@@ -519,6 +519,8 @@ impl GrammarConstraint {
             },
         );
 
+        crate::debug!(2, "Finished precomputing Trie 2");
+
         precomputed2
     }
 
