@@ -50,10 +50,10 @@ macro_rules! debug {
                     let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                     println!(
                         // Add file, line placeholders. Add timestamp placeholder if needed.
-                        // concat!("[DEBUG] {}] {}:{}: ", $fmt), // The complete format string
-                        concat!("[DEBUG {} {}] {}:{}: ", $fmt), // The complete format string
+                        concat!("[DEBUG] {}] {}:{}: ", $fmt), // The complete format string
+                        // concat!("[DEBUG {} {}] {}:{}: ", $fmt), // The complete format string
                         // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
-                        now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
+                        // now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
                         $level,           // Argument for the first {} in the prefix
                         file!(),          // Argument for the second {} in the prefix
                         line!(),          // Argument for the third {} in the prefix
@@ -96,10 +96,10 @@ macro_rules! debug {
                     let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                     println!(
                         // Add file, line placeholders. Add timestamp placeholder if needed.
-                        // "[DEBUG {}] {}:{}: {:?}", // Format string for the expression variant
-                        "[DEBUG {} {}] {}:{}: {:?}", // Format string for the expression variant
+                        "[DEBUG {}] {}:{}: {:?}", // Format string for the expression variant
+                        // "[DEBUG {} {}] {}:{}: {:?}", // Format string for the expression variant
                         // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
-                        now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
+                        // now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
                         $level,           // Argument for the first {} in the prefix
                         file!(),          // Argument for the second {} in the prefix
                         line!(),          // Argument for the third {} in the prefix
