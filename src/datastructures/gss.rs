@@ -515,8 +515,10 @@ impl GSSNode {
     }
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
-    fn new_with_map(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
-        // let pred_accs = predecessors.values().map(|p| &p.acc);
+    fn new_with_map(mut acc: Arc<Acc>, predecessors: NodeMap) -> Self {
+        if predecessors.is_empty() && !acc.trie2_nodes.is_empty() {
+            Arc::make_mut(&mut acc).trie2_nodes.clear();
+        }
         let hash_key_cache = compute_hash_key(&predecessors, &acc);
         let max_depth = compute_max_depth(&predecessors);
         Self { acc, predecessors, hash_key_cache, max_depth }
