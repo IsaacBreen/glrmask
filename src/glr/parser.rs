@@ -954,7 +954,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         });
 
-        GSSNode::merge_many_with_depth(1, out)
+        timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
+            GSSNode::merge_many_with_depth(1, out)
+        })
     }
 
     #[time_it("GLRParserState::process_token")]
@@ -1238,7 +1240,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-        const MAX: usize = 150;
+        const MAX: usize = 30;
         const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
