@@ -6998,95 +6998,74 @@ messages:
       ```
 
       The merge behaviour right now isn't quite right. It's giving the INCORRECT result.
-
-      Add a test that reproduces this behaviour. (It should fail.)
-      Don't try to fix the issue yet. Just write the test.
+      Fix it.
     metadata:
-  - assistant: |
+  - assistant: |-
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index b8f8d6a..8d7ed16 100644
+      index 1c7df3f..4f0fd89 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -1394,6 +1394,68 @@ mod tests {
-               assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
-           }
-       
-      +    #[test]
-      +    fn test_merge_unions_trie2_nodes_across_identical_towers() {
-      +        // This test reproduces a bug where merging multiple identical towers (same edges and structure)
-      +        // but with different trie2_nodes at the leaf results in the leaf keeping only one
-      +        // of the trie2_nodes instead of the union of all of them.
-      +        //
-      +        // Structure for each tower:
-      +        // Root -> (edge 2) -> Node -> (edge 1) -> Node -> (edge 5) -> Leaf [Trie2={unique}]
-      +        //
-      +        // After merging the three towers, the single leaf should contain the union of the three distinct
-      +        // trie2 nodes.
-      +
-      +        // --- Build three distinct trie2 nodes ---
-      +        let t1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-      +        let t2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-      +        let t3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-      +
-      +        // Helper to build one tower given a leaf with a unique trie2 node.
-      +        let build_tower_from_leaf = |leaf: Arc<GSSNode>| -> GSSNode {
-      +            // Leaf --(5)--> n5 --(1)--> n1 --(2)--> root
-      +            let n5 = Arc::new(GSSNode::new_with_single_predecessor(leaf, mock_edge(5), empty_acc()));
-      +            let n1 = Arc::new(n5.push(mock_edge(1)));
-      +            n1.push(mock_edge(2))
-      +        };
-      +
-      +        // --- Leaf 1 with trie2_node t1 ---
-      +        let mut acc1 = empty_acc();
-      +        acc1.trie2_nodes.insert(ArcPtrWrapper::new(t1.clone()));
-      +        let leaf1 = Arc::new(GSSNode::new(acc1));
-      +        let tower1 = build_tower_from_leaf(leaf1);
-      +
-      +        // --- Leaf 2 with trie2_node t2 ---
-      +        let mut acc2 = empty_acc();
-      +        acc2.trie2_nodes.insert(ArcPtrWrapper::new(t2.clone()));
-      +        let leaf2 = Arc::new(GSSNode::new(acc2));
-      +        let tower2 = build_tower_from_leaf(leaf2);
-      +
-      +        // --- Leaf 3 with trie2_node t3 ---
-      +        let mut acc3 = empty_acc();
-      +        acc3.trie2_nodes.insert(ArcPtrWrapper::new(t3.clone()));
-      +        let leaf3 = Arc::new(GSSNode::new(acc3));
-      +        let tower3 = build_tower_from_leaf(leaf3);
-      +
-      +        // --- Merge the three identical towers ---
-      +        let mut merged = tower1.clone();
-      +        merged.merge_with_depth(usize::MAX, &tower2);
-      +        merged.merge_with_depth(usize::MAX, &tower3);
-      +
-      +        // --- Traverse to collect leaves and inspect trie2_nodes at the bottom ---
-      +        let mut q = VecDeque::new();
-      +        q.push_back(Arc::new(merged));
-      +        let mut visited = HashSet::new();
-      +        let mut leaves = Vec::new();
-      +        while let Some(node) = q.pop_front() {
-      +            if !visited.insert(Arc::as_ptr(&node)) { continue; }
-      +            if node.is_root() { leaves.push(node.clone()); }
-      +            for p in node.predecessors().values().flat_map(|m| m.values()).flatten() {
-      +                q.push_back(p.clone());
-      +            }
-      +        }
-      +
-      +        assert_eq!(leaves.len(), 1, "Merging identical towers should result in a single unified leaf node");
-      +        let leaf = &leaves[0];
-      +        let trie2_nodes = &leaf.acc.trie2_nodes;
-      +        assert_eq!(trie2_nodes.len(), 3, "Unified leaf should contain the union of all trie2 nodes from merged towers");
-      +        assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t1)), "Unified leaf missing trie2 node 1");
-      +        assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
-      +        assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t3)), "Unified leaf missing trie2 node 3");
-      +    }
+      @@ -88,6 +88,19 @@ pub struct Acc {
+           pub trie2_nodes: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
        }
        
-       ```
+       impl Acc {
+           /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
+           pub fn new_fresh() -> Self {
+               Self {
+                   llm_tokens_union: HybridBitset::max_ones(),
+                   llm_tokens_intersection: HybridBitset::max_ones(),
+                   terminals_union: HybridL2Bitset::all(),
+                   terminals_intersection: HybridL2Bitset::all(),
+                   needs_push_down: false,
+                   trie2_nodes: BTreeSet::new(),
+               }
+           }
+       
+      +    /// Returns true if this Acc acts as a neutral element for merging.
+      +    /// That is, it contributes no constraints and carries no trie2 nodes.
+      +    /// This is used to detect safe early-return cases in GSS merges.
+      +    pub fn is_merge_neutral(&self) -> bool {
+      +        self.llm_tokens_union == HybridBitset::max_ones()
+      +            && self.llm_tokens_intersection == HybridBitset::max_ones()
+      +            && self.terminals_union == HybridL2Bitset::all()
+      +            && self.terminals_intersection == HybridL2Bitset::all()
+      +            && self.trie2_nodes.is_empty()
+      +    }
+      +
+           /// Creates an accumulator with specific local constraints for a root node.
+           pub fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
+               Self {
+                   llm_tokens_union: llm_tokens.clone(),
+                   llm_tokens_intersection: llm_tokens,
+      @@ -456,11 +469,13 @@ impl GSSNode {
+           // #[time_it]
+           fn _merge(&mut self, other: &Self, merge_depth: usize) {
+               if self == other { return; }
+       
+      -        if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
+      -        if self.predecessors.is_empty() && self.acc.llm_tokens_union == HybridBitset::max_ones() {
+      +        // Only treat a leaf as ignorable if its Acc is fully neutral (no constraints, no trie2 nodes).
+      +        if other.predecessors.is_empty() && other.acc.is_merge_neutral() {
+      +            return;
+      +        }
+      +        if self.predecessors.is_empty() && self.acc.is_merge_neutral() {
+                   *self = other.clone();
+                   return;
+               }
+       
+               let mut self_predecessors = self.get_pushed_down_predecessors();
+               let other_predecessors = other.get_pushed_down_predecessors();
+      ```
     metadata:
-  - user: |-
+  - user: |
       Apply result (git-llm mode):
-      No git diff blocks (```diff) found in the last assistant message.
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
 ...

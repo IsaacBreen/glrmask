@@ -105,6 +105,17 @@ impl Acc {
         }
     }
 
+    /// Returns true if this Acc acts as a neutral element for merging.
+    /// That is, it contributes no constraints and carries no trie2 nodes.
+    /// This is used to detect safe early-return cases in GSS merges.
+    pub fn is_merge_neutral(&self) -> bool {
+        self.llm_tokens_union == HybridBitset::max_ones()
+            && self.llm_tokens_intersection == HybridBitset::max_ones()
+            && self.terminals_union == HybridL2Bitset::all()
+            && self.terminals_intersection == HybridL2Bitset::all()
+            && self.trie2_nodes.is_empty()
+    }
+
     /// Creates an accumulator with specific local constraints for a root node.
     pub fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
         Self {
@@ -635,8 +646,11 @@ impl GSSNode {
     fn _merge(&mut self, other: &Self, merge_depth: usize) {
         if self == other { return; }
 
-        if other.predecessors.is_empty() && other.acc.llm_tokens_union == HybridBitset::max_ones() { return; }
-        if self.predecessors.is_empty() && self.acc.llm_tokens_union == HybridBitset::max_ones() {
+        // Only treat a leaf as ignorable if its Acc is fully neutral (no constraints, no trie2 nodes).
+        if other.predecessors.is_empty() && other.acc.is_merge_neutral() {
+            return;
+        }
+        if self.predecessors.is_empty() && self.acc.is_merge_neutral() {
             *self = other.clone();
             return;
         }
