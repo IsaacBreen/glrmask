@@ -260,7 +260,7 @@ pub fn dump_precompute_trie2_recursive(
 
         let (child_ptr, child_info, is_visited, is_end_node) = {
             let child_node = child_arc.read().unwrap();
-            let ptr = &*child_node as *const PrecomputeNode2;
+            let ptr = Arc::as_ptr(child_arc) as *const PrecomputeNode2;
             (ptr, format!("Node {:p} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
         };
 
