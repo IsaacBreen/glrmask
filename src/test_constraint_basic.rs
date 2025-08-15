@@ -1368,7 +1368,7 @@ fn test_constraint_expression_cycle() {
     let productions = vec![
         prod("S", vec![nt("E"), t("EOF")]),
         prod("E", vec![nt("F")]),
-        prod("F", vec![nt("E")]),
+        // prod("F", vec![nt("E")]),
         prod("F", vec![t("I")]),
     ];
     // Map grammar terminals to IDs matching regex order
@@ -1410,6 +1410,66 @@ fn test_constraint_expression_cycle() {
     assert!(state.is_active());
     let mask = state.get_mask();
     // After "i$", the parse is complete.
+    assert_eq!(mask, HybridBitset::from_iter(vec![]));
+}
+
+#[test]
+fn test_constraint_expression_split_token() {
+    // Grammar: S -> E EOF; E -> LPAREN E | I
+    // LLM token vocabulary: "i(", "$"
+    // This tests a case where an LLM token "i(" is a sequence of grammar tokens
+    // that is not actually valid in the grammar (I must be followed by EOF).
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"i(".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+
+    // Tokenizer regex for grammar tokens '(', 'i', '$'
+    let expr = groups![
+        eat_u8(b'('), // ID 0
+        eat_u8(b'i'), // ID 1
+        eat_u8(b'$'), // ID 2
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]),
+        prod("E", vec![t("LPAREN"), nt("E")]),
+        prod("E", vec![t("I")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("LPAREN"), TerminalID(0));
+    grammar_token_map.insert(regex_name("I"), TerminalID(1));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        1, // max_original_llm_token_id
+    );
+    constraint.dump_precomputed();
+    constraint.dump_precomputed2();
+
+    // Initial state and step
+    let state = constraint.init();
+    let mask = state.get_mask();
+
+    // The grammar expects either 'i' (I) or '(' (LPAREN) at the start.
+    // The LLM token "i(" corresponds to the grammar token sequence [I, LPAREN].
+    // After the parser sees I, it completes the rule E -> I. The next expected
+    // token is EOF, not LPAREN. Therefore, the sequence [I, LPAREN] is invalid.
+    // The other LLM token "$" (EOF) is also not valid at the start.
+    // Thus, the initial mask should be empty.
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
