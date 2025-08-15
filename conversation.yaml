@@ -522,8 +522,10 @@ local_system:
           }
 
           /// Private constructor for internal methods that build a node from a pre-computed map.
-          fn new_with_map(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
-              // let pred_accs = predecessors.values().map(|p| &p.acc);
+          fn new_with_map(mut acc: Arc<Acc>, predecessors: NodeMap) -> Self {
+              if !predecessors.is_empty() && !acc.trie2_nodes.is_empty() {
+                  Arc::make_mut(&mut acc).trie2_nodes.clear();
+              }
               let hash_key_cache = compute_hash_key(&predecessors, &acc);
               let max_depth = compute_max_depth(&predecessors);
               Self { acc, predecessors, hash_key_cache, max_depth }
@@ -2213,6 +2215,57 @@ local_system:
               assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node2)), "trie2_node2 missing");
               assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node3)), "trie2_node3 missing");
               assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
+          }
+
+          #[test]
+          fn test_merge_does_not_incorrectly_collapse_branches() {
+              // This test reproduces a bug where merging two GSSs with a common edge value
+              // but different sub-structures would incorrectly collapse the distinct sub-structures.
+
+              // --- Shared Nodes ---
+              let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+              let mut acc1 = empty_acc();
+              acc1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
+              let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
+
+              let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+              let mut acc2 = empty_acc();
+              acc2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
+              let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
+
+              // --- GSS A ---
+              // Root -> (edge 1) -> leaf1
+              let gss_a = GSSNode::new_with_single_predecessor(
+                  leaf1.clone(),
+                  mock_edge(1),
+                  empty_acc(),
+              );
+
+              // --- GSS B ---
+              // intermediate -> (edge 0) -> leaf2
+              let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
+                  leaf2.clone(),
+                  mock_edge(0),
+                  empty_acc(),
+              ));
+              // Root -> (edge 1) -> leaf1
+              //      -> (edge 1) -> intermediate
+              let mut gss_b_preds = NodeMap::new();
+              gss_b_preds.entry(mock_edge(1)).or_default().insert(leaf1.dest_key(), vec![leaf1.clone()]);
+              gss_b_preds.entry(mock_edge(1)).or_default().insert(intermediate_b.dest_key(), vec![intermediate_b.clone()]);
+              let gss_b = GSSNode::new_with_map(Arc::new(empty_acc()), gss_b_preds);
+
+              // --- Merge ---
+              let mut merged_gss = gss_a.clone();
+              merged_gss.merge_with_depth(usize::MAX, &gss_b);
+
+              // --- Assertions ---
+              // The merged GSS should have two distinct predecessors under edge 1, because
+              // they have different depths and structures. The incorrect behavior collapses them into one.
+              assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
+
+              let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+              assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
           }
       }
   prev_file_contents:
@@ -2734,8 +2787,10 @@ local_system:
           }
 
           /// Private constructor for internal methods that build a node from a pre-computed map.
-          fn new_with_map(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
-              // let pred_accs = predecessors.values().map(|p| &p.acc);
+          fn new_with_map(mut acc: Arc<Acc>, predecessors: NodeMap) -> Self {
+              if !predecessors.is_empty() && !acc.trie2_nodes.is_empty() {
+                  Arc::make_mut(&mut acc).trie2_nodes.clear();
+              }
               let hash_key_cache = compute_hash_key(&predecessors, &acc);
               let max_depth = compute_max_depth(&predecessors);
               Self { acc, predecessors, hash_key_cache, max_depth }
@@ -4425,6 +4480,57 @@ local_system:
               assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node2)), "trie2_node2 missing");
               assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node3)), "trie2_node3 missing");
               assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
+          }
+
+          #[test]
+          fn test_merge_does_not_incorrectly_collapse_branches() {
+              // This test reproduces a bug where merging two GSSs with a common edge value
+              // but different sub-structures would incorrectly collapse the distinct sub-structures.
+
+              // --- Shared Nodes ---
+              let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+              let mut acc1 = empty_acc();
+              acc1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
+              let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
+
+              let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+              let mut acc2 = empty_acc();
+              acc2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
+              let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
+
+              // --- GSS A ---
+              // Root -> (edge 1) -> leaf1
+              let gss_a = GSSNode::new_with_single_predecessor(
+                  leaf1.clone(),
+                  mock_edge(1),
+                  empty_acc(),
+              );
+
+              // --- GSS B ---
+              // intermediate -> (edge 0) -> leaf2
+              let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
+                  leaf2.clone(),
+                  mock_edge(0),
+                  empty_acc(),
+              ));
+              // Root -> (edge 1) -> leaf1
+              //      -> (edge 1) -> intermediate
+              let mut gss_b_preds = NodeMap::new();
+              gss_b_preds.entry(mock_edge(1)).or_default().insert(leaf1.dest_key(), vec![leaf1.clone()]);
+              gss_b_preds.entry(mock_edge(1)).or_default().insert(intermediate_b.dest_key(), vec![intermediate_b.clone()]);
+              let gss_b = GSSNode::new_with_map(Arc::new(empty_acc()), gss_b_preds);
+
+              // --- Merge ---
+              let mut merged_gss = gss_a.clone();
+              merged_gss.merge_with_depth(usize::MAX, &gss_b);
+
+              // --- Assertions ---
+              // The merged GSS should have two distinct predecessors under edge 1, because
+              // they have different depths and structures. The incorrect behavior collapses them into one.
+              assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
+
+              let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+              assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
           }
       }
   diffs_applied_this_send: true
@@ -4970,8 +5076,10 @@ messages:
           }
 
           /// Private constructor for internal methods that build a node from a pre-computed map.
-          fn new_with_map(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
-              // let pred_accs = predecessors.values().map(|p| &p.acc);
+          fn new_with_map(mut acc: Arc<Acc>, predecessors: NodeMap) -> Self {
+              if !predecessors.is_empty() && !acc.trie2_nodes.is_empty() {
+                  Arc::make_mut(&mut acc).trie2_nodes.clear();
+              }
               let hash_key_cache = compute_hash_key(&predecessors, &acc);
               let max_depth = compute_max_depth(&predecessors);
               Self { acc, predecessors, hash_key_cache, max_depth }
@@ -6662,90 +6770,139 @@ messages:
               assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node3)), "trie2_node3 missing");
               assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
           }
+
+          #[test]
+          fn test_merge_does_not_incorrectly_collapse_branches() {
+              // This test reproduces a bug where merging two GSSs with a common edge value
+              // but different sub-structures would incorrectly collapse the distinct sub-structures.
+
+              // --- Shared Nodes ---
+              let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+              let mut acc1 = empty_acc();
+              acc1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
+              let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
+
+              let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+              let mut acc2 = empty_acc();
+              acc2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
+              let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
+
+              // --- GSS A ---
+              // Root -> (edge 1) -> leaf1
+              let gss_a = GSSNode::new_with_single_predecessor(
+                  leaf1.clone(),
+                  mock_edge(1),
+                  empty_acc(),
+              );
+
+              // --- GSS B ---
+              // intermediate -> (edge 0) -> leaf2
+              let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
+                  leaf2.clone(),
+                  mock_edge(0),
+                  empty_acc(),
+              ));
+              // Root -> (edge 1) -> leaf1
+              //      -> (edge 1) -> intermediate
+              let mut gss_b_preds = NodeMap::new();
+              gss_b_preds.entry(mock_edge(1)).or_default().insert(leaf1.dest_key(), vec![leaf1.clone()]);
+              gss_b_preds.entry(mock_edge(1)).or_default().insert(intermediate_b.dest_key(), vec![intermediate_b.clone()]);
+              let gss_b = GSSNode::new_with_map(Arc::new(empty_acc()), gss_b_preds);
+
+              // --- Merge ---
+              let mut merged_gss = gss_a.clone();
+              merged_gss.merge_with_depth(usize::MAX, &gss_b);
+
+              // --- Assertions ---
+              // The merged GSS should have two distinct predecessors under edge 1, because
+              // they have different depths and structures. The incorrect behavior collapses them into one.
+              assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
+
+              let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+              assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
+          }
       }
 
       ```
     metadata:
       filename: src/datastructures/gss.rs
   - user: |-
-      Here's an example GSS.
       ```
       GSS A:
-      Root 0: Node 0 [Trie2(Nodes: None)]
-        ├── Edge StateID(1) -> Node 2 [Trie2(Nodes: [0x6000001146f0])]
+      Root 0: Node 0
+        ├── edge 1 -> Node 1 [Trie2(n=1, [0x6000001146f0])]
 
       GSS B:
-      Root 0: Node 0 [Trie2(Nodes: None)]
-        ├── Edge StateID(1) -> Node 2 [Trie2(Nodes: [0x6000001146f0])]
-        └── Edge StateID(1) -> Node 1 [Trie2(Nodes: None)]
-          └── Edge StateID(0) -> Node 2 [Trie2(Nodes: [0x600000114560])]
+      Root 0: Node 0
+        └── edge 1 -> Node 1
+          └── edge 0 -> Node 2 [Trie2(n=1, [0x600000114560])]
 
       CORRECT: GSS after merging A and B with depth usize::MAX:
-      Root 0: Node 0 [Trie2(Nodes: None)]
-        ├── Edge StateID(1) -> Node 2 [Trie2(Nodes: [0x6000001146f0])]
-        └── Edge StateID(1) -> Node 1 [Trie2(Nodes: None)]
-          └── Edge StateID(0) -> Node 2 [Trie2(Nodes: [0x600000114560])]
+      Root 0: Node 0
+        ├── edge 1 -> Node 1 [Trie2(n=1, [0x6000001146f0])]
+        └── edge 1 -> Node 2
+          └── edge 0 -> Node 3 [Trie2(n=1, [0x600000114560])]
 
       INCORRECT: GSS after merging A and B with depth usize::MAX:
-      Root 0: Node 0 [Trie2(Nodes: None)]
-        └── Edge StateID(1) -> Node 1 [Trie2(Nodes: 0x6000001146f0 [or None])]
-          └── Edge StateID(0) -> Node 2 [Trie2(Nodes: [0x600000114560])]
+      Root 0: Node 0
+        └── edge 1 -> Node 1 [Trie2(n=1, [0x6000001146f0 [or None]])]
+          └── edge 0 -> Node 2 [Trie2(n=1, [0x600000114560])]
       ```
+
       The merge behaviour right now isn't quite right. It's giving the INCORRECT result.
+
       Add a test that reproduces this behaviour. (It should fail.)
       Don't try to fix the issue yet. Just write the test.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your GSS merge behavior issue. Adding a failing test is a great way to isolate and eventually fix the problem. Here is the test case that reproduces the incorrect merge behavior you described.
+      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with subtle bugs in complex data structures like a GSS can be tricky. Adding a specific test case to reproduce the incorrect behavior is an excellent way to isolate and eventually fix the problem.
 
-      I will add the test to `src/datastructures/gss.rs`.
+      Here is the diff for a new test that implements the scenario you described. This test should fail with the current implementation, clearly demonstrating the bug.
+
+      ### Modified `src/datastructures/gss.rs`
+
+      I've added the new test case to the end of the `tests` module.
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -1700,4 +1700,54 @@
-               assert!(final_leaf_trie2_nodes.contains(&ArcPtrWrapper::new(trie2_node3)), "trie2_node3 missing");
-               assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
+      @@ -1629,4 +1629,44 @@
+               let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+               assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
            }
-      -}
       +
       +    #[test]
-      +    fn test_merge_does_not_incorrectly_collapse_branches() {
+      +    fn test_merge_with_different_depth_predecessors() {
       +        // This test reproduces a bug where merging two GSSs with a common edge value
       +        // but different sub-structures would incorrectly collapse the distinct sub-structures.
+      +        // GSS A: Root -> (edge 1) -> leaf_a
+      +        // GSS B: Root -> (edge 1) -> intermediate_b -> (edge 0) -> leaf_b
+      +        // Merged should have two predecessors from root via edge 1, at different depths.
       +
-      +        // --- Shared Nodes ---
-      +        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-      +        let mut acc1 = empty_acc();
-      +        acc1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
-      +        let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
+      +        // --- GSS A setup ---
+      +        let trie2_node_a = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +        let mut acc_a = empty_acc();
+      +        acc_a.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node_a.clone()));
+      +        let leaf_a = Arc::new(GSSNode::new(acc_a));
       +
-      +        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-      +        let mut acc2 = empty_acc();
-      +        acc2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
-      +        let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
-      +
-      +        // --- GSS A ---
-      +        // Root -> (edge 1) -> leaf1
       +        let gss_a = GSSNode::new_with_single_predecessor(
-      +            leaf1.clone(),
+      +            leaf_a.clone(),
       +            mock_edge(1),
       +            empty_acc(),
       +        );
       +
-      +        // --- GSS B ---
-      +        // intermediate -> (edge 0) -> leaf2
+      +        // --- GSS B setup ---
+      +        let trie2_node_b = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      +        let mut acc_b = empty_acc();
+      +        acc_b.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node_b.clone()));
+      +        let leaf_b = Arc::new(GSSNode::new(acc_b));
+      +
       +        let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
-      +            leaf2.clone(),
+      +            leaf_b.clone(),
       +            mock_edge(0),
       +            empty_acc(),
       +        ));
-      +        // Root -> (edge 1) -> leaf1
-      +        //      -> (edge 1) -> intermediate
-      +        let mut gss_b_preds = NodeMap::new();
-      +        gss_b_preds.entry(mock_edge(1)).or_default().insert(leaf1.dest_key(), vec![leaf1.clone()]);
-      +        gss_b_preds.entry(mock_edge(1)).or_default().insert(intermediate_b.dest_key(), vec![intermediate_b.clone()]);
-      +        let gss_b = GSSNode::new_with_map(Arc::new(empty_acc()), gss_b_preds);
+      +        let gss_b = GSSNode::new_with_single_predecessor(intermediate_b.clone(), mock_edge(1), empty_acc());
       +
       +        // --- Merge ---
       +        let mut merged_gss = gss_a.clone();
@@ -6759,9 +6916,13 @@ messages:
       +        let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
       +        assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
       +    }
-      +}
+       }
 
       ```
+
+      This test case constructs the two GSS structures as you outlined and then asserts that the merged result correctly preserves the two distinct branches under the common edge. Once you apply this patch, you should see the test fail, confirming the bug.
+
+      Let me know if you need further assistance
     metadata:
   - user: |
       Apply result (git-llm mode):

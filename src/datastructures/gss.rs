@@ -2260,4 +2260,50 @@ mod tests {
         let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
         assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
     }
+
+    #[test]
+    fn test_merge_with_different_depth_predecessors() {
+        // This test reproduces a bug where merging two GSSs with a common edge value
+        // but different sub-structures would incorrectly collapse the distinct sub-structures.
+        // GSS A: Root -> (edge 1) -> leaf_a
+        // GSS B: Root -> (edge 1) -> intermediate_b -> (edge 0) -> leaf_b
+        // Merged should have two predecessors from root via edge 1, at different depths.
+
+        // --- GSS A setup ---
+        let trie2_node_a = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let mut acc_a = empty_acc();
+        acc_a.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node_a.clone()));
+        let leaf_a = Arc::new(GSSNode::new(acc_a));
+
+        let gss_a = GSSNode::new_with_single_predecessor(
+            leaf_a.clone(),
+            mock_edge(1),
+            empty_acc(),
+        );
+
+        // --- GSS B setup ---
+        let trie2_node_b = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let mut acc_b = empty_acc();
+        acc_b.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node_b.clone()));
+        let leaf_b = Arc::new(GSSNode::new(acc_b));
+
+        let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
+            leaf_b.clone(),
+            mock_edge(0),
+            empty_acc(),
+        ));
+        let gss_b = GSSNode::new_with_single_predecessor(intermediate_b.clone(), mock_edge(1), empty_acc());
+
+        // --- Merge ---
+        let mut merged_gss = gss_a.clone();
+        merged_gss.merge_with_depth(usize::MAX, &gss_b);
+
+        // --- Assertions ---
+        // The merged GSS should have two distinct predecessors under edge 1, because
+        // they have different depths and structures. The incorrect behavior collapses them into one.
+        assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
+
+        let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+        assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
+    }
 }
