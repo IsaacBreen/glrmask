@@ -1031,3 +1031,249 @@ fn test_precompute_x_eq() {
     assert!(Arc::ptr_eq(&x_dest_wrapper.upgrade().unwrap(), &equals_dest_wrapper.upgrade().unwrap()), "Both paths should lead to the same end node instance");
 }
 
+#[test]
+fn test_constraint_expression_no_times() {
+    // Grammar: E -> E '+' T | T; T -> F; F -> '(' E ')' | 'i'
+    // LLM token vocabulary: i, +, (, ), (i, +i
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"(".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b")".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"(i".to_vec(), LLMTokenID(4));
+    llm_token_map.insert(b"+i".to_vec(), LLMTokenID(5));
+
+    // Tokenizer regex for grammar tokens '+' '(' ')' 'i'
+    let expr = groups![
+        eat_u8(b'+'),
+        eat_u8(b'('),
+        eat_u8(b')'),
+        eat_u8(b'i'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]), // Start production
+        prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+        prod("E", vec![nt("T")]),
+        prod("T", vec![nt("F")]),
+        prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+        prod("F", vec![t("I")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("PLUS"), TerminalID(0));
+    grammar_token_map.insert(regex_name("LPAREN"), TerminalID(1));
+    grammar_token_map.insert(regex_name("RPAREN"), TerminalID(2));
+    grammar_token_map.insert(regex_name("I"), TerminalID(3));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(4));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        5,
+    );
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // Expect LLM tokens that can start an expression: i (0), '(' (2), "(i" (4)
+    assert_eq!(mask, HybridBitset::from_iter(vec![0, 2, 4]));
+
+    // Commit "(i"
+    state.commit(LLMTokenID(4));
+    let mask = state.get_mask();
+    // Now expect '+', ')', '+i' => IDs 1,3,5
+    assert_eq!(mask, HybridBitset::from_iter(vec![1, 3, 5]));
+}
+
+#[test]
+fn test_constraint_expression_no_parens() {
+    // Grammar: E -> E '+' T | T; T -> T '*' F | F; F -> 'i'
+    // LLM token vocabulary: i, +, *, +i
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"+i".to_vec(), LLMTokenID(3));
+
+    // Tokenizer regex for grammar tokens '+' '*' 'i'
+    let expr = groups![
+        eat_u8(b'+'),
+        eat_u8(b'*'),
+        eat_u8(b'i'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]), // Start production
+        prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+        prod("E", vec![nt("T")]),
+        prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+        prod("T", vec![nt("F")]),
+        prod("F", vec![t("I")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("PLUS"), TerminalID(0));
+    grammar_token_map.insert(regex_name("TIMES"), TerminalID(1));
+    grammar_token_map.insert(regex_name("I"), TerminalID(2));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(3));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        3,
+    );
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // Expect LLM tokens that can start an expression: i (0)
+    assert_eq!(mask, HybridBitset::from_iter(vec![0]));
+
+    // Commit "i"
+    state.commit(LLMTokenID(0));
+    let mask = state.get_mask();
+    // Now expect '+', '*', '+i' => IDs 1,2,3
+    assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 3]));
+}
+
+#[test]
+fn test_constraint_expression_no_plus_times() {
+    // Grammar: E -> T; T -> F; F -> '(' E ')' | 'i'
+    // LLM token vocabulary: i, (, ), (i
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"(".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b")".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"(i".to_vec(), LLMTokenID(3));
+
+    // Tokenizer regex for grammar tokens '(' ')' 'i'
+    let expr = groups![
+        eat_u8(b'('),
+        eat_u8(b')'),
+        eat_u8(b'i'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]), // Start production
+        prod("E", vec![nt("T")]),
+        prod("T", vec![nt("F")]),
+        prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+        prod("F", vec![t("I")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("LPAREN"), TerminalID(0));
+    grammar_token_map.insert(regex_name("RPAREN"), TerminalID(1));
+    grammar_token_map.insert(regex_name("I"), TerminalID(2));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(3));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        3,
+    );
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (3)
+    assert_eq!(mask, HybridBitset::from_iter(vec![0, 1, 3]));
+
+    // Commit "(i"
+    state.commit(LLMTokenID(3));
+    let mask = state.get_mask();
+    // Now expect ')' => ID 2
+    assert_eq!(mask, HybridBitset::from_iter(vec![2]));
+}
+
+#[test]
+fn test_constraint_expression_no_times_parens() {
+    // Grammar: E -> E '+' T | T; T -> F; F -> 'i'
+    // LLM token vocabulary: i, +, +i
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"+i".to_vec(), LLMTokenID(2));
+
+    // Tokenizer regex for grammar tokens '+' 'i'
+    let expr = groups![
+        eat_u8(b'+'),
+        eat_u8(b'i'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]), // Start production
+        prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+        prod("E", vec![nt("T")]),
+        prod("T", vec![nt("F")]),
+        prod("F", vec![t("I")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("PLUS"), TerminalID(0));
+    grammar_token_map.insert(regex_name("I"), TerminalID(1));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        2,
+    );
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // Expect LLM tokens that can start an expression: i (0)
+    assert_eq!(mask, HybridBitset::from_iter(vec![0]));
+
+    // Commit "i"
+    state.commit(LLMTokenID(0));
+    let mask = state.get_mask();
+    // Now expect '+', '+i' => IDs 1,2
+    assert_eq!(mask, HybridBitset::from_iter(vec![1, 2]));
+}
