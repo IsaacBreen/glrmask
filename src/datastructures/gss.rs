@@ -523,7 +523,8 @@ impl GSSNode {
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
-    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
+    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, mut acc: Acc) -> Self {
+        acc.trie2_nodes.clear();
         let mut predecessors_map = NodeMap::new();
         predecessors_map
             .entry(edge_value)
@@ -533,7 +534,8 @@ impl GSSNode {
     }
 
     /// Helper to create a GSSNode with multiple predecessors, used by `push_many`.
-    fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, acc: Acc) -> Self {
+    fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, mut acc: Acc) -> Self {
+        acc.trie2_nodes.clear();
         let mut predecessors_map = NodeMap::new();
         for edge_value in edge_values {
             predecessors_map
