@@ -636,7 +636,7 @@ struct Precomputer<'r> {
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
-    pb:               Option<ProgressBar>,
+    pb:               ProgressBar,
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
@@ -676,16 +676,16 @@ impl<'r> Precomputer<'r> {
         }
 
         let total_nodes = count_vocab_nodes(&vocab.root);
-        let pb = if PROGRESS_BAR_ENABLED {
-            let pb = ProgressBar::new(total_nodes);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] \
+        let pb = ProgressBar::new(total_nodes);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] \
                            [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
-                    .expect("progress-bar"),
-            );
-            Some(pb)
-        } else { None };
+                .expect("progress-bar"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
 
         Self {
             tokenizer,
@@ -761,9 +761,7 @@ impl<'r> Precomputer<'r> {
         }
         self.dfs(&self.vocab.root, assoc, HashMap::new());
         crate::debug!(2, "Finished precompute DFS");
-        if let Some(pb) = &self.pb {
-            pb.finish_with_message("Precomputation complete");
-        }
+        self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
     }
 
@@ -785,16 +783,16 @@ impl<'r> Precomputer<'r> {
             }
         }
 
-        let pb = if PROGRESS_BAR_ENABLED {
-            let pb = ProgressBar::new(all_nodes.len() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [optimizing precomputed trie] [{elapsed_precise}] \
+        let pb = ProgressBar::new(all_nodes.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [optimizing precomputed trie] [{elapsed_precise}] \
                            [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
-                    .expect("progress-bar"),
-            );
-            Some(pb)
-        } else { None };
+                .expect("progress-bar"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
 
         // Try to find an existing end node in the whole graph to reuse.
         let mut existing_end_node: Option<Arc<RwLock<PrecomputeNode>>> = None;
@@ -807,9 +805,7 @@ impl<'r> Precomputer<'r> {
 
         // Process each node independently.
         for node_arc in &all_nodes {
-            if let Some(pb) = &pb {
-                pb.inc(1);
-            }
+            pb.inc(1);
             // Snapshot the outgoing edges so we can run analyses without holding the lock.
             let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>)> = {
                 let guard = node_arc.read().expect("poison");
@@ -936,9 +932,7 @@ impl<'r> Precomputer<'r> {
                 }
             }
         }
-        if let Some(pb) = pb {
-            pb.finish_with_message("Optimization complete");
-        }
+        pb.finish_with_message("Optimization complete");
         crate::debug!(2, "Finished optimizing precomputed trie via substring parser");
     }
 
@@ -1481,9 +1475,7 @@ impl<'r> Precomputer<'r> {
         no_go: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
-        if let Some(pb) = &self.pb {
-            pb.inc(1);
-        }
+        self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>>> = BTreeMap::new();
