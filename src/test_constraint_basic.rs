@@ -1349,6 +1349,71 @@ fn test_constraint_expression_unbalanced_parens() {
 }
 
 #[test]
+fn test_constraint_expression_cycle() {
+    // Grammar: S -> E EOF; E -> F; F -> E | I
+    // This grammar has a cycle E -> F -> E, which is a good test for the parser.
+    // LLM token vocabulary: i, $
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+
+    // Tokenizer regex for grammar tokens 'i', '$'
+    let expr = groups![
+        eat_u8(b'i'),
+        eat_u8(b'$'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]),
+        prod("E", vec![nt("F")]),
+        prod("F", vec![nt("E")]),
+        prod("F", vec![t("I")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("I"), TerminalID(0));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(1));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        1, // max_original_llm_token_id
+    );
+    constraint.dump_precomputed();
+    constraint.dump_precomputed2();
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // Expect LLM tokens that can start an expression: i (0)
+    assert_eq!(mask, HybridBitset::from_iter(vec![0]));
+
+    // Commit "i"
+    state.commit(LLMTokenID(0));
+    let mask = state.get_mask();
+    // After "i", E is satisfied, so we expect EOF ($)
+    assert_eq!(mask, HybridBitset::from_iter(vec![1]));
+
+    // Commit "$"
+    state.commit(LLMTokenID(1));
+    assert!(state.is_active());
+    let mask = state.get_mask();
+    // After "i$", the parse is complete.
+    assert_eq!(mask, HybridBitset::from_iter(vec![]));
+}
+
+#[test]
 fn test_constraint_expression_trivial_indirect() {
     // Grammar: S -> E EOF; E -> F; F -> LPAREN E | I
     // LLM token vocabulary: i, (, (i, $
