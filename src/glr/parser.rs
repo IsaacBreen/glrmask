@@ -1444,6 +1444,7 @@ impl ParseState { // No longer generic
         // if self.stack.max_depth() > other.stack.max_depth() {
         //     std::mem::swap(self, &mut other);
         // }
+        // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
         Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
     }
 }
