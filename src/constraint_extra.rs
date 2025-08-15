@@ -188,11 +188,19 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 
     /// Dumps the structure of the precomputed Trie 2 map for visualization.
     pub fn dump_precomputed2(&self) {
+        GrammarConstraint::_dump_precomputed2(
+            &self.precomputed2,
+            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.llm_vocab.llm_token_map,
+        );
+    }
+
+    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
         println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
         let mut visited: HashSet<*const PrecomputeNode2> = HashSet::new();
-        for (tokenizer_state_id, root_node_trie) in &self.precomputed2 {
+        for (tokenizer_state_id, root_node_trie) in precomputed2 {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
             let root_ptr;
@@ -212,8 +220,8 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                     root_node_trie,
                     "".to_string(),
                     &mut visited,
-                    Some(&self.llm_vocab.original_to_internal_id_bimap),
-                    Some(&self.llm_vocab.llm_token_map),
+                    Some(&original_to_internal_id_bimap),
+                    Some(&llm_token_map),
                 );
             }
         }
