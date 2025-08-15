@@ -1562,18 +1562,40 @@ pub fn print_gss_forest(
                 state_ids_in_order.push(edge_val.state_id);
             }
 
-            let acc_child = format_acc(pred_arc.as_ref(), terminal_map, config.original_internal_bimap, config.llm_token_map);
+            let acc_child = format_acc(
+                pred_arc.as_ref(),
+                terminal_map,
+                config.original_internal_bimap,
+                config.llm_token_map,
+            );
+            // Print cleaner edge line:
+            // - No "StateID(...)" wrapper; just the numeric/state value
+            // - No depth
             if config.verbose {
+                if acc_child.is_empty() {
+                    writeln!(
+                        output,
+                        "{}{} edge {} -> Node {} (ptr: {:p}, hash: {:x})",
+                        prefix, connector, edge_val.state_id.0, pred_id, pred_ptr, pred_arc.hash_key_cache,
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "{}{} edge {} -> Node {} (ptr: {:p}, hash: {:x}) {}",
+                        prefix, connector, edge_val.state_id.0, pred_id, pred_ptr, pred_arc.hash_key_cache, acc_child,
+                    )?;
+                }
+            } else if acc_child.is_empty() {
                 writeln!(
                     output,
-                    "{}{} Edge {:?} -> Node {} (ptr: {:p}, hash: {:x}, depth: {}) {}",
-                    prefix, connector, edge_val.state_id, pred_id, pred_ptr, pred_arc.hash_key_cache, pred_arc.max_depth, acc_child,
+                    "{}{} edge {} -> Node {}",
+                    prefix, connector, edge_val.state_id.0, pred_id,
                 )?;
             } else {
                 writeln!(
                     output,
-                    "{}{} Edge {:?} -> Node {} (depth {}) {}",
-                    prefix, connector, edge_val.state_id, pred_id, pred_arc.max_depth, acc_child,
+                    "{}{} edge {} -> Node {} {}",
+                    prefix, connector, edge_val.state_id.0, pred_id, acc_child,
                 )?;
             }
             *node_count += 1;
@@ -1606,13 +1628,34 @@ pub fn print_gss_forest(
         let node_ids_len = node_ids.len();
         let root_id = *node_ids.entry(root_ptr).or_insert(node_ids_len);
 
-        let acc_str = format_acc(root_arc.as_ref(), terminal_map, config.original_internal_bimap, config.llm_token_map);
+        let acc_str = format_acc(
+            root_arc.as_ref(),
+            terminal_map,
+            config.original_internal_bimap,
+            config.llm_token_map,
+        );
         let root_label = config.labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
 
+        // Cleaner root line:
+        // - No depth
         if config.verbose {
-            writeln!(&mut out_str, "{}: Node {} (ptr: {:p}, hash: {:x}, depth: {}) {}", root_label, root_id, root_ptr, root_arc.hash_key_cache, root_arc.max_depth, acc_str).unwrap();
+            if acc_str.is_empty() {
+                writeln!(
+                    &mut out_str,
+                    "{}: Node {} (ptr: {:p}, hash: {:x})",
+                    root_label, root_id, root_ptr, root_arc.hash_key_cache
+                ).unwrap();
+            } else {
+                writeln!(
+                    &mut out_str,
+                    "{}: Node {} (ptr: {:p}, hash: {:x}) {}",
+                    root_label, root_id, root_ptr, root_arc.hash_key_cache, acc_str
+                ).unwrap();
+            }
+        } else if acc_str.is_empty() {
+            writeln!(&mut out_str, "{}: Node {}", root_label, root_id).unwrap();
         } else {
-            writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
+            writeln!(&mut out_str, "{}: Node {} {}", root_label, root_id, acc_str).unwrap();
         }
         count += 1;
 
@@ -1632,77 +1675,89 @@ pub fn format_acc(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    // Avoid unused-parameter warnings now that we print the raw bitset.
+    // Avoid unused-parameter warnings; hooks left for future improvements.
     let _ = (original_internal_bimap, llm_token_map);
 
-    // Show the bitset itself instead of only counts or samples.
-    let format_allowed_llm = |bv: &HybridBitset, label: &str| -> String {
+    // Summarize a bitset with a small sample; omit entirely if it's "all".
+    let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+        if *bv == HybridBitset::max_ones() {
+            return None; // Omit when unconstrained
+        }
         if bv.is_empty() {
-            format!("{}(none)", label)
-        } else if *bv == HybridBitset::max_ones() {
-            format!("{}(all)", label)
+            return Some(format!("{}=∅", label));
+        }
+        let total = bv.len();
+        const MAX_SHOW: usize = 8;
+        let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+        if total > MAX_SHOW {
+            Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
         } else {
-            format!("{}({:?})", label, bv)
+            Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
         }
     };
 
-    let format_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> String {
-        if allowed_terminals.is_empty() {
-            return format!("Disallowed {}(All)", label);
-        }
+    // Summarize disallowed terminals (complement of allowed). Omit if none are disallowed.
+    let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+        let mut any_disallowed = false;
         let mut parts = Vec::new();
-        const MAX_RANGES_TO_SHOW: usize = 5;
+        const MAX_RANGES_TO_SHOW: usize = 3;
         for (range, allowed_bv) in allowed_terminals.range_values() {
+            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+            if disallowed_bv.is_empty() {
+                continue;
+            }
+            any_disallowed = true;
             if parts.len() >= MAX_RANGES_TO_SHOW {
-                parts.push("...".to_string());
                 break;
             }
-            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
-            if !disallowed_bv.is_empty() {
-                let range_str = if range.start() == range.end() {
-                    format!("{}", range.start())
-                } else {
-                    format!("{}..={}", range.start(), range.end())
-                };
+            let range_str = if range.start() == range.end() {
+                format!("{}", range.start())
+            } else {
+                format!("{}..={}", range.start(), range.end())
+            };
 
-                if disallowed_bv == HybridBitset::max_ones() {
-                    parts.push(format!("State(s) {}: All disallowed", range_str));
-                    continue;
-                }
+            if disallowed_bv == HybridBitset::max_ones() {
+                parts.push(format!("state(s) {}: all", range_str));
+                continue;
+            }
 
-                const MAX_NAMES_TO_SHOW: usize = 5;
-                let num_disallowed = disallowed_bv.len();
-                let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
-                    .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
-                        .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
-                    .collect();
-                let names_str = names.join(", ");
+            const MAX_NAMES_TO_SHOW: usize = 5;
+            let num_disallowed = disallowed_bv.len();
+            let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+                .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+                    .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+                .collect();
+            let names_str = names.join(", ");
 
-                if num_disallowed > MAX_NAMES_TO_SHOW {
-                    parts.push(format!("State(s) {} ({} disallowed): [{}, ...]", range_str, num_disallowed, names_str));
-                } else {
-                    parts.push(format!("State(s) {}: [{}]", range_str, names_str));
-                }
+            if num_disallowed > MAX_NAMES_TO_SHOW {
+                parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+            } else {
+                parts.push(format!("state(s) {}: [{}]", range_str, names_str));
             }
         }
-        if parts.is_empty() {
-            format!("Disallowed {}(None)", label)
+        if !any_disallowed {
+            None
+        } else if parts.is_empty() {
+            Some(format!("Disallowed {}(…)", label))
         } else {
-            format!("Disallowed {}({})", label, parts.join("; "))
+            Some(format!("Disallowed {}({})", label, parts.join("; ")))
         }
     };
 
-    let union_llm_str = format_allowed_llm(&node.acc.llm_tokens_union, "LLM(U)");
-    let intersection_llm_str = format_allowed_llm(&node.acc.llm_tokens_intersection, "LLM(I)");
-    let union_terminals_str = format_disallowed_terminals(&node.acc.terminals_union, "Term(U)");
-    let intersection_terminals_str =
-        format_disallowed_terminals(&node.acc.terminals_intersection, "Term(I)");
-    // Show pointers for trie2 nodes if there aren't too many; otherwise show a count with a sample.
+    // LLM summaries (omit when "all")
+    let union_llm_opt = summarize_llm(&node.acc.llm_tokens_union, "LLM(U)");
+    let intersection_llm_opt = summarize_llm(&node.acc.llm_tokens_intersection, "LLM(I)");
+
+    // Terminal summaries: show only when something is actually disallowed
+    let union_terminals_opt = summarize_disallowed_terminals(&node.acc.terminals_union, "Term(U)");
+    let intersection_terminals_opt = summarize_disallowed_terminals(&node.acc.terminals_intersection, "Term(I)");
+
+    // Trie2 nodes: omit when empty; otherwise show a compact summary
     let trie2_nodes_str = {
         const MAX_PTRS_TO_SHOW: usize = 5;
         let n = node.acc.trie2_nodes.len();
         if n == 0 {
-            "Trie2(Nodes: None)".to_string()
+            None
         } else if n <= MAX_PTRS_TO_SHOW {
             let ptrs: Vec<String> = node
                 .acc
@@ -1710,7 +1765,7 @@ pub fn format_acc(
                 .iter()
                 .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
                 .collect();
-            format!("Trie2(Nodes: [{}])", ptrs.join(", "))
+            Some(format!("Trie2(n={}, [{}])", n, ptrs.join(", ")))
         } else {
             let ptrs_sample: Vec<String> = node
                 .acc
@@ -1720,17 +1775,23 @@ pub fn format_acc(
                 .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
                 .collect();
             let remaining = n - MAX_PTRS_TO_SHOW;
-            format!("Trie2(Nodes: {} [first {}: {}, ...; +{} more])", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining)
+            Some(format!("Trie2(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
         }
     };
 
-    format!("[{}, {}, {}, {}, {}]",
-        union_llm_str,
-        intersection_llm_str,
-        union_terminals_str,
-        intersection_terminals_str,
-        trie2_nodes_str
-    )
+    // Collect only the non-empty components.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = union_llm_opt { parts.push(s); }
+    if let Some(s) = intersection_llm_opt { parts.push(s); }
+    if let Some(s) = union_terminals_opt { parts.push(s); }
+    if let Some(s) = intersection_terminals_opt { parts.push(s); }
+    if let Some(s) = trie2_nodes_str { parts.push(s); }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", parts.join(", "))
+    }
 }
 
 
