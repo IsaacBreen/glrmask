@@ -17,6 +17,7 @@ use crate::datastructures::{ArcPtrWrapper}; // Import ArcPtrWrapper and WeakPtrW
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
+use kdam::{tqdm, BarExt};
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::profiler::PROGRESS_BAR_ENABLED;
@@ -1096,6 +1097,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
@@ -1148,6 +1150,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 for (ek, ev, child_arc) in edges {
+                    let _ = pb.update(1);
                     let child_ptr = NodePtr::as_ptr(&child_arc);
 
                     // user ‘step’ callback
@@ -1198,6 +1201,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
@@ -1243,6 +1247,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 for (ek, dest_map) in children_by_ek {
+                    let _ = pb.update(dest_map.len());
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
                     for (child_node_ptr, new_v) in new_values_for_children {
                         let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;

@@ -8,6 +8,7 @@ use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_g
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::types::TerminalID as GrammarTokenID; // May not be used directly here anymore
 use bimap::BiBTreeMap;
+use kdam::tqdm;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
@@ -722,7 +723,7 @@ impl GrammarDefinition {
         ];
         let start_production_id = 0; // The augmented start production is always the first one.
 
-        for (name, expr) in grammar_exprs.iter() {
+        for (name, expr) in tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED) {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
