@@ -1326,6 +1326,8 @@ fn test_constraint_expression_unbalanced_parens() {
         token_name_map,
         3,
     );
+    constraint.dump_precomputed();
+    constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
