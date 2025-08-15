@@ -947,7 +947,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
             let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
                 timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
-                    GSSNode::merge_many_with_depth(1, below_zero)
+                    GSSNode::merge_many_with_depth(usize::MAX, below_zero)
                 })
             });
             out.push(merged);
@@ -955,7 +955,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
 
         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
-            GSSNode::merge_many_with_depth(1, out)
+            GSSNode::merge_many_with_depth(usize::MAX, out)
         })
     }
 
@@ -1108,9 +1108,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let mut iter = out_nodes_for_this_peek.into_iter();
                             let mut merged = iter.next().unwrap();
                             for next in iter {
-                                merged.merge_with_depth(1, &next);
+                                merged.merge_with_depth(usize::MAX, &next);
                             }
-                            reduced_stack.merge_with_depth(1, &merged);
+                            reduced_stack.merge_with_depth(usize::MAX, &merged);
                         }
                     }
 
@@ -1444,7 +1444,7 @@ impl ParseState { // No longer generic
         // if self.stack.max_depth() > other.stack.max_depth() {
         //     std::mem::swap(self, &mut other);
         // }
-        Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
     }
 }
 

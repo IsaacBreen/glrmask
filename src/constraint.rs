@@ -421,7 +421,7 @@ impl GrammarConstraint {
                 gss_nodes_to_merge.push(Arc::new(gss_node));
             }
 
-            let merged_gss = GSSNode::merge_many_with_depth(1, gss_nodes_to_merge);
+            let merged_gss = GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge);
             let parse_state = ParseState { stack: merged_gss };
             let glr_state = parser.init_glr_parser_from_parse_state(parse_state);
 
