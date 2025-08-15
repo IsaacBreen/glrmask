@@ -17,8 +17,6 @@ use std::sync::{Arc};
 use std::cell::RefCell;
 
 use bimap::BiBTreeMap;
-use bitvec::prelude::*;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
@@ -34,8 +32,6 @@ use crate::glr::parser::{
 use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
-use kdam::{tqdm, BarBuilder};
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::NodePtr;
 use crate::datastructures::gss::Acc;
@@ -45,6 +41,7 @@ use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
+use std::collections::BTreeMap as StdMap;
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -386,7 +383,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED) {
+        for (tokenizer_state_id, trie1_root) in precomputed.iter() {
             if let Some(trie2_root) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
                 precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
                 continue;
@@ -636,7 +633,6 @@ struct Precomputer<'r> {
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
-    pb:               ProgressBar,
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
@@ -675,19 +671,7 @@ impl<'r> Precomputer<'r> {
             );
         }
 
-        let total_nodes = count_vocab_nodes(&vocab.root);
-        let pb = ProgressBar::new(total_nodes);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] \
-                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
-                .expect("progress-bar"),
-        );
-        if !PROGRESS_BAR_ENABLED {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
-        }
-
-        Self {
+        Self {  
             tokenizer,
             parser,
             llm_vocab,
@@ -696,7 +680,6 @@ impl<'r> Precomputer<'r> {
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: HybridBitset::max_ones(),
             merge_threshold,
-            pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
             ignore_terminal_id,
@@ -760,8 +743,6 @@ impl<'r> Precomputer<'r> {
             crate::debug!(6, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
         self.dfs(&self.vocab.root, assoc, HashMap::new());
-        crate::debug!(2, "Finished precompute DFS");
-        self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
     }
 
@@ -783,17 +764,6 @@ impl<'r> Precomputer<'r> {
             }
         }
 
-        let pb = ProgressBar::new(all_nodes.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [optimizing precomputed trie] [{elapsed_precise}] \
-                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
-                .expect("progress-bar"),
-        );
-        if !PROGRESS_BAR_ENABLED {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
-        }
-
         // Try to find an existing end node in the whole graph to reuse.
         let mut existing_end_node: Option<Arc<RwLock<PrecomputeNode>>> = None;
         for n in &all_nodes {
@@ -805,7 +775,6 @@ impl<'r> Precomputer<'r> {
 
         // Process each node independently.
         for node_arc in &all_nodes {
-            pb.inc(1);
             // Snapshot the outgoing edges so we can run analyses without holding the lock.
             let edges: Vec<(Option<GrammarTokenID>, OrderedHashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>)> = {
                 let guard = node_arc.read().expect("poison");
@@ -932,7 +901,6 @@ impl<'r> Precomputer<'r> {
                 }
             }
         }
-        pb.finish_with_message("Optimization complete");
         crate::debug!(2, "Finished optimizing precomputed trie via substring parser");
     }
 
@@ -1475,8 +1443,6 @@ impl<'r> Precomputer<'r> {
         no_go: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
-        self.pb.inc(1);
-
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>>> = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
