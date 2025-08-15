@@ -2306,4 +2306,74 @@ mod tests {
         let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
         assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
     }
+
+    #[test]
+    fn test_merge_unions_trie2_nodes_across_identical_towers() {
+        // This test reproduces a bug where merging multiple identical towers (same edges and structure)
+        // but with different trie2_nodes at the leaf results in the leaf keeping only one
+        // of the trie2_nodes instead of the union of all of them.
+        //
+        // Structure for each tower:
+        // Root -> (edge 2) -> Node -> (edge 1) -> Node -> (edge 5) -> Leaf [Trie2={unique}]
+        //
+        // After merging the three towers, the single leaf should contain the union of the three distinct
+        // trie2 nodes.
+
+        // --- Build three distinct trie2 nodes ---
+        let t1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let t2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let t3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+
+        // Helper to build one tower given a leaf with a unique trie2 node.
+        let build_tower_from_leaf = |leaf: Arc<GSSNode>| -> GSSNode {
+            // Leaf --(5)--> n5 --(1)--> n1 --(2)--> root
+            let n5 = Arc::new(GSSNode::new_with_single_predecessor(leaf, mock_edge(5), empty_acc()));
+            let n1 = Arc::new(n5.push(mock_edge(1)));
+            n1.push(mock_edge(2))
+        };
+
+        // --- Leaf 1 with trie2_node t1 ---
+        let mut acc1 = empty_acc();
+        acc1.trie2_nodes.insert(ArcPtrWrapper::new(t1.clone()));
+        let leaf1 = Arc::new(GSSNode::new(acc1));
+        let tower1 = build_tower_from_leaf(leaf1);
+
+        // --- Leaf 2 with trie2_node t2 ---
+        let mut acc2 = empty_acc();
+        acc2.trie2_nodes.insert(ArcPtrWrapper::new(t2.clone()));
+        let leaf2 = Arc::new(GSSNode::new(acc2));
+        let tower2 = build_tower_from_leaf(leaf2);
+
+        // --- Leaf 3 with trie2_node t3 ---
+        let mut acc3 = empty_acc();
+        acc3.trie2_nodes.insert(ArcPtrWrapper::new(t3.clone()));
+        let leaf3 = Arc::new(GSSNode::new(acc3));
+        let tower3 = build_tower_from_leaf(leaf3);
+
+        // --- Merge the three identical towers ---
+        let mut merged = tower1.clone();
+        merged.merge_with_depth(usize::MAX, &tower2);
+        merged.merge_with_depth(usize::MAX, &tower3);
+
+        // --- Traverse to collect leaves and inspect trie2_nodes at the bottom ---
+        let mut q = VecDeque::new();
+        q.push_back(Arc::new(merged));
+        let mut visited = HashSet::new();
+        let mut leaves = Vec::new();
+        while let Some(node) = q.pop_front() {
+            if !visited.insert(Arc::as_ptr(&node)) { continue; }
+            if node.is_root() { leaves.push(node.clone()); }
+            for p in node.predecessors().values().flat_map(|m| m.values()).flatten() {
+                q.push_back(p.clone());
+            }
+        }
+
+        assert_eq!(leaves.len(), 1, "Merging identical towers should result in a single unified leaf node");
+        let leaf = &leaves[0];
+        let trie2_nodes = &leaf.acc.trie2_nodes;
+        assert_eq!(trie2_nodes.len(), 3, "Unified leaf should contain the union of all trie2 nodes from merged towers");
+        assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t1)), "Unified leaf missing trie2 node 1");
+        assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
+        assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t3)), "Unified leaf missing trie2 node 3");
+    }
 }
