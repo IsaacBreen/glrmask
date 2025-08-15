@@ -1201,7 +1201,7 @@ pub fn fuse_predecessors_recursive(
 #[derive(Debug, Clone, Eq, Hash)]
 pub struct RootItem<'a> {
     pub node: &'a GSSNode,
-    pub path_acc: Arc<Acc>,
+    path_acc: Arc<Acc>,
 }
 
 impl<'a> PartialEq for RootItem<'a> {
