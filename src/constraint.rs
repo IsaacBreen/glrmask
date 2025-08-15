@@ -18,7 +18,7 @@ use std::cell::RefCell;
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
@@ -35,7 +35,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateI
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use kdam::tqdm;
+use kdam::{tqdm, BarBuilder};
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::NodePtr;
 use crate::datastructures::gss::Acc;
@@ -386,8 +386,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        // for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED) {
-        for (tokenizer_state_id, trie1_root) in precomputed.iter() {
+        for (tokenizer_state_id, trie1_root) in tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED) {
             if let Some(trie2_root) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
                 precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
                 continue;
@@ -684,6 +683,9 @@ impl<'r> Precomputer<'r> {
                            [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
                 .expect("progress-bar"),
         );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
 
         Self {
             tokenizer,
@@ -788,6 +790,9 @@ impl<'r> Precomputer<'r> {
                            [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
                 .expect("progress-bar"),
         );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
 
         // Try to find an existing end node in the whole graph to reuse.
         let mut existing_end_node: Option<Arc<RwLock<PrecomputeNode>>> = None;
