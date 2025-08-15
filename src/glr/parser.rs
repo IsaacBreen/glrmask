@@ -1240,7 +1240,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-        const MAX: usize = 30;
+        const MAX: usize = 150;
         const PANIC_THRESHOLD: usize = 1_000_000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
@@ -1446,8 +1446,8 @@ impl ParseState { // No longer generic
         // }
         // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
         // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
-        // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
-        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
+        // Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
     }
 }
 
