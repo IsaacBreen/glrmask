@@ -3776,6 +3776,7 @@ local_system:
               helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
+              helper.factor_common_destinations();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -4838,6 +4839,104 @@ local_system:
               live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
 
               live_tokens_for_this_node
+          }
+
+          fn factor_common_destinations(&mut self) {
+              crate::debug!(2, "Factoring out common destinations to reduce non-None edges.");
+
+              const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
+
+              // 1. Collect all nodes in the graph.
+              let mut all_nodes = Vec::new();
+              let mut seen = HashSet::new();
+              for root in self.roots.values() {
+                  for node in Trie::all_nodes(root.clone()) {
+                      if seen.insert(Arc::as_ptr(&node)) {
+                          all_nodes.push(node);
+                      }
+                  }
+              }
+              let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
+
+              // 2. Build an incoming edge map for every node.
+              // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
+              let mut incoming_map: HashMap<
+                  *const RwLock<PrecomputeNode>, // Dst node ptr
+                  HashMap<
+                      GrammarTokenID, // Edge key 'gtid'
+                      Vec<(*const RwLock<PrecomputeNode>, LLMTokenBV)>, // List of (Src node ptr, edge bv)
+                  >,
+              > = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.read().expect("poison");
+                  for (ek_opt, dest_map) in guard.children() {
+                      if let Some(gtid) = ek_opt { // Only consider non-None edges
+                          for (dest_wrapper, bv) in dest_map {
+                              if let Some(dest_arc) = dest_wrapper.upgrade() {
+                                  let dest_ptr = Arc::as_ptr(&dest_arc);
+                                  incoming_map
+                                      .entry(dest_ptr)
+                                      .or_default()
+                                      .entry(*gtid)
+                                      .or_default()
+                                      .push((src_ptr, bv.clone()));
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // 3. Iterate through the map and find factoring opportunities.
+              for (dest_ptr, edges_by_key) in incoming_map {
+                  for (gtid, sources) in edges_by_key {
+                      if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
+                          // Opportunity found!
+                          let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
+
+                          // a. Create a new intermediate node `I`.
+                          let intermediate_node = Arc::new(RwLock::new(PrecomputeNode::new(
+                              PrecomputedNodeContents::no_end(),
+                          )));
+
+                          // b. Add edge I --(gtid)--> D
+                          let mut union_bv = LLMTokenBV::zeros();
+                          for (_, bv) in &sources {
+                              union_bv |= bv;
+                          }
+
+                          {
+                              let mut intermediate_guard = intermediate_node.write().expect("poison");
+                              let mut edge_val_opt = Some(union_bv);
+                              // No cycle possible since I is new. Use unchecked for speed.
+                              // Depth will be propagated to D.
+                              intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
+                                  .expect("Cycle detected when adding factored edge; this should not happen.");
+                          }
+
+                          // c. For each source, remove old edge and add new `None` edge to `I`.
+                          for (src_ptr, bv) in &sources {
+                              let src_arc = arc_map.get(src_ptr).unwrap();
+                              let mut src_guard = src_arc.write().expect("poison");
+
+                              // Remove S --(gtid)--> D
+                              if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&Some(gtid)) {
+                                  dest_map_for_gtid.remove(&NodePtr::Strong(ArcPtrWrapper::new(dest_arc.clone())));
+                                  if dest_map_for_gtid.is_empty() {
+                                      src_guard.children_mut().remove(&Some(gtid));
+                                  }
+                              }
+
+                              // Add S --(None)--> I
+                              let mut edge_val_opt = Some(bv.clone());
+                              src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
+                                  .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
+                          }
+                      }
+                  }
+              }
+              crate::debug!(2, "Finished factoring common destinations.");
           }
 
           fn merge_nodes(&mut self) {
@@ -9615,6 +9714,7 @@ local_system:
               helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
+              helper.factor_common_destinations();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -10677,6 +10777,104 @@ local_system:
               live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
 
               live_tokens_for_this_node
+          }
+
+          fn factor_common_destinations(&mut self) {
+              crate::debug!(2, "Factoring out common destinations to reduce non-None edges.");
+
+              const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
+
+              // 1. Collect all nodes in the graph.
+              let mut all_nodes = Vec::new();
+              let mut seen = HashSet::new();
+              for root in self.roots.values() {
+                  for node in Trie::all_nodes(root.clone()) {
+                      if seen.insert(Arc::as_ptr(&node)) {
+                          all_nodes.push(node);
+                      }
+                  }
+              }
+              let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
+
+              // 2. Build an incoming edge map for every node.
+              // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
+              let mut incoming_map: HashMap<
+                  *const RwLock<PrecomputeNode>, // Dst node ptr
+                  HashMap<
+                      GrammarTokenID, // Edge key 'gtid'
+                      Vec<(*const RwLock<PrecomputeNode>, LLMTokenBV)>, // List of (Src node ptr, edge bv)
+                  >,
+              > = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.read().expect("poison");
+                  for (ek_opt, dest_map) in guard.children() {
+                      if let Some(gtid) = ek_opt { // Only consider non-None edges
+                          for (dest_wrapper, bv) in dest_map {
+                              if let Some(dest_arc) = dest_wrapper.upgrade() {
+                                  let dest_ptr = Arc::as_ptr(&dest_arc);
+                                  incoming_map
+                                      .entry(dest_ptr)
+                                      .or_default()
+                                      .entry(*gtid)
+                                      .or_default()
+                                      .push((src_ptr, bv.clone()));
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // 3. Iterate through the map and find factoring opportunities.
+              for (dest_ptr, edges_by_key) in incoming_map {
+                  for (gtid, sources) in edges_by_key {
+                      if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
+                          // Opportunity found!
+                          let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
+
+                          // a. Create a new intermediate node `I`.
+                          let intermediate_node = Arc::new(RwLock::new(PrecomputeNode::new(
+                              PrecomputedNodeContents::no_end(),
+                          )));
+
+                          // b. Add edge I --(gtid)--> D
+                          let mut union_bv = LLMTokenBV::zeros();
+                          for (_, bv) in &sources {
+                              union_bv |= bv;
+                          }
+
+                          {
+                              let mut intermediate_guard = intermediate_node.write().expect("poison");
+                              let mut edge_val_opt = Some(union_bv);
+                              // No cycle possible since I is new. Use unchecked for speed.
+                              // Depth will be propagated to D.
+                              intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
+                                  .expect("Cycle detected when adding factored edge; this should not happen.");
+                          }
+
+                          // c. For each source, remove old edge and add new `None` edge to `I`.
+                          for (src_ptr, bv) in &sources {
+                              let src_arc = arc_map.get(src_ptr).unwrap();
+                              let mut src_guard = src_arc.write().expect("poison");
+
+                              // Remove S --(gtid)--> D
+                              if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&Some(gtid)) {
+                                  dest_map_for_gtid.remove(&NodePtr::Strong(ArcPtrWrapper::new(dest_arc.clone())));
+                                  if dest_map_for_gtid.is_empty() {
+                                      src_guard.children_mut().remove(&Some(gtid));
+                                  }
+                              }
+
+                              // Add S --(None)--> I
+                              let mut edge_val_opt = Some(bv.clone());
+                              src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
+                                  .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
+                          }
+                      }
+                  }
+              }
+              crate::debug!(2, "Finished factoring common destinations.");
           }
 
           fn merge_nodes(&mut self) {
@@ -15483,6 +15681,7 @@ messages:
               helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
+              helper.factor_common_destinations();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -16547,6 +16746,104 @@ messages:
               live_tokens_for_this_node
           }
 
+          fn factor_common_destinations(&mut self) {
+              crate::debug!(2, "Factoring out common destinations to reduce non-None edges.");
+
+              const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
+
+              // 1. Collect all nodes in the graph.
+              let mut all_nodes = Vec::new();
+              let mut seen = HashSet::new();
+              for root in self.roots.values() {
+                  for node in Trie::all_nodes(root.clone()) {
+                      if seen.insert(Arc::as_ptr(&node)) {
+                          all_nodes.push(node);
+                      }
+                  }
+              }
+              let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
+
+              // 2. Build an incoming edge map for every node.
+              // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
+              let mut incoming_map: HashMap<
+                  *const RwLock<PrecomputeNode>, // Dst node ptr
+                  HashMap<
+                      GrammarTokenID, // Edge key 'gtid'
+                      Vec<(*const RwLock<PrecomputeNode>, LLMTokenBV)>, // List of (Src node ptr, edge bv)
+                  >,
+              > = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.read().expect("poison");
+                  for (ek_opt, dest_map) in guard.children() {
+                      if let Some(gtid) = ek_opt { // Only consider non-None edges
+                          for (dest_wrapper, bv) in dest_map {
+                              if let Some(dest_arc) = dest_wrapper.upgrade() {
+                                  let dest_ptr = Arc::as_ptr(&dest_arc);
+                                  incoming_map
+                                      .entry(dest_ptr)
+                                      .or_default()
+                                      .entry(*gtid)
+                                      .or_default()
+                                      .push((src_ptr, bv.clone()));
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // 3. Iterate through the map and find factoring opportunities.
+              for (dest_ptr, edges_by_key) in incoming_map {
+                  for (gtid, sources) in edges_by_key {
+                      if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
+                          // Opportunity found!
+                          let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
+
+                          // a. Create a new intermediate node `I`.
+                          let intermediate_node = Arc::new(RwLock::new(PrecomputeNode::new(
+                              PrecomputedNodeContents::no_end(),
+                          )));
+
+                          // b. Add edge I --(gtid)--> D
+                          let mut union_bv = LLMTokenBV::zeros();
+                          for (_, bv) in &sources {
+                              union_bv |= bv;
+                          }
+
+                          {
+                              let mut intermediate_guard = intermediate_node.write().expect("poison");
+                              let mut edge_val_opt = Some(union_bv);
+                              // No cycle possible since I is new. Use unchecked for speed.
+                              // Depth will be propagated to D.
+                              intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
+                                  .expect("Cycle detected when adding factored edge; this should not happen.");
+                          }
+
+                          // c. For each source, remove old edge and add new `None` edge to `I`.
+                          for (src_ptr, bv) in &sources {
+                              let src_arc = arc_map.get(src_ptr).unwrap();
+                              let mut src_guard = src_arc.write().expect("poison");
+
+                              // Remove S --(gtid)--> D
+                              if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&Some(gtid)) {
+                                  dest_map_for_gtid.remove(&NodePtr::Strong(ArcPtrWrapper::new(dest_arc.clone())));
+                                  if dest_map_for_gtid.is_empty() {
+                                      src_guard.children_mut().remove(&Some(gtid));
+                                  }
+                              }
+
+                              // Add S --(None)--> I
+                              let mut edge_val_opt = Some(bv.clone());
+                              src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
+                                  .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
+                          }
+                      }
+                  }
+              }
+              crate::debug!(2, "Finished factoring common destinations.");
+          }
+
           fn merge_nodes(&mut self) {
               crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
               let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
@@ -17556,138 +17853,132 @@ messages:
       filename: src/constraint.rs
   - user: |-
       I want to make an optimisation on the precompute tree (not precompute 2).
-      Basically, I want to minimize the number of non-None edges in it.
-      I'm thinking there's a bunch of cases where lots of edges point to the same trie node. In these cases, each incoming edge incurs a computational cost.
-      What we could do instead is redirect these to a new node with a bunch of None edges, and then make one single non-None edge (with the original edges' value) to the destination node.
-      Do this.
+      It should agressively merge identical subtrees with a single one stored behind Arc.
+      simply loop over every edge and replace its destination with a cached node. The cache just maps a node to itself. But equality on the Trie node will kick in and we should hit identical nodes.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the git diff patches for the requested optimization.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the git diff patches for the required changes.
 
-      I've added a new optimization pass to the precomputation logic for your `Trie` structure. This pass identifies nodes that are the destination of many edges with the same non-`None` key. It then introduces an intermediate node to factor these common edges, reducing the total number of non-`None` edges in the graph. This can improve traversal performance by reducing the branching factor at nodes with many such factored edges.
+      I've implemented an aggressive subtree merging optimization for the precomputation trie. This is achieved by replacing the existing `merge_nodes` function with a more powerful version that recursively traverses the trie in post-order, canonicalizing subtrees. Identical subtrees are replaced with a single shared `Arc`, which should significantly reduce memory usage for repetitive patterns in the grammar.
 
-      Here is the patch for `src/constraint.rs`:
+      Here is the diff for `src/constraint.rs`:
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -270,6 +270,7 @@
-               helper.prune_dead_paths();
-               helper.prune_on_no_terminal_follow();
-               helper.prune_dead_paths();
-      +        helper.factor_common_destinations();
-               helper.merge_nodes();
-               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+      @@ -1000,36 +1000,61 @@
+               crate::debug!(2, "Finished factoring common destinations.");
            }
-      @@ -1008,6 +1009,100 @@
-               live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
        
-               live_tokens_for_this_node
+      -    fn merge_nodes(&mut self) {
+      -        crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
+      -        let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+      -        
+      -        for (_tokenizer_state_id, root_arc_ref) in &self.roots {
+      -            crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p}", root_arc_ref);
+      -            let node_content = root_arc_ref.read().unwrap().clone();
+      -            crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p} lock acquired, content: {:?}", root_arc_ref, node_content);
+      -            // This will associate node_content with root_arc_ref.clone().
+      -            // If node_content was already in the map, its associated Arc gets updated to root_arc_ref.clone().
+      -            // This implements a "last one wins" policy for which Arc becomes canonical for a given content.
+      -            content_to_canonical_arc_map.insert(node_content, root_arc_ref.clone());
+      -        }
+      -
+      -        crate::debug!(2, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs");
+      -        for (_tokenizer_state_id, root_arc_in_self_roots_mut) in &mut self.roots {
+      -            crate::debug!(3, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs: Root {:p}", root_arc_in_self_roots_mut);
+      -            let current_content = root_arc_in_self_roots_mut.read().unwrap().clone();
+      -            if let Some(canonical_arc) = content_to_canonical_arc_map.get(&current_content) {
+      -                crate::debug!(3, "Merging nodes: canonical Arc found for {:?}, updating root to {:p}", current_content, canonical_arc);
+      -                *root_arc_in_self_roots_mut = canonical_arc.clone();
+      -            } else {
+      -                // This should not happen if content_to_canonical_arc_map was built correctly from all roots
+      -                // and PrecomputeNode's Ord/Eq implementations are consistent.
+      -                panic!(
+      -                    "Error in merge_nodes: content of a root from self.roots (tokenizer_state_id: {:?}) \
+      -                    was not found in the canonical map. This indicates a potential issue with \
+      -                    PrecomputeNode's Ord/Eq implementation or the merge_nodes logic itself.",
+      -                    _tokenizer_state_id);
+      -            };
+      -        }
+      +    fn merge_nodes(&mut self) {
+      +        crate::debug!(2, "Merging identical subtrees in precomputed trie.");
+      +        // A map from a node's content to its canonical Arc.
+      +        let mut canonical_nodes: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+      +        // A map from a node's pointer to its canonicalized Arc, to avoid re-processing.
+      +        let mut visited: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+      +
+      +        // We need to process all roots.
+      +        let mut new_roots = BTreeMap::new();
+      +        for (sid, root_arc) in self.roots.iter() {
+      +            let canonical_root = self.deduplicate_recursive(root_arc.clone(), &mut canonical_nodes, &mut visited);
+      +            new_roots.insert(*sid, canonical_root);
+      +        }
+      +        self.roots = new_roots;
+      +        crate::debug!(2, "Finished merging subtrees. Canonical nodes: {}", canonical_nodes.len());
       +    }
       +
-      +    fn factor_common_destinations(&mut self) {
-      +        crate::debug!(2, "Factoring out common destinations to reduce non-None edges.");
-      +
-      +        const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
-      +
-      +        // 1. Collect all nodes in the graph.
-      +        let mut all_nodes = Vec::new();
-      +        let mut seen = HashSet::new();
-      +        for root in self.roots.values() {
-      +            for node in Trie::all_nodes(root.clone()) {
-      +                if seen.insert(Arc::as_ptr(&node)) {
-      +                    all_nodes.push(node);
-      +                }
-      +            }
+      +    fn deduplicate_recursive(
+      +        &self,
+      +        node_arc: Arc<RwLock<PrecomputeNode>>,
+      +        canonical_nodes: &mut HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>>,
+      +        visited: &mut HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>>,
+      +    ) -> Arc<RwLock<PrecomputeNode>> {
+      +        let node_ptr = Arc::as_ptr(&node_arc);
+      +        if let Some(canonical_arc) = visited.get(&node_ptr) {
+      +            return canonical_arc.clone();
       +        }
-      +        let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
       +
-      +        // 2. Build an incoming edge map for every node.
-      +        // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
-      +        let mut incoming_map: HashMap<
-      +            *const RwLock<PrecomputeNode>, // Dst node ptr
-      +            HashMap<
-      +                GrammarTokenID, // Edge key 'gtid'
-      +                Vec<(*const RwLock<PrecomputeNode>, LLMTokenBV)>, // List of (Src node ptr, edge bv)
-      +            >,
-      +        > = HashMap::new();
+      +        // Post-order traversal: first, canonicalize all children.
+      +        let mut new_children_map = BTreeMap::new();
+      +        let mut children_changed = false;
       +
-      +        for src_arc in &all_nodes {
-      +            let src_ptr = Arc::as_ptr(src_arc);
-      +            let guard = src_arc.read().expect("poison");
-      +            for (ek_opt, dest_map) in guard.children() {
-      +                if let Some(gtid) = ek_opt { // Only consider non-None edges
-      +                    for (dest_wrapper, bv) in dest_map {
-      +                        if let Some(dest_arc) = dest_wrapper.upgrade() {
-      +                            let dest_ptr = Arc::as_ptr(&dest_arc);
-      +                            incoming_map
-      +                                .entry(dest_ptr)
-      +                                .or_default()
-      +                                .entry(*gtid)
-      +                                .or_default()
-      +                                .push((src_ptr, bv.clone()));
+      +        {
+      +            let node_guard = node_arc.read().unwrap();
+      +            for (edge_key, dest_map) in node_guard.children() {
+      +                let mut new_dest_map = OrderedHashMap::new();
+      +                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+      +                    if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+      +                        let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+      +                        if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+      +                            children_changed = true;
       +                        }
+      +                        let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+      +                            NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+      +                        } else {
+      +                            NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+      +                        };
+      +                        new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
       +                    }
+      +                }
+      +                if !new_dest_map.is_empty() {
+      +                    new_children_map.insert(edge_key.clone(), new_dest_map);
       +                }
       +            }
       +        }
       +
-      +        // 3. Iterate through the map and find factoring opportunities.
-      +        for (dest_ptr, edges_by_key) in incoming_map {
-      +            for (gtid, sources) in edges_by_key {
-      +                if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
-      +                    // Opportunity found!
-      +                    let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
-      +
-      +                    // a. Create a new intermediate node `I`.
-      +                    let intermediate_node = Arc::new(RwLock::new(PrecomputeNode::new(
-      +                        PrecomputedNodeContents::no_end(),
-      +                    )));
-      +
-      +                    // b. Add edge I --(gtid)--> D
-      +                    let mut union_bv = LLMTokenBV::zeros();
-      +                    for (_, bv) in &sources {
-      +                        union_bv |= bv;
-      +                    }
-      +
-      +                    {
-      +                        let mut intermediate_guard = intermediate_node.write().expect("poison");
-      +                        let mut edge_val_opt = Some(union_bv);
-      +                        // No cycle possible since I is new. Use unchecked for speed.
-      +                        // Depth will be propagated to D.
-      +                        intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
-      +                            .expect("Cycle detected when adding factored edge; this should not happen.");
-      +                    }
-      +
-      +                    // c. For each source, remove old edge and add new `None` edge to `I`.
-      +                    for (src_ptr, bv) in &sources {
-      +                        let src_arc = arc_map.get(src_ptr).unwrap();
-      +                        let mut src_guard = src_arc.write().expect("poison");
-      +
-      +                        // Remove S --(gtid)--> D
-      +                        if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&Some(gtid)) {
-      +                            dest_map_for_gtid.remove(&NodePtr::Strong(ArcPtrWrapper::new(dest_arc.clone())));
-      +                            if dest_map_for_gtid.is_empty() {
-      +                                src_guard.children_mut().remove(&Some(gtid));
-      +                            }
-      +                        }
-      +
-      +                        // Add S --(None)--> I
-      +                        let mut edge_val_opt = Some(bv.clone());
-      +                        src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
-      +                            .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
-      +                    }
-      +                }
-      +            }
+      +        if children_changed {
+      +            let mut node_guard = node_arc.write().unwrap();
+      +            *node_guard.children_mut() = new_children_map;
       +        }
-      +        crate::debug!(2, "Finished factoring common destinations.");
+      +
+      +        let canonical_arc = {
+      +            let node_guard = node_arc.read().unwrap();
+      +            let node_content = (*node_guard).clone();
+      +            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+      +        };
+      +
+      +        visited.insert(node_ptr, canonical_arc.clone());
+      +        canonical_arc
            }
        
-           fn merge_nodes(&mut self) {
+           fn finish(
 
       ```
 
-      This change should give you the desired optimization. Let me know if you have any other questions
+      No changes were needed for `src/datastructures/trie.rs` as its existing `PartialEq`, `Eq`, and `Hash` implementations are suitable for this optimization.
+
+      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):

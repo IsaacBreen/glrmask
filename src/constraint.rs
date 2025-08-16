@@ -37,7 +37,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use kdam::{tqdm, BarBuilder};
 use profiler_macro::{time_it, timeit};
-use crate::datastructures::arc_wrapper::NodePtr;
+use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -1526,36 +1526,74 @@ impl<'r> Precomputer<'r> {
     }
 
     fn merge_nodes(&mut self) {
-        crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
-        let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
-        
-        for (_tokenizer_state_id, root_arc_ref) in &self.roots {
-            crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p}", root_arc_ref);
-            let node_content = root_arc_ref.read().unwrap().clone();
-            crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p} lock acquired, content: {:?}", root_arc_ref, node_content);
-            // This will associate node_content with root_arc_ref.clone().
-            // If node_content was already in the map, its associated Arc gets updated to root_arc_ref.clone().
-            // This implements a "last one wins" policy for which Arc becomes canonical for a given content.
-            content_to_canonical_arc_map.insert(node_content, root_arc_ref.clone());
+        crate::debug!(2, "Merging identical subtrees in precomputed trie.");
+        // A map from a node's content to its canonical Arc.
+        let mut canonical_nodes: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+        // A map from a node's pointer to its canonicalized Arc, to avoid re-processing.
+        let mut visited: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+
+        // We need to process all roots.
+        let mut new_roots = BTreeMap::new();
+        for (sid, root_arc) in self.roots.iter() {
+            let canonical_root = self.deduplicate_recursive(root_arc.clone(), &mut canonical_nodes, &mut visited);
+            new_roots.insert(*sid, canonical_root);
+        }
+        self.roots = new_roots;
+        crate::debug!(2, "Finished merging subtrees. Canonical nodes: {}", canonical_nodes.len());
+    }
+
+    fn deduplicate_recursive(
+        &self,
+        node_arc: Arc<RwLock<PrecomputeNode>>,
+        canonical_nodes: &mut HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>>,
+        visited: &mut HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>>,
+    ) -> Arc<RwLock<PrecomputeNode>> {
+        let node_ptr = Arc::as_ptr(&node_arc);
+        if let Some(canonical_arc) = visited.get(&node_ptr) {
+            return canonical_arc.clone();
         }
 
-        crate::debug!(2, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs");
-        for (_tokenizer_state_id, root_arc_in_self_roots_mut) in &mut self.roots {
-            crate::debug!(3, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs: Root {:p}", root_arc_in_self_roots_mut);
-            let current_content = root_arc_in_self_roots_mut.read().unwrap().clone();
-            if let Some(canonical_arc) = content_to_canonical_arc_map.get(&current_content) {
-                crate::debug!(3, "Merging nodes: canonical Arc found for {:?}, updating root to {:p}", current_content, canonical_arc);
-                *root_arc_in_self_roots_mut = canonical_arc.clone();
-            } else {
-                // This should not happen if content_to_canonical_arc_map was built correctly from all roots
-                // and PrecomputeNode's Ord/Eq implementations are consistent.
-                panic!(
-                    "Error in merge_nodes: content of a root from self.roots (tokenizer_state_id: {:?}) \
-                    was not found in the canonical map. This indicates a potential issue with \
-                    PrecomputeNode's Ord/Eq implementation or the merge_nodes logic itself.",
-                    _tokenizer_state_id);
-            };
+        // Post-order traversal: first, canonicalize all children.
+        let mut new_children_map = BTreeMap::new();
+        let mut children_changed = false;
+
+        {
+            let node_guard = node_arc.read().unwrap();
+            for (edge_key, dest_map) in node_guard.children() {
+                let mut new_dest_map = OrderedHashMap::new();
+                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                    if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+                        let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                        if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                            children_changed = true;
+                        }
+                        let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                            NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                        } else {
+                            NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                        };
+                        new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+                    }
+                }
+                if !new_dest_map.is_empty() {
+                    new_children_map.insert(edge_key.clone(), new_dest_map);
+                }
+            }
         }
+
+        if children_changed {
+            let mut node_guard = node_arc.write().unwrap();
+            *node_guard.children_mut() = new_children_map;
+        }
+
+        let canonical_arc = {
+            let node_guard = node_arc.read().unwrap();
+            let node_content = (*node_guard).clone();
+            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+        };
+
+        visited.insert(node_ptr, canonical_arc.clone());
+        canonical_arc
     }
 
     fn finish(
