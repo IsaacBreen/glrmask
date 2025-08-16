@@ -725,68 +725,96 @@ fn get_live_tokens_and_prune_trie2(
 
 fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
-    let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
 
-    let mut new_roots = BTreeMap::new();
-    for (sid, root_arc) in roots.iter() {
-        let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited);
-        new_roots.insert(*sid, canonical_root);
-    }
-    *roots = new_roots;
-    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
-}
-
-fn deduplicate_recursive_trie2(
-    node_arc: Arc<RwLock<PrecomputeNode2>>,
-    canonical_nodes: &mut HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>>,
-    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
-) -> Arc<RwLock<PrecomputeNode2>> {
-    let node_ptr = Arc::as_ptr(&node_arc);
-    if let Some(canonical_arc) = visited.get(&node_ptr) {
-        return canonical_arc.clone();
-    }
-
-    let mut new_children_map = BTreeMap::new();
-    let mut children_changed = false;
-
-    {
-        let node_guard = node_arc.read().unwrap();
-        for (edge_key, dest_map) in node_guard.children() {
-            let mut new_dest_map = OrderedHashMap::new();
-            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited);
-                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                    };
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-                }
-            }
-            if !new_dest_map.is_empty() {
-                new_children_map.insert(edge_key.clone(), new_dest_map);
+    // 1. Collect all unique nodes from all roots to keep them alive during the process.
+    let mut all_nodes = Vec::new();
+    let mut seen_nodes = HashSet::new();
+    for root_arc in roots.values() {
+        for node in Trie::all_nodes(root_arc.clone()) {
+            if seen_nodes.insert(Arc::as_ptr(&node)) {
+                all_nodes.push(node);
             }
         }
     }
 
-    if children_changed {
-        let mut node_guard = node_arc.write().unwrap();
-        *node_guard.children_mut() = new_children_map;
+    // 2. Sort nodes by depth in reverse (bottom-up) to process children before parents.
+    all_nodes.sort_by_key(|arc| std::cmp::Reverse(arc.read().unwrap().max_depth));
+
+    // 3. Canonicalize nodes.
+    let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+    let mut ptr_to_canonical: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> =
+        HashMap::new();
+
+    for node_arc in &all_nodes {
+        // a. Create a temporary, canonicalized version of the node's content to use as a key.
+        let (canonicalized_node_content, children_were_upgraded) = {
+            let node_guard = node_arc.read().unwrap();
+            let mut temp_node = Trie::new(node_guard.value.clone());
+            temp_node.max_depth = node_guard.max_depth;
+            let mut children_upgraded = false;
+
+            for (edge_key, dest_map) in node_guard.children() {
+                let mut new_dest_map = OrderedHashMap::new();
+                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                    // Since `all_nodes` keeps everything alive, `upgrade` should not fail for any
+                    // weak pointer that was valid at the start of the process.
+                    if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        let canonical_child_arc = ptr_to_canonical
+                            .get(&child_ptr)
+                            .expect("Child not found in ptr_to_canonical map. Processing order must be wrong.");
+
+                        if !Arc::ptr_eq(&child_arc, canonical_child_arc) {
+                            children_upgraded = true;
+                        }
+
+                        let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                            NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc.clone()))
+                        } else {
+                            NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(canonical_child_arc)))
+                        };
+                        new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+                    }
+                }
+                if !new_dest_map.is_empty() {
+                    temp_node.children_mut().insert(edge_key.clone(), new_dest_map);
+                }
+            }
+            (temp_node, children_upgraded)
+        };
+
+        // b. Find or create the canonical Arc for this content.
+        let canonical_arc =
+            if let Some(existing_canonical) = canonical_nodes.get(&canonicalized_node_content) {
+                existing_canonical.clone()
+            } else {
+                // This is the first time we see this content. The current `node_arc` becomes canonical.
+                // We must update its children if they were not already pointing to canonical versions.
+                if children_were_upgraded {
+                    let mut node_guard = node_arc.write().unwrap();
+                    *node_guard.children_mut() = canonicalized_node_content.children_mut().clone();
+                }
+                canonical_nodes.insert(canonicalized_node_content, node_arc.clone());
+                node_arc.clone()
+            };
+
+        // c. Store the mapping from this node's original pointer to its canonical Arc.
+        ptr_to_canonical.insert(Arc::as_ptr(node_arc), canonical_arc);
     }
 
-    let canonical_arc = {
-        let node_guard = node_arc.read().unwrap();
-        let node_content = (*node_guard).clone();
-        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-    };
+    // 4. Rewrite the main `roots` map to point to the canonical versions.
+    let mut new_roots = BTreeMap::new();
+    for (sid, root_arc) in roots.iter() {
+        let root_ptr = Arc::as_ptr(root_arc);
+        let canonical_root = ptr_to_canonical
+            .get(&root_ptr)
+            .expect("Root not found in ptr_to_canonical map.")
+            .clone();
+        new_roots.insert(*sid, canonical_root);
+    }
+    *roots = new_roots;
 
-    visited.insert(node_ptr, canonical_arc.clone());
-    canonical_arc
+    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
 }
 
 struct Precomputer<'r> {
