@@ -590,6 +590,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         max_original_llm_token_id_val
     );
     grammar_constraint.dump_precomputed();
+    grammar_constraint.dump_precomputed2();
     println!("GrammarConstraint constructed successfully.");
 
     // --- Tokenization Phase ---
