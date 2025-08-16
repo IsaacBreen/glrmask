@@ -359,6 +359,7 @@ impl GrammarConstraint {
         // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
+        helper.refine_tokens_forward();
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
@@ -525,6 +526,7 @@ impl GrammarConstraint {
 
         // Optimizations for Trie 2
         let all_llm_tokens = HybridBitset::max_ones();
+        refine_tokens_forward_pass_generic(&mut precomputed2, &all_llm_tokens);
         prune_dead_paths_generic(&mut precomputed2, &all_llm_tokens);
         merge_nodes_generic(&mut precomputed2);
 
@@ -639,6 +641,91 @@ impl GrammarConstraint {
         cache.insert(cache_key, result_map.clone());
         result_map
     }
+}
+
+fn refine_tokens_forward_pass_generic<EK>(
+    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>,
+    all_llm_tokens: &LLMTokenBV,
+)
+where
+    EK: Ord + Clone + Send + Sync + 'static,
+    Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
+{
+    crate::debug!(2, "Refining tokens with forward pass...");
+
+    let mut reachable_tokens: HashMap<*const RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>, LLMTokenBV> = HashMap::new();
+    let mut worklist: VecDeque<Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>> = VecDeque::new();
+    let mut in_worklist: HashSet<*const RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>> = HashSet::new();
+
+    // Initialize roots
+    for root_arc in roots.values() {
+        let root_ptr = Arc::as_ptr(root_arc);
+        reachable_tokens.insert(root_ptr, all_llm_tokens.clone());
+        if in_worklist.insert(root_ptr) {
+            worklist.push_back(root_arc.clone());
+        }
+    }
+
+    // Propagate tokens forward until a fixed point is reached.
+    while let Some(src_arc) = worklist.pop_front() {
+        let src_ptr = Arc::as_ptr(&src_arc);
+        in_worklist.remove(&src_ptr);
+
+        let tokens_reaching_src = reachable_tokens.get(&src_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+
+        let children_to_process: Vec<(NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>, LLMTokenBV)> = {
+            let src_guard = src_arc.read().unwrap();
+            src_guard.children().values().flat_map(|dest_map| {
+                dest_map.iter().map(|(k, v)| (k.clone(), v.clone()))
+            }).collect()
+        };
+
+        for (child_wrapper, edge_bv) in children_to_process {
+            if let Some(child_arc) = child_wrapper.upgrade() {
+                let child_ptr = Arc::as_ptr(&child_arc);
+                let tokens_for_child = &tokens_reaching_src & &edge_bv;
+
+                if tokens_for_child.is_empty() {
+                    continue;
+                }
+
+                let child_entry = reachable_tokens.entry(child_ptr).or_insert_with(LLMTokenBV::zeros);
+                let old_tokens = child_entry.clone();
+                *child_entry |= &tokens_for_child;
+
+                if *child_entry != old_tokens {
+                    if in_worklist.insert(child_ptr) {
+                        worklist.push_back(child_arc);
+                    }
+                }
+            }
+        }
+    }
+
+    // Now, refine the edge bitsets based on the computed reachable tokens for each source node.
+    let all_nodes: Vec<_> = roots.values().flat_map(|r| Trie::all_nodes(r.clone())).collect();
+    let mut seen = HashSet::new();
+
+    for src_arc in all_nodes {
+        let src_ptr = Arc::as_ptr(&src_arc);
+        if !seen.insert(src_ptr) { continue; }
+
+        if let Some(tokens_reaching_src) = reachable_tokens.get(&src_ptr) {
+            let mut src_guard = src_arc.write().unwrap();
+            src_guard.children_mut().retain(|_ek, dest_map| {
+                dest_map.retain(|_child_wrapper, edge_bv| {
+                    *edge_bv &= tokens_reaching_src;
+                    !edge_bv.is_empty()
+                });
+                !dest_map.is_empty()
+            });
+        } else {
+            // This node is unreachable by any token path from a root. Prune all its outgoing edges.
+            let mut src_guard = src_arc.write().unwrap();
+            src_guard.children_mut().clear();
+        }
+    }
+    crate::debug!(2, "Finished refining tokens with forward pass.");
 }
 
 fn prune_dead_paths_generic<EK>(
@@ -942,6 +1029,10 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
+    }
+
+    fn refine_tokens_forward(&mut self) {
+        refine_tokens_forward_pass_generic(&mut self.roots, &self.all_llm_tokens);
     }
 
     fn optimize_precomputed_via_substring_parser(&mut self) {
