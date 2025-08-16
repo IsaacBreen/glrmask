@@ -527,7 +527,6 @@ impl GrammarConstraint {
         // Optimizations for Trie 2
         let all_llm_tokens = HybridBitset::max_ones();
         refine_tokens_forward_pass_generic(&mut precomputed2, &all_llm_tokens);
-        prune_dead_paths_generic(&mut precomputed2, &all_llm_tokens);
         merge_nodes_generic(&mut precomputed2);
 
         precomputed2
@@ -643,214 +642,92 @@ impl GrammarConstraint {
     }
 }
 
-fn refine_tokens_forward_pass_generic<EK>(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>,
-    all_llm_tokens: &LLMTokenBV,
-)
-where
-    EK: Ord + Clone + Send + Sync + 'static,
-    Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
-{
-    crate::debug!(2, "Refining tokens with forward pass...");
-
-    let mut reachable_tokens: HashMap<*const RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>, LLMTokenBV> = HashMap::new();
-    let mut worklist: VecDeque<Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>> = VecDeque::new();
-    let mut in_worklist: HashSet<*const RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>> = HashSet::new();
-
-    // Initialize roots
-    for root_arc in roots.values() {
-        let root_ptr = Arc::as_ptr(root_arc);
-        reachable_tokens.insert(root_ptr, all_llm_tokens.clone());
-        if in_worklist.insert(root_ptr) {
-            worklist.push_back(root_arc.clone());
-        }
-    }
-
-    // Propagate tokens forward until a fixed point is reached.
-    while let Some(src_arc) = worklist.pop_front() {
-        let src_ptr = Arc::as_ptr(&src_arc);
-        in_worklist.remove(&src_ptr);
-
-        let tokens_reaching_src = reachable_tokens.get(&src_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
-
-        let children_to_process: Vec<(NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>, LLMTokenBV)> = {
-            let src_guard = src_arc.read().unwrap();
-            src_guard.children().values().flat_map(|dest_map| {
-                dest_map.iter().map(|(k, v)| (k.clone(), v.clone()))
-            }).collect()
-        };
-
-        for (child_wrapper, edge_bv) in children_to_process {
-            if let Some(child_arc) = child_wrapper.upgrade() {
-                let child_ptr = Arc::as_ptr(&child_arc);
-                let tokens_for_child = &tokens_reaching_src & &edge_bv;
-
-                if tokens_for_child.is_empty() {
-                    continue;
-                }
-
-                let child_entry = reachable_tokens.entry(child_ptr).or_insert_with(LLMTokenBV::zeros);
-                let old_tokens = child_entry.clone();
-                *child_entry |= &tokens_for_child;
-
-                if *child_entry != old_tokens {
-                    if in_worklist.insert(child_ptr) {
-                        worklist.push_back(child_arc);
-                    }
-                }
-            }
-        }
-    }
-
-    // Now, refine the edge bitsets based on the computed reachable tokens for each source node.
-    let all_nodes: Vec<_> = roots.values().flat_map(|r| Trie::all_nodes(r.clone())).collect();
-    let mut seen = HashSet::new();
-
-    for src_arc in all_nodes {
-        let src_ptr = Arc::as_ptr(&src_arc);
-        if !seen.insert(src_ptr) { continue; }
-
-        if let Some(tokens_reaching_src) = reachable_tokens.get(&src_ptr) {
-            let mut src_guard = src_arc.write().unwrap();
-            src_guard.children_mut().retain(|_ek, dest_map| {
-                dest_map.retain(|_child_wrapper, edge_bv| {
-                    *edge_bv &= tokens_reaching_src;
-                    !edge_bv.is_empty()
-                });
-                !dest_map.is_empty()
-            });
-        } else {
-            // This node is unreachable by any token path from a root. Prune all its outgoing edges.
-            let mut src_guard = src_arc.write().unwrap();
-            src_guard.children_mut().clear();
-        }
-    }
-    crate::debug!(2, "Finished refining tokens with forward pass.");
-}
-
 fn prune_dead_paths_generic<EK>(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>,
     all_llm_tokens: &LLMTokenBV,
-) where
-    EK: Ord + Clone + Send + Sync + 'static,
-    Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
+) 
+where EK: Ord + Clone + Send + Sync + 'static,
+      Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
 {
     crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
-    // 1. Collect all nodes and build predecessor map.
-    let mut all_nodes = Vec::new();
-    let mut seen = HashSet::new();
-    for root in roots.values() {
-        for node in Trie::all_nodes(root.clone()) {
-            if seen.insert(Arc::as_ptr(&node)) {
-                all_nodes.push(node);
-            }
-        }
-    }
+    let mut live_tokens_cache: HashMap<NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>, LLMTokenBV> = HashMap::new();
 
-    let mut predecessors: HashMap<*const RwLock<_>, Vec<*const RwLock<_>>> = HashMap::new();
-    let mut node_map: HashMap<*const RwLock<_>, Arc<RwLock<_>>> = HashMap::new();
-
-    for src_arc in &all_nodes {
-        let src_ptr = Arc::as_ptr(src_arc);
-        node_map.insert(src_ptr, src_arc.clone());
-        let guard = src_arc.read().unwrap();
-        for dest_map in guard.children().values() {
-            for child_wrapper in dest_map.keys() {
-                if let Some(child_arc) = child_wrapper.upgrade() {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    predecessors.entry(child_ptr).or_default().push(src_ptr);
-                }
-            }
-        }
-    }
-
-    // 2. Initialize live_tokens and worklist.
-    let mut live_tokens: HashMap<*const RwLock<_>, LLMTokenBV> = HashMap::new();
-    let mut worklist: VecDeque<*const RwLock<_>> = VecDeque::new();
-    let mut in_worklist: HashSet<*const RwLock<_>> = HashSet::new();
-
-    for node_arc in &all_nodes {
-        let node_ptr = Arc::as_ptr(node_arc);
-        let guard = node_arc.read().unwrap();
-        if guard.value.end {
-            live_tokens.insert(node_ptr, all_llm_tokens.clone());
-            if in_worklist.insert(node_ptr) {
-                worklist.push_back(node_ptr);
-            }
+    let sids_to_remove: Vec<_> = roots.iter().filter_map(|(sid, root_arc)| {
+        let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
+        if get_live_tokens_and_prune_generic(all_llm_tokens, root_wrapper, &mut live_tokens_cache).is_empty() {
+            Some(*sid)
         } else {
-            live_tokens.insert(node_ptr, LLMTokenBV::zeros());
+            None
         }
+    }).collect();
+
+    for sid in sids_to_remove {
+        roots.remove(&sid);
     }
 
-    // 3. Fixed-point iteration to compute live tokens.
-    while let Some(node_ptr) = worklist.pop_front() {
-        in_worklist.remove(&node_ptr);
-        let node_live_tokens = live_tokens.get(&node_ptr).unwrap().clone();
-        if node_live_tokens.is_empty() { continue; }
+    crate::debug!(2, "Finished pruning dead paths.");
+}
 
-        if let Some(preds) = predecessors.get(&node_ptr) {
-            for &pred_ptr in preds {
-                let pred_arc = node_map.get(&pred_ptr).unwrap();
-                let mut changed = false;
+fn get_live_tokens_and_prune_generic<EK>(
+    all_llm_tokens: &LLMTokenBV,
+    node_wrapper: NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>,
+    live_tokens_cache: &mut HashMap<NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>, LLMTokenBV>,
+) -> LLMTokenBV 
+where EK: Ord + Clone + Send + Sync + 'static,
+      Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
+{
+    if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
+        return cached_bv.clone();
+    }
+    live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
 
-                let pred_guard = pred_arc.read().unwrap();
-                let mut total_contrib = LLMTokenBV::zeros();
-                for dest_map in pred_guard.children().values() {
-                    for (child_wrapper, edge_bv) in dest_map.iter() {
-                        if let Some(child_arc) = child_wrapper.upgrade() {
-                            if Arc::as_ptr(&child_arc) == node_ptr {
-                                total_contrib |= &(&node_live_tokens & edge_bv);
-                            }
-                        }
-                    }
-                }
-                drop(pred_guard);
+    let node_arc = node_wrapper.upgrade().unwrap();
 
-                if !total_contrib.is_empty() {
-                    let pred_live_tokens = live_tokens.get_mut(&pred_ptr).unwrap();
-                    let old_len = pred_live_tokens.len();
-                    *pred_live_tokens |= &total_contrib;
-                    if pred_live_tokens.len() != old_len {
-                        changed = true;
-                    }
-                }
+    let children_to_check: Vec<NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>> = {
+        let node_guard = node_arc.read().unwrap();
+        node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+    };
 
-                if changed {
-                    if in_worklist.insert(pred_ptr) {
-                        worklist.push_back(pred_ptr);
-                    }
-                }
-            }
-        }
+    for child_wrapper in children_to_check {
+        get_live_tokens_and_prune_generic(all_llm_tokens, child_wrapper, live_tokens_cache);
     }
 
-    // 4. Prune edges based on computed live_tokens.
-    for node_arc in &all_nodes {
-        let mut guard = node_arc.write().unwrap();
-        guard.children_mut().retain(|_ek, dest_map| {
-            dest_map.retain(|child_wrapper, edge_bv| {
-                if let Some(child_arc) = child_wrapper.upgrade() {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    if let Some(child_live_tokens) = live_tokens.get(&child_ptr) {
-                        *edge_bv &= child_live_tokens;
-                        !edge_bv.is_empty()
-                    } else {
-                        false
-                    }
+    let mut live_tokens_for_this_node = LLMTokenBV::zeros();
+    {
+        let mut node_guard = node_arc.write().unwrap();
+
+        if node_guard.value.end {
+            live_tokens_for_this_node = all_llm_tokens.clone();
+        }
+
+        node_guard.children_mut().retain(|_edge_key, dest_map| {
+            dest_map.retain(|child_wrapper, edge_value_bv| {
+                let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
+                    .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+
+                let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                if live_tokens_for_this_edge.is_empty() {
+                    false
                 } else {
-                    false // Weak pointer expired, prune.
+                    *edge_value_bv = live_tokens_for_this_edge;
+                    true
                 }
             });
             !dest_map.is_empty()
         });
+
+        for dest_map in node_guard.children().values() {
+            for edge_bv in dest_map.values() {
+                live_tokens_for_this_node |= edge_bv;
+            }
+        }
     }
 
-    // 5. Prune roots if they are no longer live.
-    roots.retain(|_sid, root_arc| {
-        let root_ptr = Arc::as_ptr(root_arc);
-        live_tokens.get(&root_ptr).map_or(false, |bv| !bv.is_empty())
-    });
+    live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
+
+    live_tokens_for_this_node
 }
 
 fn merge_nodes_generic<EK>(
@@ -1610,7 +1487,120 @@ impl<'r> Precomputer<'r> {
     }
 
     fn prune_dead_paths(&mut self) {
-        prune_dead_paths_generic(&mut self.roots, &self.all_llm_tokens);
+        crate::debug!(2, "Pruning dead paths from precomputed trie.");
+
+        // A cache of nodes to the set of "live" LLM tokens reachable from them.
+        let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
+
+        // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
+        // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
+        // is live and prunes its dead children.
+        //
+        // We can't use `BTreeMap::retain` directly because its closure would borrow `self`
+        // immutably (to call `get_live_tokens_and_prune`) while `retain` itself holds a mutable borrow
+        // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
+        let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
+            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
+            // A root is dead if no live tokens are reachable from it.
+            if self.get_live_tokens_and_prune(root_wrapper, &mut live_tokens_cache).is_empty() {
+                Some(*sid) // This root is dead, mark for removal.
+            } else {
+                None // This root is live, keep it.
+            }
+        }).collect();
+
+        for sid in sids_to_remove {
+            self.roots.remove(&sid);
+        }
+
+        crate::debug!(2, "Finished pruning dead paths.");
+    }
+
+    /// Recursively computes the set of "live" LLM tokens reachable from a node
+    /// and prunes its children that are not live or have dead token paths.
+    /// This is a post-order traversal.
+    ///
+    /// - `node_wrapper`: The node to check.
+    /// - `live_tokens_cache`: A cache of nodes to their live token bitvectors.
+    ///
+    /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
+    fn get_live_tokens_and_prune(
+        &self,
+        node_wrapper: NodePtr<RwLock<PrecomputeNode>>,
+        live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
+    ) -> LLMTokenBV {
+        // If we've already computed the live tokens for this node, return the cached result.
+        if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
+            return cached_bv.clone();
+        }
+        // Insert a temporary empty BV to break cycles. If we revisit this node during this
+        // recursion, it will return an empty set, which is correct as no new live paths
+        // have been found through it yet.
+        live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
+
+        let node_arc = node_wrapper.upgrade().unwrap();
+
+        // We must collect children before recursing to avoid holding the lock.
+        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode>>> = {
+            let node_guard = node_arc.read().unwrap();
+            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+        };
+
+        // Recursively call on all unique children to populate the cache for them.
+        for child_wrapper in children_to_check {
+            self.get_live_tokens_and_prune(child_wrapper, live_tokens_cache);
+        }
+
+        // Now that the cache is populated for all children, we can prune the current node.
+        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
+        {
+            let mut node_guard = node_arc.write().unwrap();
+
+            // A node is live if it's an end node itself. The tokens that end here are
+            // on the edges pointing to this node.
+            if node_guard.value.end {
+                // This is the special "end node". It doesn't represent tokens itself,
+                // but it is the source of "liveness". The tokens are on the edges leading *to* it.
+                // When we calculate the live tokens for a parent, the edge BV leading to this
+                // end node will be considered fully live. For the end node itself, we can
+                // consider it to represent "all possible tokens" for the purpose of intersection,
+                // so that any edge leading to it is kept.
+                live_tokens_for_this_node = self.all_llm_tokens.clone();
+            }
+
+            node_guard.children_mut().retain(|_edge_key, dest_map| {
+                dest_map.retain(|child_wrapper, edge_value_bv| {
+                    // Get the live tokens reachable from the child node. This must be in the cache.
+                    let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
+                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+
+                    // The tokens on this edge that are actually live are the intersection
+                    // of the edge's original tokens and the live tokens from the child.
+                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                    if live_tokens_for_this_edge.is_empty() {
+                        false // Prune this destination, as no live paths go through it.
+                    } else {
+                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV.
+                        true // Keep this destination.
+                    }
+                });
+                // Keep the edge key only if it still has destinations.
+                !dest_map.is_empty()
+            });
+
+            // The total live tokens for the current node are the union of all its (now narrowed) outgoing edge BVs.
+            for dest_map in node_guard.children().values() {
+                for edge_bv in dest_map.values() {
+                    live_tokens_for_this_node |= edge_bv;
+                }
+            }
+        }
+
+        // Update the cache with the final computed live tokens for this node.
+        live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
+
+        live_tokens_for_this_node
     }
 
     fn factor_common_destinations(&mut self) {
@@ -1745,7 +1735,74 @@ impl<'r> Precomputer<'r> {
     }
 
     fn merge_nodes(&mut self) {
-        merge_nodes_generic(&mut self.roots);
+        crate::debug!(2, "Merging identical subtrees in precomputed trie.");
+        // A map from a node's content to its canonical Arc.
+        let mut canonical_nodes: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+        // A map from a node's pointer to its canonicalized Arc, to avoid re-processing.
+        let mut visited: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+
+        // We need to process all roots.
+        let mut new_roots = BTreeMap::new();
+        for (sid, root_arc) in self.roots.iter() {
+            let canonical_root = self.deduplicate_recursive(root_arc.clone(), &mut canonical_nodes, &mut visited);
+            new_roots.insert(*sid, canonical_root);
+        }
+        self.roots = new_roots;
+        crate::debug!(2, "Finished merging subtrees. Canonical nodes: {}", canonical_nodes.len());
+    }
+
+    fn deduplicate_recursive(
+        &self,
+        node_arc: Arc<RwLock<PrecomputeNode>>,
+        canonical_nodes: &mut HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>>,
+        visited: &mut HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>>,
+    ) -> Arc<RwLock<PrecomputeNode>> {
+        let node_ptr = Arc::as_ptr(&node_arc);
+        if let Some(canonical_arc) = visited.get(&node_ptr) {
+            return canonical_arc.clone();
+        }
+
+        // Post-order traversal: first, canonicalize all children.
+        let mut new_children_map = BTreeMap::new();
+        let mut children_changed = false;
+
+        {
+            let node_guard = node_arc.read().unwrap();
+            for (edge_key, dest_map) in node_guard.children() {
+                let mut new_dest_map = OrderedHashMap::new();
+                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                    if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+                        let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                        if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                            children_changed = true;
+                        }
+                        let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                            NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                        } else {
+                            NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                        };
+                        new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+                    }
+                }
+                if !new_dest_map.is_empty() {
+                    new_children_map.insert(edge_key.clone(), new_dest_map);
+                }
+            }
+        }
+
+        if children_changed {
+            let mut node_guard = node_arc.write().unwrap();
+            *node_guard.children_mut() = new_children_map;
+        }
+
+        let canonical_arc = {
+            let node_guard = node_arc.read().unwrap();
+            let node_content = (*node_guard).clone();
+            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+        };
+
+        visited.insert(node_ptr, canonical_arc.clone());
+        canonical_arc
     }
 
     fn finish(
