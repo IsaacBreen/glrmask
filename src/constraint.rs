@@ -363,7 +363,8 @@ impl GrammarConstraint {
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
         helper.factor_common_destinations();
-        helper.merge_nodes();
+        // helper.merge_nodes();
+        helper.merge_nodes_basic();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
@@ -1523,6 +1524,39 @@ impl<'r> Precomputer<'r> {
             }
         }
         crate::debug!(2, "Finished factoring common destinations.");
+    }
+
+    fn merge_nodes_basic(&mut self) {
+        crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
+        let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+
+        for (_tokenizer_state_id, root_arc_ref) in &self.roots {
+            crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p}", root_arc_ref);
+            let node_content = root_arc_ref.read().unwrap().clone();
+            crate::debug!(3, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p} lock acquired, content: {:?}", root_arc_ref, node_content);
+            // This will associate node_content with root_arc_ref.clone().
+            // If node_content was already in the map, its associated Arc gets updated to root_arc_ref.clone().
+            // This implements a "last one wins" policy for which Arc becomes canonical for a given content.
+            content_to_canonical_arc_map.insert(node_content, root_arc_ref.clone());
+        }
+
+        crate::debug!(2, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs");
+        for (_tokenizer_state_id, root_arc_in_self_roots_mut) in &mut self.roots {
+            crate::debug!(3, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs: Root {:p}", root_arc_in_self_roots_mut);
+            let current_content = root_arc_in_self_roots_mut.read().unwrap().clone();
+            if let Some(canonical_arc) = content_to_canonical_arc_map.get(&current_content) {
+                crate::debug!(3, "Merging nodes: canonical Arc found for {:?}, updating root to {:p}", current_content, canonical_arc);
+                *root_arc_in_self_roots_mut = canonical_arc.clone();
+            } else {
+                // This should not happen if content_to_canonical_arc_map was built correctly from all roots
+                // and PrecomputeNode's Ord/Eq implementations are consistent.
+                panic!(
+                    "Error in merge_nodes: content of a root from self.roots (tokenizer_state_id: {:?}) \
+                    was not found in the canonical map. This indicates a potential issue with \
+                    PrecomputeNode's Ord/Eq implementation or the merge_nodes logic itself.",
+                    _tokenizer_state_id);
+            };
+        }
     }
 
     fn merge_nodes(&mut self) {
