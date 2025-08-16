@@ -926,7 +926,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     (k, Some(goto_info.source_state_id)),
                                     active_llm_tokens.clone(),
                                     |e, n| *e |= n,
-                                ).to_destination_weakly(new_trie2_node.clone());
+                                ).try_destination_auto(new_trie2_node.clone());
                                 inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                             }
                             });
