@@ -637,7 +637,7 @@ impl GSSNode {
         self._merge(other, 1);
     }
 
-    #[time_it]
+    // #[time_it]
     pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
         self._merge(other, merge_depth);
     }
