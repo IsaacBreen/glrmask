@@ -523,6 +523,9 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 2");
 
+        prune_dead_paths_trie2(&mut precomputed2);
+        merge_nodes_trie2(&mut precomputed2);
+
         precomputed2
     }
 
@@ -634,6 +637,156 @@ impl GrammarConstraint {
         cache.insert(cache_key, result_map.clone());
         result_map
     }
+}
+
+fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+    crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+    let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
+
+    let all_llm_tokens = HybridBitset::max_ones();
+
+    let sids_to_remove: Vec<_> = roots
+        .iter()
+        .filter_map(|(sid, root_arc)| {
+            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
+            if get_live_tokens_and_prune_trie2(root_wrapper, &mut live_tokens_cache, &all_llm_tokens)
+                .is_empty()
+            {
+                Some(*sid)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for sid in sids_to_remove {
+        roots.remove(&sid);
+    }
+    crate::debug!(2, "Finished pruning dead paths from trie 2.");
+}
+
+fn get_live_tokens_and_prune_trie2(
+    node_wrapper: NodePtr<RwLock<PrecomputeNode2>>,
+    live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV>,
+    all_llm_tokens: &LLMTokenBV,
+) -> LLMTokenBV {
+    if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
+        return cached_bv.clone();
+    }
+    live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
+
+    let node_arc = node_wrapper.upgrade().unwrap();
+
+    let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
+        let node_guard = node_arc.read().unwrap();
+        node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+    };
+
+    for child_wrapper in children_to_check {
+        get_live_tokens_and_prune_trie2(child_wrapper, live_tokens_cache, all_llm_tokens);
+    }
+
+    let mut live_tokens_for_this_node = LLMTokenBV::zeros();
+    {
+        let mut node_guard = node_arc.write().unwrap();
+
+        if node_guard.value.end {
+            live_tokens_for_this_node = all_llm_tokens.clone();
+        }
+
+        node_guard.children_mut().retain(|_edge_key, dest_map| {
+            dest_map.retain(|child_wrapper, edge_value_bv| {
+                let live_tokens_from_child = live_tokens_cache
+                    .get(child_wrapper)
+                    .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+
+                let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                if live_tokens_for_this_edge.is_empty() {
+                    false
+                } else {
+                    *edge_value_bv = live_tokens_for_this_edge;
+                    true
+                }
+            });
+            !dest_map.is_empty()
+        });
+
+        for dest_map in node_guard.children().values() {
+            for edge_bv in dest_map.values() {
+                live_tokens_for_this_node |= edge_bv;
+            }
+        }
+    }
+
+    live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
+    live_tokens_for_this_node
+}
+
+fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+    crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+    let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+
+    let mut new_roots = BTreeMap::new();
+    for (sid, root_arc) in roots.iter() {
+        let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited);
+        new_roots.insert(*sid, canonical_root);
+    }
+    *roots = new_roots;
+    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
+}
+
+fn deduplicate_recursive_trie2(
+    node_arc: Arc<RwLock<PrecomputeNode2>>,
+    canonical_nodes: &mut HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>>,
+    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+) -> Arc<RwLock<PrecomputeNode2>> {
+    let node_ptr = Arc::as_ptr(&node_arc);
+    if let Some(canonical_arc) = visited.get(&node_ptr) {
+        return canonical_arc.clone();
+    }
+
+    let mut new_children_map = BTreeMap::new();
+    let mut children_changed = false;
+
+    {
+        let node_guard = node_arc.read().unwrap();
+        for (edge_key, dest_map) in node_guard.children() {
+            let mut new_dest_map = OrderedHashMap::new();
+            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+                    let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited);
+                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                        children_changed = true;
+                    }
+                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                    } else {
+                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                    };
+                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+                }
+            }
+            if !new_dest_map.is_empty() {
+                new_children_map.insert(edge_key.clone(), new_dest_map);
+            }
+        }
+    }
+
+    if children_changed {
+        let mut node_guard = node_arc.write().unwrap();
+        *node_guard.children_mut() = new_children_map;
+    }
+
+    let canonical_arc = {
+        let node_guard = node_arc.read().unwrap();
+        let node_content = (*node_guard).clone();
+        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+    };
+
+    visited.insert(node_ptr, canonical_arc.clone());
+    canonical_arc
 }
 
 struct Precomputer<'r> {
