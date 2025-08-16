@@ -362,6 +362,7 @@ impl GrammarConstraint {
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
+        helper.factor_common_destinations();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -1424,6 +1425,104 @@ impl<'r> Precomputer<'r> {
         live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
 
         live_tokens_for_this_node
+    }
+
+    fn factor_common_destinations(&mut self) {
+        crate::debug!(2, "Factoring out common destinations to reduce non-None edges.");
+
+        const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
+
+        // 1. Collect all nodes in the graph.
+        let mut all_nodes = Vec::new();
+        let mut seen = HashSet::new();
+        for root in self.roots.values() {
+            for node in Trie::all_nodes(root.clone()) {
+                if seen.insert(Arc::as_ptr(&node)) {
+                    all_nodes.push(node);
+                }
+            }
+        }
+        let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
+
+        // 2. Build an incoming edge map for every node.
+        // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
+        let mut incoming_map: HashMap<
+            *const RwLock<PrecomputeNode>, // Dst node ptr
+            HashMap<
+                GrammarTokenID, // Edge key 'gtid'
+                Vec<(*const RwLock<PrecomputeNode>, LLMTokenBV)>, // List of (Src node ptr, edge bv)
+            >,
+        > = HashMap::new();
+
+        for src_arc in &all_nodes {
+            let src_ptr = Arc::as_ptr(src_arc);
+            let guard = src_arc.read().expect("poison");
+            for (ek_opt, dest_map) in guard.children() {
+                if let Some(gtid) = ek_opt { // Only consider non-None edges
+                    for (dest_wrapper, bv) in dest_map {
+                        if let Some(dest_arc) = dest_wrapper.upgrade() {
+                            let dest_ptr = Arc::as_ptr(&dest_arc);
+                            incoming_map
+                                .entry(dest_ptr)
+                                .or_default()
+                                .entry(*gtid)
+                                .or_default()
+                                .push((src_ptr, bv.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Iterate through the map and find factoring opportunities.
+        for (dest_ptr, edges_by_key) in incoming_map {
+            for (gtid, sources) in edges_by_key {
+                if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
+                    // Opportunity found!
+                    let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
+
+                    // a. Create a new intermediate node `I`.
+                    let intermediate_node = Arc::new(RwLock::new(PrecomputeNode::new(
+                        PrecomputedNodeContents::no_end(),
+                    )));
+
+                    // b. Add edge I --(gtid)--> D
+                    let mut union_bv = LLMTokenBV::zeros();
+                    for (_, bv) in &sources {
+                        union_bv |= bv;
+                    }
+
+                    {
+                        let mut intermediate_guard = intermediate_node.write().expect("poison");
+                        let mut edge_val_opt = Some(union_bv);
+                        // No cycle possible since I is new. Use unchecked for speed.
+                        // Depth will be propagated to D.
+                        intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
+                            .expect("Cycle detected when adding factored edge; this should not happen.");
+                    }
+
+                    // c. For each source, remove old edge and add new `None` edge to `I`.
+                    for (src_ptr, bv) in &sources {
+                        let src_arc = arc_map.get(src_ptr).unwrap();
+                        let mut src_guard = src_arc.write().expect("poison");
+
+                        // Remove S --(gtid)--> D
+                        if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&Some(gtid)) {
+                            dest_map_for_gtid.remove(&NodePtr::Strong(ArcPtrWrapper::new(dest_arc.clone())));
+                            if dest_map_for_gtid.is_empty() {
+                                src_guard.children_mut().remove(&Some(gtid));
+                            }
+                        }
+
+                        // Add S --(None)--> I
+                        let mut edge_val_opt = Some(bv.clone());
+                        src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
+                            .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
+                    }
+                }
+            }
+        }
+        crate::debug!(2, "Finished factoring common destinations.");
     }
 
     fn merge_nodes(&mut self) {
