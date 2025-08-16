@@ -363,8 +363,8 @@ impl GrammarConstraint {
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
         helper.factor_common_destinations();
-        // helper.merge_nodes();
-        helper.merge_nodes_basic();
+        helper.merge_nodes();
+        // helper.merge_nodes_basic();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
