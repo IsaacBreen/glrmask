@@ -359,7 +359,6 @@ impl GrammarConstraint {
         // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
-        helper.refine_tokens_forward();
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
@@ -524,11 +523,6 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 2");
 
-        // Optimizations for Trie 2
-        let all_llm_tokens = HybridBitset::max_ones();
-        refine_tokens_forward_pass_generic(&mut precomputed2, &all_llm_tokens);
-        merge_nodes_generic(&mut precomputed2);
-
         precomputed2
     }
 
@@ -640,171 +634,6 @@ impl GrammarConstraint {
         cache.insert(cache_key, result_map.clone());
         result_map
     }
-}
-
-fn prune_dead_paths_generic<EK>(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>,
-    all_llm_tokens: &LLMTokenBV,
-) 
-where EK: Ord + Clone + Send + Sync + 'static,
-      Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
-{
-    crate::debug!(2, "Pruning dead paths from precomputed trie.");
-
-    let mut live_tokens_cache: HashMap<NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>, LLMTokenBV> = HashMap::new();
-
-    let sids_to_remove: Vec<_> = roots.iter().filter_map(|(sid, root_arc)| {
-        let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-        if get_live_tokens_and_prune_generic(all_llm_tokens, root_wrapper, &mut live_tokens_cache).is_empty() {
-            Some(*sid)
-        } else {
-            None
-        }
-    }).collect();
-
-    for sid in sids_to_remove {
-        roots.remove(&sid);
-    }
-
-    crate::debug!(2, "Finished pruning dead paths.");
-}
-
-fn get_live_tokens_and_prune_generic<EK>(
-    all_llm_tokens: &LLMTokenBV,
-    node_wrapper: NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>,
-    live_tokens_cache: &mut HashMap<NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>, LLMTokenBV>,
-) -> LLMTokenBV 
-where EK: Ord + Clone + Send + Sync + 'static,
-      Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Send + Sync,
-{
-    if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
-        return cached_bv.clone();
-    }
-    live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
-
-    let node_arc = node_wrapper.upgrade().unwrap();
-
-    let children_to_check: Vec<NodePtr<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>> = {
-        let node_guard = node_arc.read().unwrap();
-        node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-    };
-
-    for child_wrapper in children_to_check {
-        get_live_tokens_and_prune_generic(all_llm_tokens, child_wrapper, live_tokens_cache);
-    }
-
-    let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-    {
-        let mut node_guard = node_arc.write().unwrap();
-
-        if node_guard.value.end {
-            live_tokens_for_this_node = all_llm_tokens.clone();
-        }
-
-        node_guard.children_mut().retain(|_edge_key, dest_map| {
-            dest_map.retain(|child_wrapper, edge_value_bv| {
-                let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
-                    .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                if live_tokens_for_this_edge.is_empty() {
-                    false
-                } else {
-                    *edge_value_bv = live_tokens_for_this_edge;
-                    true
-                }
-            });
-            !dest_map.is_empty()
-        });
-
-        for dest_map in node_guard.children().values() {
-            for edge_bv in dest_map.values() {
-                live_tokens_for_this_node |= edge_bv;
-            }
-        }
-    }
-
-    live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
-
-    live_tokens_for_this_node
-}
-
-fn merge_nodes_generic<EK>(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>
-)
-where 
-    EK: Ord + Clone + Hash + Send + Sync + 'static,
-    Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Eq + Hash + Clone + Send + Sync,
-{
-    crate::debug!(2, "Merging identical subtrees in precomputed trie.");
-    let mut canonical_nodes: HashMap<Trie<EK, LLMTokenBV, PrecomputedNodeContents>, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>> = HashMap::new();
-    let mut visited: HashMap<*const RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>> = HashMap::new();
-
-    let mut new_roots = BTreeMap::new();
-    for (sid, root_arc) in roots.iter() {
-        let canonical_root = deduplicate_recursive_generic(root_arc.clone(), &mut canonical_nodes, &mut visited);
-        new_roots.insert(*sid, canonical_root);
-    }
-    *roots = new_roots;
-    crate::debug!(2, "Finished merging subtrees. Canonical nodes: {}", canonical_nodes.len());
-}
-
-fn deduplicate_recursive_generic<EK>(
-    node_arc: Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>,
-    canonical_nodes: &mut HashMap<Trie<EK, LLMTokenBV, PrecomputedNodeContents>, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>,
-    visited: &mut HashMap<*const RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>, Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>>,
-) -> Arc<RwLock<Trie<EK, LLMTokenBV, PrecomputedNodeContents>>>
-where 
-    EK: Ord + Clone + Hash + Send + Sync + 'static,
-    Trie<EK, LLMTokenBV, PrecomputedNodeContents>: Eq + Hash + Clone + Send + Sync,
-{
-    let node_ptr = Arc::as_ptr(&node_arc);
-    if let Some(canonical_arc) = visited.get(&node_ptr) {
-        return canonical_arc.clone();
-    }
-
-    // Post-order traversal: first, canonicalize all children.
-    let mut new_children_map = BTreeMap::new();
-    let mut children_changed = false;
-
-    {
-        let node_guard = node_arc.read().unwrap();
-        for (edge_key, dest_map) in node_guard.children() {
-            let mut new_dest_map = OrderedHashMap::new();
-            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = deduplicate_recursive_generic(child_arc.clone(), canonical_nodes, visited);
-                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                    };
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-                }
-            }
-            if !new_dest_map.is_empty() {
-                new_children_map.insert(edge_key.clone(), new_dest_map);
-            }
-        }
-    }
-
-    if children_changed {
-        let mut node_guard = node_arc.write().unwrap();
-        *node_guard.children_mut() = new_children_map;
-    }
-
-    let canonical_arc = {
-        let node_guard = node_arc.read().unwrap();
-        let node_content = (*node_guard).clone();
-        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-    };
-
-    visited.insert(node_ptr, canonical_arc.clone());
-    canonical_arc
 }
 
 struct Precomputer<'r> {
@@ -943,10 +772,6 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
-    }
-
-    fn refine_tokens_forward(&mut self) {
-        refine_tokens_forward_pass_generic(&mut self.roots, &self.all_llm_tokens);
     }
 
     fn optimize_precomputed_via_substring_parser(&mut self) {
