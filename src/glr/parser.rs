@@ -954,8 +954,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         });
 
+        timeit!("GLRParserState::reduce_and_goto", {
         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
             GSSNode::merge_many_with_depth(usize::MAX, out)
+        })
         })
     }
 
