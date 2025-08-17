@@ -1000,7 +1000,7 @@ impl<'r> Precomputer<'r> {
                     let active_tokens = glr_state.active_state.stack.allowed_llm_tokens();
                     if !active_tokens.is_empty() {
                         let mut marks = node_marks.write().unwrap();
-                        marks.entry(node_ptr).or_default() |= &active_tokens;
+                        *marks.entry(node_ptr).or_insert_with(LLMTokenBV::zeros) |= &active_tokens;
                     }
                     !glr_state.active_state.stack.is_empty()
                 }
@@ -1059,7 +1059,7 @@ impl<'r> Precomputer<'r> {
             // Prune edges based on children's liveness
             guard.children_mut().retain(|_edge_key, dest_map| {
                 dest_map.retain(|child_wrapper, edge_bv| {
-                    let live_from_child = live_tokens_cache.get(child_wrapper).cloned().unwrap_or_default();
+                    let live_from_child = live_tokens_cache.get(child_wrapper).cloned().unwrap_or_else(LLMTokenBV::zeros);
                     let new_edge_bv = &*edge_bv & &live_from_child;
                     if new_edge_bv.is_empty() {
                         false
@@ -1318,7 +1318,7 @@ impl<'r> Precomputer<'r> {
                 }
             },
             // process: Prune outgoing edges based on allowed follows.
-            move |node, maybe_all_immediate_predecessors| {
+            move |_node_ptr, node, maybe_all_immediate_predecessors| {
                 // If there are no preceding terminals (e.g., root or only None-edges path from root),
                 // all outgoing terminals are considered valid.
                 if maybe_all_immediate_predecessors.is_none() {

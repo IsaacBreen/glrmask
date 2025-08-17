@@ -2228,7 +2228,7 @@ mod tests {
                  Some(parent_val + 1)
             },
             |current, new| *current = new, // merge: replace
-            |node, computed_val| { // process: always continue
+            |_node_ptr, node, computed_val| { // process: always continue
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true
@@ -2311,7 +2311,7 @@ mod tests {
             // merge: replace
             |current, new| { *current = new; },
             // process: always continue
-            |node, computed_val| {
+            |_node_ptr, node, computed_val| {
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true
@@ -2429,7 +2429,7 @@ mod tests {
             { // process: always continue
                 let processed_nodes = processed_nodes.clone();
                 let process_count = process_count.clone();
-                move |node, final_v| {
+                move |_node_ptr, node, final_v| {
                     let mut map = processed_nodes.write().unwrap();
                     map.insert(node.value, *final_v);
                     process_count.fetch_add(1, Ordering::SeqCst);
@@ -2461,7 +2461,7 @@ mod tests {
             vec![(root.clone(), 100)],
             |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
-            |node, v| { // process: always continue
+            |_node_ptr, node, v| { // process: always continue
                 assert_eq!(node.value, 42);
                 assert_eq!(*v, 100);
                 processed = true;
@@ -2618,7 +2618,7 @@ mod tests {
             vec![(root.clone(), 100)], // Start at root
             |p, _ek, _ev, _n| Some(p + 1), // Step: increment
             |cur, new| *cur = (*cur).max(new), // Merge: max
-            |node, v| { // process: always continue
+            |_node_ptr, node, v| { // process: always continue
                 processed_vals.push(node.value);
                 computed_vals.push(*v);
                 true
@@ -2675,7 +2675,7 @@ mod tests {
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
-                move |node, final_v| {
+                move |_node_ptr, node, final_v| {
                     processed_nodes.write().unwrap().insert(node.value);
                     computed_values.write().unwrap().insert(node.value, *final_v);
                     if node.value == 1 { // Stop processing children if node value is 1 (child1)
@@ -2745,7 +2745,7 @@ mod tests {
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
-                move |node, final_v| {
+                move |_node_ptr, node, final_v| {
                     processed_nodes.write().unwrap().insert(node.value);
                     computed_values.write().unwrap().insert(node.value, *final_v);
                     true // Always continue processing if node is reached
