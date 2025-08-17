@@ -28,9 +28,7 @@ use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{
-    GLRParser, GLRParserState, ParseState, ParseStateEdgeContent,
-};
+use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
 use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -479,7 +477,7 @@ impl GrammarConstraint {
                 crate::debug!(3, "Trie2: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
                 let mut glr_s = current_glr_state.clone();
                 if let Some(gt) = edge_grammar_token_opt {
-                    glr_s.process_token(*gt);
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything });
                         print_summary_flat();
                         print_summary();
                         reset();
