@@ -317,6 +317,11 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
+        Self::_dump_precomputed2(
+            &precomputed2,
+            &llm_vocab.original_to_internal_id_bimap,
+            &llm_vocab.llm_token_map,
+        );
 
 
         // Promote weak edges in the second precomputed trie, which may have been
