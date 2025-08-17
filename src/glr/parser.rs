@@ -1004,59 +1004,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         out.push(merged);
                     }
                     BelowBottomReductionMode::ContinueFromEverything => {
-                        crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromEverything", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-
-                        let mut below_zero = Vec::new();
-                        let mut merged_acc_opt: Option<Acc> = None;
-                        for acc_arc in popper.below_bottom.values() {
-                            merged_acc_opt = Some(match merged_acc_opt.take() {
-                                None => (**acc_arc).clone(),
-                                Some(prev) => Acc::merge(&prev, acc_arc),
-                            });
-                        }
-
-                        if let Some(mut merged_acc) = merged_acc_opt {
-                            merged_acc.trie2_nodes.clear(); // Clear Trie-2 nodes to avoid cycles.
-
-                            let cache_key = BelowBottomCacheKey {
-                                nonterminal_id: nt,
-                                source_state_id: self.parser.everything_state_id,
-                                // k,
-                                acc: merged_acc.clone(),
-                            };
-                            if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
-                                // If we have seen this exact situation before, reuse the cached Trie-2 node
-                                crate::debug!(6, "Using cached Trie-2 node for key {:?}", cache_key);
-                                let new_gss0 = GSSNode::new(merged_acc);
-                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.everything_state_id });
-                                below_zero.push(Arc::new(new_gss1));
-                            }
-
-                            let new_trie2_node = self.below_bottom_cache
-                                .entry(cache_key)
-                                .or_insert_with(|| ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())))))
-                                .clone();
-                            for existing_trie2_node in &merged_acc.trie2_nodes {
-                                // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
-                                let inserter = EdgeInserter::new(
-                                    existing_trie2_node.as_arc().clone(),
-                                    (0, Some(self.parser.everything_state_id)),
-                                    merged_acc.union_llm_tokens(),
-                                    |e, n| *e |= n,
-                                ).to_destination_weakly(new_trie2_node.as_arc().clone());
-                                inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
-                            }
-
-
-                            let new_gss0 = GSSNode::new(merged_acc);
-                            let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.everything_state_id });
-                            below_zero.push(Arc::new(new_gss1));
-                        }
-
-                        if !below_zero.is_empty() {
-                            let merged = GSSNode::merge_many_with_depth(usize::MAX, below_zero);
-                            out.push(merged);
-                        }
+                        todo!()
                     }
                     BelowBottomReductionMode::Fail => {
                         crate::debug!(5, "Popped below bottom, failing these parse paths.");
