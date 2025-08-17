@@ -1076,7 +1076,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&NodePtr<RwLock<Self>>, &mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
@@ -1127,7 +1127,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
                     let mut guard = node_arc.write().expect("poison");
-                    process(&mut guard, &mut agg_v)
+                    process(node_ptr_wrapper, &mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
