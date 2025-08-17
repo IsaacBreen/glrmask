@@ -987,7 +987,9 @@ impl<'r> Precomputer<'r> {
                     // Step the GLR parser if this is a token edge.
                     let mut glr2 = ctx.glr.clone();
                     if let Some(tok) = ek {
-                        glr2.process_token(*tok);
+                        glr2.process_token_advanced(*tok, &ProcessTokenAdvancedConfig {
+                            below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything,
+                        });
                     }
                     if !glr2.is_ok() {
                         return None; // No viable continuation along this edge
