@@ -367,6 +367,9 @@ impl GrammarConstraint {
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
+        // New: prune using substring parser in "everything state" mode
+        helper.prune_with_substring_everything_state();
+        helper.prune_dead_paths(); // Clean up after GLR-based pruning
         helper.factor_common_destinations();
         helper.merge_nodes();
         // helper.merge_nodes_basic();
@@ -477,7 +480,7 @@ impl GrammarConstraint {
                 crate::debug!(3, "Trie2: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
                 let mut glr_s = current_glr_state.clone();
                 if let Some(gt) = edge_grammar_token_opt {
-                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything });
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
                         print_summary_flat();
                         print_summary();
                         reset();
@@ -709,6 +712,9 @@ fn get_live_tokens_and_prune_trie2(
     if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
         return cached_bv.clone();
     }
+    // Insert a temporary empty BV to break cycles. If we revisit this node during this
+    // recursion, it will return an empty set, which is correct as no new live paths
+    // have been found through it yet.
     live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
 
     let node_arc = node_wrapper.upgrade().unwrap();
@@ -903,6 +909,254 @@ impl<'r> Precomputer<'r> {
         }
     }
 
+    /// Prune the Precompute-1 trie using a substring GLR parser initialized in
+    /// "everything state" mode.
+    ///
+    /// Forward pass:
+    ///   - Traverse the trie with a single GLR state (cloned per path),
+    ///     stepping the parser for token edges (Some(GrammarTokenID)).
+    ///   - For every visited node, record the union of "active" LLM tokens
+    ///     allowed by the GLR state that reaches that node.
+    ///
+    /// Backward pass:
+    ///   - For every edge, keep only those tokens which:
+    ///       edge_ev ∧ forward_mark(child) ∧ reachable_to_end(child)
+    ///   - If a node is an "end" node, its reachable_to_end is its forward mark.
+    ///   - Remove edges with empty bitsets. Subsequent prune_dead_paths will
+    ///     remove now-unreachable nodes.
+    fn prune_with_substring_everything_state(&mut self) {
+        let parser = match self.parser {
+            Some(p) => p,
+            None => {
+                crate::debug!(2, "Skipping GLR-based pruning: parser is None");
+                return;
+            }
+        };
+
+        use crate::datastructures::trie::Trie;
+        type NodeDataPtr = *const Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+
+        // Forward mark: for each node, the union of GLR-allowed LLM tokens
+        // after stepping along the path to it.
+        let forward_mark: std::sync::Arc<RwLock<HashMap<NodeDataPtr, LLMTokenBV>>> =
+            std::sync::Arc::new(RwLock::new(HashMap::new()));
+
+        // Optional: Edge mark (not strictly necessary for pruning, but useful for debugging).
+        #[allow(dead_code)]
+        let _edge_mark: std::sync::Arc<RwLock<HashMap<(NodeDataPtr, Option<GrammarTokenID>, NodeDataPtr), LLMTokenBV>>> =
+            std::sync::Arc::new(RwLock::new(HashMap::new()));
+
+        #[derive(Clone)]
+        struct ForwardCtx<'a> {
+            glr: GLRParserState<'a>,
+            parent_ptr: NodeDataPtr, // pointer to the current node's Trie data (child will use this as its "parent")
+        }
+
+        // Initialize a single "everything state" substring parser.
+        let glr0 = parser.init_glr_substring_parser_with_everything_state(None);
+
+        // Seed special_map with (root, glr0.clone()) for all roots.
+        let mut initial: Vec<(Arc<RwLock<PrecomputeNode>>, ForwardCtx)> = Vec::new();
+        for root in self.roots.values() {
+            // Acquire a stable data pointer for this root.
+            let root_ptr = {
+                let guard = root.read().expect("poison");
+                &*guard as *const _
+            };
+            initial.push((
+                root.clone(),
+                ForwardCtx {
+                    glr: glr0.clone(),
+                    parent_ptr: root_ptr,
+                },
+            ));
+        }
+
+        // Forward pass using special_map
+        Trie::special_map(
+            initial,
+            {
+                let forward_mark = forward_mark.clone();
+                let _edge_mark = _edge_mark.clone();
+                move |ctx: &ForwardCtx, ek: &Option<GrammarTokenID>, ev: &LLMTokenBV, child_node: &Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>| -> Option<ForwardCtx> {
+                    // Step the GLR parser if this is a token edge.
+                    let mut glr2 = ctx.glr.clone();
+                    if let Some(tok) = ek {
+                        glr2.process_token(*tok);
+                    }
+                    if !glr2.is_ok() {
+                        return None; // No viable continuation along this edge
+                    }
+
+                    // Mark the destination (child) node with the active LLM tokens.
+                    let active_tokens = glr2.active_state.stack.allowed_llm_tokens();
+                    let child_ptr: NodeDataPtr = child_node as *const _;
+
+                    {
+                        let mut fm = forward_mark.write().expect("poison");
+                        fm.entry(child_ptr)
+                            .and_modify(|bv| *bv |= &active_tokens)
+                            .or_insert(active_tokens.clone());
+                    }
+
+                    // Optionally record edge marks (GLR-allowed ∧ edge constraint).
+                    #[allow(unused_mut)]
+                    let mut _edge_tokens = active_tokens & ev;
+                    #[allow(unused_variables)]
+                    if false {
+                        let mut em = _edge_mark.write().expect("poison");
+                        let key = (ctx.parent_ptr, *ek, child_ptr);
+                        em.entry(key)
+                            .and_modify(|bv| *bv |= &_edge_tokens)
+                            .or_insert(_edge_tokens.clone());
+                    }
+
+                    // Pass context to child: it becomes the new parent for its outgoing edges.
+                    Some(ForwardCtx {
+                        glr: glr2,
+                        parent_ptr: child_ptr,
+                    })
+                }
+            },
+            // Merge GLR states when multiple parents flow into the same node.
+            |ctx_accum: &mut ForwardCtx, ctx_new: ForwardCtx| {
+                let mut other = ctx_new;
+                ctx_accum.glr.merge_with(other.glr);
+                // parent_ptr should already match (the node being processed).
+            },
+            // Process: nothing to mutate on nodes here; keep going.
+            |_node_data, _ctx| true,
+        );
+
+        // Backward pass: compute reachable-to-end tokens and trim edges in-place.
+        fn node_data_ptr(
+            arc: &Arc<RwLock<PrecomputeNode>>,
+        ) -> NodeDataPtr {
+            let guard = arc.read().expect("poison");
+            &*guard as *const _
+        }
+
+        fn backward_prune_dfs(
+            node_arc: Arc<RwLock<PrecomputeNode>>,
+            forward_mark: &HashMap<NodeDataPtr, LLMTokenBV>,
+            memo: &mut HashMap<NodeDataPtr, LLMTokenBV>,
+            all_llm_tokens: &LLMTokenBV,
+        ) -> LLMTokenBV {
+            let this_ptr = node_data_ptr(&node_arc);
+            if let Some(cached) = memo.get(&this_ptr) {
+                return cached.clone();
+            }
+            // Mark as visited with an empty set to handle cycles.
+            memo.insert(this_ptr, LLMTokenBV::zeros());
+
+            // Snapshot children to avoid holding the lock during recursion.
+            let (is_end, children_snapshot): (bool, Vec<(Option<GrammarTokenID>, Vec<(NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV)>)>) = {
+                let guard = node_arc.read().expect("poison");
+                let is_end = guard.value.end;
+                let mut out = Vec::new();
+                for (ek, dest_map) in guard.children() {
+                    let mut edges = Vec::new();
+                    for (np, bv) in dest_map.iter() {
+                        edges.push((np.clone(), bv.clone()));
+                    }
+                    out.push((ek.clone(), edges));
+                }
+                (is_end, out)
+            };
+
+            // Compute reachable tokens from children.
+            let mut reachable = LLMTokenBV::zeros();
+            // For updating edges later, collect the post-trim values.
+            let mut trimmed: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>> = BTreeMap::new();
+
+            for (ek, edges) in &children_snapshot {
+                let mut new_map = OrderedHashMap::new();
+                for (child_ptr, edge_bv) in edges {
+                    if let Some(child_arc) = child_ptr.upgrade() {
+                        // Recurse
+                        let child_reach = backward_prune_dfs(child_arc.clone(), forward_mark, memo, all_llm_tokens);
+                        // Child's forward mark (GLR constraint at child)
+                        let child_ptr_data = {
+                            let guard = child_arc.read().expect("poison");
+                            &*guard as *const _
+                        };
+                        let child_forward = forward_mark.get(&child_ptr_data).cloned().unwrap_or_else(LLMTokenBV::zeros);
+
+                        // Tokens to keep on this edge
+                        let mut keep = edge_bv.clone();
+                        keep &= &child_forward;
+                        keep &= &child_reach;
+
+                        if !keep.is_empty() {
+                            reachable |= &keep;
+                            new_map.insert(child_ptr.clone(), keep);
+                        }
+                    }
+                }
+                if !new_map.is_empty() {
+                    trimmed.insert(ek.clone(), new_map);
+                }
+            }
+
+            // If this node is an end node, also allow tokens recorded by forward mark at this node.
+            if is_end {
+                if let Some(fwd) = forward_mark.get(&this_ptr) {
+                    reachable |= fwd;
+                } else {
+                    // Be conservative: end node with no forward mark contributes nothing extra.
+                    // Another option would be "all_llm_tokens", but forward marks encode GLR acceptance.
+                    let _ = all_llm_tokens; // silence unused var warning under cfgs
+                }
+            }
+
+            // Apply the trimming to this node's outgoing edges.
+            {
+                let mut guard = node_arc.write().expect("poison");
+                // Replace each edge-key's map with the trimmed version (if any), else remove it.
+                let ek_list: Vec<_> = guard.children().keys().cloned().collect();
+                for ek in ek_list {
+                    if let Some(new_map) = trimmed.get(&ek) {
+                        // Rebuild with the existing order where possible.
+                        let dest_map = guard.children_mut().get_mut(&ek).expect("must exist");
+                        let mut old = std::mem::take(dest_map);
+                        let mut rebuilt = OrderedHashMap::new();
+                        for (k, _v_old) in old.into_iter() {
+                            if let Some(v_new) = new_map.get(&k) {
+                                rebuilt.insert(k, v_new.clone());
+                            }
+                        }
+                        *dest_map = rebuilt;
+                    } else {
+                        // Remove this edge key entirely.
+                        guard.children_mut().remove(&ek);
+                    }
+                }
+            }
+
+            memo.insert(this_ptr, reachable.clone());
+            reachable
+        }
+
+        // Collect all unique nodes reachable from all roots to drive the backward pass.
+        let mut visited_set: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
+        let mut unique_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
+        for root in self.roots.values() {
+            for arc in Trie::all_nodes(root.clone()) {
+                let ptr = Arc::as_ptr(&arc);
+                if visited_set.insert(ptr) {
+                    unique_nodes.push(arc);
+                }
+            }
+        }
+
+        // Backward pass with memoization.
+        let mut memo: HashMap<NodeDataPtr, LLMTokenBV> = HashMap::new();
+        let all_llm_tokens = self.all_llm_tokens.clone();
+        for node_arc in &unique_nodes {
+            let _ = backward_prune_dfs(node_arc.clone(), &forward_mark.read().expect("poison"), &mut memo, &all_llm_tokens);
+        }
+    }
+
     fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
 
@@ -914,11 +1168,11 @@ impl<'r> Precomputer<'r> {
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
             for token in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token.id);
-                let applicable_tokens = child_vocab_arc.reachable_token_ids();
+                let applicable_tokens = child_vocab_node.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
             if let Some(final_state_val) = exec_result.end_state {
@@ -926,7 +1180,7 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
+                    let next_results = self.possible_matches(child_vocab_node, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
@@ -2449,3 +2703,4 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
+
