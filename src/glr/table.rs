@@ -340,6 +340,7 @@ type Stage7Result = (
     Stage7Table,
     BiBTreeMap<BTreeSet<Item>, StateID>,
     StateID,
+    StateID,
 );
 
 fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
@@ -370,6 +371,23 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
+    // --- Create the 'everything' item set ---
+    let mut everything_item_set = BTreeSet::new();
+    for prod in productions {
+        if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+            for dot_position in 0..=prod.rhs.len() {
+                for lookahead in lookaheads {
+                    let item = Item {
+                        production: Arc::new(prod.clone()),
+                        dot_position,
+                        lookahead: lookahead.clone(),
+                    };
+                    everything_item_set.insert(item);
+                }
+            }
+        }
+    }
+
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
     for p in productions {
@@ -379,6 +397,11 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let mut worklist = VecDeque::from([initial_item_set.clone()]);
     let mut transitions: Stage1Table = BTreeMap::new();
     let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
+
+    // Add the everything set to the worklist if it's not already there
+    if visited_kernels.insert(everything_item_set.clone()) {
+        worklist.push_back(everything_item_set);
+    }
 
     crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
@@ -669,7 +692,30 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
     let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
     stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
-    (stage_7_table, item_set_map, start_state_id)
+    // --- Find and configure the 'everything' state ---
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    let mut everything_item_set = BTreeSet::new();
+    for prod in productions {
+        if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+            for dot_position in 0..=prod.rhs.len() {
+                for lookahead in lookaheads {
+                    let item = Item {
+                        production: Arc::new(prod.clone()),
+                        dot_position,
+                        lookahead: lookahead.clone(),
+                    };
+                    everything_item_set.insert(item);
+                }
+            }
+        }
+    }
+    let everything_state_id = *item_set_map.get_by_left(&everything_item_set).expect("Everything item set not found in state map");
+    stage_7_table.get_mut(&everything_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+
+    (stage_7_table, item_set_map, start_state_id, everything_state_id)
 }
 
 fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
@@ -1011,7 +1057,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, mut item_set_map, mut start_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+    let (mut stage_7_table, mut item_set_map, mut start_state_id, everything_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Stage 8");
     let stage_8_table = stage_8(stage_7_table);
@@ -1030,7 +1076,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id, substring_gotos)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
