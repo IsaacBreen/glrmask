@@ -405,7 +405,7 @@ impl GrammarConstraint {
 
             let mut gss_nodes_to_merge = Vec::new();
 
-            const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
+            const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
 
             let glr_state;
 
