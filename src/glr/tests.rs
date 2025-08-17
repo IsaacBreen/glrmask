@@ -1,5 +1,5 @@
 use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
-use crate::glr::parser::{GLRParser, GLRParserState};
+use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ProcessTokenAdvancedConfig};
 use crate::glr::table::{generate_glr_parser, TerminalID, StateID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
 use crate::glr::stats;
@@ -813,24 +813,26 @@ fn test_substring_parser_simple() {
     let b = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
     let c = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
 
+    let config = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything };
+
     // Test case 1: "c" is a valid sentence.
     let mut state1 = parser.init_glr_substring_parser_with_everything_state(None);
-    state1.parse(&[c]);
+    state1.parse_advanced(&[c], &config);
     assert!(state1.is_ok(), "Substring parser should succeed on 'c'");
 
     // Test case 2: "acb" is a valid sentence.
     let mut state2 = parser.init_glr_substring_parser_with_everything_state(None);
-    state2.parse(&[a, c, b]);
+    state2.parse_advanced(&[a, c, b], &config);
     assert!(state2.is_ok(), "Substring parser should succeed on 'acb'");
 
     // Test case 3: ...
     let mut state3 = parser.init_glr_substring_parser_with_everything_state(None);
-    state3.parse(&[c, b]);
+    state3.parse_advanced(&[c, b], &config);
     assert!(state3.is_ok(), "Substring parser should succeed on 'cb' (c followed by b)");
 
     // Test case 4: "cbbb"
     let mut state4 = parser.init_glr_substring_parser_with_everything_state(None);
-    state4.parse(&[c, b, b, b]);
+    state4.parse_advanced(&[c, b, b, b], &config);
     assert!(state4.is_ok(), "Substring parser should succeed on 'cbbb' (c followed by multiple b's)");
 }
 

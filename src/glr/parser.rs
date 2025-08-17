@@ -1282,6 +1282,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
+    pub fn step_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
+        self.process_token_advanced(token_id, config);
+    }
+
+    pub fn parse_advanced(&mut self, input: &[TerminalID], config: &ProcessTokenAdvancedConfig) {
+        self.parse_part_advanced(input, config);
+    }
+
+    pub fn parse_part_advanced(&mut self, input: &[TerminalID], config: &ProcessTokenAdvancedConfig) {
+        for &token_id in input {
+            self.step_advanced(token_id, config);
+        }
+    }
+
     pub fn and_step(mut self, token_id: TerminalID) -> Self {
         self.step(token_id);
         self
