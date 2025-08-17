@@ -164,6 +164,21 @@ pub enum ParserPhase {
     ReadyForDefaultReductions,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BelowBottomReductionMode {
+    #[default]
+    ContinueFromAll,
+    ContinueFromEverything,
+    Fail,
+    Panic,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProcessTokenAdvancedConfig {
+    pub below_bottom_mode: BelowBottomReductionMode,
+}
+
+
 #[derive(Clone)]
 pub struct GLRParser {
     pub table: Table,
@@ -702,6 +717,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         shifted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
         use_full_action_map: bool,
+        config: &ProcessTokenAdvancedConfig,
     ) where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
@@ -722,7 +738,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             ..
                         } => {
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
+                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
                                 if let Some(ref mut r_map) = reduce_map {
@@ -743,7 +759,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector);
+                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
                                         if let Some(ref mut r_map) = reduce_map {
@@ -764,7 +780,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.below_bottom_cache.clear();
     }
 
-    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
@@ -775,11 +791,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 shifted_states_todo,
                 |row| &row.shifts_and_reduces_without_default_reduce,
                 false, // Not using full action map
+                config,
             );
         });
     }
 
-    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>) {
+    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
@@ -790,6 +807,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 shifted_states_todo,
                 |row| &row.shifts_and_reduces_full,
                 true, // Using full action map
+                config,
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
         });
@@ -803,6 +821,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
         token_id: TerminalID,
         action_selector: &F,
+        config: &ProcessTokenAdvancedConfig,
     ) -> Arc<GSSNode>
     where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
@@ -872,97 +891,130 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
-        timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
-        if any_below_bottom {
-            crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-            timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, self.parser.substring_gotos.get(&nt).unwrap().len()), {});
-            let mut below_zero = Vec::new();
+            timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
+            if any_below_bottom {
+                match config.below_bottom_mode {
+                    BelowBottomReductionMode::ContinueFromAll => {
+                        crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromAll", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                        timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, self.parser.substring_gotos.get(&nt).unwrap().len()), {});
+                        let mut below_zero = Vec::new();
 
-            if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
-                crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
-                let mut trie2_dst_nodes = HashMap::new();
-                for (k, acc_arc) in popper.below_bottom {
-                    let mut acc: Acc = acc_arc.as_ref().clone();
-                    let active_llm_tokens = acc.union_llm_tokens();
-                    let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                    for goto_info in gotos_for_nt {
-                        // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
-                        let cache_key = BelowBottomCacheKey {
-                            nonterminal_id: nt,
-                            source_state_id: goto_info.source_state_id,
-                            // k,
-                            acc: acc.clone(),
-                        };
+                        if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
+                            crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
+                            let mut trie2_dst_nodes = HashMap::new();
+                            for (k, acc_arc) in popper.below_bottom {
+                                let mut acc: Acc = acc_arc.as_ref().clone();
+                                let active_llm_tokens = acc.union_llm_tokens();
+                                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                                for goto_info in gotos_for_nt {
+                                    // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
+                                    let cache_key = BelowBottomCacheKey {
+                                        nonterminal_id: nt,
+                                        source_state_id: goto_info.source_state_id,
+                                        // k,
+                                        acc: acc.clone(),
+                                    };
 
-                        // If we have seen this exact situation before, reuse the cached Trie-2 node
-                        if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
-                            timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
-                            for existing_trie2_node in &trie2_nodes {
-                                timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
-                                // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
-                                let inserter = EdgeInserter::new(
-                                    existing_trie2_node.as_arc().clone(),
-                                    (k, Some(goto_info.source_state_id)),
-                                    active_llm_tokens.clone(),
-                                    |e, n| *e |= n,
-                                ).to_destination_weakly(cached_trie2_node.as_arc().clone());
-                                inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                                    // If we have seen this exact situation before, reuse the cached Trie-2 node
+                                    if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                                        timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
+                                        for existing_trie2_node in &trie2_nodes {
+                                            timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
+                                            // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
+                                            let inserter = EdgeInserter::new(
+                                                existing_trie2_node.as_arc().clone(),
+                                                (k, Some(goto_info.source_state_id)),
+                                                active_llm_tokens.clone(),
+                                                |e, n| *e |= n,
+                                            ).to_destination_weakly(cached_trie2_node.as_arc().clone());
+                                            inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                                        }
+                                        });
+
+                                        if goto_info.accept {
+                                            self.accepted = true;
+                                        }
+
+                                        // IMPORTANT: No need to push a new GSS node here.
+                                        // It would be equivalent to the one created when this key was first seen.
+                                        continue;
+                                    }
+                                    if let Some(goto_state_id) = goto_info.goto_state_id {
+                                        // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
+                                        let new_trie2_node = trie2_dst_nodes
+                                            .entry(goto_info.source_state_id)
+                                            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                                            .clone();
+                                        self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
+
+                                        timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
+                                        for existing_trie2_node in &trie2_nodes {
+                                            // Allow cycles to be represented as WEAK edges if they occur.
+                                            timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
+                                            let inserter = EdgeInserter::new(
+                                                existing_trie2_node.as_arc().clone(),
+                                                (k, Some(goto_info.source_state_id)),
+                                                active_llm_tokens.clone(),
+                                                |e, n| *e |= n,
+                                            ).try_destination_auto(new_trie2_node.clone());
+                                            inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                        }
+                                        });
+
+                                        let mut acc2 = acc.clone();
+                                        acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                                        let new_gss0 = GSSNode::new(acc2);
+                                        let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                        let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                                        below_zero.push(Arc::new(new_gss2));
+                                    }
+
+                                    if goto_info.accept {
+                                        self.accepted = true;
+                                    }
+                                }
                             }
+                        }
+                        let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
+                            timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
+                                GSSNode::merge_many_with_depth(usize::MAX, below_zero)
+                            })
+                        });
+                        out.push(merged);
+                    }
+                    BelowBottomReductionMode::ContinueFromEverything => {
+                        crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromEverything", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                        let mut below_zero = Vec::new();
+                        let mut merged_acc_opt: Option<Acc> = None;
+                        for acc_arc in popper.below_bottom.values() {
+                            merged_acc_opt = Some(match merged_acc_opt.take() {
+                                None => (**acc_arc).clone(),
+                                Some(prev) => Acc::merge(&prev, acc_arc),
                             });
-
-                            if goto_info.accept {
-                                self.accepted = true;
-                            }
-
-                            // IMPORTANT: No need to push a new GSS node here.
-                            // It would be equivalent to the one created when this key was first seen.
-                            continue;
-                        }
-                        if let Some(goto_state_id) = goto_info.goto_state_id {
-                            // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
-                            let new_trie2_node = trie2_dst_nodes
-                                .entry(goto_info.source_state_id)
-                                .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
-                                .clone();
-                            self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
-
-                            timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
-                            for existing_trie2_node in &trie2_nodes {
-                                // Allow cycles to be represented as WEAK edges if they occur.
-                                timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
-                                let inserter = EdgeInserter::new(
-                                    existing_trie2_node.as_arc().clone(),
-                                    (k, Some(goto_info.source_state_id)),
-                                    active_llm_tokens.clone(),
-                                    |e, n| *e |= n,
-                                ).try_destination_auto(new_trie2_node.clone());
-                                inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                            }
-                            });
-
-                            let mut acc2 = acc.clone();
-                            acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
-                            let new_gss0 = GSSNode::new(acc2);
-                            let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-                            let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
-                            below_zero.push(Arc::new(new_gss2));
                         }
 
-                        if goto_info.accept {
-                            self.accepted = true;
+                        if let Some(merged_acc) = merged_acc_opt {
+                            let new_gss0 = GSSNode::new(merged_acc);
+                            let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: self.parser.everything_state_id });
+                            below_zero.push(Arc::new(new_gss1));
                         }
+
+                        if !below_zero.is_empty() {
+                            let merged = GSSNode::merge_many_with_depth(usize::MAX, below_zero);
+                            out.push(merged);
+                        }
+                    }
+                    BelowBottomReductionMode::Fail => {
+                        crate::debug!(5, "Popped below bottom, failing these parse paths.");
+                        // Do nothing, paths are dropped.
+                    }
+                    BelowBottomReductionMode::Panic => {
+                        panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
                     }
                 }
             }
-            let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
-                timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
-                    GSSNode::merge_many_with_depth(usize::MAX, below_zero)
-                })
             });
-            out.push(merged);
-        }
-        });
-
+ 
         timeit!("GLRParserState::reduce_and_goto", {
         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
             GSSNode::merge_many_with_depth(usize::MAX, out)
@@ -970,8 +1022,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         })
     }
 
-    #[time_it("GLRParserState::process_token")]
     pub fn process_token(&mut self, token_id: TerminalID) {
+        self.process_token_advanced(token_id, &ProcessTokenAdvancedConfig::default())
+    }
+
+    #[time_it("GLRParserState::process_token_advanced")]
+    pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         // Reset acceptance flag for the new token
         self.accepted = false;
 
@@ -989,26 +1045,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, self.active_state.clone());
-            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo);
+            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, config);
         } else { // ParserPhase::ReadyForDefaultReductions
-            // If we are ready for phase 3, it means we have a set of shifted states.
-            // Instead of performing default reductions (phase 3), we can process the next token.
-            // The user suggests skipping phase 1 and going straight to phase 2.
-            // This means we take the current active states and process them with the full action table.
             Self::enqueue(&mut phase2_todo, self.active_state.clone());
         }
 
         // --- Phase 2 ---
-        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo);
+        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo, config);
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState::new();
         for state in shifted_states_todo {
-            // crate::debug!(5, "Merging shifted state into active state");
-            // let mut glr_s = self.clone();
-            // glr_s.active_state = state.clone();
-            // glr_s.log_gss("Phase1/2-shifted", token_id, false, false);
             next_active.merge(state);
         }
         self.active_state = next_active;
@@ -1199,7 +1247,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         self.process_token(token_id);
     }
@@ -1389,7 +1436,8 @@ impl GLRParser {
                     .replace('{', "\\{")
                     .replace('}', "\\}")
                     .replace('<', "\\<")
-                    .replace('>', "\\>");
+                    .replace('>', "\\>")
+                    .replace('\'', "\\'"); // Escape single quotes for DOT
 
                 writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", parent_id, parent_id, node_arc.max_depth(), escaped_acc).unwrap();
             }
@@ -1412,7 +1460,8 @@ impl GLRParser {
                         .replace('{', "\\{")
                         .replace('}', "\\}")
                         .replace('<', "\\<")
-                        .replace('>', "\\>");
+                        .replace('>', "\\>")
+                        .replace('\'', "\\'"); // Escape single quotes for DOT
                     
                     writeln!(&mut dot, "  E{} [label=\"State {}\\l{}\", shape=plaintext, fontname=\"Courier New\"];", id, state_id.0, escaped_explanation).unwrap();
                     id
