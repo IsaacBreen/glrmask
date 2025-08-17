@@ -166,10 +166,10 @@ pub enum ParserPhase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BelowBottomReductionMode {
-    #[default]
     ContinueFromAll,
     ContinueFromEverything,
     Fail,
+    #[default]
     Panic,
 }
 
