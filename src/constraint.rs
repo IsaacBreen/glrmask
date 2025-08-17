@@ -408,32 +408,60 @@ impl GrammarConstraint {
 
             let mut gss_nodes_to_merge = Vec::new();
 
-            for state_id in parser.table.keys() {
+            const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
+
+            let glr_state;
+
+            if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+                for state_id in parser.table.keys() {
+                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
+                        PrecomputedNodeContents::no_end(),
+                    )));
+
+                    let mut inserter = EdgeInserter::new(
+                        trie2_root.clone(),
+                        (0, Some(*state_id)),
+                        LLMTokenBV::ones(internal_max_llm_token + 1),
+                        |e, n| *e |= n,
+                    );
+                    inserter = inserter.try_destination(new_trie2_node.clone());
+                    inserter.expect("Failed to insert initial edge into Trie2 root");
+
+                    let mut acc = Acc::new_fresh();
+                    acc.trie2_nodes
+                        .insert(ArcPtrWrapper::new(new_trie2_node));
+                    let gss_root = GSSNode::new(acc);
+                    let gss_node =
+                        gss_root.push(ParseStateEdgeContent { state_id: *state_id });
+                    gss_nodes_to_merge.push(Arc::new(gss_node));
+                }
+
+                let merged_gss = GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge);
+                let parse_state = ParseState { stack: merged_gss };
+                glr_state = parser.init_glr_parser_from_parse_state(parse_state);
+            } else {
                 let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
                     PrecomputedNodeContents::no_end(),
                 )));
-
                 let mut inserter = EdgeInserter::new(
                     trie2_root.clone(),
-                    (0, Some(*state_id)),
+                    (0, None),
                     LLMTokenBV::ones(internal_max_llm_token + 1),
                     |e, n| *e |= n,
                 );
                 inserter = inserter.try_destination(new_trie2_node.clone());
                 inserter.expect("Failed to insert initial edge into Trie2 root");
-
                 let mut acc = Acc::new_fresh();
-                acc.trie2_nodes
-                    .insert(ArcPtrWrapper::new(new_trie2_node));
+                acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node));
                 let gss_root = GSSNode::new(acc);
-                let gss_node =
-                    gss_root.push(ParseStateEdgeContent { state_id: *state_id });
+                let gss_node = gss_root.push(ParseStateEdgeContent { state_id: parser.everything_state_id });
                 gss_nodes_to_merge.push(Arc::new(gss_node));
+                glr_state = parser.init_glr_parser_from_parse_state(
+                    ParseState {
+                        stack: GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge),
+                    },
+                );
             }
-
-            let merged_gss = GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge);
-            let parse_state = ParseState { stack: merged_gss };
-            let glr_state = parser.init_glr_parser_from_parse_state(parse_state);
 
             memo.insert(ArcPtrWrapper::new(trie1_root.clone()), trie2_root.clone());
 
