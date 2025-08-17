@@ -159,13 +159,27 @@ pub fn dump_precompute_trie_recursive(
 impl GrammarConstraint { // This is in constraint_extra.rs
     /// Dumps the structure of the precomputed Trie map for visualization.
     pub fn dump_precomputed(&self) {
-        println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
+        GrammarConstraint::_dump_precomputed(
+            &self.precomputed,
+            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.token_name_map,
+            &self.llm_vocab.llm_token_map,
+        );
+    }
+
+    pub fn _dump_precomputed(
+        precomputed: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
+        original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
+        token_name_map: &BiBTreeMap<Terminal, usize>,
+        llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+    ) {
+        println!("Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
         let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
-        for (tokenizer_state_id, root_node_trie) in &self.precomputed {
+        for (tokenizer_state_id, root_node_trie) in precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-            
+
             let root_ptr;
             let root_info;
             {
@@ -179,7 +193,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                 println!("  (Root already visited)");
             } else {
                 visited.insert(root_ptr);
-                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.llm_vocab.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_vocab.llm_token_map));
+                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(original_to_internal_id_bimap), Some(token_name_map), Some(llm_token_map));
             }
         }
         println!("\n===================================");

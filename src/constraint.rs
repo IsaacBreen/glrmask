@@ -314,6 +314,13 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
+        Self::_dump_precomputed(
+            &precomputed,
+            &llm_vocab.original_to_internal_id_bimap,
+            &token_name_map,
+            &llm_vocab.llm_token_map,
+        );
+
         // Promote weak edges in the second precomputed trie, which may have been
         // created by the GLR parser logic to break cycles.
         let roots2: Vec<_> = precomputed2.values().cloned().collect();
