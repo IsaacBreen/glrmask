@@ -395,6 +395,27 @@ impl GLRParser {
         ParseState { stack: Arc::new(stack_top) }
     }
 
+    pub fn init_glr_substring_parser_everything(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+        let initial_parse_state = self.init_parse_state_substring_everything();
+        GLRParserState {
+            parser: self,
+            active_state: initial_parse_state,
+            phase: ParserPhase::ReadyForDefaultReductions,
+            below_bottom_cache: Default::default(),
+            accepted: false,
+        }
+    }
+
+    /// Builds a parse state whose stack top has a single predecessor edge for the 'everything' state.
+    /// The effect is “parser is in all states at once” at depth 1.
+    pub fn init_parse_state_substring_everything(&self) -> ParseState {
+        let initial_content = ParseStateEdgeContent {
+            state_id: self.everything_state_id,
+        };
+        let stack = Arc::new(GSSNode::new_fresh().push(initial_content));
+        ParseState { stack }
+    }
+
     pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
         self.init_parse_state_with_acc()
     }
