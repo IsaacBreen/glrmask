@@ -363,9 +363,12 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
+        // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
-        helper.optimize_precomputed_via_substring_parser();
+        helper.prune_dead_paths();
+        helper.prune_on_no_terminal_follow();
+        helper.prune_dead_paths();
         helper.factor_common_destinations();
         helper.merge_nodes();
         // helper.merge_nodes_basic();
@@ -962,135 +965,6 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Precomputation complete");
     }
 
-    fn optimize_precomputed_via_substring_parser(&mut self) {
-        let parser = if let Some(p) = self.parser { p } else { return; };
-        crate::debug!(2, "Optimizing precomputed trie via substring parser...");
-    
-        // 1. Initialization
-        let initial_glr_state = parser.init_glr_substring_parser_with_everything_state(self.llm_vocab.clone());
-        let initial_nodes_and_values: Vec<_> = self.roots.values()
-            .map(|root_arc| (root_arc.clone(), initial_glr_state.clone()))
-            .collect();
-    
-        // Map from node pointer to the set of LLM tokens that are valid *after* passing through this node.
-        let node_marks = Arc::new(RwLock::new(HashMap::<*const RwLock<PrecomputeNode>, LLMTokenBV>::new()));
-    
-        // 2. Forward Pass: Propagate GLR state and find all parsable tokens at each node.
-        Trie::special_map(
-            initial_nodes_and_values,
-            // step: process token and propagate state
-            |glr_state, edge_terminal_opt, _edge_bv, _child_node| {
-                let mut new_state = glr_state.clone();
-                if let Some(terminal_id) = edge_terminal_opt {
-                    new_state.process_token(*terminal_id);
-                }
-                if new_state.is_ok() {
-                    Some(new_state)
-                } else {
-                    None
-                }
-            },
-            // merge: merge GLR states
-            |s1, s2| s1.merge_with(s2),
-            // process: compute and store active tokens for this node
-            {
-                let node_marks = node_marks.clone();
-                move |node_ptr_wrapper, _node_data, glr_state| {
-                    let node_ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode>;
-                    let active_tokens = glr_state.active_state.stack.allowed_llm_tokens();
-                    if !active_tokens.is_empty() {
-                        let mut marks = node_marks.write().unwrap();
-                        *marks.entry(node_ptr).or_insert_with(LLMTokenBV::zeros) |= &active_tokens;
-                    }
-                    !glr_state.active_state.stack.is_empty()
-                }
-            }
-        );
-    
-        // 3. Backward Pass & Pruning: Ensure all paths lead to an end node.
-        let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
-        let node_marks_read = node_marks.read().unwrap();
-    
-        for root_arc in self.roots.values() {
-            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-            self.compute_live_tokens_and_prune_with_marks(root_wrapper, &mut live_tokens_cache, &node_marks_read);
-        }
-    
-        // 4. Final Pruning of Roots: Remove roots that are no longer live.
-        self.roots.retain(|_sid, root_arc| {
-            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-            live_tokens_cache.get(&root_wrapper).map_or(false, |bv| !bv.is_empty())
-        });
-    
-        crate::debug!(2, "Finished optimizing precomputed trie.");
-    }
-
-    fn compute_live_tokens_and_prune_with_marks(
-        &self,
-        node_wrapper: NodePtr<RwLock<PrecomputeNode>>,
-        live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
-        node_marks: &HashMap<*const RwLock<PrecomputeNode>, LLMTokenBV>,
-    ) -> LLMTokenBV {
-        if let Some(cached) = live_tokens_cache.get(&node_wrapper) {
-            return cached.clone();
-        }
-        live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros()); // For cycle breaking
-    
-        let node_arc = node_wrapper.upgrade().unwrap();
-        let node_ptr = Arc::as_ptr(&node_arc);
-    
-        // Recurse on children first (post-order traversal)
-        let children_to_check: Vec<_> = {
-            let guard = node_arc.read().unwrap();
-            guard.children().values().flat_map(|m| m.keys().cloned()).collect()
-        };
-        for child in children_to_check {
-            self.compute_live_tokens_and_prune_with_marks(child, live_tokens_cache, node_marks);
-        }
-    
-        // Now compute live tokens for this node
-        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-        {
-            let mut guard = node_arc.write().unwrap();
-            if guard.value.end {
-                live_tokens_for_this_node = self.all_llm_tokens.clone();
-            }
-    
-            // Prune edges based on children's liveness
-            guard.children_mut().retain(|_edge_key, dest_map| {
-                dest_map.retain(|child_wrapper, edge_bv| {
-                    let live_from_child = live_tokens_cache.get(child_wrapper).cloned().unwrap_or_else(LLMTokenBV::zeros);
-                    let new_edge_bv = &*edge_bv & &live_from_child;
-                    if new_edge_bv.is_empty() {
-                        false
-                    } else {
-                        *edge_bv = new_edge_bv;
-                        true
-                    }
-                });
-                !dest_map.is_empty()
-            });
-    
-            // Union the live tokens from the now-pruned edges
-            for dest_map in guard.children().values() {
-                for edge_bv in dest_map.values() {
-                    live_tokens_for_this_node |= edge_bv;
-                }
-            }
-        }
-    
-        // Intersect with what the parser allowed at this node from the forward pass
-        if let Some(parser_allowed_tokens) = node_marks.get(&node_ptr) {
-            live_tokens_for_this_node &= parser_allowed_tokens;
-        } else {
-            // If the forward pass didn't reach this node, it's dead.
-            live_tokens_for_this_node.clear();
-        }
-    
-        live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
-        live_tokens_for_this_node
-    }
-
     fn replace_ignore_token_edges_with_none_edges(&mut self) {
         let ignore_tid = if let Some(id) = self.ignore_terminal_id {
             id
@@ -1318,7 +1192,7 @@ impl<'r> Precomputer<'r> {
                 }
             },
             // process: Prune outgoing edges based on allowed follows.
-            move |_node_ptr, node, maybe_all_immediate_predecessors| {
+            move |node, maybe_all_immediate_predecessors| {
                 // If there are no preceding terminals (e.g., root or only None-edges path from root),
                 // all outgoing terminals are considered valid.
                 if maybe_all_immediate_predecessors.is_none() {

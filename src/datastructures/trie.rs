@@ -1076,7 +1076,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&NodePtr<RwLock<Self>>, &mut Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
@@ -1127,7 +1127,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
                     let mut guard = node_arc.write().expect("poison");
-                    process(node_ptr_wrapper, &mut guard, &mut agg_v)
+                    process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
@@ -2228,7 +2228,7 @@ mod tests {
                  Some(parent_val + 1)
             },
             |current, new| *current = new, // merge: replace
-            |_node_ptr, node, computed_val| { // process: always continue
+            |node, computed_val| { // process: always continue
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true
@@ -2311,7 +2311,7 @@ mod tests {
             // merge: replace
             |current, new| { *current = new; },
             // process: always continue
-            |_node_ptr, node, computed_val| {
+            |node, computed_val| {
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true
@@ -2429,7 +2429,7 @@ mod tests {
             { // process: always continue
                 let processed_nodes = processed_nodes.clone();
                 let process_count = process_count.clone();
-                move |_node_ptr, node, final_v| {
+                move |node, final_v| {
                     let mut map = processed_nodes.write().unwrap();
                     map.insert(node.value, *final_v);
                     process_count.fetch_add(1, Ordering::SeqCst);
@@ -2461,7 +2461,7 @@ mod tests {
             vec![(root.clone(), 100)],
             |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
-            |_node_ptr, node, v| { // process: always continue
+            |node, v| { // process: always continue
                 assert_eq!(node.value, 42);
                 assert_eq!(*v, 100);
                 processed = true;
@@ -2618,7 +2618,7 @@ mod tests {
             vec![(root.clone(), 100)], // Start at root
             |p, _ek, _ev, _n| Some(p + 1), // Step: increment
             |cur, new| *cur = (*cur).max(new), // Merge: max
-            |_node_ptr, node, v| { // process: always continue
+            |node, v| { // process: always continue
                 processed_vals.push(node.value);
                 computed_vals.push(*v);
                 true
@@ -2675,7 +2675,7 @@ mod tests {
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
-                move |_node_ptr, node, final_v| {
+                move |node, final_v| {
                     processed_nodes.write().unwrap().insert(node.value);
                     computed_values.write().unwrap().insert(node.value, *final_v);
                     if node.value == 1 { // Stop processing children if node value is 1 (child1)
@@ -2745,7 +2745,7 @@ mod tests {
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
-                move |_node_ptr, node, final_v| {
+                move |node, final_v| {
                     processed_nodes.write().unwrap().insert(node.value);
                     computed_values.write().unwrap().insert(node.value, *final_v);
                     true // Always continue processing if node is reached
