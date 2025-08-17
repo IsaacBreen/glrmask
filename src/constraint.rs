@@ -1002,7 +1002,7 @@ impl<'r> Precomputer<'r> {
                 // substring state, step with `gtid`, restrict tokens by child's BV.
                 let mut initial_values: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> = Vec::new();
                 for (child_wrapper, edge_bv) in dest_map_snapshot.iter() {
-                    let mut glr = self.parser.unwrap().init_glr_substring_parser_with_all_states(self.llm_vocab.clone());
+                    let mut glr = self.parser.unwrap().init_glr_substring_parser_with_everything_state(self.llm_vocab.clone());
                     glr.process_token(gtid); // GrammarTokenID is the same underlying type
                     // Restrict this path to the LLM tokens permitted on this edge.
                     {
