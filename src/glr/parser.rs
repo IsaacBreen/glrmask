@@ -373,8 +373,8 @@ impl GLRParser {
     /// This corresponds to starting “for each state directly reachable”
     /// simultaneously (as per Rekers/Koorn, 4.3), but since we do not know
     /// the first token a priori, we simply include all table states here.
-    pub fn init_glr_substring_parser(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
-        let initial_parse_state = self.init_parse_state_substring();
+    pub fn init_glr_substring_parser_with_all_states(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+        let initial_parse_state = self.init_parse_state_substring_with_all_states();
         GLRParserState {
             parser: self,
             active_state: initial_parse_state,
@@ -386,7 +386,7 @@ impl GLRParser {
 
     /// Builds a parse state whose stack top has a predecessor edge for each table state.
     /// The effect is “parser is in all states at once” at depth 1.
-    pub fn init_parse_state_substring(&self) -> ParseState {
+    pub fn init_parse_state_substring_with_all_states(&self) -> ParseState {
         let all_edges: Vec<ParseStateEdgeContent> = self.table
             .keys()
             .map(|sid| ParseStateEdgeContent { state_id: *sid })
@@ -395,8 +395,8 @@ impl GLRParser {
         ParseState { stack: Arc::new(stack_top) }
     }
 
-    pub fn init_glr_substring_parser_everything(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
-        let initial_parse_state = self.init_parse_state_substring_everything();
+    pub fn init_glr_substring_parser_with_everything_state(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+        let initial_parse_state = self.init_parse_state_substring_with_everything_state();
         GLRParserState {
             parser: self,
             active_state: initial_parse_state,
@@ -408,7 +408,7 @@ impl GLRParser {
 
     /// Builds a parse state whose stack top has a single predecessor edge for the 'everything' state.
     /// The effect is “parser is in all states at once” at depth 1.
-    pub fn init_parse_state_substring_everything(&self) -> ParseState {
+    pub fn init_parse_state_substring_with_everything_state(&self) -> ParseState {
         let initial_content = ParseStateEdgeContent {
             state_id: self.everything_state_id,
         };
