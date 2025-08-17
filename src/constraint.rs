@@ -390,6 +390,13 @@ impl GrammarConstraint {
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
         crate::debug!(2, "Precomputing Trie 2...");
+        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
+        const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+            BelowBottomReductionMode::ContinueFromEverything
+        } else {
+            BelowBottomReductionMode::ContinueFromAll
+        };
+
         let mut precomputed2 = BTreeMap::new();
         let mut memo: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, Arc<RwLock<_>>> = HashMap::new();
 
@@ -408,8 +415,6 @@ impl GrammarConstraint {
             precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
 
             let mut gss_nodes_to_merge = Vec::new();
-
-            const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
 
             let glr_state;
 
@@ -480,7 +485,7 @@ impl GrammarConstraint {
                 crate::debug!(3, "Trie2: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
                 let mut glr_s = current_glr_state.clone();
                 if let Some(gt) = edge_grammar_token_opt {
-                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything });
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                         print_summary_flat();
                         print_summary();
                         reset();
