@@ -395,7 +395,7 @@ impl GrammarConstraint {
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
         crate::debug!(2, "Precomputing Trie 2...");
-        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
+        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
         const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             BelowBottomReductionMode::ContinueFromEverything
         } else {
@@ -570,8 +570,8 @@ impl GrammarConstraint {
         crate::debug!(2, "Finished precomputing Trie 2");
 
         let roots2: Vec<_> = precomputed2.values().cloned().collect();
-        let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
-        crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+        // let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+        // crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
 
