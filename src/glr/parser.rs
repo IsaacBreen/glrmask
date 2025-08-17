@@ -1004,7 +1004,83 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         out.push(merged);
                     }
                     BelowBottomReductionMode::ContinueFromEverything => {
-                        todo!()
+                        crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromEverything", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+                        let mut below_zero = Vec::new();
+
+                        // Find the single goto from the 'everything' state for this non-terminal.
+                        let everything_state_id = self.parser.everything_state_id;
+                        if let Some(goto) = self.parser.table.get(&everything_state_id).and_then(|row| row.gotos.get(&nt)) {
+                            let goto_info = SubstringGoto {
+                                source_state_id: everything_state_id,
+                                goto_state_id: goto.state_id,
+                                accept: goto.accept,
+                            };
+
+                            // Now, the logic is very similar to the loop in ContinueFromAll, but just for this one goto_info.
+                            let mut trie2_dst_nodes = HashMap::new();
+                            for (k, acc_arc) in popper.below_bottom {
+                                let mut acc: Acc = acc_arc.as_ref().clone();
+                                let active_llm_tokens = acc.union_llm_tokens();
+                                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+
+                                // Key that ignores trie2_nodes
+                                let cache_key = BelowBottomCacheKey {
+                                    nonterminal_id: nt,
+                                    source_state_id: goto_info.source_state_id,
+                                    // k,
+                                    acc: acc.clone(),
+                                };
+
+                                // Cache check
+                                if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                                    for existing_trie2_node in &trie2_nodes {
+                                        let inserter = EdgeInserter::new(
+                                            existing_trie2_node.as_arc().clone(),
+                                            (k, Some(goto_info.source_state_id)),
+                                            active_llm_tokens.clone(),
+                                            |e, n| *e |= n,
+                                        ).to_destination_weakly(cached_trie2_node.as_arc().clone());
+                                        inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                                    }
+                                    if goto_info.accept {
+                                        self.accepted = true;
+                                    }
+                                    continue;
+                                }
+
+                                // If there's a state to go to, build the GSS path.
+                                if let Some(goto_state_id) = goto_info.goto_state_id {
+                                    let new_trie2_node = trie2_dst_nodes
+                                        .entry(goto_info.source_state_id)
+                                        .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                                        .clone();
+                                    self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
+
+                                    for existing_trie2_node in &trie2_nodes {
+                                        let inserter = EdgeInserter::new(
+                                            existing_trie2_node.as_arc().clone(),
+                                            (k, Some(goto_info.source_state_id)),
+                                            active_llm_tokens.clone(),
+                                            |e, n| *e |= n,
+                                        ).try_destination_auto(new_trie2_node.clone());
+                                        inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                    }
+
+                                    let mut acc2 = acc.clone();
+                                    acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                                    let new_gss0 = GSSNode::new(acc2);
+                                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                                    below_zero.push(Arc::new(new_gss2));
+                                }
+
+                                if goto_info.accept {
+                                    self.accepted = true;
+                                }
+                            }
+                        }
+                        let merged = GSSNode::merge_many_with_depth(usize::MAX, below_zero);
+                        out.push(merged);
                     }
                     BelowBottomReductionMode::Fail => {
                         crate::debug!(5, "Popped below bottom, failing these parse paths.");
