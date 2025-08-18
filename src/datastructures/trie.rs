@@ -855,6 +855,113 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
         false // No cycle found originating from this node or its descendants along this path
     }
+
+    /// Recomputes `max_depth` for all nodes reachable from the given roots.
+    /// This is useful after manual graph manipulations that do not automatically
+    /// update the depths. It uses a topological sort (Kahn's algorithm) to ensure
+    /// correctness in a single pass.
+    pub fn recompute_all_max_depths(roots: &[Arc<RwLock<Self>>]) {
+        let all_nodes = Self::all_nodes_multiple_roots(roots);
+        if all_nodes.is_empty() {
+            return;
+        }
+
+        let mut node_map: HashMap<*const RwLock<Self>, Arc<RwLock<Self>>> = HashMap::new();
+        for node_arc in &all_nodes {
+            node_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
+        }
+
+        let mut in_degree: HashMap<*const RwLock<Self>, usize> = HashMap::new();
+        let mut adj: HashMap<*const RwLock<Self>, Vec<*const RwLock<Self>>> = HashMap::new();
+
+        for node_arc in &all_nodes {
+            let node_ptr = Arc::as_ptr(node_arc);
+            in_degree.entry(node_ptr).or_insert(0);
+            adj.entry(node_ptr).or_default();
+
+            let node_guard = node_arc.read().unwrap();
+            for child_arc in node_guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
+                let child_ptr = Arc::as_ptr(&child_arc);
+                adj.entry(node_ptr).or_default().push(child_ptr);
+                *in_degree.entry(child_ptr).or_default() += 1;
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        for node_arc in &all_nodes {
+            let node_ptr = Arc::as_ptr(node_arc);
+            if in_degree.get(&node_ptr).cloned().unwrap_or(0) == 0 {
+                queue.push_back(node_ptr);
+                node_arc.write().unwrap().max_depth = 0;
+            } else {
+                // Reset depth for non-source nodes. It will be computed.
+                node_arc.write().unwrap().max_depth = 0;
+            }
+        }
+
+        while let Some(u_ptr) = queue.pop_front() {
+            let u_arc = node_map.get(&u_ptr).unwrap();
+            let u_depth = u_arc.read().unwrap().max_depth;
+
+            if let Some(children_ptrs) = adj.get(&u_ptr) {
+                for &v_ptr in children_ptrs {
+                    let v_arc = node_map.get(&v_ptr).unwrap();
+                    {
+                        let mut v_guard = v_arc.write().unwrap();
+                        v_guard.max_depth = v_guard.max_depth.max(u_depth + 1);
+                    }
+
+                    let v_in_degree = in_degree.get_mut(&v_ptr).unwrap();
+                    *v_in_degree -= 1;
+                    if *v_in_degree == 0 {
+                        queue.push_back(v_ptr);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Helper to collect all nodes from multiple roots.
+    fn all_nodes_multiple_roots(roots: &[Arc<RwLock<Self>>]) -> Vec<Arc<RwLock<Self>>> {
+        let mut visited = HashSet::new();
+        let mut result = Vec::new();
+        let mut queue = VecDeque::from_iter(roots.iter().cloned());
+        for root in roots {
+            visited.insert(Arc::as_ptr(root));
+        }
+
+        while let Some(node_arc) = queue.pop_front() {
+            result.push(node_arc.clone());
+            let guard = node_arc.read().unwrap();
+            for child_arc in guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
+                if visited.insert(Arc::as_ptr(&child_arc)) {
+                    queue.push_back(child_arc);
+                }
+            }
+        }
+        result
+    }
+
+    /// Recomputes the max_depth of this node based on its children's depths.
+    /// Returns true if the depth changed.
+    /// NOTE: This does NOT propagate changes. The caller is responsible for propagation
+    /// if the depth of this node changes and it has parents. This is typically safe
+    /// to call in a post-order traversal where children's depths are finalized first.
+    pub fn recompute_max_depth(&mut self) -> bool {
+        let new_max_depth = self.children.values()
+            .flat_map(|dest_map| dest_map.keys())
+            .filter_map(|node_ptr| node_ptr.upgrade())
+            .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
+            .max()
+            .unwrap_or(0);
+
+        if new_max_depth != self.max_depth {
+            self.max_depth = new_max_depth;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 // Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.

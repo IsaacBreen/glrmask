@@ -368,7 +368,12 @@ impl GrammarConstraint {
         helper.run_dfs();
         // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
-        helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
+        helper.simplify_none_edges(); // This can invalidate max_depth.
+
+        // Recompute all max_depth values after major graph surgery.
+        let roots_for_recompute: Vec<_> = helper.roots.values().cloned().collect();
+        Trie::recompute_all_max_depths(&roots_for_recompute);
+
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
@@ -856,6 +861,7 @@ fn deduplicate_recursive_trie2(
     if children_changed {
         let mut node_guard = node_arc.write().unwrap();
         *node_guard.children_mut() = new_children_map;
+        node_guard.recompute_max_depth();
     }
 
     let canonical_arc = {
@@ -1787,12 +1793,13 @@ impl<'r> Precomputer<'r> {
             }
         }
 
-        if children_changed {
-            let mut node_guard = node_arc.write().unwrap();
-            *node_guard.children_mut() = new_children_map;
-        }
+    if children_changed {
+        let mut node_guard = node_arc.write().unwrap();
+        *node_guard.children_mut() = new_children_map;
+        node_guard.recompute_max_depth();
+    }
 
-        let canonical_arc = {
+    let canonical_arc = {
             let node_guard = node_arc.read().unwrap();
             let node_content = (*node_guard).clone();
             canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()

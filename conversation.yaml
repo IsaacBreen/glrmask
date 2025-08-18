@@ -7860,7 +7860,7 @@ local_system:
               possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
           ) -> Precomputed2 {
               crate::debug!(2, "Precomputing Trie 2...");
-              const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
+              const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
               const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                   BelowBottomReductionMode::ContinueFromEverything
               } else {
@@ -8155,6 +8155,20 @@ local_system:
 
       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+
+          // Collect all unique nodes into a Vec to hold strong references to them.
+          // This prevents any node from being dropped while we are modifying the graph structure,
+          // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+          let mut all_nodes = Vec::new();
+          let mut visited = HashSet::new();
+          for root_arc in roots.values() {
+              for node in Trie::all_nodes(root_arc.clone()) {
+                  if visited.insert(Arc::as_ptr(&node)) {
+                      all_nodes.push(node);
+                  }
+              }
+          }
+
           let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
 
           let all_llm_tokens = HybridBitset::max_ones();
@@ -8242,6 +8256,19 @@ local_system:
 
       fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+
+          // Collect all unique nodes to keep them alive during the merging process.
+          // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
+          let mut all_nodes = Vec::new();
+          let mut visited_ptrs = HashSet::new();
+          for root_arc in roots.values() {
+              for node in Trie::all_nodes(root_arc.clone()) {
+                  if visited_ptrs.insert(Arc::as_ptr(&node)) {
+                      all_nodes.push(node);
+                  }
+              }
+          }
+
           let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
 
@@ -18035,7 +18062,7 @@ local_system:
               possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
           ) -> Precomputed2 {
               crate::debug!(2, "Precomputing Trie 2...");
-              const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
+              const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
               const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                   BelowBottomReductionMode::ContinueFromEverything
               } else {
@@ -18330,6 +18357,20 @@ local_system:
 
       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+
+          // Collect all unique nodes into a Vec to hold strong references to them.
+          // This prevents any node from being dropped while we are modifying the graph structure,
+          // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+          let mut all_nodes = Vec::new();
+          let mut visited = HashSet::new();
+          for root_arc in roots.values() {
+              for node in Trie::all_nodes(root_arc.clone()) {
+                  if visited.insert(Arc::as_ptr(&node)) {
+                      all_nodes.push(node);
+                  }
+              }
+          }
+
           let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
 
           let all_llm_tokens = HybridBitset::max_ones();
@@ -18417,6 +18458,19 @@ local_system:
 
       fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+
+          // Collect all unique nodes to keep them alive during the merging process.
+          // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
+          let mut all_nodes = Vec::new();
+          let mut visited_ptrs = HashSet::new();
+          for root_arc in roots.values() {
+              for node in Trie::all_nodes(root_arc.clone()) {
+                  if visited_ptrs.insert(Arc::as_ptr(&node)) {
+                      all_nodes.push(node);
+                  }
+              }
+          }
+
           let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
 
@@ -28249,7 +28303,7 @@ messages:
               possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
           ) -> Precomputed2 {
               crate::debug!(2, "Precomputing Trie 2...");
-              const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
+              const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
               const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                   BelowBottomReductionMode::ContinueFromEverything
               } else {
@@ -28544,6 +28598,20 @@ messages:
 
       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+
+          // Collect all unique nodes into a Vec to hold strong references to them.
+          // This prevents any node from being dropped while we are modifying the graph structure,
+          // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+          let mut all_nodes = Vec::new();
+          let mut visited = HashSet::new();
+          for root_arc in roots.values() {
+              for node in Trie::all_nodes(root_arc.clone()) {
+                  if visited.insert(Arc::as_ptr(&node)) {
+                      all_nodes.push(node);
+                  }
+              }
+          }
+
           let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
 
           let all_llm_tokens = HybridBitset::max_ones();
@@ -28631,6 +28699,19 @@ messages:
 
       fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+
+          // Collect all unique nodes to keep them alive during the merging process.
+          // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
+          let mut all_nodes = Vec::new();
+          let mut visited_ptrs = HashSet::new();
+          for root_arc in roots.values() {
+              for node in Trie::all_nodes(root_arc.clone()) {
+                  if visited_ptrs.insert(Arc::as_ptr(&node)) {
+                      all_nodes.push(node);
+                  }
+              }
+          }
+
           let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
 
@@ -30576,82 +30657,242 @@ messages:
       filename: src/constraint.rs
   - user: |-
       ```
-      [DEBUG] 2] src/constraint.rs:570: Finished precomputing Trie 2
-      [DEBUG] 2] src/constraint.rs:692: Pruning dead paths from precomputed trie 2.
+      --- Tokenizer State ID: 38 ---
+      Root Node 0x600005921e20 (MaxDepth: 0)
+      ├── Edge ε: [3502, 3518..=3520, 5029, 5062, 6173, ...] (e.g., [" \\", " `", " ``", " ``(", "(\\"], ...) -> Ref to Node 0x600021ef8160 (MaxDepth: 1)
+      ├── Edge ε: [0..=3517, 3521..=8938, 8944..=14267] (e.g., ["\n", "\n\n", " ", " !", " !!"], ...) -> Ref to Node 0x600019b14020 (MaxDepth: 6)
+      └── Edge ε: [31, 4861, 6219] (e.g., [" $\\", " {\\", ">>\\"]) -> Ref to Node 0x600021ef5420 (MaxDepth: 3)
 
-      thread 'test_constraint_js::test_js_constraint_integration' panicked at src/constraint.rs:730:43:
-      called `Option::unwrap()` on a `None` value
-      stack backtrace:
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-      test test_constraint_js::test_js_constraint_integration ... FAILED
+      --- Tokenizer State ID: 39 ---
+      Root Node 0x600005921e70 (MaxDepth: 0)
+      ├── Edge ε: [3502, 3518..=3520, 5029, 5062, 6173, ...] (e.g., [" \\", " `", " ``", " ``(", "(\\"], ...) -> Ref to Node 0x600021ef8160 (MaxDepth: 1)
+      ├── Edge ε: [4964..=4966, 8930..=8934, 8938] (e.g., ["$,", "$.", "${", "_(", "_-"], ...) -> Ref to Node 0x600021eac5c0 (MaxDepth: 1)
+      ├── Edge ε: [0..=3517, 3521..=8938, 8944..=14267] (e.g., ["\n", "\n\n", " ", " !", " !!"], ...) -> Ref to Node 0x600019b14020 (MaxDepth: 6)
+      ├── Edge ε: [4961..=4963, 5180..=6160, 6244..=8881, 8929, 8935..=8937, ...] (e.g., ["$", "$$", "$$$$", "0", "00"], ...) -> Ref to Node 0x600019b140c0 (MaxDepth: 6)
+      └── Edge ε: [31, 4861, 6219] (e.g., [" $\\", " {\\", ">>\\"]) -> Ref to Node 0x600021ef5420 (MaxDepth: 3)
+
+      --- Tokenizer State ID: 40 ---
+      Root Node 0x600005921ec0 (MaxDepth: 0)
+      ├── Edge ε: [5091..=5095, 5098..=5101] (e.g., [",\"", ",'", ",'\"", ",''", ",)"], ...) -> Ref to Node 0x600021b508e0 (MaxDepth: 1)
+      ├── Edge ε: [3502, 3518..=3520, 5029, 5062, 6173, ...] (e.g., [" \\", " `", " ``", " ``(", "(\\"], ...) -> Ref to Node 0x600021ef8160 (MaxDepth: 1)
+      ├── Edge ε: [5090, 5096..=5097] (e.g., [",", ",,", ",,,,"]) -> Ref to Node 0x60002188c570 (MaxDepth: 6)
+      ├── Edge ε: [0..=3517, 3521..=8938, 8944..=14267] (e.g., ["\n", "\n\n", " ", " !", " !!"], ...) -> Ref to Node 0x600019b14020 (MaxDepth: 6)
+      └── Edge ε: [31, 4861, 6219] (e.g., [" $\\", " {\\", ">>\\"]) -> Ref to Node 0x600021ef5420 (MaxDepth: 3)
+
+      --- Tokenizer State ID: 41 ---
+      Root Node 0x600005921ec0 (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 42 ---
+      Root Node 0x600005921e20 (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 43 ---
+      Root Node 0x600005921e70 (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 44 ---
+      Root Node 0x600005921e70 (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 45 ---
+      Root Node 0x600005922050 (MaxDepth: 0)
+      ├── Edge ε: [3502, 3518..=3520, 5029, 5062, 6173, ...] (e.g., [" \\", " `", " ``", " ``(", "(\\"], ...) -> Ref to Node 0x600021ef8160 (MaxDepth: 1)
+      ├── Edge ε: [4964..=4966, 8930..=8934, 8938] (e.g., ["$,", "$.", "${", "_(", "_-"], ...) -> Ref to Node 0x600021eac5c0 (MaxDepth: 1)
+      ├── Edge ε: [0..=3517, 3521..=8938, 8944..=14267] (e.g., ["\n", "\n\n", " ", " !", " !!"], ...) -> Ref to Node 0x600019b14020 (MaxDepth: 6)
+      ├── Edge ε: [4961..=4963, 5180..=6160, 6244..=8881, 8929, 8935..=8937, ...] (e.g., ["$", "$$", "$$$$", "0", "00"], ...) -> Ref to Node 0x600019b140c0 (MaxDepth: 6)
+      ├── Edge ε: [13686] (e.g., ["y"]) -> Ref to Node 0x60002188c610 (MaxDepth: 5)
+      ├── Edge ε: [31, 4861, 6219] (e.g., [" $\\", " {\\", ">>\\"]) -> Ref to Node 0x600021ef5420 (MaxDepth: 3)
+      └── Edge ''finally'': [13687..=13752] (e.g., ["ya", "yah", "yan", "yang", "yard"], ...) -> Ref to Node 0x6000059714c0 (MaxDepth: 2)
       ```
 
-      I think this fails because there's no strong ref to the node after pruning. Fix this by temporarily creating a collection of all nodes to prevent deallocation and then converting weak to strong nodes.
-      I anticipate this'll be an issue throughout optimisations for trie 2.
+      It seems that max depth isn't being properly computed somehow. Fix it.
     metadata:
   - assistant: |-
-      Hello! Dealing with graphs that have weak pointers can be tricky, especially during mutation. The panic you're seeing is indeed because a `Weak` pointer is being upgraded after its corresponding `Arc` has been dropped, which happens when pruning edges reduces its strong count to zero.
+      Hello! It looks like you've encountered an issue with `max_depth` calculation in the `Trie` structure, especially after complex graph manipulations during the precomputation phase. You are correct, some of the optimization passes modify the graph structure without correctly updating the `max_depth` property, leading to inconsistencies.
 
-      Here are the patches to fix this. I've applied the strategy of collecting all nodes to keep them alive during the optimization passes for `trie2`, which should resolve the panic and prevent similar issues in the merging logic.
+      Here are the patches to fix this. I'll add functions to recompute `max_depth` and call them after the graph transformation steps.
+
+      ### `src/datastructures/trie.rs`
+
+      I'll add two new functions to `Trie`:
+      1.  `recompute_max_depth()`: A local function to recompute a node's depth based on its immediate children. This is efficient to use during post-order traversals.
+      2.  `recompute_all_max_depths()`: A global function that correctly recomputes depths for the entire graph using a topological sort. This is safer to use after complex manipulations that are not simple post-order traversals.
+
+      ```diff
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -770,6 +770,100 @@
+               recursion_stack_arcs.remove(&node_arc_ptr);
+       
+               false // No cycle found originating from this node or its descendants along this path
+           }
+      +
+      +    /// Recomputes `max_depth` for all nodes reachable from the given roots.
+      +    /// This is useful after manual graph manipulations that do not automatically
+      +    /// update the depths. It uses a topological sort (Kahn's algorithm) to ensure
+      +    /// correctness in a single pass.
+      +    pub fn recompute_all_max_depths(roots: &[Arc<RwLock<Self>>]) {
+      +        let all_nodes = Self::all_nodes_multiple_roots(roots);
+      +        if all_nodes.is_empty() {
+      +            return;
+      +        }
+      +
+      +        let mut node_map: HashMap<*const RwLock<Self>, Arc<RwLock<Self>>> = HashMap::new();
+      +        for node_arc in &all_nodes {
+      +            node_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
+      +        }
+      +
+      +        let mut in_degree: HashMap<*const RwLock<Self>, usize> = HashMap::new();
+      +        let mut adj: HashMap<*const RwLock<Self>, Vec<*const RwLock<Self>>> = HashMap::new();
+      +
+      +        for node_arc in &all_nodes {
+      +            let node_ptr = Arc::as_ptr(node_arc);
+      +            in_degree.entry(node_ptr).or_insert(0);
+      +            adj.entry(node_ptr).or_default();
+      +
+      +            let node_guard = node_arc.read().unwrap();
+      +            for child_arc in node_guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
+      +                let child_ptr = Arc::as_ptr(&child_arc);
+      +                adj.entry(node_ptr).or_default().push(child_ptr);
+      +                *in_degree.entry(child_ptr).or_default() += 1;
+      +            }
+      +        }
+      +
+      +        let mut queue = VecDeque::new();
+      +        for node_arc in &all_nodes {
+      +            let node_ptr = Arc::as_ptr(node_arc);
+      +            if in_degree.get(&node_ptr).cloned().unwrap_or(0) == 0 {
+      +                queue.push_back(node_ptr);
+      +                node_arc.write().unwrap().max_depth = 0;
+      +            } else {
+      +                // Reset depth for non-source nodes. It will be computed.
+      +                node_arc.write().unwrap().max_depth = 0;
+      +            }
+      +        }
+      +
+      +        while let Some(u_ptr) = queue.pop_front() {
+      +            let u_arc = node_map.get(&u_ptr).unwrap();
+      +            let u_depth = u_arc.read().unwrap().max_depth;
+      +
+      +            if let Some(children_ptrs) = adj.get(&u_ptr) {
+      +                for &v_ptr in children_ptrs {
+      +                    let v_arc = node_map.get(&v_ptr).unwrap();
+      +                    {
+      +                        let mut v_guard = v_arc.write().unwrap();
+      +                        v_guard.max_depth = v_guard.max_depth.max(u_depth + 1);
+      +                    }
+      +
+      +                    let v_in_degree = in_degree.get_mut(&v_ptr).unwrap();
+      +                    *v_in_degree -= 1;
+      +                    if *v_in_degree == 0 {
+      +                        queue.push_back(v_ptr);
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    /// Helper to collect all nodes from multiple roots.
+      +    fn all_nodes_multiple_roots(roots: &[Arc<RwLock<Self>>]) -> Vec<Arc<RwLock<Self>>> {
+      +        let mut visited = HashSet::new();
+      +        let mut result = Vec::new();
+      +        let mut queue = VecDeque::from_iter(roots.iter().cloned());
+      +        for root in roots {
+      +            visited.insert(Arc::as_ptr(root));
+      +        }
+      +
+      +        while let Some(node_arc) = queue.pop_front() {
+      +            result.push(node_arc.clone());
+      +            let guard = node_arc.read().unwrap();
+      +            for child_arc in guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
+      +                if visited.insert(Arc::as_ptr(&child_arc)) {
+      +                    queue.push_back(child_arc);
+      +                }
+      +            }
+      +        }
+      +        result
+      +    }
+      +
+      +    /// Recomputes the max_depth of this node based on its children's depths.
+      +    /// Returns true if the depth changed.
+      +    /// NOTE: This does NOT propagate changes. The caller is responsible for propagation
+      +    /// if the depth of this node changes and it has parents. This is typically safe
+      +    /// to call in a post-order traversal where children's depths are finalized first.
+      +    pub fn recompute_max_depth(&mut self) -> bool {
+      +        let new_max_depth = self.children.values()
+      +            .flat_map(|dest_map| dest_map.keys())
+      +            .filter_map(|node_ptr| node_ptr.upgrade())
+      +            .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
+      +            .max()
+      +            .unwrap_or(0);
+      +
+      +        if new_max_depth != self.max_depth {
+      +            self.max_depth = new_max_depth;
+      +            true
+      +        } else {
+      +            false
+      +        }
+      +    }
+       }
+       
+       // Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
+
+      ```
 
       ### `src/constraint.rs`
 
-      I'll add logic to `prune_dead_paths_trie2` and `merge_nodes_trie2` to gather all nodes in the graph first. This ensures that strong references are held to all nodes throughout the optimization process, preventing any `Arc` from being deallocated prematurely.
+      Now I'll use the new functions in `constraint.rs`. I'll call `recompute_all_max_depths` after `simplify_none_edges` and use the local `recompute_max_depth` inside the recursive deduplication functions, which is more efficient.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -692,6 +692,18 @@
+      @@ -400,7 +400,12 @@
        
-       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+               helper.run_dfs();
+               // helper.optimize_precomputed_via_substring_parser();
+               helper.replace_ignore_token_edges_with_none_edges();
+      -        helper.simplify_none_edges(); // Simplify out None-edges by shortcutting predecessors to successors
+      +        helper.simplify_none_edges(); // This can invalidate max_depth.
       +
-      +    // Collect all unique nodes into a Vec to hold strong references to them.
-      +    // This prevents any node from being dropped while we are modifying the graph structure,
-      +    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
-      +    let mut all_nodes = Vec::new();
-      +    let mut visited = HashSet::new();
-      +    for root_arc in roots.values() {
-      +        for node in Trie::all_nodes(root_arc.clone()) {
-      +            if visited.insert(Arc::as_ptr(&node)) {
-      +                all_nodes.push(node);
-      +            }
-      +        }
-      +    }
+      +        // Recompute all max_depth values after major graph surgery.
+      +        let roots_for_recompute: Vec<_> = helper.roots.values().cloned().collect();
+      +        Trie::recompute_all_max_depths(&roots_for_recompute);
       +
-           let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
+               helper.prune_dead_paths();
+               helper.prune_on_no_terminal_follow();
+               helper.prune_dead_paths();
+      @@ -1000,6 +1005,7 @@
+           if children_changed {
+               let mut node_guard = node_arc.write().unwrap();
+               *node_guard.children_mut() = new_children_map;
+      +        node_guard.recompute_max_depth();
+           }
        
-           let all_llm_tokens = HybridBitset::max_ones();
-      @@ -778,6 +790,19 @@
+           let canonical_arc = {
+      @@ -1048,6 +1054,7 @@
+           if children_changed {
+               let mut node_guard = node_arc.write().unwrap();
+               *node_guard.children_mut() = new_children_map;
+      +        node_guard.recompute_max_depth();
+           }
        
-       fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
-      +
-      +    // Collect all unique nodes to keep them alive during the merging process.
-      +    // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
-      +    let mut all_nodes = Vec::new();
-      +    let mut visited_ptrs = HashSet::new();
-      +    for root_arc in roots.values() {
-      +        for node in Trie::all_nodes(root_arc.clone()) {
-      +            if visited_ptrs.insert(Arc::as_ptr(&node)) {
-      +                all_nodes.push(node);
-      +            }
-      +        }
-      +    }
-      +
-           let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-       
+           let canonical_arc = {
 
       ```
 
-      These changes should resolve the panic and make your trie optimizations more robust. Let me know if you have any other questions
+      These changes should resolve the `max_depth` inconsistencies you've observed. The combination of a targeted fix during the post-order `merge_nodes` pass and a robust global recalculation after the more complex `simplify_none_edges` pass will ensure the `max_depth` values are correct throughout the precomputation process. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
