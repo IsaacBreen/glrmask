@@ -575,10 +575,19 @@ impl GrammarConstraint {
         crate::debug!(2, "Finished precomputing Trie 2");
 
         let roots2: Vec<_> = precomputed2.values().cloned().collect();
-        // let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
-        // crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+        let mut all_nodes = Vec::new();
+        let mut visited_ptrs = HashSet::new();
+        for root_arc in precomputed2.values() {
+            for node in Trie::all_nodes(root_arc.clone()) {
+                if visited_ptrs.insert(Arc::as_ptr(&node)) {
+                    all_nodes.push(node);
+                }
+            }
+        }
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
+        let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+        crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
         precomputed2
     }
