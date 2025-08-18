@@ -378,7 +378,7 @@ impl GrammarConstraint {
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
         // New: prune using substring parser in "everything state" mode
-        helper.prune_with_substring_everything_state();
+        // helper.prune_with_substring_everything_state();
         helper.prune_dead_paths(); // Clean up after GLR-based pruning
         helper.factor_common_destinations();
         helper.merge_nodes();
