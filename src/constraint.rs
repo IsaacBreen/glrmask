@@ -690,6 +690,20 @@ impl GrammarConstraint {
 
 fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+
+    // Collect all unique nodes into a Vec to hold strong references to them.
+    // This prevents any node from being dropped while we are modifying the graph structure,
+    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+    let mut all_nodes = Vec::new();
+    let mut visited = HashSet::new();
+    for root_arc in roots.values() {
+        for node in Trie::all_nodes(root_arc.clone()) {
+            if visited.insert(Arc::as_ptr(&node)) {
+                all_nodes.push(node);
+            }
+        }
+    }
+
     let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
 
     let all_llm_tokens = HybridBitset::max_ones();
@@ -777,6 +791,19 @@ fn get_live_tokens_and_prune_trie2(
 
 fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+
+    // Collect all unique nodes to keep them alive during the merging process.
+    // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
+    let mut all_nodes = Vec::new();
+    let mut visited_ptrs = HashSet::new();
+    for root_arc in roots.values() {
+        for node in Trie::all_nodes(root_arc.clone()) {
+            if visited_ptrs.insert(Arc::as_ptr(&node)) {
+                all_nodes.push(node);
+            }
+        }
+    }
+
     let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
     let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
 
