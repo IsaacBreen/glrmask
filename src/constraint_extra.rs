@@ -342,7 +342,7 @@ impl JSONConvertible for PrecomputeStats {
         obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
         obj.insert("final_total_occupancy_sum_for_some_keys".to_string(), self.final_total_occupancy_sum_for_some_keys.to_json());
         obj.insert("final_num_occupied_some_edge_keys".to_string(), self.final_num_occupied_some_edge_keys.to_json());
-        obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_num_occupied_none_edge_keys.to_json());
+        obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_total_occupancy_sum_for_none_keys.to_json());
         obj.insert("final_num_occupied_none_edge_keys".to_string(), self.final_num_occupied_none_edge_keys.to_json());
         obj.insert("final_grammar_token_edge_key_counts".to_string(), self.final_grammar_token_edge_key_counts.to_json());
         obj.insert("final_grammar_token_edge_fanouts_dist".to_string(), self.final_grammar_token_edge_fanouts_dist.to_json());
@@ -402,205 +402,9 @@ impl JSONConvertible for PrecomputeStats {
             }
             _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
         }
-    }
+    }   
 }
 
-// Add this struct definition before impl GrammarConstraint
-#[derive(Default, Debug)]
-pub struct PrecomputeStats2 {
-    // Final structure stats
-    pub final_unique_nodes_count: usize,
-    pub final_root_nodes_count: usize,
-    pub final_non_root_internal_nodes_count: usize,
-    pub final_leaf_nodes_count: usize,
-    pub final_edges_count: usize,
-    pub final_nodes_with_clean_end: usize,
-    pub final_total_ranges_in_bvs: usize,
-
-    // Stats about edge keys (k, Option<StateID>)
-    pub final_k_dist: BTreeMap<usize, usize>, // count of edges for each k
-    pub final_state_id_dist: BTreeMap<Option<StateID>, usize>, // count of edges for each state_id
-    pub final_edge_fanouts_dist: Vec<usize>,
-    pub final_edge_token_set_sizes_dist: Vec<usize>,
-}
-
-impl JSONConvertible for PrecomputeStats2 {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("final_unique_nodes_count".to_string(), self.final_unique_nodes_count.to_json());
-        obj.insert("final_root_nodes_count".to_string(), self.final_root_nodes_count.to_json());
-        obj.insert("final_non_root_internal_nodes_count".to_string(), self.final_non_root_internal_nodes_count.to_json());
-        obj.insert("final_leaf_nodes_count".to_string(), self.final_leaf_nodes_count.to_json());
-        obj.insert("final_edges_count".to_string(), self.final_edges_count.to_json());
-        obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
-        obj.insert("final_total_ranges_in_bvs".to_string(), self.final_total_ranges_in_bvs.to_json());
-        obj.insert("final_k_dist".to_string(), self.final_k_dist.to_json());
-        obj.insert("final_state_id_dist".to_string(), self.final_state_id_dist.to_json());
-        obj.insert("final_edge_fanouts_dist".to_string(), self.final_edge_fanouts_dist.to_json());
-        obj.insert("final_edge_token_set_sizes_dist".to_string(), self.final_edge_token_set_sizes_dist.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(PrecomputeStats2 {
-                final_unique_nodes_count: obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count".to_string())?.from_json()?,
-                final_root_nodes_count: obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count".to_string())?.from_json()?,
-                final_non_root_internal_nodes_count: obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count".to_string())?.from_json()?,
-                final_leaf_nodes_count: obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count".to_string())?.from_json()?,
-                final_edges_count: obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count".to_string())?.from_json()?,
-                final_nodes_with_clean_end: obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end".to_string())?.from_json()?,
-                final_total_ranges_in_bvs: obj.remove("final_total_ranges_in_bvs").ok_or_else(|| "Missing field final_total_ranges_in_bvs".to_string())?.from_json()?,
-                final_k_dist: obj.remove("final_k_dist").ok_or_else(|| "Missing field final_k_dist".to_string())?.from_json()?,
-                final_state_id_dist: obj.remove("final_state_id_dist").ok_or_else(|| "Missing field final_state_id_dist".to_string())?.from_json()?,
-                final_edge_fanouts_dist: obj.remove("final_edge_fanouts_dist").ok_or_else(|| "Missing field final_edge_fanouts_dist".to_string())?.from_json()?,
-                final_edge_token_set_sizes_dist: obj.remove("final_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_edge_token_set_sizes_dist".to_string())?.from_json()?,
-            }),
-            _ => Err("Expected JSONNode::Object for PrecomputeStats2".to_string()),
-        }
-    }
-}
-
-pub fn calculate_final_stats2(
-    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-    stats: &mut PrecomputeStats2,
-) {
-    crate::debug!(2, "Calculating final precompute 2 statistics...");
-
-    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = BTreeMap::new();
-    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode2>>> = precomputed_roots.values().cloned().collect();
-    let mut visited_data_ptrs: HashSet<*const PrecomputeNode2> = HashSet::new();
-
-    while let Some(node_arc) = queue.pop_front() {
-        let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.read().unwrap();
-            let ptr = &*node_guard as *const PrecomputeNode2;
-            let children = node_guard.children()
-                .values()
-                .flat_map(|dest_map| {
-                    dest_map
-                        .keys()
-                        .filter_map(|wrapper| wrapper.upgrade())
-                })
-                .collect::<Vec<_>>();
-            (children, ptr)
-        };
-
-        if visited_data_ptrs.insert(node_ptr) {
-            all_reachable_nodes.insert(node_ptr, node_arc.clone());
-            for child_arc in children_to_queue {
-                queue.push_back(child_arc);
-            }
-        }
-    }
-
-    stats.final_unique_nodes_count = all_reachable_nodes.len();
-
-    let root_node_pointers: HashSet<*const PrecomputeNode2> = precomputed_roots
-        .values()
-        .map(|arc| {
-            let guard = arc.read().unwrap();
-            &*guard as *const PrecomputeNode2
-        })
-        .collect();
-    stats.final_root_nodes_count = root_node_pointers.len();
-
-    // Initialize stats fields
-    stats.final_edges_count = 0;
-    stats.final_nodes_with_clean_end = 0;
-    stats.final_non_root_internal_nodes_count = 0;
-    stats.final_leaf_nodes_count = 0;
-    stats.final_total_ranges_in_bvs = 0;
-    stats.final_k_dist.clear();
-    stats.final_state_id_dist.clear();
-    stats.final_edge_fanouts_dist.clear();
-    stats.final_edge_token_set_sizes_dist.clear();
-
-    for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.read().expect("RwLock poisoned during final stats calculation");
-
-        if !root_node_pointers.contains(node_ptr) {
-            if node_guard.children().is_empty() {
-                stats.final_leaf_nodes_count += 1;
-            } else {
-                stats.final_non_root_internal_nodes_count += 1;
-            }
-        }
-
-        for (edge_key, dest_map) in node_guard.children() {
-            let (k, state_id_opt) = edge_key;
-            let num_edges = dest_map.len();
-            stats.final_edges_count += num_edges;
-
-            *stats.final_k_dist.entry(*k).or_default() += num_edges;
-            *stats.final_state_id_dist.entry(*state_id_opt).or_default() += num_edges;
-            
-            stats.final_edge_fanouts_dist.push(num_edges);
-            for bv in dest_map.values() {
-                stats.final_edge_token_set_sizes_dist.push(bv.len());
-                stats.final_total_ranges_in_bvs += bv.inner().ranges_len();
-            }
-        }
-
-        if node_guard.value.end {
-            stats.final_nodes_with_clean_end += 1;
-        }
-    }
-    crate::debug!(2, "Finished calculating final precompute 2 statistics.");
-}
-
-pub fn print_precompute_stats2(
-    stats: &PrecomputeStats2,
-) {
-    println!("--- Precomputation 2 Statistics ---");
-
-    println!("\nNode Counts Breakdown:");
-    println!("  There are:");
-    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
-    println!("    - {} are roots", stats.final_root_nodes_count);
-    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count);
-    println!("    - {} are non-roots, of which", non_root_count);
-    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
-    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
-
-    println!("\nFinal Graph Structure (Trie 2):");
-    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
-    println!("  Total Edges: {}", stats.final_edges_count);
-    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
-
-    println!("\nEdge Key Statistics (k = pop length):");
-    let mut k_dist: Vec<_> = stats.final_k_dist.iter().collect();
-    k_dist.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
-    for (k, count) in k_dist.iter().take(10) {
-        println!("  - k={:<4}: {:>6} edges", k, count);
-    }
-    if k_dist.len() > 10 {
-        println!("  ... ({} more)", k_dist.len() - 10);
-    }
-
-    println!("\nEdge Key Statistics (State ID):");
-    let mut state_dist: Vec<_> = stats.final_state_id_dist.iter().collect();
-    state_dist.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
-    for (state_id_opt, count) in state_dist.iter().take(10) {
-        let state_str = state_id_opt.map_or("None".to_string(), |s| s.0.to_string());
-        println!("  - State {:<4}: {:>6} edges", state_str, count);
-    }
-    if state_dist.len() > 10 {
-        println!("  ... ({} more)", state_dist.len() - 10);
-    }
-
-    let (fanout_sum, fanout_avg, fanout_med) = calculate_stats_from_vec_usize(&stats.final_edge_fanouts_dist);
-    let (tokens_sum, tokens_avg, tokens_med) = calculate_stats_from_vec_usize(&stats.final_edge_token_set_sizes_dist);
-    
-    println!("\nEdge Distribution Stats:");
-    println!("  Fanout (destinations per edge key):");
-    println!("    Sum: {}, Avg: {:.2}, Median: {:.2}", fanout_sum, fanout_avg.unwrap_or(0.0), fanout_med.unwrap_or(0.0));
-    println!("  Token Set Size (tokens per edge):");
-    println!("    Sum: {}, Avg: {:.2}, Median: {:.2}", tokens_sum, tokens_avg.unwrap_or(0.0), tokens_med.unwrap_or(0.0));
-
-    println!("---------------------------------");
-}
 
 /// Helper function to calculate sum, mean, and median from Vec<usize>
 fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
@@ -624,3 +428,335 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
     (sum, mean, median)
 }
 
+pub fn calculate_final_stats(
+    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
+    stats: &mut PrecomputeStats,
+) {
+    crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
+
+    // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = BTreeMap::new();
+    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
+
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read().unwrap();
+            let ptr = &*node_guard as *const PrecomputeNode;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map
+                        .keys()
+                        .filter_map(|wrapper| wrapper.upgrade())
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
+            }
+        }
+    }
+
+    stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+    let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
+        .values()
+        .map(|arc| {
+            let guard = arc.read().unwrap();
+            &*guard as *const PrecomputeNode
+        })
+        .collect();
+    stats.final_root_nodes_count = root_node_pointers.len();
+
+    // Initialize stats fields
+    stats.final_total_occupancy_sum_for_some_keys = 0;
+    stats.final_num_occupied_some_edge_keys = 0;
+    stats.final_total_occupancy_sum_for_none_keys = 0;
+    stats.final_num_occupied_none_edge_keys = 0;
+    stats.final_edges_count = 0;
+    stats.final_edges_with_none_key = 0;
+    stats.final_edges_with_some_key = 0;
+    stats.final_nodes_with_clean_end = 0;
+    stats.final_grammar_token_edge_key_counts.clear();
+    stats.final_grammar_token_edge_fanouts_dist.clear();
+    stats.final_grammar_token_edge_token_set_sizes_dist.clear();
+    // stats.final_root_nodes_count = 0; // Already set above
+    stats.final_non_root_internal_nodes_count = 0;
+    stats.final_leaf_nodes_count = 0;
+    stats.edges_pruned_by_terminal_sequence = 0;
+    stats.final_total_ranges_in_bvs = 0;
+
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read().expect("RwLock poisoned during final stats calculation");
+
+        // New logic for non-root internal and leaf nodes
+        if !root_node_pointers.contains(node_ptr) {
+            if node_guard.children().is_empty() {
+                stats.final_leaf_nodes_count += 1;
+            } else {
+                stats.final_non_root_internal_nodes_count += 1;
+            }
+        }
+
+        // Existing logic for edges
+        for (edge_key_opt, dest_map) in node_guard.children() {
+            let num_edges_for_this_key_to_distinct_children = dest_map.len();
+            stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+
+            if let Some(gtid) = edge_key_opt {
+                stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children; // Corrected: sum edges not occurrences of key
+
+                stats.final_grammar_token_edge_fanouts_dist
+                    .entry(*gtid)
+                    .or_default()
+                    .push(num_edges_for_this_key_to_distinct_children);
+                for llm_token_bv_on_edge in dest_map.values() {
+                    stats.final_grammar_token_edge_token_set_sizes_dist
+                        .entry(*gtid)
+                        .or_default()
+                        .push(llm_token_bv_on_edge.len());
+                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+                }
+                if num_edges_for_this_key_to_distinct_children > 0 {
+                    stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                    stats.final_num_occupied_some_edge_keys += 1;
+                }
+            } else {
+                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                if num_edges_for_this_key_to_distinct_children > 0 {
+                    stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                    stats.final_num_occupied_none_edge_keys += 1;
+                }
+            }
+        }
+
+        // Existing logic for clean_end
+        // if let Some(clean_end_bv) = &node_guard.value.clean_end {
+        //     stats.final_nodes_with_clean_end += 1;
+        //     stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
+        // }
+        if node_guard.value.end {
+            stats.final_nodes_with_clean_end += 1;
+        }
+    }
+    crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
+}
+
+
+pub fn print_precompute_stats(
+    stats: &PrecomputeStats,
+    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
+) {
+    let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+    } else { 0.0 };
+    let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+        stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
+    } else { 0.0 };
+
+    println!("--- Precomputation Statistics ---");
+    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+
+    println!("\nNode Counts Breakdown:");
+    println!("  There are:");
+    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!("    - {} are roots", stats.final_root_nodes_count);
+    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
+    println!("    - {} are non-roots, of which", non_root_count);
+    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+    println!("\nFinal Graph Structure (after sharing and deduplication):");
+    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+    println!("  Total Edges: {}", stats.final_edges_count);
+    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+    println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+    println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
+
+    let mut grammar_token_stats_new: Vec<(
+        GrammarTokenID,
+        usize, // key_usages (KeyUse)
+        (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
+        (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
+    )> = Vec::new();
+
+    for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
+        let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                    .get(gtid)
+                                    .cloned()
+                                    .unwrap_or_else(Vec::new);
+        let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
+
+        let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+                                            .get(gtid)
+                                            .cloned()
+                                            .unwrap_or_else(Vec::new);
+        let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
+
+        grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
+    }
+
+    grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
+
+    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+    println!(
+        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+    );
+    println!(
+        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+        "", "", "", "", "", "", "", "", "", ""
+    );
+
+    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+        let name = token_name_map
+            .get_by_right(&gtid.0) // gtid is GrammarTokenID
+            .cloned()
+            .map_or(
+                format!("ID:{}", gtid.0),
+                |t| t.to_string()
+            );
+
+        let (sum_child, avg_child, med_child) = child_stats;
+        let (sum_toks, avg_toks, med_toks) = toks_stats;
+        let avg_key_toks = if key_usages > 0 {
+            Some(sum_toks as f64 / key_usages as f64)
+        } else {
+            None
+        };
+
+
+        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+
+        println!(
+            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+            name,
+            gtid.0,
+            key_usages,
+            sum_child,
+            format_opt_f64(avg_child),
+            format_opt_f64(med_child),
+            format_opt_f64(avg_key_toks),
+            sum_toks,
+            format_opt_f64(avg_toks),
+            format_opt_f64(med_toks)
+        );
+    }
+    println!("---------------------------------");
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use crate::finite_automata::{eat_u8, Regex};
+    use crate::glr::grammar::{nt, prod, t, regex_name, Terminal};
+    use crate::glr::parser::GLRParser;
+    use crate::glr::table::generate_glr_parser_with_terminal_map;
+    use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+    use crate::types::TerminalID;
+    use bimap::BiBTreeMap;
+    use super::*;
+    use bitvec::prelude::*;
+    use crate::seq;
+    use crate::datastructures::hybrid_bitset::HybridBitset;
+
+    #[test]
+    fn test_format_bv_with_tokens_no_maps() {
+        let bv = HybridBitset::from_iter(vec![1, 2]);
+        assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "[1..=2]");
+    }
+
+    #[test]
+    fn test_format_bv_with_tokens_with_maps() {
+        let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+        let mut bimap = BiBTreeMap::new();
+        bimap.insert(10, 0); // original 10 -> internal 0
+        bimap.insert(20, 1); // original 20 -> internal 1
+        let mut llm_map = BiBTreeMap::new();
+        llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+        llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+
+        let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
+        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+    }
+
+    #[test]
+    fn test_format_bv_with_tokens_limit_and_ellipsis() {
+        let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+        let mut bimap = BiBTreeMap::new();
+        let mut llm_map = BiBTreeMap::new();
+        for i in 0..10 {
+            bimap.insert(100 + i, i);
+            llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+        }
+
+        let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
+        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+    }
+
+    // Helper function to create a minimal constraint for testing dump
+    fn create_minimal_constraint() -> GrammarConstraint {
+        // Tokenizer: Matches "a" (token 0) or "$" (token 1)
+        let expr = crate::groups![
+            eat_u8(b'a'), // Grammar Token 0
+            seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
+            eat_u8(b'$')  // Grammar Token 2 (EOF)
+        ];
+        let tokenizer = expr.build();
+
+        // LLM Token Map: "aaaa" -> 0, "$" -> 1
+        let mut llm_token_map = LLMTokenMap::new();
+        llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
+        llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+        let max_llm_token_id = 1;
+
+        // Grammar: S -> A $
+        let productions = vec![
+            prod("S", vec![nt("A"), nt("AA"), t("EOF")]), // S' -> S EOF is implicit
+        ];
+
+        // Map grammar terminals to the tokenizer's token IDs
+        let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+        grammar_token_map.insert(regex_name("A"), TerminalID(0)); // "a" from tokenizer
+        grammar_token_map.insert(regex_name("AA"), TerminalID(1)); // "aa" from tokenizer
+        grammar_token_map.insert(regex_name("EOF"), TerminalID(2)); // "$" from tokenizer
+
+        // Generate parser
+        let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map, None);
+
+        let mut terminal_name_map = BiBTreeMap::new();
+        terminal_name_map.insert(regex_name("A"), 0);
+        terminal_name_map.insert(regex_name("AA"), 1);
+        terminal_name_map.insert(regex_name("EOF"), 2);
+
+        // Create constraint (this runs precomputation)
+        GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)
+    }
+
+    #[test]
+    fn test_dump_precomputed_runs() {
+        let constraint = create_minimal_constraint();
+        println!("--- Starting dump_precomputed test output ---");
+        constraint.dump_precomputed(); // Just ensure it runs without panic
+        println!("--- Finished dump_precomputed test output ---");
+    }
+
+    #[test]
+    fn test_dump_precomputed2_runs() {
+        let constraint = create_minimal_constraint();
+        println!("--- Starting dump_precomputed2 test output ---");
+        constraint.dump_precomputed2(); // Just ensure it runs without panic
+        println!("--- Finished dump_precomputed2 test output ---");
+    }
+}
