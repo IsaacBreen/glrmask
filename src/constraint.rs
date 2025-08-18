@@ -20,7 +20,7 @@ use bimap::BiBTreeMap;
 use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats, calculate_final_stats2, print_precompute_stats2, PrecomputeStats2};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
 use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -330,6 +330,10 @@ impl GrammarConstraint {
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
+        let mut stats2 = PrecomputeStats2::default();
+        calculate_final_stats2(&precomputed2, &mut stats2);
+        print_precompute_stats2(&stats2);
+
         let mut gc = Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
@@ -349,7 +353,8 @@ impl GrammarConstraint {
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
-        internal_max_llm_token: usize,
+        internal_max_llm_token: usize,                       
+        merge_threshold:  usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -361,7 +366,7 @@ impl GrammarConstraint {
             internal_llm_token_map,
             internal_max_llm_token,
             MERGE_THRESHOLD,
-            terminal_follow_map, // Pass to Precomputer::new
+            terminal_follow_map,
             ignore_terminal_id,
         );
 
@@ -657,14 +662,13 @@ impl GrammarConstraint {
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
-            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
+        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
+                let applicable_tokens = child_vocab_node.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
@@ -687,7 +691,7 @@ impl GrammarConstraint {
                 if !new_grammar_tokens_to_look_for.is_empty() {
                     let next_results = Self::compute_possible_matches_for_vocab_node(
                         tokenizer,
-                        child_vocab_node_ref, // Recurse with the child node
+                        child_vocab_node, // Recurse with the child node
                         final_tokenizer_state_id,
                         cache,
                     );
@@ -874,32 +878,32 @@ fn deduplicate_recursive_trie2(
     }
 
     let canonical_arc = {
-        let node_guard = node_arc.read().unwrap();
-        let node_content = (*node_guard).clone();
-        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-    };
+            let node_guard = node_arc.read().unwrap();
+            let node_content = (*node_guard).clone();
+            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+        };
 
-    visited.insert(node_ptr, canonical_arc.clone());
-    canonical_arc
-}
+        visited.insert(node_ptr, canonical_arc.clone());
+        canonical_arc
+    }
 
-struct Precomputer<'r> {
-    tokenizer:        &'r Regex,
-    parser:           Option<&'r GLRParser>,
-    llm_vocab:        Option<Arc<LLMVocab>>,
-    vocab:            VocabPrefixTree,
-    roots:            BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
-    possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
-    all_llm_tokens:   HybridBitset,
-    merge_threshold:  usize,
-    pb:               ProgressBar,
-    stats:            PrecomputeStats,
-    terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-    ignore_terminal_id: Option<TerminalID>,
-    // Map each precompute node to the set of LLM tokens that can pass through it.
-    tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>,
-    end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
-}
+    struct Precomputer<'r> {
+        tokenizer:        &'r Regex,
+        parser:           Option<&'r GLRParser>,
+        llm_vocab:        Option<Arc<LLMVocab>>,
+        vocab:            VocabPrefixTree,
+        roots:            BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
+        possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
+        all_llm_tokens:   HybridBitset,
+        merge_threshold:  usize,
+        pb:               ProgressBar,
+        stats:            PrecomputeStats,
+        terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        ignore_terminal_id: Option<TerminalID>,
+        // Map each precompute node to the set of LLM tokens that can pass through it.
+        tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>,
+        end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
+    }
 
 impl<'r> Precomputer<'r> {
     fn new(
@@ -2515,8 +2519,8 @@ impl<'a> GrammarConstraintState<'a> {
                 let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
-                    let mut out_gss_filtered = out_gss.clone();
-                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
+                    let mut out_glr_s = glr_s.clone();
+                    allow_only_llm_tokens_and_prune_arc(&mut out_glr_s.active_state.stack, edge_bv, &mut HashMap::new());
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
                     if out_glr_s.is_ok() {
