@@ -577,8 +577,8 @@ impl GrammarConstraint {
         let roots2: Vec<_> = precomputed2.values().cloned().collect();
         // let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         // crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
-        // prune_dead_paths_trie2(&mut precomputed2);
-        // merge_nodes_trie2(&mut precomputed2);
+        prune_dead_paths_trie2(&mut precomputed2);
+        merge_nodes_trie2(&mut precomputed2);
 
         precomputed2
     }
