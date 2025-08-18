@@ -1116,7 +1116,7 @@ pub fn merge_trie2_nodes_if_needed(
                     (0, None),
                     HybridBitset::max_ones(),
                     |e, n| *e |= n,
-                ).to_destination_weakly(new_trie2_node_arc.as_arc().clone());
+                ).try_destination_auto(new_trie2_node_arc.as_arc().clone());
                 inserter.expect("merge_trie2_nodes_if_needed: merge insert failed");
             }
             new_acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
