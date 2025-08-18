@@ -291,6 +291,85 @@ pub fn dump_precompute_trie2_recursive(
     }
 }
 
+pub fn calculate_final_stats2(
+    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    stats: &mut PrecomputeStats,
+) {
+    crate::debug!(2, "Calculating final precompute2 statistics...");
+
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = BTreeMap::new();
+    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode2>>> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<*const PrecomputeNode2> = HashSet::new();
+
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read().unwrap();
+            let ptr = &*node_guard as *const PrecomputeNode2;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map
+                        .keys()
+                        .filter_map(|wrapper| wrapper.upgrade())
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
+            }
+        }
+    }
+
+    *stats = PrecomputeStats::default();
+    stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+    let root_node_pointers: HashSet<*const PrecomputeNode2> = precomputed_roots
+        .values()
+        .map(|arc| {
+            let guard = arc.read().unwrap();
+            &*guard as *const PrecomputeNode2
+        })
+        .collect();
+    stats.final_root_nodes_count = root_node_pointers.len();
+
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read().expect("RwLock poisoned during final stats calculation");
+
+        if !root_node_pointers.contains(node_ptr) {
+            if node_guard.children().is_empty() {
+                stats.final_leaf_nodes_count += 1;
+            } else {
+                stats.final_non_root_internal_nodes_count += 1;
+            }
+        }
+
+        for (_edge_key, dest_map) in node_guard.children() {
+            let num_edges_for_this_key = dest_map.len();
+            stats.final_edges_count += num_edges_for_this_key;
+            
+            // For PrecomputeNode2, all keys are "some" keys in a sense.
+            stats.final_edges_with_some_key += num_edges_for_this_key;
+            if num_edges_for_this_key > 0 {
+                stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key;
+                stats.final_num_occupied_some_edge_keys += 1;
+            }
+
+            for llm_token_bv_on_edge in dest_map.values() {
+                stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+            }
+        }
+
+        if node_guard.value.end {
+            stats.final_nodes_with_clean_end += 1;
+        }
+    }
+    crate::debug!(2, "Finished calculating final precompute2 statistics.");
+}
+
 
 // Add this struct definition before impl GrammarConstraint
 #[derive(Default, Debug)]
@@ -652,6 +731,33 @@ pub fn print_precompute_stats(
             format_opt_f64(med_toks)
         );
     }
+    println!("---------------------------------");
+}
+
+pub fn print_precompute_stats2(
+    stats: &PrecomputeStats,
+) {
+    let avg_fanout = if stats.final_num_occupied_some_edge_keys > 0 {
+        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+    } else { 0.0 };
+
+    println!("--- Precomputation 2 Statistics ---");
+    
+    println!("\nNode Counts Breakdown:");
+    println!("  There are:");
+    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!("    - {} are roots", stats.final_root_nodes_count);
+    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count);
+    println!("    - {} are non-roots, of which", non_root_count);
+    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+    println!("\nFinal Graph Structure (after sharing and deduplication):");
+    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+    println!("  Total Edges: {}", stats.final_edges_count);
+    println!("  Nodes with End Marker: {}", stats.final_nodes_with_clean_end);
+    println!("  Average edge fanout:    {:.2}", avg_fanout);
+    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
     println!("---------------------------------");
 }
 

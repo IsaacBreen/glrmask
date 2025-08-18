@@ -317,6 +317,11 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
+
+        let mut stats2 = PrecomputeStats::default();
+        crate::constraint_extra::calculate_final_stats2(&precomputed2, &mut stats2);
+        crate::constraint_extra::print_precompute_stats2(&stats2);
+
         Self::_dump_precomputed2(
             &precomputed2,
             &llm_vocab.original_to_internal_id_bimap,
