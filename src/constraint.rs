@@ -793,6 +793,7 @@ fn get_live_tokens_and_prune_trie2(
                 live_tokens_for_this_node |= edge_bv;
             }
         }
+        node_guard.value.live_tokens = live_tokens_for_this_node.clone();
     }
 
     live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
@@ -1627,12 +1628,13 @@ impl<'r> Precomputer<'r> {
             // The total live tokens for the current node are the union of all its (now narrowed) outgoing edge BVs.
             for dest_map in node_guard.children().values() {
                 for edge_bv in dest_map.values() {
-                    live_tokens_for_this_node |= edge_bv;
-                }
+                live_tokens_for_this_node |= edge_bv;
             }
         }
+        node_guard.value.live_tokens = live_tokens_for_this_node.clone();
+    }
 
-        // Update the cache with the final computed live tokens for this node.
+    // Update the cache with the final computed live tokens for this node.
         live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
 
         live_tokens_for_this_node
