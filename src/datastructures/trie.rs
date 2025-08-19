@@ -1829,7 +1829,8 @@ where
             let new_ev = self.edge_value.take().unwrap();
             (self.merge_edge_value)(existing_ev_mut, new_ev);
             self.result = Some(destination);
-            (self.update_node_value)(&mut source_guard.value, existing_ev_mut);
+            let updated_ev = existing_ev_mut.clone();
+            (self.update_node_value)(&mut source_guard.value, &updated_ev);
         } else {
             // Edge doesn't exist, try inserting. try_insert expects the value by move.
             let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
@@ -1861,7 +1862,8 @@ where
             let new_ev = self.edge_value.take().unwrap();
             (self.merge_edge_value)(existing_ev_mut, new_ev);
             self.result = Some(destination);
-            (self.update_node_value)(&mut source_guard.value, existing_ev_mut);
+            let updated_ev = existing_ev_mut.clone();
+            (self.update_node_value)(&mut source_guard.value, &updated_ev);
         } else {
             // Attempt strong; if cycle, degrade to weak
             let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
@@ -1903,7 +1905,8 @@ where
             let new_ev = self.edge_value.take().unwrap();
             (self.merge_edge_value)(existing_ev_mut, new_ev);
             self.result = Some(destination);
-            (self.update_node_value)(&mut source_guard.value, existing_ev_mut);
+            let updated_ev = existing_ev_mut.clone();
+            (self.update_node_value)(&mut source_guard.value, &updated_ev);
         } else {
             // No edge to this destination exists under this key. Insert a new weak one.
             let edge_val = self.edge_value.take().unwrap();
