@@ -1233,8 +1233,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
-                    let mut guard = node_arc.write().expect("poison");
-                    process(&mut guard, &mut agg_v)
+                    let guard = node_arc.read().expect("poison");
+                    process(&guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
@@ -1290,7 +1290,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     )
     where
         V: Clone,
@@ -1334,8 +1334,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 let node_arc = node_ptr_wrapper.as_arc();
 
                 let proceed = {
-                    let mut guard = node_arc.write().expect("poison");
-                    process(&mut guard, &mut agg_v)
+                    let mut guard = node_arc.read().expect("poison");
+                    process(&guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
