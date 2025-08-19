@@ -957,8 +957,6 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
-    // Map each precompute node to the set of LLM tokens that can pass through it.
-    tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>,
     end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
 }
 
@@ -1017,7 +1015,6 @@ impl<'r> Precomputer<'r> {
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
             ignore_terminal_id,
-            tags: RefCell::new(HashMap::new()),
             end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
@@ -1896,24 +1893,9 @@ impl<'r> Precomputer<'r> {
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().filter_map(|w| w.upgrade()).filter(|w| !w.read().unwrap().value.end));
 
-                            if true {
-                                let children_of_src: Vec<_> = src_node_wrapper.upgrade().unwrap().read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                let tags = self.tags.borrow();
-                                let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
-                                    if let Some(child_arc) = child_node_ptr.upgrade() {
-                                        if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) {
-                                            Some(child_arc)
-                                        } else { None }
-                                    } else { None }
-                                });
-                                inserter = inserter.try_destinations_iter(eligible_children);
-                                drop(tags);
-                            }
-
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
                             let result_node_ptr = NodePtr::Strong(ArcPtrWrapper::new(result_node.clone()));
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
-                            *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv;
                         }
                     }
 
