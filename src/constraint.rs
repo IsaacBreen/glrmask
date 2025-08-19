@@ -766,6 +766,10 @@ fn deduplicate_recursive_trie2(
         return canonical_arc.clone();
     }
 
+    // Pre-emptively insert the current node's arc. This breaks cycles.
+    // If we find a canonical version later, we'll update the entry.
+    visited.insert(node_ptr, node_arc.clone());
+
     let mut new_children_map = BTreeMap::new();
     let mut children_changed = false;
 
@@ -805,6 +809,7 @@ fn deduplicate_recursive_trie2(
         canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
     };
 
+    // Update the visited map with the final canonical arc.
     visited.insert(node_ptr, canonical_arc.clone());
     canonical_arc
 }
@@ -1692,6 +1697,9 @@ impl<'r> Precomputer<'r> {
             return canonical_arc.clone();
         }
 
+        // Pre-emptively insert to break cycles.
+        visited.insert(node_ptr, node_arc.clone());
+
         // Post-order traversal: first, canonicalize all children.
         let mut new_children_map = BTreeMap::new();
         let mut children_changed = false;
@@ -1733,6 +1741,7 @@ impl<'r> Precomputer<'r> {
             canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
         };
 
+        // Update with the final canonical arc.
         visited.insert(node_ptr, canonical_arc.clone());
         canonical_arc
     }
