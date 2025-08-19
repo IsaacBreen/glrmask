@@ -823,27 +823,36 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     // This prevents any node from being dropped while we are modifying the graph structure,
     // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let _all_nodes = Trie::all_nodes(&roots_vec);
+    let all_nodes = Trie::all_nodes(&roots_vec);
 
     let all_llm_tokens = HybridBitset::max_ones();
     recompute_live_tokens_trie2(roots, &all_llm_tokens);
 
-    let all_nodes = Trie::all_nodes(&roots_vec);
+    // Step 1: Collect live_tokens to avoid nested locks.
+    let mut live_tokens_map = HashMap::new();
+    for node_arc in &all_nodes {
+        let live_tokens = node_arc.read().unwrap().value.live_tokens.clone();
+        live_tokens_map.insert(Arc::as_ptr(node_arc), live_tokens);
+    }
 
-    for node_arc in all_nodes {
+    // Step 2: Prune edges.
+    for node_arc in &all_nodes {
         let mut node_guard = node_arc.write().unwrap();
         node_guard.children_mut().retain(|_edge_key, dest_map| {
             dest_map.retain(|child_wrapper, edge_value_bv| {
                 if let Some(child_arc) = child_wrapper.upgrade() {
-                    let child_guard = child_arc.read().unwrap();
-                    let live_tokens_from_child = &child_guard.value.live_tokens;
-                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-                    
-                    if live_tokens_for_this_edge.is_empty() {
-                        false
+                    let child_ptr = Arc::as_ptr(&child_arc);
+                    if let Some(live_tokens_from_child) = live_tokens_map.get(&child_ptr) {
+                        let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+                        
+                        if live_tokens_for_this_edge.is_empty() {
+                            false
+                        } else {
+                            *edge_value_bv = live_tokens_for_this_edge;
+                            true
+                        }
                     } else {
-                        *edge_value_bv = live_tokens_for_this_edge;
-                        true
+                        false
                     }
                 } else {
                     false
@@ -1587,21 +1596,32 @@ impl<'r> Precomputer<'r> {
         // Now prune based on the cached live_tokens.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
         let all_nodes = Trie::all_nodes(&roots_vec);
-
-        for node_arc in all_nodes {
+ 
+        // Step 1: Collect all live_tokens from all nodes to avoid nested locks.
+        let mut live_tokens_map = HashMap::new();
+        for node_arc in &all_nodes {
+            let live_tokens = node_arc.read().unwrap().value.live_tokens.clone();
+            live_tokens_map.insert(Arc::as_ptr(node_arc), live_tokens);
+        }
+ 
+        // Step 2: Iterate and prune using the collected map.
+        for node_arc in &all_nodes {
             let mut node_guard = node_arc.write().unwrap();
             node_guard.children_mut().retain(|_edge_key, dest_map| {
                 dest_map.retain(|child_wrapper, edge_value_bv| {
                     if let Some(child_arc) = child_wrapper.upgrade() {
-                        let child_guard = child_arc.read().unwrap();
-                        let live_tokens_from_child = &child_guard.value.live_tokens;
-                        let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-                        
-                        if live_tokens_for_this_edge.is_empty() {
-                            false
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        if let Some(live_tokens_from_child) = live_tokens_map.get(&child_ptr) {
+                            let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+                            
+                            if live_tokens_for_this_edge.is_empty() {
+                                false
+                            } else {
+                                *edge_value_bv = live_tokens_for_this_edge;
+                                true
+                            }
                         } else {
-                            *edge_value_bv = live_tokens_for_this_edge;
-                            true
+                            false // Child not in map, prune.
                         }
                     } else {
                         false // Weak pointer expired, prune.
