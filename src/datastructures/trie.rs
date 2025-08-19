@@ -1183,7 +1183,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
