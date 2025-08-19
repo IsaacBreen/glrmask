@@ -1243,8 +1243,8 @@ local_system:
 
                       // ---------- user ‘process’ callback ----------
                       let proceed = {
-                          let mut guard = node_arc.write().expect("poison");
-                          process(&mut guard, &mut agg_v)
+                          let guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
                       };
                       done.insert(ptr);
 
@@ -1344,8 +1344,8 @@ local_system:
                       let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
-                          let mut guard = node_arc.write().expect("poison");
-                          process(&mut guard, &mut agg_v)
+                          let mut guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
                       };
                       done.insert(ptr);
 
@@ -11573,8 +11573,8 @@ local_system:
 
                       // ---------- user ‘process’ callback ----------
                       let proceed = {
-                          let mut guard = node_arc.write().expect("poison");
-                          process(&mut guard, &mut agg_v)
+                          let guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
                       };
                       done.insert(ptr);
 
@@ -11674,8 +11674,8 @@ local_system:
                       let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
-                          let mut guard = node_arc.write().expect("poison");
-                          process(&mut guard, &mut agg_v)
+                          let mut guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
                       };
                       done.insert(ptr);
 
@@ -21927,8 +21927,8 @@ messages:
 
                       // ---------- user ‘process’ callback ----------
                       let proceed = {
-                          let mut guard = node_arc.write().expect("poison");
-                          process(&mut guard, &mut agg_v)
+                          let guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
                       };
                       done.insert(ptr);
 
@@ -22028,8 +22028,8 @@ messages:
                       let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
-                          let mut guard = node_arc.write().expect("poison");
-                          process(&mut guard, &mut agg_v)
+                          let mut guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
                       };
                       done.insert(ptr);
 
@@ -31053,45 +31053,124 @@ messages:
       Fix this. Don't try modify the trie node in special map. Do it afterwards.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the error you're encountering. The issue stems from an overly restrictive function signature in your `Trie::special_map` and `Trie::special_map_grouped` methods, which prevents mutable access to the trie node within the `process` closure, even though a write lock is held.
+      Hello! As a helpful assistant, I'd be happy to help you fix this compilation error. The error occurs because you're trying to modify a `Trie` node within the `process` closure of `Trie::special_map`, which only provides an immutable reference to the node.
 
-      Here are the patches to correct the function signatures and resolve the compilation error.
+      As you suggested, the correct approach is to collect the necessary information for pruning during the `special_map` traversal and then apply the modifications afterward. Here are the patches to fix the issue.
 
-      In `src/datastructures/trie.rs`, I'll update the `process` closure to accept a mutable reference to the `Trie` node, which is safe given the existing write lock.
+      In `src/constraint.rs`, I'll update `prune_on_no_terminal_follow` to gather which edges to keep and then iterate through the nodes to perform the pruning after the traversal is complete.
+
+      ### `src/constraint.rs`
 
       ```diff
-      --- a/src/datastructures/trie.rs
-      +++ b/src/datastructures/trie.rs
-      @@ -1411,7 +1411,7 @@
-               initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
-               mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
-               mut merge: impl FnMut(&mut V, V),
-      -        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
-      +        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
-           ) {
-               // ------------------------------------------------------------------
-               //  Simple depth-driven scheduler.
-      @@ -1481,7 +1481,7 @@
-               initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
-               mut step: S,
-               mut merge: impl FnMut(&mut V, V),
-      -        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
-      +        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
-           )
-           where
-               V: Clone,
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1498,50 +1498,63 @@
+           }
+           
+           fn prune_on_no_terminal_follow(&mut self) {
+               crate::debug!(2, "Pruning based on terminal follow sets.");
+       
+               let terminal_follow_map = self.terminal_follow_map;
+               let ignore_terminal_id = self.ignore_terminal_id;
+       
+               let initial_nodes_and_values: Vec<_> = self.roots.values()
+                   .map(|root_arc| (root_arc.clone(), None))
+                   .collect();
+       
+      +        type NodePtr = *const PrecomputeNode;
+      +        let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+      +
+               Trie::special_map(
+                   initial_nodes_and_values,
+                   // step: Propagate predecessor terminals.
+                   |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
+                       match edge_terminal_opt {
+                           Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                           Some(t) => Some(Some(BTreeSet::from([*t]))),
+                           None => Some(predecessors.clone()),
+                       }
+                   },
+                   // merge: Union of predecessor sets from different paths.
+                   |existing_set, new_set| {
+                       match (existing_set, new_set) {
+                           (None, _) => {},
+                           (existing_set @ _, None) => *existing_set = None,
+                           (Some(existing), Some(new)) => existing.extend(new),
+                       }
+                   },
+      -            // process: Prune outgoing edges based on allowed follows.
+      +            // process: Collect information about which edges to prune.
+                   move |node, maybe_all_immediate_predecessors| {
+                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
+                       // all outgoing terminals are considered valid.
+                       if maybe_all_immediate_predecessors.is_none() {
+      -                    return true; // Continue traversal
+      +                    return true; // Continue traversal, no pruning needed for this node.
+                       }
+       
+                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
+                       let mut allowed_follow_terminals = BTreeSet::new();
+                       if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
+                           for preceding_terminal in all_immediate_predecessors {
+                               if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                                   allowed_follow_terminals.extend(follow_set.iter().cloned());
+                               }
+                           }
+                       }
+       
+      -                // Prune children of the current node.
+      -                node.children_mut().retain(|edge_terminal_opt, _dest_map| {
+      +                let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_terminal_opt| {
+                           match edge_terminal_opt {
+                               // Keep edges with terminals that are in the allowed follow set (or ignore edges).
+                               Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
+                               // Always keep `None` edges, as they don't represent grammar terminals.
+                               None => true,
+                           }
+      -                });
+      +                }).cloned().collect();
+      +
+      +                let node_ptr: NodePtr = node;
+      +                edges_to_keep.insert(node_ptr, keys_to_keep);
+           
+                       true // Continue traversal
+                   },
+               );
+      +
+      +        // Now, apply the pruning.
+      +        let mut all_nodes = Vec::new();
+      +        let mut visited = HashSet::new();
+      +        for root_arc in self.roots.values() {
+      +            for node in Trie::all_nodes(root_arc.clone()) {
+      +                if visited.insert(Arc::as_ptr(&node)) {
+      +                    all_nodes.push(node);
+      +                }
+      +            }
+      +        }
+      +
+      +        for node_arc in all_nodes {
+      +            let node_ptr: NodePtr = &*node_arc.read().unwrap();
+      +            if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+      +                let mut node_guard = node_arc.write().unwrap();
+      +                node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
+      +            }
+      +        }
+      +
+               crate::debug!(2, "Finished pruning based on terminal follow sets.");
+           }
+       
 
       ```
 
-      These changes will allow your code in `src/constraint.rs` to compile successfully without requiring any modifications to that file. Let me know if you have any other questions
+      This change defers the mutation of the trie nodes until after the `special_map` traversal has completed, resolving the borrowing error. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/trie.rs
-      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/trie.rs.
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
 ...
