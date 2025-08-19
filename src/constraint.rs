@@ -707,6 +707,111 @@ impl GrammarConstraint {
     }
 }
 
+fn recompute_live_tokens(
+    roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
+    all_llm_tokens: &LLMTokenBV,
+) {
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(&roots_vec);
+    let mut memo: HashMap<*const RwLock<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+
+    // The all_nodes is in BFS order. We need post-order. Reversing BFS order is a good approximation.
+    for node_arc in all_nodes.iter().rev() {
+        _recompute_live_tokens_recursive(node_arc, &mut memo, all_llm_tokens);
+    }
+}
+
+fn _recompute_live_tokens_recursive(
+    node_arc: &Arc<RwLock<PrecomputeNode>>,
+    memo: &mut HashMap<*const RwLock<PrecomputeNode>, LLMTokenBV>,
+    all_llm_tokens: &LLMTokenBV,
+) -> LLMTokenBV {
+    let node_ptr = Arc::as_ptr(node_arc);
+    if memo.contains_key(&node_ptr) {
+        return memo.get(&node_ptr).unwrap().clone();
+    }
+    // Cycle breaking: insert temporary value.
+    memo.insert(node_ptr, LLMTokenBV::zeros());
+
+    let mut live_tokens = LLMTokenBV::zeros();
+    
+    let (is_end, children) = {
+        let node_guard = node_arc.read().unwrap();
+        (node_guard.value.end, node_guard.children().clone()) // Clone children to release lock
+    };
+
+    if is_end {
+        live_tokens = all_llm_tokens.clone();
+    }
+
+    for dest_map in children.values() {
+        for (child_wrapper, edge_bv) in dest_map.iter() {
+            if let Some(child_arc) = child_wrapper.upgrade() {
+                let child_live_tokens = _recompute_live_tokens_recursive(&child_arc, memo, all_llm_tokens);
+                live_tokens |= &*edge_bv & &child_live_tokens;
+            }
+        }
+    }
+    
+    // Now write the result back.
+    let mut node_guard_mut = node_arc.write().unwrap();
+    node_guard_mut.value.live_tokens = live_tokens.clone();
+    
+    memo.insert(node_ptr, live_tokens.clone());
+    live_tokens
+}
+
+fn recompute_live_tokens_trie2(
+    roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    all_llm_tokens: &LLMTokenBV,
+) {
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(&roots_vec);
+    let mut memo: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+    for node_arc in all_nodes.iter().rev() {
+        _recompute_live_tokens_recursive_trie2(node_arc, &mut memo, all_llm_tokens);
+    }
+}
+
+fn _recompute_live_tokens_recursive_trie2(
+    node_arc: &Arc<RwLock<PrecomputeNode2>>,
+    memo: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+    all_llm_tokens: &LLMTokenBV,
+) -> LLMTokenBV {
+    let node_ptr = Arc::as_ptr(node_arc);
+    if memo.contains_key(&node_ptr) {
+        return memo.get(&node_ptr).unwrap().clone();
+    }
+    memo.insert(node_ptr, LLMTokenBV::zeros());
+
+    let mut live_tokens = LLMTokenBV::zeros();
+    
+    let (is_end, children) = {
+        let node_guard = node_arc.read().unwrap();
+        (node_guard.value.end, node_guard.children().clone())
+    };
+
+    if is_end {
+        live_tokens = all_llm_tokens.clone();
+    }
+
+    for dest_map in children.values() {
+        for (child_wrapper, edge_bv) in dest_map.iter() {
+            if let Some(child_arc) = child_wrapper.upgrade() {
+                let child_live_tokens = _recompute_live_tokens_recursive_trie2(&child_arc, memo, all_llm_tokens);
+                live_tokens |= &*edge_bv & &child_live_tokens;
+            }
+        }
+    }
+    
+    let mut node_guard_mut = node_arc.write().unwrap();
+    node_guard_mut.value.live_tokens = live_tokens.clone();
+    
+    memo.insert(node_ptr, live_tokens.clone());
+    live_tokens
+}
+
 fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
@@ -716,89 +821,41 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes = Trie::all_nodes(&roots_vec);
 
-    let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
-
     let all_llm_tokens = HybridBitset::max_ones();
+    recompute_live_tokens_trie2(roots, &all_llm_tokens);
 
-    let sids_to_remove: Vec<_> = roots
-        .iter()
-        .filter_map(|(sid, root_arc)| {
-            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-            if get_live_tokens_and_prune_trie2(root_wrapper, &mut live_tokens_cache, &all_llm_tokens)
-                .is_empty()
-            {
-                Some(*sid)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let all_nodes = Trie::all_nodes(&roots_vec);
 
-    for sid in sids_to_remove {
-        roots.remove(&sid);
-    }
-    crate::debug!(2, "Finished pruning dead paths from trie 2.");
-}
-
-fn get_live_tokens_and_prune_trie2(
-    node_wrapper: NodePtr<RwLock<PrecomputeNode2>>,
-    live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV>,
-    all_llm_tokens: &LLMTokenBV,
-) -> LLMTokenBV {
-    if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
-        return cached_bv.clone();
-    }
-    // Insert a temporary empty BV to break cycles. If we revisit this node during this
-    // recursion, it will return an empty set, which is correct as no new live paths
-    // have been found through it yet.
-    live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
-
-    let node_arc = node_wrapper.upgrade().unwrap();
-
-    let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
-        let node_guard = node_arc.read().unwrap();
-        node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-    };
-
-    for child_wrapper in children_to_check {
-        get_live_tokens_and_prune_trie2(child_wrapper, live_tokens_cache, all_llm_tokens);
-    }
-
-    let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-    {
+    for node_arc in all_nodes {
         let mut node_guard = node_arc.write().unwrap();
-
-        if node_guard.value.end {
-            live_tokens_for_this_node = all_llm_tokens.clone();
-        }
-
         node_guard.children_mut().retain(|_edge_key, dest_map| {
             dest_map.retain(|child_wrapper, edge_value_bv| {
-                let live_tokens_from_child = live_tokens_cache
-                    .get(child_wrapper)
-                    .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                if live_tokens_for_this_edge.is_empty() {
-                    false
+                if let Some(child_arc) = child_wrapper.upgrade() {
+                    let child_guard = child_arc.read().unwrap();
+                    let live_tokens_from_child = &child_guard.value.live_tokens;
+                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+                    
+                    if live_tokens_for_this_edge.is_empty() {
+                        false
+                    } else {
+                        *edge_value_bv = live_tokens_for_this_edge;
+                        true
+                    }
                 } else {
-                    *edge_value_bv = live_tokens_for_this_edge;
-                    true
+                    false
                 }
             });
             !dest_map.is_empty()
         });
-
-        for dest_map in node_guard.children().values() {
-            for edge_bv in dest_map.values() {
-                live_tokens_for_this_node |= edge_bv;
-            }
-        }
     }
 
-    live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
-    live_tokens_for_this_node
+    // After pruning edges, recompute liveness one last time before removing roots.
+    recompute_live_tokens_trie2(roots, &all_llm_tokens);
+
+    roots.retain(|_sid, root_arc| {
+        !root_arc.read().unwrap().value.live_tokens.is_empty()
+    });
+    crate::debug!(2, "Finished pruning dead paths from trie 2.");
 }
 
 fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
@@ -1520,118 +1577,44 @@ impl<'r> Precomputer<'r> {
     fn prune_dead_paths(&mut self) {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
-        // A cache of nodes to the set of "live" LLM tokens reachable from them.
-        let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
+        // First, ensure live_tokens are up-to-date.
+        recompute_live_tokens(&self.roots, &self.all_llm_tokens);
 
-        // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
-        // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
-        // is live and prunes its dead children.
-        //
-        // We can't use `BTreeMap::retain` directly because its closure would borrow `self`
-        // immutably (to call `get_live_tokens_and_prune`) while `retain` itself holds a mutable borrow
-        // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
-        let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
-            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-            // A root is dead if no live tokens are reachable from it.
-            if self.get_live_tokens_and_prune(root_wrapper, &mut live_tokens_cache).is_empty() {
-                Some(*sid) // This root is dead, mark for removal.
-            } else {
-                None // This root is live, keep it.
-            }
-        }).collect();
+        // Now prune based on the cached live_tokens.
+        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&roots_vec);
 
-        for sid in sids_to_remove {
-            self.roots.remove(&sid);
-        }
-
-        crate::debug!(2, "Finished pruning dead paths.");
-    }
-
-    /// Recursively computes the set of "live" LLM tokens reachable from a node
-    /// and prunes its children that are not live or have dead token paths.
-    /// This is a post-order traversal.
-    ///
-    /// - `node_wrapper`: The node to check.
-    /// - `live_tokens_cache`: A cache of nodes to their live token bitvectors.
-    ///
-    /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
-    fn get_live_tokens_and_prune(
-        &self,
-        node_wrapper: NodePtr<RwLock<PrecomputeNode>>,
-        live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
-    ) -> LLMTokenBV {
-        // If we've already computed the live tokens for this node, return the cached result.
-        if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
-            return cached_bv.clone();
-        }
-        // Insert a temporary empty BV to break cycles. If we revisit this node during this
-        // recursion, it will return an empty set, which is correct as no new live paths
-        // have been found through it yet.
-        live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
-
-        let node_arc = node_wrapper.upgrade().unwrap();
-
-        // We must collect children before recursing to avoid holding the lock.
-        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode>>> = {
-            let node_guard = node_arc.read().unwrap();
-            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-        };
-
-        // Recursively call on all unique children to populate the cache for them.
-        for child_wrapper in children_to_check {
-            self.get_live_tokens_and_prune(child_wrapper, live_tokens_cache);
-        }
-
-        // Now that the cache is populated for all children, we can prune the current node.
-        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-        {
+        for node_arc in all_nodes {
             let mut node_guard = node_arc.write().unwrap();
-
-            // A node is live if it's an end node itself. The tokens that end here are
-            // on the edges pointing to this node.
-            if node_guard.value.end {
-                // This is the special "end node". It doesn't represent tokens itself,
-                // but it is the source of "liveness". The tokens are on the edges leading *to* it.
-                // When we calculate the live tokens for a parent, the edge BV leading to this
-                // end node will be considered fully live. For the end node itself, we can
-                // consider it to represent "all possible tokens" for the purpose of intersection,
-                // so that any edge leading to it is kept.
-                live_tokens_for_this_node = self.all_llm_tokens.clone();
-            }
-
             node_guard.children_mut().retain(|_edge_key, dest_map| {
                 dest_map.retain(|child_wrapper, edge_value_bv| {
-                    // Get the live tokens reachable from the child node. This must be in the cache.
-                    let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
-                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                    // The tokens on this edge that are actually live are the intersection
-                    // of the edge's original tokens and the live tokens from the child.
-                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                    if live_tokens_for_this_edge.is_empty() {
-                        false // Prune this destination, as no live paths go through it.
+                    if let Some(child_arc) = child_wrapper.upgrade() {
+                        let child_guard = child_arc.read().unwrap();
+                        let live_tokens_from_child = &child_guard.value.live_tokens;
+                        let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+                        
+                        if live_tokens_for_this_edge.is_empty() {
+                            false
+                        } else {
+                            *edge_value_bv = live_tokens_for_this_edge;
+                            true
+                        }
                     } else {
-                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV.
-                        true // Keep this destination.
+                        false // Weak pointer expired, prune.
                     }
                 });
-                // Keep the edge key only if it still has destinations.
                 !dest_map.is_empty()
             });
-
-            // The total live tokens for the current node are the union of all its (now narrowed) outgoing edge BVs.
-            for dest_map in node_guard.children().values() {
-                for edge_bv in dest_map.values() {
-                    live_tokens_for_this_node |= edge_bv;
-                }
-            }
         }
 
-        // Update the cache with the final computed live tokens for this node.
-        live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
+        // After pruning edges, recompute liveness one last time before removing roots.
+        recompute_live_tokens(&self.roots, &self.all_llm_tokens);
 
-        live_tokens_for_this_node
+        self.roots.retain(|_sid, root_arc| {
+            !root_arc.read().unwrap().value.live_tokens.is_empty()
+        });
+
+        crate::debug!(2, "Finished pruning dead paths.");
     }
 
     fn factor_common_destinations(&mut self) {
