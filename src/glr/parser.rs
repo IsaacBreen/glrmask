@@ -942,14 +942,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         for existing_trie2_node in &trie2_nodes {
                                             timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
                                             // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
-                                            let inserter = EdgeInserter::new(
-                                                existing_trie2_node.as_arc().clone(),
-                                                (k, Some(goto_info.source_state_id)),
-                                                active_llm_tokens.clone(),
-                                                |e, n| *e |= n,
-                                            ).to_destination_weakly(cached_trie2_node.as_arc().clone());
-                                            inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
-                                        }
+                        let inserter = EdgeInserter::new(
+                            existing_trie2_node.as_arc().clone(),
+                            (k, Some(goto_info.source_state_id)),
+                            active_llm_tokens.clone(),
+                            |e, n| *e |= n,
+                            |_, _, _| {},
+                        ).to_destination_weakly(cached_trie2_node.as_arc().clone());
+                        inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                    }
                                         });
 
                                         if goto_info.accept {
@@ -974,12 +975,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
                                             let inserter = EdgeInserter::new(
                                                 existing_trie2_node.as_arc().clone(),
-                                                (k, Some(goto_info.source_state_id)),
-                                                active_llm_tokens.clone(),
-                                                |e, n| *e |= n,
-                                            ).try_destination_auto(new_trie2_node.clone());
-                                            inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                        }
+                                            (k, Some(goto_info.source_state_id)),
+                                            active_llm_tokens.clone(),
+                                            |e, n| *e |= n,
+                                            |_, _, _| {},
+                                        ).try_destination_auto(new_trie2_node.clone());
+                                        inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                    }
                                         });
 
                                         let mut acc2 = acc.clone();
@@ -1039,6 +1041,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
+                                            |_, _, _| {},
                                         ).to_destination_weakly(cached_trie2_node.as_arc().clone());
                                         inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                                     }
@@ -1062,6 +1065,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
+                                            |_, _, _| {},
                                         ).try_destination_auto(new_trie2_node.clone());
                                         inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     }

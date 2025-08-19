@@ -22,14 +22,14 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
-use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
+use crate::datastructures::gss::{gather_gss_stats, GSSNode, allow_only_llm_tokens_and_prune_arc, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
-use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
+use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -294,7 +294,7 @@ impl GrammarConstraint {
             &internal_llm_token_map_for_precompute,
             &token_name_map,
             internal_max_llm_token,
-            &terminal_follow_map, // Pass the new map
+            &terminal_follow_map,
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
@@ -313,7 +313,7 @@ impl GrammarConstraint {
             &internal_llm_token_map_for_precompute,
             &token_name_map,
             internal_max_llm_token,
-            &terminal_follow_map, // Pass the new map
+            &terminal_follow_map,
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
@@ -336,13 +336,13 @@ impl GrammarConstraint {
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
         let mut gc = Self {
-            tokenizer, // This is the tokenizer parameter being moved into the struct
+            tokenizer,
             parser,
             precomputed,
             precomputed2,
             llm_vocab,
             token_name_map,
-            possible_matches: computed_possible_matches, // Add this line
+            possible_matches: computed_possible_matches,
         };
 
         gc
@@ -354,7 +354,7 @@ impl GrammarConstraint {
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
-        internal_max_llm_token: usize,
+        internal_max_llm_token: usize,                       
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -366,7 +366,7 @@ impl GrammarConstraint {
             internal_llm_token_map,
             internal_max_llm_token,
             MERGE_THRESHOLD,
-            terminal_follow_map, // Pass to Precomputer::new
+            terminal_follow_map,
             ignore_terminal_id,
         );
 
@@ -444,6 +444,7 @@ impl GrammarConstraint {
                         (0, Some(*state_id)),
                         LLMTokenBV::ones(internal_max_llm_token + 1),
                         |e, n| *e |= n,
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
                     );
                     inserter = inserter.try_destination(new_trie2_node.clone());
                     inserter.expect("Failed to insert initial edge into Trie2 root");
@@ -469,6 +470,7 @@ impl GrammarConstraint {
                     (0, None),
                     LLMTokenBV::ones(internal_max_llm_token + 1),
                     |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
                 );
                 inserter = inserter.try_destination(new_trie2_node.clone());
                 inserter.expect("Failed to insert initial edge into Trie2 root");
@@ -567,6 +569,7 @@ impl GrammarConstraint {
                                 (0, None),
                                 active_llm_tokens_for_root.clone(),
                                 |e, n| *e |= n,
+                                |node_value, edge_value| node_value.live_tokens |= edge_value,
                             );
                             inserter = inserter.try_destination(trie2_end.clone());
                             inserter.expect("Failed to insert end edge into Trie2 node");
@@ -632,7 +635,7 @@ impl GrammarConstraint {
         let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
         // for internal_id_val in internal_bv.iter() {
-        //     let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV from internal BV: {:?}", internal_id_val, internal_bv).as_str());
+        //     let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV: {:?}", internal_id_val, internal_bv).as_str());
         //     original_bv.insert(*original_id_val as usize);
         // }
         for i in 0..=self.llm_vocab.internal_max_llm_token {
@@ -716,17 +719,10 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes = Trie::all_nodes(&roots_vec);
 
-    let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
-
-    let all_llm_tokens = HybridBitset::max_ones();
-
     let sids_to_remove: Vec<_> = roots
         .iter()
         .filter_map(|(sid, root_arc)| {
-            let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-            if get_live_tokens_and_prune_trie2(root_wrapper, &mut live_tokens_cache, &all_llm_tokens)
-                .is_empty()
-            {
+            if root_arc.read().unwrap().value.live_tokens.is_empty() {
                 Some(*sid)
             } else {
                 None
@@ -738,67 +734,6 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
         roots.remove(&sid);
     }
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
-}
-
-fn get_live_tokens_and_prune_trie2(
-    node_wrapper: NodePtr<RwLock<PrecomputeNode2>>,
-    live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV>,
-    all_llm_tokens: &LLMTokenBV,
-) -> LLMTokenBV {
-    if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
-        return cached_bv.clone();
-    }
-    // Insert a temporary empty BV to break cycles. If we revisit this node during this
-    // recursion, it will return an empty set, which is correct as no new live paths
-    // have been found through it yet.
-    live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
-
-    let node_arc = node_wrapper.upgrade().unwrap();
-
-    let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
-        let node_guard = node_arc.read().unwrap();
-        node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-    };
-
-    for child_wrapper in children_to_check {
-        get_live_tokens_and_prune_trie2(child_wrapper, live_tokens_cache, all_llm_tokens);
-    }
-
-    let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-    {
-        let mut node_guard = node_arc.write().unwrap();
-
-        if node_guard.value.end {
-            live_tokens_for_this_node = all_llm_tokens.clone();
-        }
-
-        node_guard.children_mut().retain(|_edge_key, dest_map| {
-            dest_map.retain(|child_wrapper, edge_value_bv| {
-                let live_tokens_from_child = live_tokens_cache
-                    .get(child_wrapper)
-                    .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                if live_tokens_for_this_edge.is_empty() {
-                    false
-                } else {
-                    *edge_value_bv = live_tokens_for_this_edge;
-                    true
-                }
-            });
-            !dest_map.is_empty()
-        });
-
-        for dest_map in node_guard.children().values() {
-            for edge_bv in dest_map.values() {
-                live_tokens_for_this_node |= edge_bv;
-            }
-        }
-    }
-
-    live_tokens_cache.insert(node_wrapper, live_tokens_for_this_node.clone());
-    live_tokens_for_this_node
 }
 
 fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
@@ -888,7 +823,7 @@ struct Precomputer<'r> {
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to the set of LLM tokens that can pass through it.
-    tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>,
+    // tags:             RefCell<HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>>, // Removed
     end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
 }
 
@@ -900,7 +835,7 @@ impl<'r> Precomputer<'r> {
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
-        terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
+        terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
@@ -945,9 +880,9 @@ impl<'r> Precomputer<'r> {
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
-            terminal_follow_map, // Store the map
+            terminal_follow_map,
             ignore_terminal_id,
-            tags: RefCell::new(HashMap::new()),
+            // tags: RefCell::new(HashMap::new()), // Removed
             end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
@@ -1096,10 +1031,10 @@ impl<'r> Precomputer<'r> {
 
             // Snapshot children to avoid holding the lock during recursion.
             let (is_end, children_snapshot): (bool, Vec<(Option<GrammarTokenID>, Vec<(NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV)>)>) = {
-                let guard = node_arc.read().expect("poison");
-                let is_end = guard.value.end;
+                let node_guard = node_arc.read().unwrap();
+                let is_end = node_guard.value.end;
                 let mut out = Vec::new();
-                for (ek, dest_map) in guard.children() {
+                for (ek, dest_map) in node_guard.children() {
                     let mut edges = Vec::new();
                     for (np, bv) in dest_map.iter() {
                         edges.push((np.clone(), bv.clone()));
@@ -1156,7 +1091,7 @@ impl<'r> Precomputer<'r> {
 
             // Apply the trimming to this node's outgoing edges.
             {
-                let mut guard = node_arc.write().expect("poison");
+                let mut guard = node_arc.write().unwrap();
                 // Replace each edge-key's map with the trimmed version (if any), else remove it.
                 let ek_list: Vec<_> = guard.children().keys().cloned().collect();
                 for ek in ek_list {
@@ -1248,7 +1183,7 @@ impl<'r> Precomputer<'r> {
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
-        self.dfs(&self.vocab.root, assoc, HashMap::new());
+        self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
@@ -1626,6 +1561,8 @@ impl<'r> Precomputer<'r> {
                     live_tokens_for_this_node |= edge_bv;
                 }
             }
+            // Update the node's own live_tokens field
+            node_guard.value.live_tokens = live_tokens_for_this_node.clone();
         }
 
         // Update the cache with the final computed live tokens for this node.
@@ -1694,11 +1631,12 @@ impl<'r> Precomputer<'r> {
 
                     {
                         let mut intermediate_guard = intermediate_node.write().expect("poison");
-                        let mut edge_val_opt = Some(union_bv);
+                        let mut edge_val_opt = Some(union_bv.clone());
                         // No cycle possible since I is new. Use unchecked for speed.
                         // Depth will be propagated to D.
                         intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
                             .expect("Cycle detected when adding factored edge; this should not happen.");
+                        intermediate_guard.value.live_tokens |= &union_bv; // Update live_tokens for intermediate node
                     }
 
                     // c. For each source, remove old edge and add new `None` edge to `I`.
@@ -1718,6 +1656,7 @@ impl<'r> Precomputer<'r> {
                         let mut edge_val_opt = Some(bv.clone());
                         src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
                             .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
+                        src_guard.value.live_tokens |= bv; // Update live_tokens for source node
                     }
                 }
             }
@@ -1785,6 +1724,7 @@ impl<'r> Precomputer<'r> {
         let mut node_guard = node_arc.write().unwrap();
         *node_guard.children_mut() = new_children_map;
         node_guard.recompute_max_depth();
+        // The live_tokens field will be recomputed by prune_dead_paths after merging.
     }
 
     let canonical_arc = {
@@ -1817,8 +1757,6 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>,
         >,
-        no_go: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
-
     ) {
         self.pb.inc(1);
 
@@ -1861,6 +1799,7 @@ impl<'r> Precomputer<'r> {
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 );
                                 // Print the source node.
                                 // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
@@ -1882,6 +1821,7 @@ impl<'r> Precomputer<'r> {
                                 Some(terminal_id),
                                 edge_bv.clone(),
                                 |e, n| *e |= n,
+                                |node_value, edge_value| node_value.live_tokens |= edge_value,
                             );
 
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
@@ -1891,22 +1831,23 @@ impl<'r> Precomputer<'r> {
 
                             if true {
                                 let children_of_src: Vec<_> = src_node_wrapper.upgrade().unwrap().read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                let tags = self.tags.borrow();
+                                // let tags = self.tags.borrow(); // Removed
                                 let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
                                     if let Some(child_arc) = child_node_ptr.upgrade() {
-                                        if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) {
+                                        // if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) { // Removed
+                                        if (child_arc.read().unwrap().value.live_tokens & &edge_bv).is_empty() {
                                             Some(child_arc)
                                         } else { None }
                                     } else { None }
                                 });
                                 inserter = inserter.try_destinations_iter(eligible_children);
-                                drop(tags);
+                                // drop(tags); // Removed
                             }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
                             let result_node_ptr = NodePtr::Strong(ArcPtrWrapper::new(result_node.clone()));
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
-                            *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv;
+                            // *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv; // Removed
                         }
                     }
 
@@ -1922,6 +1863,7 @@ impl<'r> Precomputer<'r> {
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 );
                                 // Print the source node.
                                 // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
@@ -1936,7 +1878,7 @@ impl<'r> Precomputer<'r> {
 
 
             if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc, no_go.clone());
+                self.dfs(child_vocab_node, next_level_assoc);
             }
         }
     }
@@ -2737,3 +2679,4 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
+
