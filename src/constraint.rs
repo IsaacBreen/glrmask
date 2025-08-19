@@ -1901,7 +1901,7 @@ impl<'r> Precomputer<'r> {
                                 let tags = self.tags.borrow();
                                 let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
                                     if let Some(child_arc) = child_node_ptr.upgrade() {
-                                        if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) && !child_arc.read().unwrap().value.end {
+                                        if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) {
                                             Some(child_arc)
                                         } else { None }
                                     } else { None }
