@@ -405,7 +405,7 @@ impl GrammarConstraint {
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
         crate::debug!(2, "Precomputing Trie 2...");
-        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
+        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
         const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             BelowBottomReductionMode::ContinueFromEverything
         } else {
@@ -1499,8 +1499,6 @@ impl<'r> Precomputer<'r> {
                 true // Continue traversal
             },
         );
-
-        crate::debug!(3, "Number of edges to keep based on terminal follow sets: {}", edges_to_keep.len());
 
         // Now, apply the pruning.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
