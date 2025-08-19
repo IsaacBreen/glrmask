@@ -1506,7 +1506,10 @@ impl<'r> Precomputer<'r> {
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
         let all_nodes = Trie::all_nodes(&roots_vec);
         for node_arc in all_nodes {
-            let node_ptr: NodePtr = &*node_arc.read().unwrap();
+            let node_ptr: NodePtr = {
+                let guard = node_arc.read().expect("poison");
+                &*guard as *const _
+            };
             if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
                 let mut node_guard = node_arc.write().unwrap();
                 node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
