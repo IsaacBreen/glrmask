@@ -40,7 +40,7 @@ use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
-use crate::glr::items::{LRMode, LR_MODE};
+use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 
@@ -559,21 +559,36 @@ impl GrammarConstraint {
                         false,
                         false,
                     );
+                    let mut end_dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                    let end_wr = ArcPtrWrapper::new(trie2_end.clone());
+
                     for gss_root in glr_s.active_state.stack.get_roots() {
                         let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
-                        crate::debug!(3, "Trie2: Inserting end edge into Trie2 node with active LLM tokens: {:?} into Trie2 nodes: {:?}", active_llm_tokens_for_root, gss_root_acc.trie2_nodes);
-                        for trie2_node in gss_root_acc.trie2_nodes.iter() {
-                            let mut inserter = EdgeInserter::new(
-                                trie2_node.as_arc().clone(),
+
+                        for src_wr in gss_root_acc.trie2_nodes.iter() {
+                            let src_arc = src_wr.as_arc().clone();
+                            let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
+                            let tokens_to_push = &active_llm_tokens_for_root & &src_live;
+                            if tokens_to_push.is_empty() {
+                                continue;
+                            }
+
+                            let inserter = EdgeInserter::new(
+                                src_arc.clone(),
                                 (0, None),
-                                active_llm_tokens_for_root.clone(),
+                                tokens_to_push.clone(),
                                 |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                            );
-                            inserter = inserter.try_destination(trie2_end.clone());
+                                |_, _| {}, // defer updating live_tokens
+                            ).try_destination(trie2_end.clone());
                             inserter.expect("Failed to insert end edge into Trie2 node");
+
+                            end_dest_agg.entry(end_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                         }
+                    }
+                    if let Some(added) = end_dest_agg.get(&end_wr) {
+                        let mut g = trie2_end.write().expect("poison");
+                        g.value.live_tokens |= added.clone();
                     }
                 }
                 keep_going

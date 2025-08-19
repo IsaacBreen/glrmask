@@ -962,30 +962,70 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         continue;
                                     }
                                     if let Some(goto_state_id) = goto_info.goto_state_id {
-                                        // Create and cache the new Trie-2 node under this key (before wiring or GSS building).
+                                        let edge_key = (k, Some(goto_info.source_state_id));
+                                        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                                        let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+
+                                        // Pooled fallback destination (created once per source_state_id)
                                         let new_trie2_node = trie2_dst_nodes
                                             .entry(goto_info.source_state_id)
                                             .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
                                             .clone();
+
+                                        // Store the pooled new node in the cache under this key (same as before).
+                                        // We keep the cache semantics unchanged; the pooled node is used when no eligible child exists.
                                         self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
                                         timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
                                         for existing_trie2_node in &trie2_nodes {
                                             // Allow cycles to be represented as WEAK edges if they occur.
                                             timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
+                                            let source_arc = existing_trie2_node.as_arc().clone();
+                                            let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
+                                            let tokens_to_push = &source_live & &active_llm_tokens;
+                                            if tokens_to_push.is_empty() { continue; }
+
+                                            // Try eligible existing child under (k, Some(goto_info.source_state_id))
+                                            let eligible_dest_opt: Option<Arc<RwLock<PrecomputeNode2>>> = {
+                                                let g = source_arc.read().expect("poison");
+                                                g.children().get(&edge_key).and_then(|dest_map| {
+                                                    for (node_ptr, _ev) in dest_map.iter() {
+                                                        if let Some(dest_arc) = node_ptr.upgrade() {
+                                                            let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
+                                                            if (&dl & &tokens_to_push).is_empty() {
+                                                                return Some(dest_arc);
+                                                            }
+                                                        }
+                                                    }
+                                                    None
+                                                })
+                                            };
+
+                                            let chosen_dest = eligible_dest_opt.unwrap_or_else(|| new_trie2_node.clone());
+
                                             let inserter = EdgeInserter::new(
-                                                existing_trie2_node.as_arc().clone(),
-                                            (k, Some(goto_info.source_state_id)),
-                                            active_llm_tokens.clone(),
-                                            |e, n| *e |= n,
-                                            |_, _| {},
-                                        ).try_destination_auto(new_trie2_node.clone());
-                                        inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                    }
+                                                source_arc.clone(),
+                                                edge_key,
+                                                tokens_to_push.clone(),
+                                                |e, n| *e |= n,
+                                                |_, _| {}, // defer live_tokens updates
+                                            ).try_destination_auto(chosen_dest.clone());
+
+                                            let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                            let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+
+                                            dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                                            used_dests.insert(final_dest_wr);
+                                        }
                                         });
 
+                                        for (dst_wr, added) in &dest_agg {
+                                            let mut dg = dst_wr.as_arc().write().expect("poison");
+                                            dg.value.live_tokens |= added.clone();
+                                        }
+
                                         let mut acc2 = acc.clone();
-                                        acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
+                                        acc2.trie2_nodes = used_dests.clone();
                                         let new_gss0 = GSSNode::new(acc2);
                                         let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                         let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
