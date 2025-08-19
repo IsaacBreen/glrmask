@@ -713,15 +713,8 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     // Collect all unique nodes into a Vec to hold strong references to them.
     // This prevents any node from being dropped while we are modifying the graph structure,
     // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
-    let mut all_nodes = Vec::new();
-    let mut visited = HashSet::new();
-    for root_arc in roots.values() {
-        for node in Trie::all_nodes(root_arc.clone()) {
-            if visited.insert(Arc::as_ptr(&node)) {
-                all_nodes.push(node);
-            }
-        }
-    }
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let _all_nodes = Trie::all_nodes(&roots_vec);
 
     let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
 
@@ -813,15 +806,8 @@ fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Precomput
 
     // Collect all unique nodes to keep them alive during the merging process.
     // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
-    let mut all_nodes = Vec::new();
-    let mut visited_ptrs = HashSet::new();
-    for root_arc in roots.values() {
-        for node in Trie::all_nodes(root_arc.clone()) {
-            if visited_ptrs.insert(Arc::as_ptr(&node)) {
-                all_nodes.push(node);
-            }
-        }
-    }
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let _all_nodes = Trie::all_nodes(&roots_vec);
 
     let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
     let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
@@ -1286,16 +1272,8 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Replacing ignore token edges with None edges...");
 
         // 1. Collect all unique nodes.
-        let mut seen: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
-        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
-        for root in self.roots.values() {
-            for arc in Trie::all_nodes(root.clone()) {
-                let ptr = Arc::as_ptr(&arc);
-                if seen.insert(ptr) {
-                    all_nodes.push(arc);
-                }
-            }
-        }
+        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&roots_vec);
 
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
@@ -1338,16 +1316,8 @@ impl<'r> Precomputer<'r> {
         let root_node_ptrs: HashSet<*const RwLock<PrecomputeNode>> = self.roots.values().map(|arc| Arc::as_ptr(arc)).collect();
 
         // 1) Collect all unique nodes reachable from any root
-        let mut seen: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
-        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
-        for root in self.roots.values() {
-            for arc in Trie::all_nodes(root.clone()) {
-                let ptr = Arc::as_ptr(&arc);
-                if seen.insert(ptr) {
-                    all_nodes.push(arc);
-                }
-            }
-        }
+        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&roots_vec);
         // Map pointer -> Arc for quick retrieval
         let mut arc_by_ptr: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
         for n in &all_nodes {
@@ -1540,15 +1510,8 @@ impl<'r> Precomputer<'r> {
         );
 
         // Now, apply the pruning.
-        let mut all_nodes = Vec::new();
-        let mut visited = HashSet::new();
-        for root_arc in self.roots.values() {
-            for node in Trie::all_nodes(root_arc.clone()) {
-                if visited.insert(Arc::as_ptr(&node)) {
-                    all_nodes.push(node);
-                }
-            }
-        }
+        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&roots_vec);
 
         for node_arc in all_nodes {
             let node_ptr: NodePtr = &*node_arc.read().unwrap();
@@ -1684,15 +1647,8 @@ impl<'r> Precomputer<'r> {
         const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
 
         // 1. Collect all nodes in the graph.
-        let mut all_nodes = Vec::new();
-        let mut seen = HashSet::new();
-        for root in self.roots.values() {
-            for node in Trie::all_nodes(root.clone()) {
-                if seen.insert(Arc::as_ptr(&node)) {
-                    all_nodes.push(node);
-                }
-            }
-        }
+        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&roots_vec);
         let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
 
         // 2. Build an incoming edge map for every node.

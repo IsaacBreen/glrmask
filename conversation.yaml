@@ -9056,6 +9056,9 @@ local_system:
                   .map(|root_arc| (root_arc.clone(), None))
                   .collect();
 
+              type NodePtr = *const PrecomputeNode;
+              let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+
               Trie::special_map(
                   initial_nodes_and_values,
                   // step: Propagate predecessor terminals.
@@ -9074,12 +9077,12 @@ local_system:
                           (Some(existing), Some(new)) => existing.extend(new),
                       }
                   },
-                  // process: Prune outgoing edges based on allowed follows.
+                  // process: Collect information about which edges to prune.
                   move |node, maybe_all_immediate_predecessors| {
                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
                       // all outgoing terminals are considered valid.
                       if maybe_all_immediate_predecessors.is_none() {
-                          return true; // Continue traversal
+                          return true; // Continue traversal, no pruning needed for this node.
                       }
 
                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
@@ -9092,19 +9095,41 @@ local_system:
                           }
                       }
 
-                      // Prune children of the current node.
-                      node.children_mut().retain(|edge_terminal_opt, _dest_map| {
+                      let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_terminal_opt| {
                           match edge_terminal_opt {
                               // Keep edges with terminals that are in the allowed follow set (or ignore edges).
                               Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
                               // Always keep `None` edges, as they don't represent grammar terminals.
                               None => true,
                           }
-                      });
+                      }).cloned().collect();
+
+                      let node_ptr: NodePtr = node;
+                      edges_to_keep.insert(node_ptr, keys_to_keep);
           
                       true // Continue traversal
                   },
               );
+
+              // Now, apply the pruning.
+              let mut all_nodes = Vec::new();
+              let mut visited = HashSet::new();
+              for root_arc in self.roots.values() {
+                  for node in Trie::all_nodes(root_arc.clone()) {
+                      if visited.insert(Arc::as_ptr(&node)) {
+                          all_nodes.push(node);
+                      }
+                  }
+              }
+
+              for node_arc in all_nodes {
+                  let node_ptr: NodePtr = &*node_arc.read().unwrap();
+                  if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+                      let mut node_guard = node_arc.write().unwrap();
+                      node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
+                  }
+              }
+
               crate::debug!(2, "Finished pruning based on terminal follow sets.");
           }
 
@@ -19386,6 +19411,9 @@ local_system:
                   .map(|root_arc| (root_arc.clone(), None))
                   .collect();
 
+              type NodePtr = *const PrecomputeNode;
+              let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+
               Trie::special_map(
                   initial_nodes_and_values,
                   // step: Propagate predecessor terminals.
@@ -19404,12 +19432,12 @@ local_system:
                           (Some(existing), Some(new)) => existing.extend(new),
                       }
                   },
-                  // process: Prune outgoing edges based on allowed follows.
+                  // process: Collect information about which edges to prune.
                   move |node, maybe_all_immediate_predecessors| {
                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
                       // all outgoing terminals are considered valid.
                       if maybe_all_immediate_predecessors.is_none() {
-                          return true; // Continue traversal
+                          return true; // Continue traversal, no pruning needed for this node.
                       }
 
                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
@@ -19422,19 +19450,41 @@ local_system:
                           }
                       }
 
-                      // Prune children of the current node.
-                      node.children_mut().retain(|edge_terminal_opt, _dest_map| {
+                      let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_terminal_opt| {
                           match edge_terminal_opt {
                               // Keep edges with terminals that are in the allowed follow set (or ignore edges).
                               Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
                               // Always keep `None` edges, as they don't represent grammar terminals.
                               None => true,
                           }
-                      });
+                      }).cloned().collect();
+
+                      let node_ptr: NodePtr = node;
+                      edges_to_keep.insert(node_ptr, keys_to_keep);
           
                       true // Continue traversal
                   },
               );
+
+              // Now, apply the pruning.
+              let mut all_nodes = Vec::new();
+              let mut visited = HashSet::new();
+              for root_arc in self.roots.values() {
+                  for node in Trie::all_nodes(root_arc.clone()) {
+                      if visited.insert(Arc::as_ptr(&node)) {
+                          all_nodes.push(node);
+                      }
+                  }
+              }
+
+              for node_arc in all_nodes {
+                  let node_ptr: NodePtr = &*node_arc.read().unwrap();
+                  if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+                      let mut node_guard = node_arc.write().unwrap();
+                      node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
+                  }
+              }
+
               crate::debug!(2, "Finished pruning based on terminal follow sets.");
           }
 
@@ -29755,6 +29805,9 @@ messages:
                   .map(|root_arc| (root_arc.clone(), None))
                   .collect();
 
+              type NodePtr = *const PrecomputeNode;
+              let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+
               Trie::special_map(
                   initial_nodes_and_values,
                   // step: Propagate predecessor terminals.
@@ -29773,12 +29826,12 @@ messages:
                           (Some(existing), Some(new)) => existing.extend(new),
                       }
                   },
-                  // process: Prune outgoing edges based on allowed follows.
+                  // process: Collect information about which edges to prune.
                   move |node, maybe_all_immediate_predecessors| {
                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
                       // all outgoing terminals are considered valid.
                       if maybe_all_immediate_predecessors.is_none() {
-                          return true; // Continue traversal
+                          return true; // Continue traversal, no pruning needed for this node.
                       }
 
                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
@@ -29791,19 +29844,41 @@ messages:
                           }
                       }
 
-                      // Prune children of the current node.
-                      node.children_mut().retain(|edge_terminal_opt, _dest_map| {
+                      let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_terminal_opt| {
                           match edge_terminal_opt {
                               // Keep edges with terminals that are in the allowed follow set (or ignore edges).
                               Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
                               // Always keep `None` edges, as they don't represent grammar terminals.
                               None => true,
                           }
-                      });
+                      }).cloned().collect();
+
+                      let node_ptr: NodePtr = node;
+                      edges_to_keep.insert(node_ptr, keys_to_keep);
           
                       true // Continue traversal
                   },
               );
+
+              // Now, apply the pruning.
+              let mut all_nodes = Vec::new();
+              let mut visited = HashSet::new();
+              for root_arc in self.roots.values() {
+                  for node in Trie::all_nodes(root_arc.clone()) {
+                      if visited.insert(Arc::as_ptr(&node)) {
+                          all_nodes.push(node);
+                      }
+                  }
+              }
+
+              for node_arc in all_nodes {
+                  let node_ptr: NodePtr = &*node_arc.read().unwrap();
+                  if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+                      let mut node_guard = node_arc.write().unwrap();
+                      node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
+                  }
+              }
+
               crate::debug!(2, "Finished pruning based on terminal follow sets.");
           }
 
@@ -31039,136 +31114,251 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: |-
-      ```
-      error[E0596]: cannot borrow `*node` as mutable, as it is behind a `&` reference
-          --> src/constraint.rs:1524:17
-           |
-      1506 |             move |node, maybe_all_immediate_predecessors| {
-           |                   ---- consider changing this binding's type to be: `&mut trie::Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, gss::PrecomputedNodeContents>`
-      ...
-      1524 |                 node.children_mut().retain(|edge_terminal_opt, _dest_map| {
-           |                 ^^^^ `node` is a `&` reference, so the data it refers to cannot be borrowed as mutable
-      ```
-      Fix this. Don't try modify the trie node in special map. Do it afterwards.
+  - user: Make `Trie::all_nodes` take a slice of nodes, not a single root. This should
+      make it possible to simplify a lot of the code in eg constraint.rs that gets
+      all nodes for a collection of trie roots.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you fix this compilation error. The error occurs because you're trying to modify a `Trie` node within the `process` closure of `Trie::special_map`, which only provides an immutable reference to the node.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the git diff patches for the requested changes.
 
-      As you suggested, the correct approach is to collect the necessary information for pruning during the `special_map` traversal and then apply the modifications afterward. Here are the patches to fix the issue.
+      I've updated `Trie::all_nodes` to accept a slice of root nodes, which simplifies the code in several places by allowing a single traversal instead of iterating and collecting nodes from multiple traversals.
 
-      In `src/constraint.rs`, I'll update `prune_on_no_terminal_follow` to gather which edges to keep and then iterate through the nodes to perform the pruning after the traversal is complete.
-
-      ### `src/constraint.rs`
+      Here are the changes for each file:
 
       ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      index 1111111..2222222 100644
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -600,21 +600,18 @@
+       
+           /// Collects all *unique* nodes (by pointer) reachable from the given root (BFS).
+           /// This method does not panic on cycles, it simply avoids revisiting nodes.
+      -    pub fn all_nodes(root: Arc<RwLock<Trie<EK, EV, T>>>) -> Vec<Arc<RwLock<Trie<EK, EV, T>>>> {
+      +    pub fn all_nodes(roots: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Vec<Arc<RwLock<Trie<EK, EV, T>>>> {
+               // Use Arc::as_ptr for visited tracking
+               let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+               let mut result = Vec::new();
+               let mut queue = VecDeque::new();
+       
+      -        let root_arc_ptr = Arc::as_ptr(&root);
+      -        if visited_arcs.insert(root_arc_ptr) {
+      -            queue.push_back(root);
+      +        for root in roots {
+      +            if visited_arcs.insert(Arc::as_ptr(root)) {
+      +                queue.push_back(root.clone());
+      +            }
+               }
+       
+               while let Some(node_arc) = queue.pop_front() {
+                   result.push(node_arc.clone()); // Add the node itself to the result
+      @@ -700,7 +697,7 @@
+           /// This is useful after manual graph manipulations that do not automatically
+           /// update the depths. It uses a topological sort (Kahn's algorithm) to ensure
+           /// correctness in a single pass.
+      -    pub fn recompute_all_max_depths(roots: &[Arc<RwLock<Self>>]) {
+      -        let all_nodes = Self::all_nodes_multiple_roots(roots);
+      +    pub fn recompute_all_max_depths(roots: &[Arc<RwLock<Self>>]) {
+      +        let all_nodes = Self::all_nodes(roots);
+               if all_nodes.is_empty() {
+                   return;
+               }
+      @@ -748,27 +745,6 @@
+               }
+           }
+       
+      -    /// Helper to collect all nodes from multiple roots.
+      -    fn all_nodes_multiple_roots(roots: &[Arc<RwLock<Self>>]) -> Vec<Arc<RwLock<Self>>> {
+      -        let mut visited = HashSet::new();
+      -        let mut result = Vec::new();
+      -        let mut queue = VecDeque::from_iter(roots.iter().cloned());
+      -        for root in roots {
+      -            visited.insert(Arc::as_ptr(root));
+      -        }
+      -
+      -        while let Some(node_arc) = queue.pop_front() {
+      -            result.push(node_arc.clone());
+      -            let guard = node_arc.read().unwrap();
+      -            for child_arc in guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
+      -                if visited.insert(Arc::as_ptr(&child_arc)) {
+      -                    queue.push_back(child_arc);
+      -                }
+      -            }
+      -        }
+      -        result
+      -    }
+      -
+           /// Recomputes the max_depth of this node based on its children's depths.
+           /// Returns true if the depth changed.
+           /// NOTE: This does NOT propagate changes. The caller is responsible for propagation
+      @@ -1512,7 +1488,7 @@
+               } // root lock released
+       
+               // Check all_nodes - call *after* releasing lock
+      -        let all = Trie::all_nodes(root.clone());
+      +        let all = Trie::all_nodes(&[root.clone()]);
+               assert_eq!(all.len(), 3); // root, child1, child2
+               let all_ptrs: HashSet<_> = all.iter().map(arc_ptr).collect();
+               assert!(all_ptrs.contains(&arc_ptr(&root)));
+      @@ -1621,7 +1597,7 @@
+                   c2.try_insert("c2", &mut Some("e4"), grandchild.clone()).unwrap(); // Diamond
+               }
+       
+      -        let all_nodes = Trie::all_nodes(root.clone());
+      +        let all_nodes = Trie::all_nodes(&[root.clone()]);
+       
+               // Should find 4 unique nodes.
+               assert_eq!(all_nodes.len(), 4);
+      @@ -1683,7 +1659,7 @@
+           #[test]
+           fn test_empty_trie() {
+               let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(42)));
+      -        let nodes = Trie::all_nodes(root.clone());
+      +        let nodes = Trie::all_nodes(&[root.clone()]);
+               assert_eq!(nodes.len(), 1);
+               assert!(Arc::ptr_eq(&nodes[0], &root));
+               assert!(root.read().unwrap().is_leaf()); // Lock needed here
+      @@ -1751,7 +1727,7 @@
+               root.write().unwrap().max_depth = 0;
+               child.write().unwrap().max_depth = 1;
+       
+      -        let all_nodes = Trie::all_nodes(root.clone());
+      +        let all_nodes = Trie::all_nodes(&[root.clone()]);
+       
+               // Should detect both nodes exactly once.
+               assert_eq!(all_nodes.len(), 2);
+
+      ``````diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index 1111111..2222222 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1498,50 +1498,63 @@
-           }
-           
-           fn prune_on_no_terminal_follow(&mut self) {
-               crate::debug!(2, "Pruning based on terminal follow sets.");
+      @@ -400,17 +400,8 @@
        
-               let terminal_follow_map = self.terminal_follow_map;
-               let ignore_terminal_id = self.ignore_terminal_id;
+           // Collect all unique nodes into a Vec to hold strong references to them.
+           // This prevents any node from being dropped while we are modifying the graph structure,
+      -    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+      -    let mut all_nodes = Vec::new();
+      -    let mut visited = HashSet::new();
+      -    for root_arc in roots.values() {
+      -        for node in Trie::all_nodes(root_arc.clone()) {
+      -            if visited.insert(Arc::as_ptr(&node)) {
+      -                all_nodes.push(node);
+      -            }
+      -        }
+      -    }
+      +    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      +    let _all_nodes = Trie::all_nodes(&roots_vec);
        
-               let initial_nodes_and_values: Vec<_> = self.roots.values()
-                   .map(|root_arc| (root_arc.clone(), None))
-                   .collect();
+           let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::new();
        
-      +        type NodePtr = *const PrecomputeNode;
-      +        let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
-      +
-               Trie::special_map(
-                   initial_nodes_and_values,
-                   // step: Propagate predecessor terminals.
-                   |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
-                       match edge_terminal_opt {
-                           Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                           Some(t) => Some(Some(BTreeSet::from([*t]))),
-                           None => Some(predecessors.clone()),
-                       }
-                   },
-                   // merge: Union of predecessor sets from different paths.
-                   |existing_set, new_set| {
-                       match (existing_set, new_set) {
-                           (None, _) => {},
-                           (existing_set @ _, None) => *existing_set = None,
-                           (Some(existing), Some(new)) => existing.extend(new),
-                       }
-                   },
-      -            // process: Prune outgoing edges based on allowed follows.
-      +            // process: Collect information about which edges to prune.
-                   move |node, maybe_all_immediate_predecessors| {
-                       // If there are no preceding terminals (e.g., root or only None-edges path from root),
-                       // all outgoing terminals are considered valid.
-                       if maybe_all_immediate_predecessors.is_none() {
-      -                    return true; // Continue traversal
-      +                    return true; // Continue traversal, no pruning needed for this node.
-                       }
+      @@ -498,17 +489,8 @@
        
-                       // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
-                       let mut allowed_follow_terminals = BTreeSet::new();
-                       if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
-                           for preceding_terminal in all_immediate_predecessors {
-                               if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                                   allowed_follow_terminals.extend(follow_set.iter().cloned());
-                               }
-                           }
-                       }
+           // Collect all unique nodes to keep them alive during the merging process.
+           // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
+      -    let mut all_nodes = Vec::new();
+      -    let mut visited_ptrs = HashSet::new();
+      -    for root_arc in roots.values() {
+      -        for node in Trie::all_nodes(root_arc.clone()) {
+      -            if visited_ptrs.insert(Arc::as_ptr(&node)) {
+      -                all_nodes.push(node);
+      -            }
+      -        }
+      -    }
+      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      +    let _all_nodes = Trie::all_nodes(&roots_vec);
        
-      -                // Prune children of the current node.
-      -                node.children_mut().retain(|edge_terminal_opt, _dest_map| {
-      +                let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_terminal_opt| {
-                           match edge_terminal_opt {
-                               // Keep edges with terminals that are in the allowed follow set (or ignore edges).
-                               Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
-                               // Always keep `None` edges, as they don't represent grammar terminals.
-                               None => true,
-                           }
-      -                });
-      +                }).cloned().collect();
-      +
-      +                let node_ptr: NodePtr = node;
-      +                edges_to_keep.insert(node_ptr, keys_to_keep);
-           
-                       true // Continue traversal
-                   },
+           let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+      @@ -670,17 +652,8 @@
+               crate::debug!(2, "Replacing ignore token edges with None edges...");
+       
+               // 1. Collect all unique nodes.
+      -        let mut seen: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
+      -        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
+      -        for root in self.roots.values() {
+      -            for arc in Trie::all_nodes(root.clone()) {
+      -                let ptr = Arc::as_ptr(&arc);
+      -                if seen.insert(ptr) {
+      -                    all_nodes.push(arc);
+      -                }
+      -            }
+      -        }
+      +        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+      +        let all_nodes = Trie::all_nodes(&roots_vec);
+       
+               // 2. Iterate over each node and modify its children map.
+               for node_arc in all_nodes {
+      @@ -717,17 +690,8 @@
+               let root_node_ptrs: HashSet<*const RwLock<PrecomputeNode>> = self.roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+       
+               // 1) Collect all unique nodes reachable from any root
+      -        let mut seen: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
+      -        let mut all_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
+      -        for root in self.roots.values() {
+      -            for arc in Trie::all_nodes(root.clone()) {
+      -                let ptr = Arc::as_ptr(&arc);
+      -                if seen.insert(ptr) {
+      -                    all_nodes.push(arc);
+      -                }
+      -            }
+      -        }
+      +        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+      +        let all_nodes = Trie::all_nodes(&roots_vec);
+               // Map pointer -> Arc for quick retrieval
+               let mut arc_by_ptr: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
+               for n in &all_nodes {
+      @@ -868,16 +832,8 @@
                );
-      +
-      +        // Now, apply the pruning.
-      +        let mut all_nodes = Vec::new();
-      +        let mut visited = HashSet::new();
-      +        for root_arc in self.roots.values() {
-      +            for node in Trie::all_nodes(root_arc.clone()) {
-      +                if visited.insert(Arc::as_ptr(&node)) {
-      +                    all_nodes.push(node);
-      +                }
-      +            }
-      +        }
-      +
-      +        for node_arc in all_nodes {
-      +            let node_ptr: NodePtr = &*node_arc.read().unwrap();
-      +            if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
-      +                let mut node_guard = node_arc.write().unwrap();
-      +                node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
-      +            }
-      +        }
-      +
-               crate::debug!(2, "Finished pruning based on terminal follow sets.");
-           }
        
-
+               // Now, apply the pruning.
+      -        let mut all_nodes = Vec::new();
+      -        let mut visited = HashSet::new();
+      -        for root_arc in self.roots.values() {
+      -            for node in Trie::all_nodes(root_arc.clone()) {
+      -                if visited.insert(Arc::as_ptr(&node)) {
+      -                    all_nodes.push(node);
+      -                }
+      -            }
+      -        }
+      +        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+      +        let all_nodes = Trie::all_nodes(&roots_vec);
+       
+               for node_arc in all_nodes {
+                   let node_ptr: NodePtr = &*node_arc.read().unwrap();
+      @@ -969,17 +925,8 @@
+               const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3; // Configurable threshold
+       
+               // 1. Collect all nodes in the graph.
+      -        let mut all_nodes = Vec::new();
+      -        let mut seen = HashSet::new();
+      -        for root in self.roots.values() {
+      -            for node in Trie::all_nodes(root.clone()) {
+      -                if seen.insert(Arc::as_ptr(&node)) {
+      -                    all_nodes.push(node);
+      -                }
+      -            }
+      -        }
+      +        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+      +        let all_nodes = Trie::all_nodes(&roots_vec);
+               let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
+       
+               // 2. Build an incoming edge map for every node.
       ```
 
-      This change defers the mutation of the trie nodes until after the `special_map` traversal has completed, resolving the borrowing error. Let me know if you have any other questions
+      I hope this is helpful! Let me know if you have any other questions.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.

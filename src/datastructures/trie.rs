@@ -750,15 +750,16 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
     /// Collects all *unique* nodes (by pointer) reachable from the given root (BFS).
     /// This method does not panic on cycles, it simply avoids revisiting nodes.
-    pub fn all_nodes(root: Arc<RwLock<Trie<EK, EV, T>>>) -> Vec<Arc<RwLock<Trie<EK, EV, T>>>> {
+    pub fn all_nodes(roots: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Vec<Arc<RwLock<Trie<EK, EV, T>>>> {
         // Use Arc::as_ptr for visited tracking
         let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
-        let root_arc_ptr = Arc::as_ptr(&root);
-        if visited_arcs.insert(root_arc_ptr) {
-            queue.push_back(root);
+        for root in roots {
+            if visited_arcs.insert(Arc::as_ptr(root)) {
+                queue.push_back(root.clone());
+            }
         }
 
         while let Some(node_arc) = queue.pop_front() {
@@ -861,7 +862,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// update the depths. It uses a topological sort (Kahn's algorithm) to ensure
     /// correctness in a single pass.
     pub fn recompute_all_max_depths(roots: &[Arc<RwLock<Self>>]) {
-        let all_nodes = Self::all_nodes_multiple_roots(roots);
+        let all_nodes = Self::all_nodes(roots);
         if all_nodes.is_empty() {
             return;
         }
@@ -919,27 +920,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                 }
             }
         }
-    }
-
-    /// Helper to collect all nodes from multiple roots.
-    fn all_nodes_multiple_roots(roots: &[Arc<RwLock<Self>>]) -> Vec<Arc<RwLock<Self>>> {
-        let mut visited = HashSet::new();
-        let mut result = Vec::new();
-        let mut queue = VecDeque::from_iter(roots.iter().cloned());
-        for root in roots {
-            visited.insert(Arc::as_ptr(root));
-        }
-
-        while let Some(node_arc) = queue.pop_front() {
-            result.push(node_arc.clone());
-            let guard = node_arc.read().unwrap();
-            for child_arc in guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
-                if visited.insert(Arc::as_ptr(&child_arc)) {
-                    queue.push_back(child_arc);
-                }
-            }
-        }
-        result
     }
 
     /// Recomputes the max_depth of this node based on its children's depths.
@@ -2315,7 +2295,7 @@ mod tests {
         } // root lock released
 
         // Check all_nodes - call *after* releasing lock
-        let all = Trie::all_nodes(root.clone());
+        let all = Trie::all_nodes(&[root.clone()]);
         assert_eq!(all.len(), 3); // root, child1, child2
         let all_ptrs: HashSet<_> = all.iter().map(arc_ptr).collect();
         assert!(all_ptrs.contains(&arc_ptr(&root)));
@@ -2483,7 +2463,7 @@ mod tests {
             c2.try_insert("c2", &mut Some("e4"), grandchild.clone()).unwrap(); // Diamond
         }
 
-        let all_nodes = Trie::all_nodes(root.clone());
+        let all_nodes = Trie::all_nodes(&[root.clone()]);
 
         // Should find 4 unique nodes.
         assert_eq!(all_nodes.len(), 4);
@@ -2558,7 +2538,7 @@ mod tests {
     #[test]
     fn test_empty_trie() {
         let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(42)));
-        let nodes = Trie::all_nodes(root.clone());
+        let nodes = Trie::all_nodes(&[root.clone()]);
         assert_eq!(nodes.len(), 1);
         assert!(Arc::ptr_eq(&nodes[0], &root));
         assert!(root.read().unwrap().is_leaf()); // Lock needed here
@@ -2637,7 +2617,7 @@ mod tests {
         root.write().unwrap().max_depth = 0;
         child.write().unwrap().max_depth = 1;
 
-        let all_nodes = Trie::all_nodes(root.clone());
+        let all_nodes = Trie::all_nodes(&[root.clone()]);
 
         // Should detect both nodes exactly once.
         assert_eq!(all_nodes.len(), 2);
