@@ -1,8 +1,8 @@
 local_system:
   attached_files:
+    - src/constraint.rs
     - src/datastructures/gss.rs
     - src/datastructures/trie.rs
-    - src/constraint.rs
     - src/glr/parser.rs
   conversation_file:
   compile_command:
@@ -6689,6 +6689,10 @@ local_system:
               return canonical_arc.clone();
           }
 
+          // Pre-emptively insert the current node's arc. This breaks cycles.
+          // If we find a canonical version later, we'll update the entry.
+          visited.insert(node_ptr, node_arc.clone());
+
           let mut new_children_map = BTreeMap::new();
           let mut children_changed = false;
 
@@ -6728,6 +6732,7 @@ local_system:
               canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
           };
 
+          // Update the visited map with the final canonical arc.
           visited.insert(node_ptr, canonical_arc.clone());
           canonical_arc
       }
@@ -7615,6 +7620,9 @@ local_system:
                   return canonical_arc.clone();
               }
 
+              // Pre-emptively insert to break cycles.
+              visited.insert(node_ptr, node_arc.clone());
+
               // Post-order traversal: first, canonicalize all children.
               let mut new_children_map = BTreeMap::new();
               let mut children_changed = false;
@@ -7656,6 +7664,7 @@ local_system:
                   canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
               };
 
+              // Update with the final canonical arc.
               visited.insert(node_ptr, canonical_arc.clone());
               canonical_arc
           }
@@ -10307,7 +10316,7 @@ local_system:
       pub type MaxDepth = usize;
       pub type DestKey = MaxDepth;
       /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-      type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
+      type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>;
       /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
       type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
       /// A temporary set of predecessors used during node construction and simplification.
@@ -11143,11 +11152,6 @@ local_system:
               return cached_result.clone();
           }
 
-          // Pre-emptively mark as visited to break cycles. Assume no change by default.
-          // If it's pruned later, this will be updated to None.
-          // This is crucial for handling cycles in the GSS graph.
-          memo.insert(node_ptr, Some(node_arc.clone()));
-
           match closure(node_arc.as_ref()) {
               None => { // Prune this node
                   memo.insert(node_ptr, None);
@@ -11395,16 +11399,66 @@ local_system:
               if new_acc.trie2_nodes.len() > merge_threshold {
                   let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
                   let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
+
+                  // Accumulate live_token contributions per destination (by pointer).
+                  let mut dest_contribs: HashMap<*const RwLock<PrecomputeNode2>, (Arc<RwLock<PrecomputeNode2>>, HybridBitset)> = HashMap::new();
+
                   for existing_trie2_node in &new_acc.trie2_nodes {
-                      let inserter = EdgeInserter::new(
+                      // Edge key and tokens to add
+                      let edge_key = (0usize, None);
+                      // Constrain by source node's current live tokens
+                      let source_live = {
+                          let g = existing_trie2_node.as_arc().read().expect("RwLock poisoned");
+                          g.value.live_tokens.clone()
+                      };
+                      let tokens_to_add = source_live.clone(); // max_ones ∧ source_live = source_live
+
+                      // Try to reuse an eligible existing child if its live_tokens is disjoint with tokens_to_add
+                      let chosen_dest_arc = {
+                          let maybe_existing_child = {
+                              let src_guard = existing_trie2_node.as_arc().read().expect("RwLock poisoned");
+                              src_guard.get(&edge_key).cloned()
+                          };
+                          if let Some(map) = maybe_existing_child {
+                              let mut picked: Option<Arc<RwLock<PrecomputeNode2>>> = None;
+                              for (np, _ev) in map.iter() {
+                                  if !np.is_strong() { continue; }
+                                  if let Some(child_arc) = np.upgrade() {
+                                      let live = child_arc.read().expect("RwLock poisoned").value.live_tokens.clone();
+                                      if (&live & &tokens_to_add).is_empty() {
+                                          picked = Some(child_arc.clone());
+                                          break;
+                                      }
+                                  }
+                              }
+                              picked.unwrap_or_else(|| new_trie2_node.clone())
+                          } else {
+                              new_trie2_node.clone()
+                          }
+                      };
+
+                      // Insert edge (degrade to weak if necessary)
+                      let used_dest = EdgeInserter::new(
                           existing_trie2_node.as_arc().clone(),
-                          (0, None),
-                          HybridBitset::max_ones(),
+                          edge_key,
+                          tokens_to_add.clone(),
                           |e, n| *e |= n,
                           |_, _| {},
-                      ).try_destination_auto(new_trie2_node_arc.as_arc().clone());
-                      inserter.expect("merge_trie2_nodes_if_needed: merge insert failed");
+                      ).try_destination_auto(chosen_dest_arc.clone())
+                       .expect("merge_trie2_nodes_if_needed: merge insert failed");
+
+                      let ptr = Arc::as_ptr(&used_dest);
+                      dest_contribs.entry(ptr)
+                          .and_modify(|(_, bv)| *bv |= &tokens_to_add)
+                          .or_insert((used_dest.clone(), tokens_to_add.clone()));
                   }
+
+                  // Update destination nodes' live_tokens after all insertions
+                  for (_ptr, (dst_arc, add_bv)) in dest_contribs {
+                      let mut g = dst_arc.write().expect("RwLock poisoned");
+                      g.value.live_tokens |= add_bv;
+                  }
+
                   new_acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
               }
               if new_acc == *node.acc {
@@ -11450,10 +11504,6 @@ local_system:
           if let Some(fused_arc) = memo.get(&node_ptr) {
               return fused_arc.clone();
           }
-
-          // Pre-emptively insert the current node to break cycles.
-          // The final fused result will overwrite this entry.
-          memo.insert(node_ptr, node_arc.clone());
 
           // 1. Recursively fuse the predecessors first (post-order traversal).
           let mut recursively_fused_predecessors = Vec::new();
@@ -11691,11 +11741,6 @@ local_system:
               return *id;
           }
 
-          // Pre-emptively insert a temporary ID to break cycles.
-          // We use a value that's unlikely to be a real ID from the structural_cache.
-          // The final, correct ID will overwrite this.
-          memo.insert(node_ptr, usize::MAX);
-
           let mut pred_structural_ids = BTreeMap::new();
           for (edge_val, preds_by_depth) in &node.predecessors {
               let mut ids_by_depth = BTreeMap::new();
@@ -11713,7 +11758,6 @@ local_system:
 
           let next_id = structural_cache.len();
           let id = *structural_cache.entry(pred_structural_ids).or_insert(next_id);
-          // Update the memo with the final, correct structural ID.
           memo.insert(node_ptr, id);
           id
       }
@@ -11737,9 +11781,6 @@ local_system:
               if node_arc.predecessors.is_empty() {
                   return Vec::new();
               }
-
-              // Pre-emptively insert an empty path to break cycles.
-              memo.insert(node_ptr, Vec::new());
 
               let mut longest_path = Vec::new();
               for (edge_val, preds_by_depth) in node_arc.predecessors.iter() {
@@ -20580,7 +20621,7 @@ system:
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5{store=true}
   code_completion_model:
     - gf
   commit_message_model:
@@ -27282,6 +27323,10 @@ messages:
               return canonical_arc.clone();
           }
 
+          // Pre-emptively insert the current node's arc. This breaks cycles.
+          // If we find a canonical version later, we'll update the entry.
+          visited.insert(node_ptr, node_arc.clone());
+
           let mut new_children_map = BTreeMap::new();
           let mut children_changed = false;
 
@@ -27321,6 +27366,7 @@ messages:
               canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
           };
 
+          // Update the visited map with the final canonical arc.
           visited.insert(node_ptr, canonical_arc.clone());
           canonical_arc
       }
@@ -28208,6 +28254,9 @@ messages:
                   return canonical_arc.clone();
               }
 
+              // Pre-emptively insert to break cycles.
+              visited.insert(node_ptr, node_arc.clone());
+
               // Post-order traversal: first, canonicalize all children.
               let mut new_children_map = BTreeMap::new();
               let mut children_changed = false;
@@ -28249,6 +28298,7 @@ messages:
                   canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
               };
 
+              // Update with the final canonical arc.
               visited.insert(node_ptr, canonical_arc.clone());
               canonical_arc
           }
@@ -30874,149 +30924,186 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: 'This seems to occur in deduplicate_recursive_trie2: `fatal runtime error:
-      stack overflow, aborting`. It seems to occur here: `let canonical_child_arc
-      = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited);`.
-      Fix it.'
+  - user: |-
+      Modify edge insertion for trie 2 nodes to in some places try to insert into eligible existing children.
+      Do it here:
+      - merge_trie2_nodes_if_needed
+      - reduce_and_goto for the non-cached case
+      - precompute2 in the process fn (but not in the setup/`initial_values_for_map`)
+      Eligible children are those for which there's no overlap between the bitset that is getting added to the new edge and the live bitset in that node already.
+
+      ...
+
+      Hmm... For the changes in `reduce_and_goto`, the `acc2.trie2_nodes` set should  include all nodes that are pushed to, not just `new_trie2_node`, for example. In fact, if `new_trie2_node` isn't actually needed, it shouldn't even be pushed to. The inserter can tell us which node was finally used. Use this fact. Get the node that was finally pushed to and add it to the set.
+      Oh and update the `live_tokens` to include `active_llm_tokens`, but only after all edges have been pushed, *not* before.
+
+      Actually, instead of accumulating a set of destination nodes, accumulate a map from destination node to (an intersection between the active LLM tokens in the state (`active_llm_tokens`) and the active LLM tokens in each *source* node). Accumulate by unioning these intersections. Then update the destination bitset with each of these.
+
+      ...
+
+      Do something similar in precompute2 and gss.rs as well.
     metadata:
   - assistant: |-
-      Hello! Dealing with stack overflows in recursive graph traversals can be tricky. The issue is almost always related to how cycles are handled. A common pattern in post-order traversals is to forget to mark a node as "visiting" before recursing on its children, leading to infinite recursion when a cycle is present.
-
-      I've identified this issue in `deduplicate_recursive_trie2` and several other recursive functions across your GSS and constraint logic. By pre-emptively marking nodes as visited before recursion, we can break these cycles and prevent the stack overflow.
-
-      Here are the patches to fix the issue.
-
-      ### File: `src/constraint.rs`
-
-      I've applied the cycle-breaking fix to `deduplicate_recursive_trie2` (which you reported) and `deduplicate_recursive` for consistency.
-
       ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -999,6 +999,10 @@
-               return canonical_arc.clone();
-           }
+      *** Begin Patch
+      *** Update File: src/datastructures/gss.rs
+      @@
+       use crate::datastructures::trie::{EdgeInserter, Trie};
        
-      +    // Pre-emptively insert the current node's arc. This breaks cycles.
-      +    // If we find a canonical version later, we'll update the entry.
-      +    visited.insert(node_ptr, node_arc.clone());
+       use crate::glr::parser::ParseStateEdgeContent;
+       use crate::datastructures::hybrid_bitset::HybridBitset;
+       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+      +use crate::datastructures::arc_wrapper::NodePtr;
+       use crate::glr::grammar::Terminal;
+       use crate::glr::table::StateID;
+       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+       use crate::types::TerminalID;
+       use std::ops::{BitAnd, BitOr};
+      @@
+       pub fn merge_trie2_nodes_if_needed(
+           root_arc: &mut Arc<GSSNode>,
+           merge_threshold: usize,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+               let mut new_acc = (*node.acc).clone();
+               if new_acc.trie2_nodes.len() > merge_threshold {
+                   let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+      -            let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
+      -            for existing_trie2_node in &new_acc.trie2_nodes {
+      -                let inserter = EdgeInserter::new(
+      -                    existing_trie2_node.as_arc().clone(),
+      -                    (0, None),
+      -                    HybridBitset::max_ones(),
+      -                    |e, n| *e |= n,
+      -                    |_, _| {},
+      -                ).try_destination_auto(new_trie2_node_arc.as_arc().clone());
+      -                inserter.expect("merge_trie2_nodes_if_needed: merge insert failed");
+      -            }
+      +            let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
       +
-           let mut new_children_map = BTreeMap::new();
-           let mut children_changed = false;
-       
-      @@ -1037,7 +1041,8 @@
-               canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-           };
-       
-      -    visited.insert(node_ptr, canonical_arc.clone());
-      +    // Update the visited map with the final canonical arc.
-      +    visited.insert(node_ptr, canonical_arc.clone());
-           canonical_arc
-       }
-       
-      @@ -1379,6 +1384,9 @@
-                   return canonical_arc.clone();
+      +            // Accumulate live_token contributions per destination (by pointer).
+      +            let mut dest_contribs: HashMap<*const RwLock<PrecomputeNode2>, (Arc<RwLock<PrecomputeNode2>>, HybridBitset)> = HashMap::new();
+      +
+      +            for existing_trie2_node in &new_acc.trie2_nodes {
+      +                // Edge key and tokens to add
+      +                let edge_key = (0usize, None);
+      +                // Constrain by source node's current live tokens
+      +                let source_live = {
+      +                    let g = existing_trie2_node.as_arc().read().expect("RwLock poisoned");
+      +                    g.value.live_tokens.clone()
+      +                };
+      +                let tokens_to_add = source_live.clone(); // max_ones ∧ source_live = source_live
+      +
+      +                // Try to reuse an eligible existing child if its live_tokens is disjoint with tokens_to_add
+      +                let chosen_dest_arc = {
+      +                    let maybe_existing_child = {
+      +                        let src_guard = existing_trie2_node.as_arc().read().expect("RwLock poisoned");
+      +                        src_guard.get(&edge_key).cloned()
+      +                    };
+      +                    if let Some(map) = maybe_existing_child {
+      +                        let mut picked: Option<Arc<RwLock<PrecomputeNode2>>> = None;
+      +                        for (np, _ev) in map.iter() {
+      +                            if !np.is_strong() { continue; }
+      +                            if let Some(child_arc) = np.upgrade() {
+      +                                let live = child_arc.read().expect("RwLock poisoned").value.live_tokens.clone();
+      +                                if (&live & &tokens_to_add).is_empty() {
+      +                                    picked = Some(child_arc.clone());
+      +                                    break;
+      +                                }
+      +                            }
+      +                        }
+      +                        picked.unwrap_or_else(|| new_trie2_node.clone())
+      +                    } else {
+      +                        new_trie2_node.clone()
+      +                    }
+      +                };
+      +
+      +                // Insert edge (degrade to weak if necessary)
+      +                let used_dest = EdgeInserter::new(
+      +                    existing_trie2_node.as_arc().clone(),
+      +                    edge_key,
+      +                    tokens_to_add.clone(),
+      +                    |e, n| *e |= n,
+      +                    |_, _| {},
+      +                ).try_destination_auto(chosen_dest_arc.clone())
+      +                 .expect("merge_trie2_nodes_if_needed: merge insert failed");
+      +
+      +                let ptr = Arc::as_ptr(&used_dest);
+      +                dest_contribs.entry(ptr)
+      +                    .and_modify(|(_, bv)| *bv |= &tokens_to_add)
+      +                    .or_insert((used_dest.clone(), tokens_to_add.clone()));
+      +            }
+      +
+      +            // Update destination nodes' live_tokens after all insertions
+      +            for (_ptr, (dst_arc, add_bv)) in dest_contribs {
+      +                let mut g = dst_arc.write().expect("RwLock poisoned");
+      +                g.value.live_tokens |= add_bv;
+      +            }
+      +
+                   new_acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
                }
-       
-      +        // Pre-emptively insert to break cycles.
-      +        visited.insert(node_ptr, node_arc.clone());
-      +
-               // Post-order traversal: first, canonicalize all children.
-               let mut new_children_map = BTreeMap::new();
-               let mut children_changed = false;
-      @@ -1418,7 +1426,8 @@
-                   canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-               };
-       
-      -        visited.insert(node_ptr, canonical_arc.clone());
-      +        // Update with the final canonical arc.
-      +        visited.insert(node_ptr, canonical_arc.clone());
-               canonical_arc
-           }
-       
-
-      ```
-
-      ### File: `src/datastructures/gss.rs`
-
-      Several recursive functions in this file had the same potential for stack overflows on cyclic graphs. I've patched them to ensure they handle cycles correctly.
-
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1000,6 +1000,11 @@
-               return cached_result.clone();
-           }
-       
-      +    // Pre-emptively mark as visited to break cycles. Assume no change by default.
-      +    // If it's pruned later, this will be updated to None.
-      +    // This is crucial for handling cycles in the GSS graph.
-      +    memo.insert(node_ptr, Some(node_arc.clone()));
-      +
-           match closure(node_arc.as_ref()) {
-               None => { // Prune this node
-                   memo.insert(node_ptr, None);
-      @@ -1318,6 +1323,10 @@
-               return fused_arc.clone();
-           }
-       
-      +    // Pre-emptively insert the current node to break cycles.
-      +    // The final fused result will overwrite this entry.
-      +    memo.insert(node_ptr, node_arc.clone());
-      +
-           // 1. Recursively fuse the predecessors first (post-order traversal).
-           let mut recursively_fused_predecessors = Vec::new();
-           for (edge_val, preds_by_depth) in &node_arc.predecessors {
-      @@ -1491,6 +1500,11 @@
-               return *id;
-           }
-       
-      +    // Pre-emptively insert a temporary ID to break cycles.
-      +    // We use a value that's unlikely to be a real ID from the structural_cache.
-      +    // The final, correct ID will overwrite this.
-      +    memo.insert(node_ptr, usize::MAX);
-      +
-           let mut pred_structural_ids = BTreeMap::new();
-           for (edge_val, preds_by_depth) in &node.predecessors {
-               let mut ids_by_depth = BTreeMap::new();
-      @@ -1506,6 +1520,7 @@
-       
-           let next_id = structural_cache.len();
-           let id = *structural_cache.entry(pred_structural_ids).or_insert(next_id);
-      +    // Update the memo with the final, correct structural ID.
-           memo.insert(node_ptr, id);
-           id
-       }
-      @@ -1518,6 +1533,9 @@
-                   return Vec::new();
+               if new_acc == *node.acc {
+                   new_acc = (*node.acc).clone();
                }
-       
-      +        // Pre-emptively insert an empty path to break cycles.
-      +        memo.insert(node_ptr, Vec::new());
-      +
-               let mut longest_path = Vec::new();
-               for (edge_val, preds_by_depth) in node_arc.predecessors.iter() {
-                   for pred_vec in preds_by_depth.values() {
-
+      *** End Patch
       ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
 
-      These changes should resolve the stack overflow and make your recursive graph algorithms more robust against cycles. Let me know if you have any other questions
+      --- Processing Diff Block 1 ---
+      Error: Could not determine filename for diff block 1. Skipping.
+      Diff content start:
+      *** Begin Patch
+      *** Update File: src/datastructures/gss.rs
+      @@
+       use crate::datastructures::trie::{EdgeInserter, Trie};
+       
+       use crate::glr::parser::ParseStateEdgeContent;
+       use crate::datastructures::hybr...
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Error: Could not determine filename for diff block 1. Skipping.
+      Diff content start:
+      *** Begin Patch
+      *** Update File: src/datastructures/gss.rs
+      @@
+       use crate::datastructures::trie::{EdgeInserter, Trie};
+       
+       use crate::glr::parser::ParseStateEdgeContent;
+       use crate::datastructures::hybr...
 
-      --- Processing Diff Block 2 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/gss.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/datastructures/gss.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/datastructures/gss.rs
     metadata:
-  - user: 'Changes committed with message: "Fix: Improve cycle handling in recursive
-      graph traversals to prevent stack overflows"'
+  - user: 'Changes committed with message: "feat(gss): Improve merge_trie2_nodes_if_needed
+      for better trie2 node sharing and live token accumulation"'
     metadata:
 ...

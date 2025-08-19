@@ -31,7 +31,7 @@ pub type TerminalBV = HybridBitset;
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
+type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
@@ -1114,16 +1114,66 @@ pub fn merge_trie2_nodes_if_needed(
         if new_acc.trie2_nodes.len() > merge_threshold {
             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
             let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
+
+            // Accumulate live_token contributions per destination (by pointer).
+            let mut dest_contribs: HashMap<*const RwLock<PrecomputeNode2>, (Arc<RwLock<PrecomputeNode2>>, HybridBitset)> = HashMap::new();
+
             for existing_trie2_node in &new_acc.trie2_nodes {
-                let inserter = EdgeInserter::new(
+                // Edge key and tokens to add
+                let edge_key = (0usize, None);
+                // Constrain by source node's current live tokens
+                let source_live = {
+                    let g = existing_trie2_node.as_arc().read().expect("RwLock poisoned");
+                    g.value.live_tokens.clone()
+                };
+                let tokens_to_add = source_live.clone(); // max_ones ∧ source_live = source_live
+
+                // Try to reuse an eligible existing child if its live_tokens is disjoint with tokens_to_add
+                let chosen_dest_arc = {
+                    let maybe_existing_child = {
+                        let src_guard = existing_trie2_node.as_arc().read().expect("RwLock poisoned");
+                        src_guard.get(&edge_key).cloned()
+                    };
+                    if let Some(map) = maybe_existing_child {
+                        let mut picked: Option<Arc<RwLock<PrecomputeNode2>>> = None;
+                        for (np, _ev) in map.iter() {
+                            if !np.is_strong() { continue; }
+                            if let Some(child_arc) = np.upgrade() {
+                                let live = child_arc.read().expect("RwLock poisoned").value.live_tokens.clone();
+                                if (&live & &tokens_to_add).is_empty() {
+                                    picked = Some(child_arc.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        picked.unwrap_or_else(|| new_trie2_node.clone())
+                    } else {
+                        new_trie2_node.clone()
+                    }
+                };
+
+                // Insert edge (degrade to weak if necessary)
+                let used_dest = EdgeInserter::new(
                     existing_trie2_node.as_arc().clone(),
-                    (0, None),
-                    HybridBitset::max_ones(),
+                    edge_key,
+                    tokens_to_add.clone(),
                     |e, n| *e |= n,
                     |_, _| {},
-                ).try_destination_auto(new_trie2_node_arc.as_arc().clone());
-                inserter.expect("merge_trie2_nodes_if_needed: merge insert failed");
+                ).try_destination_auto(chosen_dest_arc.clone())
+                 .expect("merge_trie2_nodes_if_needed: merge insert failed");
+
+                let ptr = Arc::as_ptr(&used_dest);
+                dest_contribs.entry(ptr)
+                    .and_modify(|(_, bv)| *bv |= &tokens_to_add)
+                    .or_insert((used_dest.clone(), tokens_to_add.clone()));
             }
+
+            // Update destination nodes' live_tokens after all insertions
+            for (_ptr, (dst_arc, add_bv)) in dest_contribs {
+                let mut g = dst_arc.write().expect("RwLock poisoned");
+                g.value.live_tokens |= add_bv;
+            }
+
             new_acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
         }
         if new_acc == *node.acc {
