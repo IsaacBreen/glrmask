@@ -564,15 +564,33 @@ impl GrammarConstraint {
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                         crate::debug!(3, "Trie2: Inserting end edge into Trie2 node with active LLM tokens: {:?} into Trie2 nodes: {:?}", active_llm_tokens_for_root, gss_root_acc.trie2_nodes);
                         for trie2_node in gss_root_acc.trie2_nodes.iter() {
+                            let source_node = trie2_node.as_arc();
+                            let edge_bv = active_llm_tokens_for_root.clone();
+
+                            let eligible_children: Vec<_> = {
+                                let source_guard = source_node.read().unwrap();
+                                source_guard.children().values().flat_map(|dest_map| dest_map.keys())
+                                    .filter_map(|node_ptr| node_ptr.upgrade())
+                                    .filter(|child_arc| {
+                                        let child_guard = child_arc.read().unwrap();
+                                        child_guard.value.end && (child_guard.value.live_tokens.clone() & &edge_bv).is_empty()
+                                    })
+                                    .collect()
+                            };
+
                             let mut inserter = EdgeInserter::new(
-                                trie2_node.as_arc().clone(),
+                                source_node.clone(),
                                 (0, None),
-                                active_llm_tokens_for_root.clone(),
+                                edge_bv.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                             );
-                            inserter = inserter.try_destination(trie2_end.clone());
-                            inserter.expect("Failed to insert end edge into Trie2 node");
+
+                            inserter = inserter.try_destinations_iter(eligible_children.into_iter());
+
+                            if inserter.clone_into_option().is_none() {
+                                inserter.try_destination(trie2_end.clone()).expect("Failed to insert end edge into Trie2 node");
+                            }
                         }
                     }
                 }
