@@ -1953,7 +1953,7 @@ where
             if self.result.is_some() { // Check before calling try_destination
                 break;
             }
-            self = self.try_destination(destination);
+            self = self.try_destination(destination.clone()); // destination is already Arc, clone it
         }
         self
     }

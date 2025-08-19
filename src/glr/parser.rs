@@ -969,34 +969,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             .clone();
                                         self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
+                                        timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node", {
                                         for existing_trie2_node in &trie2_nodes {
-                                            let source_node = existing_trie2_node.as_arc();
-                                            let eligible_children: Vec<_> = {
-                                                let source_guard = source_node.read().unwrap();
-                                                source_guard.children().values().flat_map(|dest_map| dest_map.keys())
-                                                    .filter_map(|node_ptr| node_ptr.upgrade())
-                                                    .filter(|child_arc| {
-                                                        let child_guard = child_arc.read().unwrap();
-                                                        (child_guard.value.live_tokens.clone() & &active_llm_tokens).is_empty()
-                                                    })
-                                                    .collect()
-                                            };
-
-                                            let mut inserter = EdgeInserter::new(
-                                                source_node.clone(),
-                                                (k, Some(goto_info.source_state_id)),
-                                                active_llm_tokens.clone(),
-                                                |e, n| *e |= n,
-                                                |_, _| {},
-                                            );
-
-                                            inserter = inserter.try_destinations_iter(eligible_children.into_iter());
-
-                                            if inserter.clone_into_option().is_none() {
-                                                inserter.try_destination_auto(new_trie2_node.clone())
-                                                    .expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                            }
-                                        }
+                                            // Allow cycles to be represented as WEAK edges if they occur.
+                                            timeit!("GLRParserState::reduce_and_goto: Inserting new Trie-2 node (loop iteration)", {});
+                                            let inserter = EdgeInserter::new(
+                                                existing_trie2_node.as_arc().clone(),
+                                            (k, Some(goto_info.source_state_id)),
+                                            active_llm_tokens.clone(),
+                                            |e, n| *e |= n,
+                                            |_, _| {},
+                                        ).try_destination_auto(new_trie2_node.clone());
+                                        inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                    }
+                                        });
 
                                         let mut acc2 = acc.clone();
                                         acc2.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node.clone())].into_iter().collect();
@@ -1074,32 +1060,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
                                     for existing_trie2_node in &trie2_nodes {
-                                        let source_node = existing_trie2_node.as_arc();
-                                        let eligible_children: Vec<_> = {
-                                            let source_guard = source_node.read().unwrap();
-                                            source_guard.children().values().flat_map(|dest_map| dest_map.keys())
-                                                .filter_map(|node_ptr| node_ptr.upgrade())
-                                                .filter(|child_arc| {
-                                                    let child_guard = child_arc.read().unwrap();
-                                                    (child_guard.value.live_tokens.clone() & &active_llm_tokens).is_empty()
-                                                })
-                                                .collect()
-                                        };
-
-                                        let mut inserter = EdgeInserter::new(
-                                            source_node.clone(),
+                                        let inserter = EdgeInserter::new(
+                                            existing_trie2_node.as_arc().clone(),
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
                                             |_, _| {},
-                                        );
-
-                                        inserter = inserter.try_destinations_iter(eligible_children.into_iter());
-
-                                        if inserter.clone_into_option().is_none() {
-                                            inserter.try_destination_auto(new_trie2_node.clone())
-                                                .expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                        }
+                                        ).try_destination_auto(new_trie2_node.clone());
+                                        inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     }
 
                                     let mut acc2 = acc.clone();

@@ -1115,33 +1115,14 @@ pub fn merge_trie2_nodes_if_needed(
             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
             let new_trie2_node_arc = ArcPtrWrapper::new(new_trie2_node.clone());
             for existing_trie2_node in &new_acc.trie2_nodes {
-                let source_node = existing_trie2_node.as_arc();
-                let edge_bv = HybridBitset::max_ones();
-                let eligible_children: Vec<_> = {
-                    let source_guard = source_node.read().unwrap();
-                    source_guard.children().values().flat_map(|dest_map| dest_map.keys())
-                        .filter_map(|node_ptr| node_ptr.upgrade())
-                        .filter(|child_arc| {
-                            let child_guard = child_arc.read().unwrap();
-                            (child_guard.value.live_tokens.clone() & &edge_bv).is_empty()
-                        })
-                        .collect()
-                };
-
-                let mut inserter = EdgeInserter::new(
-                    source_node.clone(),
+                let inserter = EdgeInserter::new(
+                    existing_trie2_node.as_arc().clone(),
                     (0, None),
-                    edge_bv.clone(),
+                    HybridBitset::max_ones(),
                     |e, n| *e |= n,
                     |_, _| {},
-                );
-
-                inserter = inserter.try_destinations_iter(eligible_children.into_iter());
-
-                if inserter.clone_into_option().is_none() {
-                    inserter.try_destination_auto(new_trie2_node_arc.as_arc().clone())
-                        .expect("merge_trie2_nodes_if_needed: merge insert failed");
-                }
+                ).try_destination_auto(new_trie2_node_arc.as_arc().clone());
+                inserter.expect("merge_trie2_nodes_if_needed: merge insert failed");
             }
             new_acc.trie2_nodes = vec![ArcPtrWrapper::new(new_trie2_node)].into_iter().collect();
         }
