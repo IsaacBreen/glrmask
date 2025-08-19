@@ -4,7 +4,7 @@
 use std::sync::RwLock;
 use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, print_gss_forest};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -29,7 +29,7 @@ use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeN
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
-use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -1835,7 +1835,7 @@ impl<'r> Precomputer<'r> {
                                 let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
                                     if let Some(child_arc) = child_node_ptr.upgrade() {
                                         // if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) { // Removed
-                                        if (child_arc.read().unwrap().value.live_tokens & &edge_bv).is_empty() {
+                                        if (child_arc.read().unwrap().value.live_tokens.clone() & &edge_bv).is_empty() {
                                             Some(child_arc)
                                         } else { None }
                                     } else { None }
