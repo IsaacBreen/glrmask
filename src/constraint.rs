@@ -711,6 +711,7 @@ fn recompute_live_tokens(
     roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
     all_llm_tokens: &LLMTokenBV,
 ) {
+    crate::debug!(2, "Recomputing live tokens for precomputed trie.");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(&roots_vec);
     let mut memo: HashMap<*const RwLock<PrecomputeNode>, LLMTokenBV> = HashMap::new();
@@ -719,6 +720,7 @@ fn recompute_live_tokens(
     for node_arc in all_nodes.iter().rev() {
         _recompute_live_tokens_recursive(node_arc, &mut memo, all_llm_tokens);
     }
+    crate::debug!(2, "Finished recomputing live tokens for precomputed trie.");
 }
 
 fn _recompute_live_tokens_recursive(
@@ -765,6 +767,7 @@ fn recompute_live_tokens_trie2(
     roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
     all_llm_tokens: &LLMTokenBV,
 ) {
+    crate::debug!(2, "Recomputing live tokens for precomputed trie 2.");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(&roots_vec);
     let mut memo: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
@@ -772,6 +775,7 @@ fn recompute_live_tokens_trie2(
     for node_arc in all_nodes.iter().rev() {
         _recompute_live_tokens_recursive_trie2(node_arc, &mut memo, all_llm_tokens);
     }
+    crate::debug!(2, "Finished recomputing live tokens for precomputed trie 2.");
 }
 
 fn _recompute_live_tokens_recursive_trie2(
@@ -1325,7 +1329,7 @@ impl<'r> Precomputer<'r> {
         let all_nodes = Trie::all_nodes(&roots_vec);
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
-            let mut node_guard = node_arc.write().expect("poison");
+            let mut node_guard = node_arc.write().unwrap();
             
             // Check if there are any edges with the ignore token key.
             let ignore_key = Some(ignore_tid);
