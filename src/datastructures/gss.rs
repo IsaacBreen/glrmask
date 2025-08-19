@@ -42,15 +42,16 @@ pub type TerminalInfo = HybridL2Bitset;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
     pub end: bool,
+    pub live_tokens: LLMTokenBV,
 }
 
 impl PrecomputedNodeContents {
     pub fn no_end() -> Self {
-        Self { end: false }
+        Self { end: false, live_tokens: LLMTokenBV::zeros() }
     }
 
     pub fn end() -> Self {
-        Self { end: true }
+        Self { end: true, live_tokens: LLMTokenBV::max_ones() }
     }
 }
 
@@ -62,6 +63,7 @@ impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         obj.insert("clean_end".to_string(), self.end.to_json());
+        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -69,7 +71,9 @@ impl JSONConvertible for PrecomputedNodeContents {
             JSONNode::Object(mut obj) => {
                 let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
                                    .and_then(bool::from_json)?;
-                Ok(PrecomputedNodeContents { end })
+                let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents".to_string())
+                    .and_then(LLMTokenBV::from_json)?;
+                Ok(PrecomputedNodeContents { end, live_tokens })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
         }
