@@ -39,7 +39,6 @@ use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
-use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
@@ -583,7 +582,7 @@ impl GrammarConstraint {
         let mut all_nodes = Vec::new();
         let mut visited_ptrs = HashSet::new();
         for root_arc in precomputed2.values() {
-            for node in Trie::all_nodes(root_arc.clone()) {
+            for node in Trie::all_nodes(&[root_arc.clone()]) {
                 if visited_ptrs.insert(Arc::as_ptr(&node)) {
                     all_nodes.push(node);
                 }
@@ -1183,16 +1182,8 @@ impl<'r> Precomputer<'r> {
         }
 
         // Collect all unique nodes reachable from all roots to drive the backward pass.
-        let mut visited_set: HashSet<*const RwLock<PrecomputeNode>> = HashSet::new();
-        let mut unique_nodes: Vec<Arc<RwLock<PrecomputeNode>>> = Vec::new();
-        for root in self.roots.values() {
-            for arc in Trie::all_nodes(root.clone()) {
-                let ptr = Arc::as_ptr(&arc);
-                if visited_set.insert(ptr) {
-                    unique_nodes.push(arc);
-                }
-            }
-        }
+        let roots_vec: Vec<_> = self.roots.values().cloned().collect();
+        let unique_nodes = Trie::all_nodes(&roots_vec);
 
         // Backward pass with memoization.
         let mut memo: HashMap<NodeDataPtr, LLMTokenBV> = HashMap::new();
@@ -1274,7 +1265,6 @@ impl<'r> Precomputer<'r> {
         // 1. Collect all unique nodes.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
         let all_nodes = Trie::all_nodes(&roots_vec);
-
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
             let mut node_guard = node_arc.write().expect("poison");
@@ -1476,7 +1466,7 @@ impl<'r> Precomputer<'r> {
                 }
             },
             // process: Collect information about which edges to prune.
-            move |node, maybe_all_immediate_predecessors| {
+            |node, maybe_all_immediate_predecessors| {
                 // If there are no preceding terminals (e.g., root or only None-edges path from root),
                 // all outgoing terminals are considered valid.
                 if maybe_all_immediate_predecessors.is_none() {
@@ -1512,7 +1502,6 @@ impl<'r> Precomputer<'r> {
         // Now, apply the pruning.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
         let all_nodes = Trie::all_nodes(&roots_vec);
-
         for node_arc in all_nodes {
             let node_ptr: NodePtr = &*node_arc.read().unwrap();
             if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
@@ -2744,4 +2733,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-
