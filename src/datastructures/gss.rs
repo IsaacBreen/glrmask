@@ -867,11 +867,6 @@ fn prune_and_transform_recursive(
         return cached_result.clone();
     }
 
-    // Pre-emptively mark as visited to break cycles. Assume no change by default.
-    // If it's pruned later, this will be updated to None.
-    // This is crucial for handling cycles in the GSS graph.
-    memo.insert(node_ptr, Some(node_arc.clone()));
-
     match closure(node_arc.as_ref()) {
         None => { // Prune this node
             memo.insert(node_ptr, None);
@@ -1175,10 +1170,6 @@ pub fn fuse_predecessors_recursive(
         return fused_arc.clone();
     }
 
-    // Pre-emptively insert the current node to break cycles.
-    // The final fused result will overwrite this entry.
-    memo.insert(node_ptr, node_arc.clone());
-
     // 1. Recursively fuse the predecessors first (post-order traversal).
     let mut recursively_fused_predecessors = Vec::new();
     for (edge_val, preds_by_depth) in &node_arc.predecessors {
@@ -1415,11 +1406,6 @@ fn get_structural_id(
         return *id;
     }
 
-    // Pre-emptively insert a temporary ID to break cycles.
-    // We use a value that's unlikely to be a real ID from the structural_cache.
-    // The final, correct ID will overwrite this.
-    memo.insert(node_ptr, usize::MAX);
-
     let mut pred_structural_ids = BTreeMap::new();
     for (edge_val, preds_by_depth) in &node.predecessors {
         let mut ids_by_depth = BTreeMap::new();
@@ -1437,7 +1423,6 @@ fn get_structural_id(
 
     let next_id = structural_cache.len();
     let id = *structural_cache.entry(pred_structural_ids).or_insert(next_id);
-    // Update the memo with the final, correct structural ID.
     memo.insert(node_ptr, id);
     id
 }
@@ -1461,9 +1446,6 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
         if node_arc.predecessors.is_empty() {
             return Vec::new();
         }
-
-        // Pre-emptively insert an empty path to break cycles.
-        memo.insert(node_ptr, Vec::new());
 
         let mut longest_path = Vec::new();
         for (edge_val, preds_by_depth) in node_arc.predecessors.iter() {
