@@ -39,6 +39,7 @@ use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
+use crate::glr::grammar::Terminal;
 use crate::glr::items::{LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
