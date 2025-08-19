@@ -1500,6 +1500,8 @@ impl<'r> Precomputer<'r> {
             },
         );
 
+        crate::debug!(3, "Number of edges to keep based on terminal follow sets: {}", edges_to_keep.len());
+
         // Now, apply the pruning.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
         let all_nodes = Trie::all_nodes(&roots_vec);
