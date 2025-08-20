@@ -947,7 +947,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             (k, Some(goto_info.source_state_id)),
                             active_llm_tokens.clone(),
                             |e, n| *e |= n,
-                            |_, _| {},
+                            |node_value, edge_value| node_value.live_tokens |= edge_value,
                         ).to_destination_weakly(cached_trie2_node.as_arc().clone());
                         inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                     }
@@ -1006,7 +1006,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 edge_key,
                                                 tokens_to_push.clone(),
                                                 |e, n| *e |= n,
-                                                |_, _| {}, // defer live_tokens
+                                                |node_value, edge_value| node_value.live_tokens |= edge_value,
                                             ).try_destinations_iter_with(eligible_iter_builder);
 
                                             inserter = inserter.try_destination_auto(new_trie2_node.clone());
@@ -1080,7 +1080,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
-                                            |_, _| {},
+                                            |node_value, edge_value| node_value.live_tokens |= edge_value,
                                         ).to_destination_weakly(cached_trie2_node.as_arc().clone());
                                         inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                                     }
@@ -1104,7 +1104,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
-                                            |_, _| {},
+                                            |node_value, edge_value| node_value.live_tokens |= edge_value,
                                         ).try_destination_auto(new_trie2_node.clone());
                                         inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     }

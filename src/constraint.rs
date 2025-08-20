@@ -601,14 +601,14 @@ impl GrammarConstraint {
                                 edge_key,
                                 tokens_to_push.clone(),
                                 |e, n| *e |= n,
-                                |_, _| {}, // defer live_tokens
+                                |node_value, edge_value| node_value.live_tokens |= edge_value,
                             ).try_destinations_iter_with(eligible_iter_builder);
 
                             inserter = inserter.try_destination(trie2_end.clone());
 
                             let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie2 node");
                             let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                            dest_agg.entry(final_dest_wr).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                            dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                         }
                     }
                     for (dst_wr, added) in &dest_agg {
