@@ -1491,11 +1491,11 @@ local_system:
       use crate::datastructures::trie::EdgeInserter;
 
       // A single combined action for a given (state,row) and token:
-      // - Token(...) is a concrete per-token action from the row's action map
+      // - Normal(...) is a concrete per-token action from the row's action map
       // - Default(...) is the row's default reduction (token-independent)
       #[derive(Debug)]
       enum Action<'a> {
-          Token(&'a Stage7ShiftsAndReducesLookaheadValue),
+          Normal(&'a Stage7ShiftsAndReducesLookaheadValue),
           Default(&'a DefaultReduce),
       }
 
@@ -2241,13 +2241,13 @@ local_system:
                   if let Some(action) = action_opt {
                       for peek in GSSNode::peek_iter(&state.stack) {
                           match action {
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                                   crate::debug!(5, "Action: Shift to state {}", to.0);
                                   let new_parse_state =
                                       self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                   shifted_states_todo.push_back(new_parse_state);
                               }
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                   nonterminal_id: nt,
                                   len,
                                   ..
@@ -2263,7 +2263,7 @@ local_system:
                                       }
                                   }
                               }
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                                   crate::debug!(5, "Action: Split with shift and reduces");
                                   if let Some(to) = shift {
                                       crate::debug!(5, "Action (Split): Shift to state {}", to.0);
@@ -2322,7 +2322,6 @@ local_system:
                       crate::debug!(5, "No action found in state {}", state_id.0);
                   }
               }
-              self.below_bottom_cache.clear();
           }
 
           fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
@@ -2337,7 +2336,7 @@ local_system:
                       move |row| {
                           row.shifts_and_reduces_without_default_reduce
                               .get(&tid)
-                              .map(Action::Token)
+                              .map(Action::Normal)
                       },
                       config,
                   );
@@ -2357,7 +2356,7 @@ local_system:
                           // Prefer a concrete token action; otherwise use the default reduce.
                           row.shifts_and_reduces_full
                               .get(&tid)
-                              .map(Action::Token)
+                              .map(Action::Normal)
                       },
                       config,
                   );
@@ -2406,7 +2405,7 @@ local_system:
                           if let Some(goto_state_id) = goto.state_id {
                               let next_row = &self.parser.table[&goto_state_id];
                               match action_selector(next_row) {
-                                  Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
+                                  Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
                                       // Token-based unit reduction: continue the chain.
                                       current_nt = *next_nt;
                                       continue;
@@ -2430,8 +2429,7 @@ local_system:
                                   _ => {
                                       // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
                                       // finalize at this GOTO and stop chaining.
-                                      let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                      out.push(Arc::new(final_node));
+                                      out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                       break;
                                   }
                               }
@@ -2638,6 +2636,8 @@ local_system:
               // Reset acceptance flag for the new token
               self.accepted = false;
 
+              self.below_bottom_cache.clear();
+
               if Some(token_id) == self.parser.ignore_terminal_id {
                   crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
                   self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
@@ -2668,10 +2668,15 @@ local_system:
               }
               self.active_state = next_active;
               self.log_gss("Phase1/2-end", token_id, false, false);
+              self.below_bottom_cache.clear();
           }
 
-          #[time_it("GLRParserState::process_default_reductions")]
           pub fn process_default_reductions(&mut self) {
+              self.process_default_reductions_advanced(&ProcessTokenAdvancedConfig::default());
+          }
+
+          #[time_it("GLRParserState::process_default_reductions_advanced")]
+          pub fn process_default_reductions_advanced(&mut self, config: &ProcessTokenAdvancedConfig) {
               self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
               if self.phase == ParserPhase::ReadyForToken {
                   crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
@@ -2679,8 +2684,33 @@ local_system:
               }
               assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
-              todo!();
+              // Phase 3: apply default reductions until fixpoint (no token involved).
+              let mut work_map: WorkMap = WorkMap::new();
+              // Seed the queue with the current active state.
+              Self::enqueue(&mut work_map, self.active_state.clone());
 
+              // Collect survivors (clone-and-merge states and reduction results that finalize).
+              let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+
+              // Run the generic action-processing loop with a Default-only selector.
+              // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
+              // - action_selector returns the Default action for each row (no token actions here).
+              self.process_action_queue(
+                  &mut work_map,
+                  None,
+                  &mut shifted_states_todo,
+                  |row| Some(Action::Default(&row.default_reduce)),
+                  &config,
+              );
+
+              // Consolidate all survivors into the new active state.
+              let mut next_active = ParseState::new();
+              for state in shifted_states_todo {
+                  next_active.merge(state);
+              }
+              self.active_state = next_active;
+
+              // After Phase 3, we’re ready for the next token.
               self.phase = ParserPhase::ReadyForToken;
               self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
           }
@@ -2704,8 +2734,8 @@ local_system:
                       for peek in GSSNode::peek_iter(&self.active_state.stack) {
                           let row = &self.parser.table[&peek.edge_value().state_id];
                           let action_opt = match self.phase {
-                              ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Token),
-                              ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Token).or_else(|| Some(Action::Default(&row.default_reduce))),
+                              ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal),
+                              ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Normal).or_else(|| Some(Action::Default(&row.default_reduce))),
                           };
                           if let Some(action) = action_opt {
                               crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
@@ -2730,7 +2760,6 @@ local_system:
 
           pub fn step(&mut self, token_id: TerminalID) {
               self.process_token(token_id);
-              self.process_default_reductions();
           }
 
           pub fn parse(&mut self, input: &[TerminalID]) {
@@ -4550,11 +4579,11 @@ local_system:
       use crate::datastructures::trie::EdgeInserter;
 
       // A single combined action for a given (state,row) and token:
-      // - Token(...) is a concrete per-token action from the row's action map
+      // - Normal(...) is a concrete per-token action from the row's action map
       // - Default(...) is the row's default reduction (token-independent)
       #[derive(Debug)]
       enum Action<'a> {
-          Token(&'a Stage7ShiftsAndReducesLookaheadValue),
+          Normal(&'a Stage7ShiftsAndReducesLookaheadValue),
           Default(&'a DefaultReduce),
       }
 
@@ -4653,13 +4682,17 @@ local_system:
 
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseState { // No longer generic
-          pub stack: Arc<GSSNode>, // GSSNode is now concrete
+      pub struct ParseState {
+          pub stack: Arc<GSSNode>,
+          pub accepted_state: Arc<GSSNode>,
       }
 
       impl ParseState {
           pub fn new() -> Self {
-              ParseState { stack: Arc::new(GSSNode::new_fresh()) }
+              ParseState {
+                  stack: Arc::new(GSSNode::new_fresh()),
+                  accepted_state: Arc::new(GSSNode::new_fresh()),
+              }
           }
       }
 
@@ -4924,7 +4957,10 @@ local_system:
                   .map(|sid| ParseStateEdgeContent { state_id: *sid })
                   .collect();
               let stack_top = GSSNode::new_fresh().push_many(all_edges);
-              ParseState { stack: Arc::new(stack_top) }
+              ParseState {
+                  stack: Arc::new(stack_top),
+                  accepted_state: Arc::new(GSSNode::new_fresh()),
+              }
           }
 
           pub fn init_glr_substring_parser_with_everything_state(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
@@ -4945,7 +4981,10 @@ local_system:
                   state_id: self.everything_state_id,
               };
               let stack = Arc::new(GSSNode::new_fresh().push(initial_content));
-              ParseState { stack }
+              ParseState {
+                  stack,
+                  accepted_state: Arc::new(GSSNode::new_fresh()),
+              }
           }
 
           pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
@@ -4956,8 +4995,10 @@ local_system:
               let initial_content = ParseStateEdgeContent {
                   state_id: self.start_state_id,
               };
-              let stack = Arc::new(GSSNode::new_fresh().push(initial_content)); // pushed node has initial_acc
-              ParseState { stack }
+              ParseState {
+                  stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
+                  accepted_state: Arc::new(GSSNode::new_fresh()),
+              }
           }
 
           pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -5262,7 +5303,10 @@ local_system:
               // and group the resulting isolated paths by their (depth, state_id) key.
               // This merges paths that are in the same logical state, reducing redundant processing.
               for peek in GSSNode::peek_iter(&state.stack) {
-                  let isolated_state = ParseState { stack: peek.isolated_parent() };
+                  let isolated_state = ParseState {
+                      stack: peek.isolated_parent(),
+                      accepted_state: state.accepted_state.clone(),
+                  };
                   let depth = isolated_state.stack.max_depth();
                   let state_id = peek.edge_value().state_id;
                   work_map.entry(WorkMapKey(depth, state_id))
@@ -5278,7 +5322,10 @@ local_system:
           ) -> ParseState {
               crate::debug!(4, "Pushing new state with content: {:?}", new_content);
               let new_gss_node_instance = peek.push_on_parent(new_content);
-              ParseState { stack: Arc::new(new_gss_node_instance) }
+              ParseState {
+                  stack: Arc::new(new_gss_node_instance),
+                  accepted_state: self.active_state.accepted_state.clone(),
+              }
           }
 
           /// Shared inner loop for phase 1 and phase 2.
@@ -5300,13 +5347,13 @@ local_system:
                   if let Some(action) = action_opt {
                       for peek in GSSNode::peek_iter(&state.stack) {
                           match action {
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                                   crate::debug!(5, "Action: Shift to state {}", to.0);
                                   let new_parse_state =
                                       self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                   shifted_states_todo.push_back(new_parse_state);
                               }
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                   nonterminal_id: nt,
                                   len,
                                   ..
@@ -5314,7 +5361,10 @@ local_system:
                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                                   let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                   if !s_new_arc.is_empty() {
-                                      let new_parse_state = ParseState { stack: s_new_arc };
+                                      let new_parse_state = ParseState {
+                                          stack: s_new_arc,
+                                          accepted_state: self.active_state.accepted_state.clone(),
+                                      };
                                       if let Some(ref mut r_map) = reduce_map {
                                           Self::enqueue(r_map, new_parse_state);
                                       } else {
@@ -5322,7 +5372,7 @@ local_system:
                                       }
                                   }
                               }
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                                   crate::debug!(5, "Action: Split with shift and reduces");
                                   if let Some(to) = shift {
                                       crate::debug!(5, "Action (Split): Shift to state {}", to.0);
@@ -5335,7 +5385,10 @@ local_system:
                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                           let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                           if !s_new_arc.is_empty() {
-                                              let new_parse_state = ParseState { stack: s_new_arc };
+                                              let new_parse_state = ParseState {
+                                                  stack: s_new_arc,
+                                                  accepted_state: self.active_state.accepted_state.clone(),
+                                              };
                                               if let Some(ref mut r_map) = reduce_map {
                                                   Self::enqueue(r_map, new_parse_state);
                                               } else {
@@ -5362,7 +5415,10 @@ local_system:
                                               config,
                                           );
                                           if !s_new_arc.is_empty() {
-                                              let new_parse_state = ParseState { stack: s_new_arc };
+                                              let new_parse_state = ParseState {
+                                                  stack: s_new_arc,
+                                                  accepted_state: self.active_state.accepted_state.clone(),
+                                              };
                                               if let Some(ref mut r_map) = reduce_map {
                                                   Self::enqueue(r_map, new_parse_state);
                                               } else {
@@ -5381,7 +5437,6 @@ local_system:
                       crate::debug!(5, "No action found in state {}", state_id.0);
                   }
               }
-              self.below_bottom_cache.clear();
           }
 
           fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
@@ -5396,7 +5451,7 @@ local_system:
                       move |row| {
                           row.shifts_and_reduces_without_default_reduce
                               .get(&tid)
-                              .map(Action::Token)
+                              .map(Action::Normal)
                       },
                       config,
                   );
@@ -5416,7 +5471,7 @@ local_system:
                           // Prefer a concrete token action; otherwise use the default reduce.
                           row.shifts_and_reduces_full
                               .get(&tid)
-                              .map(Action::Token)
+                              .map(Action::Normal)
                       },
                       config,
                   );
@@ -5460,12 +5515,18 @@ local_system:
                           if goto.accept {
                               crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
                               self.accepted = true;
+
+                              // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
+                              let accepted_stack_instance = peek2.push_on_parent(ParseStateEdgeContent { state_id: predecessor_state_id });
+                              let accepted_stack_arc = Arc::new(accepted_stack_instance);
+                              Arc::make_mut(&mut self.active_state.accepted_state)
+                                  .merge_with_depth(usize::MAX, &accepted_stack_arc);
                           }
 
                           if let Some(goto_state_id) = goto.state_id {
                               let next_row = &self.parser.table[&goto_state_id];
                               match action_selector(next_row) {
-                                  Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
+                                  Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
                                       // Token-based unit reduction: continue the chain.
                                       current_nt = *next_nt;
                                       continue;
@@ -5489,8 +5550,7 @@ local_system:
                                   _ => {
                                       // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
                                       // finalize at this GOTO and stop chaining.
-                                      let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                      out.push(Arc::new(final_node));
+                                      out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                       break;
                                   }
                               }
@@ -5662,6 +5722,12 @@ local_system:
                                       acc2.trie2_nodes = used_dests.clone();
                                       let new_gss0 = GSSNode::new(acc2);
                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                      if goto_info.accept {
+                                          // Record the “accepted” stack at the reduce boundary for substring mode:
+                                          let accepted_arc = Arc::new(new_gss1.clone());
+                                          Arc::make_mut(&mut self.active_state.accepted_state)
+                                              .merge_with_depth(usize::MAX, &accepted_arc);
+                                      }
                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                                       below_zero.push(Arc::new(new_gss2));
                                   }
@@ -5697,6 +5763,8 @@ local_system:
               // Reset acceptance flag for the new token
               self.accepted = false;
 
+              self.below_bottom_cache.clear();
+
               if Some(token_id) == self.parser.ignore_terminal_id {
                   crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
                   self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
@@ -5727,10 +5795,15 @@ local_system:
               }
               self.active_state = next_active;
               self.log_gss("Phase1/2-end", token_id, false, false);
+              self.below_bottom_cache.clear();
           }
 
-          #[time_it("GLRParserState::process_default_reductions")]
           pub fn process_default_reductions(&mut self) {
+              self.process_default_reductions_advanced(&ProcessTokenAdvancedConfig::default());
+          }
+
+          #[time_it("GLRParserState::process_default_reductions_advanced")]
+          pub fn process_default_reductions_advanced(&mut self, config: &ProcessTokenAdvancedConfig) {
               self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
               if self.phase == ParserPhase::ReadyForToken {
                   crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
@@ -5745,10 +5818,6 @@ local_system:
 
               // Collect survivors (clone-and-merge states and reduction results that finalize).
               let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
-
-              // Default config for below-bottom behavior during default reductions.
-              // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
-              let config = ProcessTokenAdvancedConfig::default();
 
               // Run the generic action-processing loop with a Default-only selector.
               // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
@@ -5792,8 +5861,8 @@ local_system:
                       for peek in GSSNode::peek_iter(&self.active_state.stack) {
                           let row = &self.parser.table[&peek.edge_value().state_id];
                           let action_opt = match self.phase {
-                              ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Token),
-                              ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Token).or_else(|| Some(Action::Default(&row.default_reduce))),
+                              ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal),
+                              ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Normal).or_else(|| Some(Action::Default(&row.default_reduce))),
                           };
                           if let Some(action) = action_opt {
                               crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
@@ -5818,7 +5887,6 @@ local_system:
 
           pub fn step(&mut self, token_id: TerminalID) {
               self.process_token(token_id);
-              self.process_default_reductions();
           }
 
           pub fn parse(&mut self, input: &[TerminalID]) {
@@ -6096,6 +6164,7 @@ local_system:
               // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
               // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
               Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+              Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
           }
       }
 
@@ -7684,11 +7753,11 @@ messages:
       use crate::datastructures::trie::EdgeInserter;
 
       // A single combined action for a given (state,row) and token:
-      // - Token(...) is a concrete per-token action from the row's action map
+      // - Normal(...) is a concrete per-token action from the row's action map
       // - Default(...) is the row's default reduction (token-independent)
       #[derive(Debug)]
       enum Action<'a> {
-          Token(&'a Stage7ShiftsAndReducesLookaheadValue),
+          Normal(&'a Stage7ShiftsAndReducesLookaheadValue),
           Default(&'a DefaultReduce),
       }
 
@@ -8434,13 +8503,13 @@ messages:
                   if let Some(action) = action_opt {
                       for peek in GSSNode::peek_iter(&state.stack) {
                           match action {
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                                   crate::debug!(5, "Action: Shift to state {}", to.0);
                                   let new_parse_state =
                                       self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                   shifted_states_todo.push_back(new_parse_state);
                               }
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                   nonterminal_id: nt,
                                   len,
                                   ..
@@ -8456,7 +8525,7 @@ messages:
                                       }
                                   }
                               }
-                              Action::Token(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
+                              Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                                   crate::debug!(5, "Action: Split with shift and reduces");
                                   if let Some(to) = shift {
                                       crate::debug!(5, "Action (Split): Shift to state {}", to.0);
@@ -8515,7 +8584,6 @@ messages:
                       crate::debug!(5, "No action found in state {}", state_id.0);
                   }
               }
-              self.below_bottom_cache.clear();
           }
 
           fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
@@ -8530,7 +8598,7 @@ messages:
                       move |row| {
                           row.shifts_and_reduces_without_default_reduce
                               .get(&tid)
-                              .map(Action::Token)
+                              .map(Action::Normal)
                       },
                       config,
                   );
@@ -8550,7 +8618,7 @@ messages:
                           // Prefer a concrete token action; otherwise use the default reduce.
                           row.shifts_and_reduces_full
                               .get(&tid)
-                              .map(Action::Token)
+                              .map(Action::Normal)
                       },
                       config,
                   );
@@ -8599,7 +8667,7 @@ messages:
                           if let Some(goto_state_id) = goto.state_id {
                               let next_row = &self.parser.table[&goto_state_id];
                               match action_selector(next_row) {
-                                  Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
+                                  Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
                                       // Token-based unit reduction: continue the chain.
                                       current_nt = *next_nt;
                                       continue;
@@ -8623,8 +8691,7 @@ messages:
                                   _ => {
                                       // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
                                       // finalize at this GOTO and stop chaining.
-                                      let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                      out.push(Arc::new(final_node));
+                                      out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                       break;
                                   }
                               }
@@ -8831,6 +8898,8 @@ messages:
               // Reset acceptance flag for the new token
               self.accepted = false;
 
+              self.below_bottom_cache.clear();
+
               if Some(token_id) == self.parser.ignore_terminal_id {
                   crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
                   self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
@@ -8861,10 +8930,15 @@ messages:
               }
               self.active_state = next_active;
               self.log_gss("Phase1/2-end", token_id, false, false);
+              self.below_bottom_cache.clear();
           }
 
-          #[time_it("GLRParserState::process_default_reductions")]
           pub fn process_default_reductions(&mut self) {
+              self.process_default_reductions_advanced(&ProcessTokenAdvancedConfig::default());
+          }
+
+          #[time_it("GLRParserState::process_default_reductions_advanced")]
+          pub fn process_default_reductions_advanced(&mut self, config: &ProcessTokenAdvancedConfig) {
               self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
               if self.phase == ParserPhase::ReadyForToken {
                   crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
@@ -8872,8 +8946,33 @@ messages:
               }
               assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
-              todo!();
+              // Phase 3: apply default reductions until fixpoint (no token involved).
+              let mut work_map: WorkMap = WorkMap::new();
+              // Seed the queue with the current active state.
+              Self::enqueue(&mut work_map, self.active_state.clone());
 
+              // Collect survivors (clone-and-merge states and reduction results that finalize).
+              let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+
+              // Run the generic action-processing loop with a Default-only selector.
+              // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
+              // - action_selector returns the Default action for each row (no token actions here).
+              self.process_action_queue(
+                  &mut work_map,
+                  None,
+                  &mut shifted_states_todo,
+                  |row| Some(Action::Default(&row.default_reduce)),
+                  &config,
+              );
+
+              // Consolidate all survivors into the new active state.
+              let mut next_active = ParseState::new();
+              for state in shifted_states_todo {
+                  next_active.merge(state);
+              }
+              self.active_state = next_active;
+
+              // After Phase 3, we’re ready for the next token.
               self.phase = ParserPhase::ReadyForToken;
               self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
           }
@@ -8897,8 +8996,8 @@ messages:
                       for peek in GSSNode::peek_iter(&self.active_state.stack) {
                           let row = &self.parser.table[&peek.edge_value().state_id];
                           let action_opt = match self.phase {
-                              ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Token),
-                              ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Token).or_else(|| Some(Action::Default(&row.default_reduce))),
+                              ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal),
+                              ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Normal).or_else(|| Some(Action::Default(&row.default_reduce))),
                           };
                           if let Some(action) = action_opt {
                               crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
@@ -8923,7 +9022,6 @@ messages:
 
           pub fn step(&mut self, token_id: TerminalID) {
               self.process_token(token_id);
-              self.process_default_reductions();
           }
 
           pub fn parse(&mut self, input: &[TerminalID]) {
@@ -9263,113 +9361,248 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Complete the `todo!()` in `process_default_reductions`. This function should
-      work quite similarly to normal token processing, except that it's not taking
-      a token, of course. Instead, it's looking up any default reduction and using
-      that. And only default reductions, no others. But everything else works much
-      the same way.
+  - user: 'Add an `accepted_state: Arc<GSSNode>` to `ParseState`. When a goto has
+      accept, the stack (with the reduced state that the goto belongs to at the top)
+      will get added to this accepted state.'
     metadata:
   - assistant: |-
-      Below are precise, minimal instructions to implement Phase 3 (default reductions) and replace the current todo!().
+      Below are precise, step-by-step changes to implement an accepted_state on ParseState and to add stacks to it whenever a goto has accept.
 
-      File to edit: src/glr/parser.rs
+      Goal
+      - Add a field accepted_state: Arc<GSSNode> to ParseState.
+      - Ensure every constructor and site that creates a ParseState initializes accepted_state.
+      - When a reduction’s goto has accept set, add the stack (with the reduced state that the goto belongs to at the top) into ParseState’s accepted_state GSS.
+      - Make sure merging parse states also merges their accepted states.
 
-      1) Locate the method:
-      - Search for fn process_default_reductions(&mut self) in impl GLRParserState<'a>.
+      All edits are in src/glr/parser.rs unless stated otherwise.
 
-      2) Replace the todo!() body with the following code:
-      - Keep the existing logging at the start and end of the function.
-      - Insert this code exactly where todo!() appears.
+      1) Add accepted_state to ParseState
+      - Find the definition of ParseState.
 
-      ```rust
-          // Phase 3: apply default reductions until fixpoint (no token involved).
-          let mut work_map: WorkMap = WorkMap::new();
-          // Seed the queue with the current active state.
-          Self::enqueue(&mut work_map, self.active_state.clone());
+      Currently:
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct ParseState { // No longer generic
+            pub stack: Arc<GSSNode>, // GSSNode is now concrete
+        }
 
-          // Collect survivors (clone-and-merge states and reduction results that finalize).
-          let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+      Change it to:
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct ParseState {
+            pub stack: Arc<GSSNode>,
+            pub accepted_state: Arc<GSSNode>,
+        }
 
-          // Default config for below-bottom behavior during default reductions.
-          // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
-          let config = ProcessTokenAdvancedConfig::default();
+      2) Initialize accepted_state in ParseState::new
+      - Find impl ParseState with fn new() -> Self.
 
-          // Run the generic action-processing loop with a Default-only selector.
-          // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
-          // - action_selector returns the Default action for each row (no token actions here).
-          self.process_action_queue(
-              &mut work_map,
-              None,
-              &mut shifted_states_todo,
-              |row| Some(Action::Default(&row.default_reduce)),
-              &config,
-          );
+      Currently:
+        impl ParseState {
+            pub fn new() -> Self {
+                ParseState { stack: Arc::new(GSSNode::new_fresh()) }
+            }
+        }
 
-          // Consolidate all survivors into the new active state.
-          let mut next_active = ParseState::new();
-          for state in shifted_states_todo {
-              next_active.merge(state);
-          }
-          self.active_state = next_active;
+      Change it to:
+        impl ParseState {
+            pub fn new() -> Self {
+                ParseState {
+                    stack: Arc::new(GSSNode::new_fresh()),
+                    accepted_state: Arc::new(GSSNode::new_fresh()),
+                }
+            }
+        }
 
-          // After Phase 3, we’re ready for the next token.
-          self.phase = ParserPhase::ReadyForToken;
-      ```
+      3) Update all constructors that build a ParseState to set accepted_state
+      3.1) GLRParser::init_parse_state_with_acc
+      - Find init_parse_state_with_acc.
 
-      3) Final function for reference (only the function body changed; keep the signature and logging lines that are already present):
+      Currently returns:
+        ParseState { stack: Arc::new(GSSNode::new_fresh().push(initial_content)) }
 
-      ```rust
-      #[time_it("GLRParserState::process_default_reductions")]
-      pub fn process_default_reductions(&mut self) {
-          self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
-          if self.phase == ParserPhase::ReadyForToken {
-              crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
-              return;
-          }
-          assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
+      Change it to:
+        ParseState {
+            stack: Arc::new(GSSNode::new_fresh().push(initial_content)),
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
 
-          // Phase 3: apply default reductions until fixpoint (no token involved).
-          let mut work_map: WorkMap = WorkMap::new();
-          // Seed the queue with the current active state.
-          Self::enqueue(&mut work_map, self.active_state.clone());
+      3.2) GLRParser::init_parse_state
+      - It calls init_parse_state_with_acc; no change needed here (already handled by 3.1).
 
-          // Collect survivors (clone-and-merge states and reduction results that finalize).
-          let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+      3.3) GLRParser::init_parse_state_substring_with_all_states
+      - Find that function.
 
-          // Default config for below-bottom behavior during default reductions.
-          // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
-          let config = ProcessTokenAdvancedConfig::default();
+      Currently returns:
+        ParseState { stack: Arc::new(stack_top) }
 
-          // Run the generic action-processing loop with a Default-only selector.
-          // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
-          // - action_selector returns the Default action for each row (no token actions here).
-          self.process_action_queue(
-              &mut work_map,
-              None,
-              &mut shifted_states_todo,
-              |row| Some(Action::Default(&row.default_reduce)),
-              &config,
-          );
+      Change it to:
+        ParseState {
+            stack: Arc::new(stack_top),
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
 
-          // Consolidate all survivors into the new active state.
-          let mut next_active = ParseState::new();
-          for state in shifted_states_todo {
-              next_active.merge(state);
-          }
-          self.active_state = next_active;
+      3.4) GLRParser::init_parse_state_substring_with_everything_state
+      - Find that function.
 
-          // After Phase 3, we’re ready for the next token.
-          self.phase = ParserPhase::ReadyForToken;
-          self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
-      }
-      ```
+      Currently returns:
+        ParseState { stack }
+
+      Change it to:
+        ParseState {
+            stack,
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
+
+      3.5) GLRParser::init_glr_parser_null, init_glr_parser_with_acc, init_glr_parser_from_parse_state
+      - These wrap ParseState values returned elsewhere or accept ParseState; no direct changes needed, since ParseState already has accepted_state and ParseState::new initializes it.
+
+      4) Ensure new ParseStates created during parsing copy the accepted_state along
+      4.1) GLRParserState::push_state
+      - Find fn push_state(&self, peek: &GSSPeek, new_content: ParseStateEdgeContent) -> ParseState.
+
+      Currently:
+        let new_gss_node_instance = peek.push_on_parent(new_content);
+        ParseState { stack: Arc::new(new_gss_node_instance) }
+
+      Change it to:
+        let new_gss_node_instance = peek.push_on_parent(new_content);
+        ParseState {
+            stack: Arc::new(new_gss_node_instance),
+            accepted_state: self.active_state.accepted_state.clone(),
+        }
+
+      Explanation: all branches created by pushing a new state share the same accepted_state accumulator (cloned Arc).
+
+      4.2) GLRParserState::enqueue
+      - Find fn enqueue(work_map: &mut WorkMap, state: ParseState).
+
+      Currently builds isolated_state with only stack:
+        let isolated_state = ParseState { stack: peek.isolated_parent() };
+
+      Change it to:
+        let isolated_state = ParseState {
+            stack: peek.isolated_parent(),
+            accepted_state: state.accepted_state.clone(),
+        };
+
+      Explanation: The accepted_state accumulator propagates with the derived ParseState.
+
+      4.3) ParseState creation after reductions (in process_action_queue)
+      There are several places where new ParseState { stack: s_new_arc } is constructed after a call to reduce_and_goto. Update all of these to include accepted_state: self.active_state.accepted_state.clone().
+
+      Search for “ParseState { stack: s_new_arc” and update each to:
+
+        let new_parse_state = ParseState {
+            stack: s_new_arc,
+            accepted_state: self.active_state.accepted_state.clone(),
+        };
+
+      Specifically update these occurrences:
+      - In Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { .. }) branch (both the Some(reduce_map) and the None branch).
+      - In Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { .. }) reduces (inside the nested loops over reduces).
+      - In Action::Default(default_reduce) branch when reduce is Some(..) (both the Some(reduce_map) and the None branch).
+
+      5) Merge accepted_state when merging ParseStates
+      - Find impl ParseState { pub fn merge(&mut self, mut other: ParseState) { ... } }.
+
+      Currently merges only the main stack:
+        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+
+      Add a second merge immediately after it:
+        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
+
+      The final body should be:
+
+        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
+
+      6) Add the “accepted stack” to accepted_state when a goto has accept
+      6.1) Normal reduction/goto path
+      - Find fn reduce_and_goto.
+      - Inside the loop:
+
+          for popper_item in popper.iter() {
+              for peek2 in popper_item.peek_iter() {
+                  let predecessor_state_id = peek2.edge_value().state_id;
+                  let mut current_nt = nt;
+
+                  // Fast loop ...
+                  loop {
+                      let goto = self.parser.table.get(&predecessor_state_id)...
+                      if goto.accept { ... }
+
+      Right after the existing accept flag setting:
+
+      Currently:
+        if goto.accept {
+            crate::debug!(4, "Accepting with NT '{}' in state {:?}", ...);
+            self.accepted = true;
+        }
+
+      Change it to:
+        if goto.accept {
+            crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
+            self.accepted = true;
+
+            // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
+            let accepted_stack_instance = peek2.push_on_parent(ParseStateEdgeContent { state_id: predecessor_state_id });
+            let accepted_stack_arc = Arc::new(accepted_stack_instance);
+            Arc::make_mut(&mut self.active_state.accepted_state)
+                .merge_with_depth(usize::MAX, &accepted_stack_arc);
+        }
+
+      Explanation: This records the parse stack exactly at the reduce boundary (before applying the GOTO), using the state whose row contains the accepting goto.
+
+      6.2) Below-bottom (substring) path
+      - In the same function reduce_and_goto, locate the big “popped below bottom” block starting with:
+
+        if any_below_bottom {
+            ...
+            for goto_info in gotos_for_nt {
+                ...
+                if let Some(goto_state_id) = goto_info.goto_state_id {
+                    ...
+                    let new_gss0 = GSSNode::new(acc2);
+                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                    below_zero.push(Arc::new(new_gss2));
+                }
+                if goto_info.accept {
+                    self.accepted = true;
+                }
+            }
+
+      Immediately after computing new_gss1 and before pushing new_gss2, insert:
+
+        if goto_info.accept {
+            // Record the “accepted” stack at the reduce boundary for substring mode:
+            let accepted_arc = Arc::new(new_gss1.clone());
+            Arc::make_mut(&mut self.active_state.accepted_state)
+                .merge_with_depth(usize::MAX, &accepted_arc);
+        }
+
+      Leave the existing self.accepted = true lines as-is.
 
       Notes:
-      - This reuses the existing generic process_action_queue so semantics match Phase 1/2 logic:
-        - Only default actions are considered.
-        - Reductions are re-enqueued into the same work queue until a fixpoint (closure) is reached.
-        - clone_and_merge states (and any default-reduction results that survive) are merged into the next active state.
-      - Accepted paths will be flagged automatically via reduce_and_goto, consistent with token processing.
+      - In the cached branch (when a cached Trie-2 node is used), the accepted stack for this key would have already been recorded when this key was first seen, so it is sufficient to update accepted_state in the non-cached path above.
+
+      7) Nothing else needs changing
+      - You do not need to modify GLRParserState::is_ok, has_action_for, or logging functions. ParseState is not serialized, so no JSON changes are required.
+      - The accepted_state accumulator will now persist across steps (ParseState merges merge it), and you can inspect it or export it later if you choose to add diagnostics.
+
+      Sanity check summary of changed spots
+      - struct ParseState: added accepted_state.
+      - ParseState::new(): initialize accepted_state.
+      - GLRParser::init_parse_state_with_acc(), init_parse_state_substring_with_all_states(), init_parse_state_substring_with_everything_state(): return ParseState with accepted_state: Arc::new(GSSNode::new_fresh()).
+      - GLRParserState::enqueue(): include accepted_state: state.accepted_state.clone().
+      - GLRParserState::push_state(): include accepted_state: self.active_state.accepted_state.clone().
+      - Every “new ParseState” construction after reduce: include accepted_state: self.active_state.accepted_state.clone().
+      - ParseState::merge(): merge accepted_state along with stack.
+      - GLRParserState::reduce_and_goto():
+        - On goto.accept in the normal path: push predecessor_state_id on parent and merge into accepted_state.
+        - On goto_info.accept in below-bottom path: merge new_gss1 (before pushing goto_state_id) into accepted_state.
+
+      What this achieves
+      - Whenever a reduction triggers an accepting goto, the parser now saves a copy of the stack at the reduce boundary (with the reduced state that owns the goto at the top) into ParseState.accepted_state. This persists and merges across branches and steps, accumulating all accepting stacks.
     metadata:
   - user: |
       Using model 'gf' for code completion.
@@ -9388,7 +9621,7 @@ messages:
       --- Applying Changes ---
       Successfully replaced file: src/glr/parser.rs
     metadata:
-  - user: 'Changes committed with message: "feat: Implement process_default_reductions
-      (Phase 3)"'
+  - user: 'Changes committed with message: "feat: Add accepted_state to ParseState
+      for tracking accepting stacks"'
     metadata:
 ...

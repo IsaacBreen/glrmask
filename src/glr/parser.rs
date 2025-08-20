@@ -130,13 +130,17 @@ impl JSONConvertible for ParseStateEdgeContent {
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseState { // No longer generic
-    pub stack: Arc<GSSNode>, // GSSNode is now concrete
+pub struct ParseState {
+    pub stack: Arc<GSSNode>,
+    pub accepted_state: Arc<GSSNode>,
 }
 
 impl ParseState {
     pub fn new() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new_fresh()) }
+        ParseState {
+            stack: Arc::new(GSSNode::new_fresh()),
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
     }
 }
 
@@ -401,7 +405,10 @@ impl GLRParser {
             .map(|sid| ParseStateEdgeContent { state_id: *sid })
             .collect();
         let stack_top = GSSNode::new_fresh().push_many(all_edges);
-        ParseState { stack: Arc::new(stack_top) }
+        ParseState {
+            stack: Arc::new(stack_top),
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
     }
 
     pub fn init_glr_substring_parser_with_everything_state(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
@@ -422,7 +429,10 @@ impl GLRParser {
             state_id: self.everything_state_id,
         };
         let stack = Arc::new(GSSNode::new_fresh().push(initial_content));
-        ParseState { stack }
+        ParseState {
+            stack,
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
     }
 
     pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
@@ -433,8 +443,10 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let stack = Arc::new(GSSNode::new_fresh().push(initial_content)); // pushed node has initial_acc
-        ParseState { stack }
+        ParseState {
+            stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
     }
 
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -739,7 +751,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // and group the resulting isolated paths by their (depth, state_id) key.
         // This merges paths that are in the same logical state, reducing redundant processing.
         for peek in GSSNode::peek_iter(&state.stack) {
-            let isolated_state = ParseState { stack: peek.isolated_parent() };
+            let isolated_state = ParseState {
+                stack: peek.isolated_parent(),
+                accepted_state: state.accepted_state.clone(),
+            };
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
             work_map.entry(WorkMapKey(depth, state_id))
@@ -755,7 +770,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
         let new_gss_node_instance = peek.push_on_parent(new_content);
-        ParseState { stack: Arc::new(new_gss_node_instance) }
+        ParseState {
+            stack: Arc::new(new_gss_node_instance),
+            accepted_state: self.active_state.accepted_state.clone(),
+        }
     }
 
     /// Shared inner loop for phase 1 and phase 2.
@@ -791,7 +809,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
                             let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                             if !s_new_arc.is_empty() {
-                                let new_parse_state = ParseState { stack: s_new_arc };
+                                let new_parse_state = ParseState {
+                                    stack: s_new_arc,
+                                    accepted_state: self.active_state.accepted_state.clone(),
+                                };
                                 if let Some(ref mut r_map) = reduce_map {
                                     Self::enqueue(r_map, new_parse_state);
                                 } else {
@@ -812,7 +833,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                     let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                     if !s_new_arc.is_empty() {
-                                        let new_parse_state = ParseState { stack: s_new_arc };
+                                        let new_parse_state = ParseState {
+                                            stack: s_new_arc,
+                                            accepted_state: self.active_state.accepted_state.clone(),
+                                        };
                                         if let Some(ref mut r_map) = reduce_map {
                                             Self::enqueue(r_map, new_parse_state);
                                         } else {
@@ -839,7 +863,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         config,
                                     );
                                     if !s_new_arc.is_empty() {
-                                        let new_parse_state = ParseState { stack: s_new_arc };
+                                        let new_parse_state = ParseState {
+                                            stack: s_new_arc,
+                                            accepted_state: self.active_state.accepted_state.clone(),
+                                        };
                                         if let Some(ref mut r_map) = reduce_map {
                                             Self::enqueue(r_map, new_parse_state);
                                         } else {
@@ -936,6 +963,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if goto.accept {
                         crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
                         self.accepted = true;
+
+                        // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
+                        let accepted_stack_instance = peek2.push_on_parent(ParseStateEdgeContent { state_id: predecessor_state_id });
+                        let accepted_stack_arc = Arc::new(accepted_stack_instance);
+                        Arc::make_mut(&mut self.active_state.accepted_state)
+                            .merge_with_depth(usize::MAX, &accepted_stack_arc);
                     }
 
                     if let Some(goto_state_id) = goto.state_id {
@@ -1137,6 +1170,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 acc2.trie2_nodes = used_dests.clone();
                                 let new_gss0 = GSSNode::new(acc2);
                                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                if goto_info.accept {
+                                    // Record the “accepted” stack at the reduce boundary for substring mode:
+                                    let accepted_arc = Arc::new(new_gss1.clone());
+                                    Arc::make_mut(&mut self.active_state.accepted_state)
+                                        .merge_with_depth(usize::MAX, &accepted_arc);
+                                }
                                 let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                                 below_zero.push(Arc::new(new_gss2));
                             }
@@ -1573,6 +1612,7 @@ impl ParseState { // No longer generic
         // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
         // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
         Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
     }
 }
 
