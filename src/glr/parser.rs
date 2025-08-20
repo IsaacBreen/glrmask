@@ -27,11 +27,11 @@ use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndR
 use crate::datastructures::trie::EdgeInserter;
 
 // A single combined action for a given (state,row) and token:
-// - Token(...) is a concrete per-token action from the row's action map
+// - Normal(...) is a concrete per-token action from the row's action map
 // - Default(...) is the row's default reduction (token-independent)
 #[derive(Debug)]
 enum Action<'a> {
-    Token(&'a Stage7ShiftsAndReducesLookaheadValue),
+    Normal(&'a Stage7ShiftsAndReducesLookaheadValue),
     Default(&'a DefaultReduce),
 }
 
@@ -777,13 +777,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
             if let Some(action) = action_opt {
                 for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
-                        Action::Token(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                             crate::debug!(5, "Action: Shift to state {}", to.0);
                             let new_parse_state =
                                 self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                             shifted_states_todo.push_back(new_parse_state);
                         }
-                        Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id: nt,
                             len,
                             ..
@@ -799,7 +799,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
                         }
-                        Action::Token(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
+                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                             crate::debug!(5, "Action: Split with shift and reduces");
                             if let Some(to) = shift {
                                 crate::debug!(5, "Action (Split): Shift to state {}", to.0);
@@ -873,7 +873,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 move |row| {
                     row.shifts_and_reduces_without_default_reduce
                         .get(&tid)
-                        .map(Action::Token)
+                        .map(Action::Normal)
                 },
                 config,
             );
@@ -893,7 +893,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     // Prefer a concrete token action; otherwise use the default reduce.
                     row.shifts_and_reduces_full
                         .get(&tid)
-                        .map(Action::Token)
+                        .map(Action::Normal)
                 },
                 config,
             );
@@ -942,7 +942,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(goto_state_id) = goto.state_id {
                         let next_row = &self.parser.table[&goto_state_id];
                         match action_selector(next_row) {
-                            Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
+                            Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
                                 // Token-based unit reduction: continue the chain.
                                 current_nt = *next_nt;
                                 continue;
@@ -1269,8 +1269,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for peek in GSSNode::peek_iter(&self.active_state.stack) {
                     let row = &self.parser.table[&peek.edge_value().state_id];
                     let action_opt = match self.phase {
-                        ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Token),
-                        ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Token).or_else(|| Some(Action::Default(&row.default_reduce))),
+                        ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal),
+                        ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Normal).or_else(|| Some(Action::Default(&row.default_reduce))),
                     };
                     if let Some(action) = action_opt {
                         crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
