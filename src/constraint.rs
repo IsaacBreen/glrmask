@@ -1816,7 +1816,11 @@ impl<'r> Precomputer<'r> {
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
-                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |node_value, edge_value| {
+                                        crate::debug!(7, "Before updating live tokens {:?} |= {:?}", node_value.live_tokens, edge_value);
+                                        node_value.live_tokens |= edge_value;
+                                        crate::debug!(7, "After updating live tokens: {:?}", node_value.live_tokens);
+                                    },
                                     |ev, t| *ev &= &t.live_tokens,
                                 );
                                 // Print the source node.
