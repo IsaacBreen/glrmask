@@ -433,7 +433,7 @@ impl GrammarConstraint {
 
             let glr_state;
 
-            if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+            if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                 for state_id in parser.table.keys() {
                     let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
                         PrecomputedNodeContents::internal(),
@@ -468,7 +468,7 @@ impl GrammarConstraint {
                 )));
                 let mut inserter = EdgeInserter::new(
                     trie2_root.clone(),
-                    (0, None),
+                    (0, Some(parser.everything_state_id)),
                     LLMTokenBV::ones(internal_max_llm_token + 1),
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
