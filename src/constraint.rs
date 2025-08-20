@@ -1884,7 +1884,7 @@ impl<'r> Precomputer<'r> {
                                 let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
                                     if let Some(child_arc) = child_node_ptr.upgrade() {
                                         // if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) { // Removed
-                                        if (child_arc.read().unwrap().value.live_tokens.clone() & &edge_bv).is_empty() {
+                                        if (child_arc.read().unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read().unwrap().value.end {
                                             Some(child_arc)
                                         } else { None }
                                     } else { None }
