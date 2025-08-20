@@ -46,12 +46,16 @@ pub struct PrecomputedNodeContents {
 }
 
 impl PrecomputedNodeContents {
-    pub fn no_end() -> Self {
+    pub fn internal() -> Self {
         Self { end: false, live_tokens: LLMTokenBV::zeros() }
     }
 
-    pub fn end() -> Self {
+    pub fn leaf() -> Self {
         Self { end: true, live_tokens: LLMTokenBV::zeros() }
+    }
+
+    pub fn root(internal_max_llm_token_id: usize) -> Self {
+        Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
     }
 }
 
@@ -1116,7 +1120,7 @@ pub fn merge_trie2_nodes_if_needed(
             let edge_key = (0, None);
 
             // Shared fallback destination (for sources without any eligible existing child).
-            let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+            let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
             for existing_trie2_node in &new_acc.trie2_nodes {
                 let source_arc = existing_trie2_node.as_arc().clone();
@@ -2219,9 +2223,9 @@ mod tests {
         // constraint propagation (narrowing).
 
         // --- GSS 1 Setup ---
-        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let trie2_node3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_node3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         let mut acc_l1 = empty_acc();
         acc_l1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
@@ -2278,12 +2282,12 @@ mod tests {
         // but different sub-structures would incorrectly collapse the distinct sub-structures.
 
         // --- Shared Nodes ---
-        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc1 = empty_acc();
         acc1.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node1.clone()));
         let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
 
-        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc2 = empty_acc();
         acc2.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node2.clone()));
         let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
@@ -2332,7 +2336,7 @@ mod tests {
         // Merged should have two predecessors from root via edge 1, at different depths.
 
         // --- GSS A setup ---
-        let trie2_node_a = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node_a = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc_a = empty_acc();
         acc_a.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node_a.clone()));
         let leaf_a = Arc::new(GSSNode::new(acc_a));
@@ -2344,7 +2348,7 @@ mod tests {
         );
 
         // --- GSS B setup ---
-        let trie2_node_b = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let trie2_node_b = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc_b = empty_acc();
         acc_b.trie2_nodes.insert(ArcPtrWrapper::new(trie2_node_b.clone()));
         let leaf_b = Arc::new(GSSNode::new(acc_b));
@@ -2382,8 +2386,8 @@ mod tests {
         // trie2 nodes.
 
         // --- Build two distinct trie2 nodes ---
-        let t1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
-        let t2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end())));
+        let t1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let t2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         // Helper to build one tower given a leaf with a unique trie2 node.
         let build_tower_from_leaf = |leaf: Arc<GSSNode>| -> GSSNode {

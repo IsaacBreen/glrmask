@@ -425,7 +425,7 @@ impl GrammarConstraint {
                 continue;
             }
             let trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
-                PrecomputedNodeContents::no_end(),
+                PrecomputedNodeContents::internal(),
             )));
             precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
 
@@ -436,7 +436,7 @@ impl GrammarConstraint {
             if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                 for state_id in parser.table.keys() {
                     let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
-                        PrecomputedNodeContents::no_end(),
+                        PrecomputedNodeContents::internal(),
                     )));
 
                     let mut inserter = EdgeInserter::new(
@@ -463,7 +463,7 @@ impl GrammarConstraint {
                 glr_state = parser.init_glr_parser_from_parse_state(parse_state);
             } else {
                 let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::no_end(),
+                    PrecomputedNodeContents::internal(),
                 )));
                 let mut inserter = EdgeInserter::new(
                     trie2_root.clone(),
@@ -492,7 +492,7 @@ impl GrammarConstraint {
 
         }
 
-        let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::end(), )));
+        let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::leaf(), )));
 
         crate::debug!(2, "Running special_map_grouped for Trie 2 precomputation");
         Trie::special_map_grouped(
@@ -882,7 +882,7 @@ impl<'r> Precomputer<'r> {
             roots.insert(
                 sid,
                 Arc::new(RwLock::new(PrecomputeNode::new(
-                    PrecomputedNodeContents::no_end(),
+                    PrecomputedNodeContents::internal(),
                 ))),
             );
         }
@@ -913,7 +913,7 @@ impl<'r> Precomputer<'r> {
             terminal_follow_map,
             ignore_terminal_id,
             // tags: RefCell::new(HashMap::new()), // Removed
-            end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
+            end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::leaf())))),
         }
     }
 
@@ -1650,7 +1650,7 @@ impl<'r> Precomputer<'r> {
 
                     // a. Create a new intermediate node `I`.
                     let intermediate_node = Arc::new(RwLock::new(PrecomputeNode::new(
-                        PrecomputedNodeContents::no_end(),
+                        PrecomputedNodeContents::internal(),
                     )));
 
                     // b. Add edge I --(gtid)--> D
@@ -1878,7 +1878,7 @@ impl<'r> Precomputer<'r> {
                                 // drop(tags); // Removed
                             }
 
-                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
+                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::internal()).unwrap();
                             let result_node_ptr = NodePtr::Strong(ArcPtrWrapper::new(result_node.clone()));
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
                             // *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv; // Removed

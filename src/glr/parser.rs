@@ -991,7 +991,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         // Pooled fallback destination (created once per source_state_id)
                                         let new_trie2_node = trie2_dst_nodes
                                             .entry(goto_info.source_state_id)
-                                            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                                            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
                                             .clone();
 
                                         // Store the pooled new node in the cache under this key (same as before).
@@ -1116,7 +1116,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some(goto_state_id) = goto_info.goto_state_id {
                                     let new_trie2_node = trie2_dst_nodes
                                         .entry(goto_info.source_state_id)
-                                        .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::no_end()))))
+                                        .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
                                         .clone();
                                     self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
 
