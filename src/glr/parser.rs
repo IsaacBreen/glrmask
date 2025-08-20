@@ -7,6 +7,7 @@ use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGoto};
+use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -750,8 +751,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     /// Shared inner loop for phase 1 and phase 2.
     /// `action_selector` chooses between the phase-1 or phase-2 action map.
-    fn process_action_queue<'b, F>(
-        &'b mut self,
+    fn process_action_queue<F>(
+        &mut self,
+        token_id: TerminalID,
         work_map: &mut WorkMap,
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
@@ -759,11 +761,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
         use_full_action_map: bool,
         config: &ProcessTokenAdvancedConfig,
     ) where
-        F: Fn(&'b Row) -> Option<&'b Stage7ShiftsAndReducesLookaheadValue>,
+        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
         while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
             let row = &self.parser.table[&state_id];
-            if let Some(action) = action_selector(row) {
+            if let Some(action) = action_selector(row).get(&token_id) {
                 for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
@@ -778,7 +780,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             ..
                         } => {
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
                                 if let Some(ref mut r_map) = reduce_map {
@@ -799,7 +801,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
                                         if let Some(ref mut r_map) = reduce_map {
@@ -813,6 +815,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     }
                 }
+            } else {
+                crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
             }
         }
         self.below_bottom_cache.clear();
@@ -822,12 +826,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
-            let action_selector = move |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
             self.process_action_queue(
+                token_id,
                 phase1_todo,
                 Some(phase2_todo),
                 shifted_states_todo,
-                action_selector,
+                |row| &row.shifts_and_reduces_without_default_reduce,
                 false, // Not using full action map
                 config,
             );
@@ -838,29 +842,31 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
-            let action_selector = move |row: &Row| row.shifts_and_reduces_full.get(&token_id);
             self.process_action_queue(
+                token_id,
                 phase2_todo,
                 None,
                 shifted_states_todo,
-                action_selector,
+                |row| &row.shifts_and_reduces_full,
                 true, // Using full action map
                 config,
             );
+            self.phase = ParserPhase::ReadyForDefaultReductions;
         });
     }
 
     #[time_it("GLRParserState::reduce_and_goto")]
-    fn reduce_and_goto<'b, F>(
-        &'b mut self,
+    fn reduce_and_goto<F>(
+        &mut self,
         peek: &GSSPeek,
         nt: NonTerminalID,
         len: usize,
+        token_id: TerminalID,
         action_selector: &F,
         config: &ProcessTokenAdvancedConfig,
     ) -> Arc<GSSNode>
     where
-        F: Fn(&'b Row) -> Option<&'b Stage7ShiftsAndReducesLookaheadValue>,
+        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -891,7 +897,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(goto_state_id) = goto.state_id {
                         let next_row = &self.parser.table[&goto_state_id];
                         // Check if the action in the new state for the current token is a len-1 reduce.
-                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row) {
+                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
                             // It is. Continue the chain by updating the non-terminal and looping.
                             current_nt = *next_nt;
                             continue; // Continue the fast loop.
@@ -899,7 +905,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // It's not a len-1 reduce. This is our final state for this chain.
                             let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                             out.push(Arc::new(new_gss_node));
-                            timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row)), {});
+                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
                             break; // Exit the fast loop for this path
                         }
                     } else {
@@ -919,7 +925,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
  
-        timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
+        // Handle “popped below bottom” cases:
+        //
+        // If the reduction pops below the bottom, we have recognized only the
+        // suffix β of a rule A ::= α β. Per substring parsing semantics,
+        // α lies before the substring start and must be considered unknown (but derivable),
+        // so we continue in every state that has a GOTO on A. We also merge the Acc
+        // accumulated along these paths to create a new virtual root to push onto.
+        // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
+            timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
             if any_below_bottom {
                 let gotos_for_nt_storage; // To hold the Vec for ContinueFromEverything
                 let gotos_for_nt: &[SubstringGoto] = match config.below_bottom_mode {
