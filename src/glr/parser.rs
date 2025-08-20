@@ -895,7 +895,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     row.shifts_and_reduces_full
                         .get(&tid)
                         .map(Action::Token)
-                        .or_else(|| Some(Action::Default(&row.default_reduce)))
                 },
                 config,
             );
