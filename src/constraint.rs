@@ -578,31 +578,13 @@ impl GrammarConstraint {
 
                             let edge_key = (0, None);
 
-                            // Build an iterator of all eligible strong children under edge_key = (0, None)
-                            let eligible_iter_builder = || {
-                                let g = src_arc.read().expect("poison");
-                                let mut v = Vec::new();
-                                if let Some(dest_map) = g.children().get(&edge_key) {
-                                    for (node_ptr, _ev) in dest_map.iter() {
-                                        if !node_ptr.is_strong() { continue; }
-                                        if let Some(dest_arc) = node_ptr.upgrade() {
-                                            let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                            if (&dl & &tokens_to_push).is_empty() {
-                                                v.push(dest_arc.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                                v.into_iter()
-                            };
-
                             let mut inserter = EdgeInserter::new(
                                 src_arc.clone(),
                                 edge_key,
                                 tokens_to_push.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
-                            ).try_destinations_iter_with(eligible_iter_builder);
+                            );
 
                             inserter = inserter.try_destination(trie2_end.clone());
 
