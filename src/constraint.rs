@@ -567,8 +567,10 @@ impl GrammarConstraint {
                     for gss_root in glr_s.active_state.stack.get_roots() {
                         let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
+                        crate::debug!(4, "Trie2: For GSS root, active LLM tokens: {:?}", active_llm_tokens_for_root);
 
                         for src_wr in gss_root_acc.trie2_nodes.iter() {
+                            crate::debug!(4, "Trie2: Considering source Trie2 node for end edge insertion");
                             let src_arc = src_wr.as_arc().clone();
                             let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
                             let tokens_to_push = &active_llm_tokens_for_root & &src_live;
