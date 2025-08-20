@@ -70,7 +70,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
@@ -687,10 +687,6 @@ struct WorkMapKey(usize, StateID);
 
 impl PartialOrd for WorkMapKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // This ordering is chosen for performance. It processes deeper stacks first.
-        // The idea is that deeper stacks are more constrained and processing them
-        // first might lead to quicker pruning of invalid paths.
-        // Sorting by depth descending, then by state_id ascending.
         Some(self.cmp(other))
     }
 }
@@ -904,7 +900,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     1 << (32 - (i as u32 - 1).leading_zeros())
                 };
  
-                timeit!(format!("GLRParserState::reduce_and_goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
+                timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
             }
         }
  
@@ -915,7 +911,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // α lies before the substring start and must be considered unknown (but derivable),
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
-        // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
+        // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
             timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
             if any_below_bottom {
                 match config.below_bottom_mode {
@@ -931,9 +927,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let mut acc: Acc = acc_arc.as_ref().clone();
                                 let active_llm_tokens = acc.union_llm_tokens();
                                 let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                                let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
-
                                 for goto_info in gotos_for_nt {
                                     // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                                     let cache_key = BelowBottomCacheKey {
@@ -949,15 +942,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         for existing_trie2_node in &trie2_nodes {
                                             timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
                                             // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
-                                            let inserter = EdgeInserter::new(
-                                                existing_trie2_node.as_arc().clone(),
-                                                (k, Some(goto_info.source_state_id)),
-                                                active_llm_tokens.clone(),
-                                                |e, n| *e |= n,
-                                                |_, _| {},
-                                            ).to_destination_weakly(cached_trie2_node.as_arc().clone());
-                                            inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
-                                        }
+                        let inserter = EdgeInserter::new(
+                            existing_trie2_node.as_arc().clone(),
+                            (k, Some(goto_info.source_state_id)),
+                            active_llm_tokens.clone(),
+                            |e, n| *e |= n,
+                            |_, _| {},
+                        ).to_destination_weakly(cached_trie2_node.as_arc().clone());
+                        inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                    }
                                         });
 
                                         if goto_info.accept {
@@ -969,6 +962,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         continue;
                                     }
                                     if let Some(goto_state_id) = goto_info.goto_state_id {
+                                        let edge_key = (k, Some(goto_info.source_state_id));
+                                        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                                        let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+
                                         // Pooled fallback destination (created once per source_state_id)
                                         let new_trie2_node = trie2_dst_nodes
                                             .entry(goto_info.source_state_id)
@@ -1237,7 +1234,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     timeit!(format!("GLRParserState::step::phase3::reduce NT '{}' (len {}) in state {}",
                                     self.parser.non_terminal_map.get_by_right(&r.nonterminal_id).unwrap(),
                                     r.len, state_id.0), {
-                    // timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {});
+                    // timeit!(format!("GLRParserState::step::phase3::reduce NT (len {})", r.len), {
                         // For each peek in the current state, reduce and goto.
                         // This is the core of phase 3: reducing all stacks with the same state_id.
                         // We will merge the results into a new stack part.
@@ -1711,3 +1708,4 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
+

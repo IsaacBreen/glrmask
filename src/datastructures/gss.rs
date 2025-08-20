@@ -447,7 +447,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
         let final_node = if iter.len() == 0 {
             first
         } else {
-            let mut merged_node = first.as_ref().clone();
+            let mut merged_node = (*first).clone();
             for other_arc in iter {
                 merged_node.merge_with_depth(1, &other_arc);
             }
@@ -1166,7 +1166,6 @@ pub fn merge_trie2_nodes_if_needed(
                 dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
             }
 
-            // After the loop, update destinations’ live_tokens in one go:
             for (dst_wr, added) in &dest_agg {
                 let mut dg = dst_wr.as_arc().write().expect("poison");
                 dg.value.live_tokens |= added.clone();
@@ -1246,7 +1245,7 @@ pub fn fuse_predecessors_recursive(
         let final_pred_arc = if iter.len() == 0 {
             first
         } else {
-            let mut merged_node = first.as_ref().clone();
+            let mut merged_node = (*first).clone();
             for other_arc in iter {
                 merged_node.merge_with_depth(1, &other_arc);
             }

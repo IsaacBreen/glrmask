@@ -40,7 +40,7 @@ use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
-use crate::glr::items::{LRMode, LR_MODE};
+use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 
@@ -353,6 +353,7 @@ impl GrammarConstraint {
         parser:           Option<&GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,                       
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
@@ -401,7 +402,7 @@ impl GrammarConstraint {
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
-        possible_matches: &mut BTreeMap<TerminalID, BTreeMap<TerminalID, LLMTokenBV>>,
+        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
         crate::debug!(2, "Precomputing Trie 2...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = true;
@@ -558,8 +559,8 @@ impl GrammarConstraint {
                         false,
                         false,
                     );
-                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                    let edge_key = (0, None);
+                    let mut end_dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                    let end_wr = ArcPtrWrapper::new(trie2_end.clone());
 
                     for gss_root in glr_s.active_state.stack.get_roots() {
                         let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
@@ -704,19 +705,22 @@ impl GrammarConstraint {
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
+            for token_match in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node.reachable_token_ids();
+                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
             if let Some(final_state_val) = exec_result.end_state {
+                let final_tokenizer_state_id = TokenizerStateID(final_state_val);
+                
                 let matches_possible_from_new_tokenizer_state: BTreeSet<_> = tokenizer
-                    .tokens_accessible_from_state(TokenizerStateID(final_state_val))
+                    .tokens_accessible_from_state(final_tokenizer_state_id)
                     .into_iter()
                     .collect();
 
@@ -731,7 +735,7 @@ impl GrammarConstraint {
                 if !new_grammar_tokens_to_look_for.is_empty() {
                     let next_results = Self::compute_possible_matches_for_vocab_node(
                         tokenizer,
-                        child_vocab_node, // Recurse with the child node
+                        child_vocab_node_ref, // Recurse with the child node
                         final_tokenizer_state_id,
                         cache,
                     );
@@ -1540,7 +1544,9 @@ impl<'r> Precomputer<'r> {
         if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
             return cached_bv.clone();
         }
-        // Mark as visited with an empty set to handle cycles.
+        // Insert a temporary empty BV to break cycles. If we revisit this node during this
+        // recursion, it will return an empty set, which is correct as no new live paths
+        // have been found through it yet.
         live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
 
         let node_arc = node_wrapper.upgrade().unwrap();
@@ -1766,20 +1772,20 @@ impl<'r> Precomputer<'r> {
         let mut node_guard = node_arc.write().unwrap();
         *node_guard.children_mut() = new_children_map;
         node_guard.recompute_max_depth();
+        // The live_tokens field will be recomputed by prune_dead_paths after merging.
     }
 
     let canonical_arc = {
-        let node_guard = node_arc.read().unwrap();
-        let node_content = (*node_guard).clone();
-        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-    };
+            let node_guard = node_arc.read().unwrap();
+            let node_content = (*node_guard).clone();
+            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+        };
 
-    // Update the visited map with the final canonical arc.
-    visited.insert(node_ptr, canonical_arc.clone());
-    canonical_arc
-}
+        // Update with the final canonical arc.
+        visited.insert(node_ptr, canonical_arc.clone());
+        canonical_arc
+    }
 
-impl<'r> Precomputer<'r> {
     fn finish(
         mut self,
         token_name_map: &BiBTreeMap<Terminal, usize>,
@@ -1952,9 +1958,48 @@ impl<'a> Eq for GrammarConstraintState<'a> {}
 
 impl<'a> Display for GrammarConstraintState<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // TODO: this is bad. make this better
-        // Display the stack
-        self.log_gss("    ", TerminalID(0), false, false);
+        writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+        if self.state.is_empty() {
+            return Ok(());
+        }
+
+        let mut gss_roots = Vec::new();
+        let mut tokenizer_state_info = Vec::new();
+
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if !glr_state.active_state.stack.is_empty() {
+                gss_roots.push(glr_state.active_state.stack.clone());
+                tokenizer_state_info.push(format!(
+                    "  - Tokenizer State {:>3}: GSS Root ({} predecessors)",
+                    tokenizer_state_id.0,
+                    glr_state.active_state.stack.num_predecessors()
+                ));
+            } else {
+                tokenizer_state_info.push(format!(
+                    "  - Tokenizer State {:>3}: (Empty GSS)",
+                    tokenizer_state_id.0
+                ));
+            }
+        }
+
+        for info in tokenizer_state_info {
+            writeln!(f, "{}", info)?;
+        }
+
+        if !gss_roots.is_empty() {
+            writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+            let config = GSSPrintConfig {
+                labels: None,
+                max_nodes: 50,
+                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+                verbose: false,
+            };
+            let (gss_str, _) =
+                crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+            write!(f, "{}", gss_str)?;
+        }
+
         Ok(())
     }
 }
@@ -2683,3 +2728,4 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
+
