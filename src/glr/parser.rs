@@ -965,6 +965,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
                                             // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
                         let inserter = EdgeInserter::new(
+                            |ev, t| *ev &= &t.live_tokens,
                             existing_trie2_node.as_arc().clone(),
                             (k, Some(goto_info.source_state_id)),
                             active_llm_tokens.clone(),
@@ -1024,6 +1025,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             };
 
                                             let mut inserter = EdgeInserter::new(
+                                                |ev, t| *ev &= &t.live_tokens,
                                                 source_arc.clone(),
                                                 edge_key,
                                                 tokens_to_push.clone(),
@@ -1098,6 +1100,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
                                     for existing_trie2_node in &trie2_nodes {
                                         let inserter = EdgeInserter::new(
+                                            |ev, t| *ev &= &t.live_tokens,
                                             existing_trie2_node.as_arc().clone(),
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
@@ -1122,6 +1125,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                                     for existing_trie2_node in &trie2_nodes {
                                         let inserter = EdgeInserter::new(
+                                            |ev, t| *ev &= &t.live_tokens,
                                             existing_trie2_node.as_arc().clone(),
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),

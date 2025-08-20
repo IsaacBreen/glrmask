@@ -440,6 +440,7 @@ impl GrammarConstraint {
                     )));
 
                     let mut inserter = EdgeInserter::new(
+                        |ev, t| *ev &= &t.live_tokens,
                         trie2_root.clone(),
                         (0, Some(*state_id)),
                         LLMTokenBV::ones(internal_max_llm_token + 1),
@@ -466,6 +467,7 @@ impl GrammarConstraint {
                     PrecomputedNodeContents::internal(),
                 )));
                 let mut inserter = EdgeInserter::new(
+                    |ev, t| *ev &= &t.live_tokens,
                     trie2_root.clone(),
                     (0, None),
                     LLMTokenBV::ones(internal_max_llm_token + 1),
@@ -582,6 +584,7 @@ impl GrammarConstraint {
                             let edge_key = (0, None);
 
                             let mut inserter = EdgeInserter::new(
+                                |ev, t| *ev &= &t.live_tokens,
                                 src_arc.clone(),
                                 edge_key,
                                 tokens_to_push.clone(),
@@ -1829,6 +1832,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
+                                    |ev, t| *ev &= &t.live_tokens,
                                     src_node_wrapper.upgrade().unwrap().clone(),
                                     Some(terminal_id),
                                     edge_bv,
@@ -1851,6 +1855,7 @@ impl<'r> Precomputer<'r> {
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
+                                |ev, t| *ev &= &t.live_tokens,
                                 src_node_wrapper.upgrade().unwrap().clone(),
                                 Some(terminal_id),
                                 edge_bv.clone(),
@@ -1893,6 +1898,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
+                                    |ev, t| *ev &= &t.live_tokens,
                                     src_node_wrapper.upgrade().unwrap().clone(),
                                     Some(terminal_id),
                                     edge_bv,

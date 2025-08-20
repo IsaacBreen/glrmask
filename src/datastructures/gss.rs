@@ -1151,6 +1151,7 @@ pub fn merge_trie2_nodes_if_needed(
                 };
 
                 let mut inserter = EdgeInserter::new(
+                    |ev, t| *ev &= &t.live_tokens,
                     source_arc.clone(),
                     edge_key,
                     tokens_to_push.clone(),
