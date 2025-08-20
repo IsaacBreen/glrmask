@@ -969,7 +969,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let mut below_zero = Vec::new();
 
                     crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
-                    println!("GLRParserState::reduce_and_goto: States to push after reduction (precomputed): {:?}", gotos_for_nt);
                     let mut trie2_dst_nodes = HashMap::new();
                     for (k, acc_arc) in popper.below_bottom {
                         let mut acc: Acc = acc_arc.as_ref().clone();
