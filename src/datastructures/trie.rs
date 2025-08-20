@@ -1802,6 +1802,13 @@ where
         update_node_value: FUpdateT,
         merge_edge_value_and_source_node_value: FMergeEV_T,
     ) -> Self {
+        let mut edge_value = edge_value;
+        let mut merge_edge_value_and_source_node_value = merge_edge_value_and_source_node_value;
+        {
+            let source_guard = source_arc.read().expect("RwLock poisoned while reading source node value for edge value merge");
+            merge_edge_value_and_source_node_value(&mut edge_value, &source_guard.value);
+        }
+
         EdgeInserter {
             source_arc,
             edge_key,
