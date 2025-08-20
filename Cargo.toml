@@ -38,9 +38,5 @@ reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 
 [profile.dev]
 #codegen-backend = "cranelift"
-debug = 0
-#debug = true
+debug = true
 #opt-level = 1
-
-[profile.test]
-debug = 0
