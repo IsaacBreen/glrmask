@@ -1797,11 +1797,19 @@ where
     pub fn new(
         source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
-        edge_value: EV,
+        mut edge_value: EV,
         merge_edge_value: FMergeEV,
         update_node_value: FUpdateT,
-        merge_edge_value_and_source_node_value: FMergeEV_T,
+        mut merge_edge_value_and_source_node_value: FMergeEV_T,
     ) -> Self {
+        // Before doing anything else, merge the edge value with the source node's value.
+        // This allows the edge value to be influenced by its source context before it's
+        // used for insertion or merging with other edges.
+        {
+            let source_guard = source_arc.read().expect("RwLock poisoned while locking source in EdgeInserter::new");
+            (merge_edge_value_and_source_node_value)(&mut edge_value, &source_guard.value);
+        }
+
         EdgeInserter {
             source_arc,
             edge_key,
