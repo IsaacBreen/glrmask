@@ -1001,7 +1001,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 v.into_iter()
                                             };
 
-                                            let inserter = EdgeInserter::new(
+                                            let mut inserter = EdgeInserter::new(
                                                 source_arc.clone(),
                                                 edge_key,
                                                 tokens_to_push.clone(),
@@ -1009,11 +1009,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 |_, _| {}, // defer live_tokens
                                             ).try_destinations_iter_with(eligible_iter_builder);
 
-                                            let inserter = if inserter.clone_into_option().is_none() {
-                                                inserter.try_destination_auto(new_trie2_node.clone())
-                                            } else {
-                                                inserter
-                                            };
+                                            inserter = inserter.try_destination_auto(new_trie2_node.clone());
 
                                             let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                             let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());

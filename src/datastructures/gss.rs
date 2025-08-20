@@ -1146,7 +1146,7 @@ pub fn merge_trie2_nodes_if_needed(
                     v.into_iter()
                 };
 
-                let inserter = EdgeInserter::new(
+                let mut inserter = EdgeInserter::new(
                     source_arc.clone(),
                     edge_key,
                     tokens_to_push.clone(),
@@ -1154,11 +1154,7 @@ pub fn merge_trie2_nodes_if_needed(
                     |_, _| {}, // defer live_tokens updates; do them in bulk at the end
                 ).try_destinations_iter_with(eligible_iter_builder);
 
-                let inserter = if inserter.clone_into_option().is_none() {
-                    inserter.try_destination_auto(fallback_dest.clone())
-                } else {
-                    inserter
-                };
+                inserter = inserter.try_destination_auto(fallback_dest.clone());
 
                 let final_dest_arc = inserter.clone_into_option().expect("merge_trie2_nodes_if_needed: insert failed");
                 let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
