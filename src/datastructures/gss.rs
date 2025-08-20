@@ -1137,7 +1137,7 @@ pub fn merge_trie2_nodes_if_needed(
                             if !node_ptr.is_strong() { continue; }
                             if let Some(dest_arc) = node_ptr.upgrade() {
                                 let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                if (&dl & &tokens_to_push).is_empty() {
+                                if (&dl & &tokens_to_push).is_empty() && !dest_arc.read().unwrap().value.end {
                                     v.push(dest_arc.clone());
                                 }
                             }

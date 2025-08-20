@@ -1014,7 +1014,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                         if !node_ptr.is_strong() { continue; }
                                                         if let Some(dest_arc) = node_ptr.upgrade() {
                                                             let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                                            if (&dl & &tokens_to_push).is_empty() {
+                                                            if (&dl & &tokens_to_push).is_empty() && !dest_arc.read().expect("poison").value.end {
                                                                 v.push(dest_arc.clone());
                                                             }
                                                         }
