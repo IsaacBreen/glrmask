@@ -1841,6 +1841,7 @@ where
 
             if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
                 let new_ev = self.edge_value.take().unwrap();
+                crate::debug!(7, "Merging edge value {:?} into existing edge value {:?} for edge {:?} to node {:p}", new_ev, existing_ev_mut, self.edge_key, Arc::as_ptr(&destination));
                 (self.merge_edge_value)(existing_ev_mut, new_ev);
                 let updated_ev = existing_ev_mut.clone();
                 self.result = Some(destination.clone());
@@ -1857,7 +1858,7 @@ where
         }
 
         if let Some((dest_arc, ev)) = update_info {
-            println!("Updating node value for destination {:p} with edge value {:?}", Arc::as_ptr(&dest_arc), ev);
+            crate::debug!(7, "Updating node value for destination {:p} with edge value {:?}. self.edge_value: {:?}", Arc::as_ptr(&dest_arc), ev, self.edge_value);
             (self.update_node_value)(&mut dest_arc.write().unwrap().value, &ev);
         }
 
