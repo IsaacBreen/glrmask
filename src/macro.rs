@@ -50,8 +50,8 @@ macro_rules! __debug_impl {
                 // #[cfg(feature = "debug")]
                 { // Use a block to scope the 'now' variable and the import
                     // Make chrono, file! and line! available inside the macro expansion
-                    use chrono::Local;
-                    let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
+                    // use chrono::Local;
+                    // let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                     println!(
                         // The complete format string is constructed here
                         concat!("[DEBUG] {}] {}:{}: ", $user_fmt),
