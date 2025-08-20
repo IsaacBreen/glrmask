@@ -972,7 +972,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         self.accepted = true;
 
                         // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
-                        let accepted_stack_instance = peek2.push_on_parent(ParseStateEdgeContent { state_id: predecessor_state_id });
+                        let accepted_stack_instance = peek2.isolated_parent();
                         let accepted_stack_arc = Arc::new(accepted_stack_instance);
                         Arc::make_mut(&mut self.active_state.accepted_state)
                             .merge_with_depth(usize::MAX, &accepted_stack_arc);
@@ -1179,7 +1179,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                 if goto_info.accept {
                                     // Record the “accepted” stack at the reduce boundary for substring mode:
-                                    let accepted_arc = Arc::new(new_gss1.clone());
+                                    let accepted_arc = Arc::new(new_gss0);
                                     Arc::make_mut(&mut self.active_state.accepted_state)
                                         .merge_with_depth(usize::MAX, &accepted_arc);
                                 }
@@ -1217,6 +1217,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         // Reset acceptance flag for the new token
         self.accepted = false;
+        self.active_state.accepted_state = Arc::new(GSSNode::new_fresh());
 
         self.below_bottom_cache.clear();
 
