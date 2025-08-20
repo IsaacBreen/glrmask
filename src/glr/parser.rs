@@ -965,8 +965,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             _ => {
                                 // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
                                 // finalize at this GOTO and stop chaining.
-                                let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                out.push(Arc::new(final_node));
+                                out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 break;
                             }
                         }
