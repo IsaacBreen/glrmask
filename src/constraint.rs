@@ -562,6 +562,8 @@ impl GrammarConstraint {
                     let mut end_dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                     let end_wr = ArcPtrWrapper::new(trie2_end.clone());
 
+                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+
                     for gss_root in glr_s.active_state.stack.get_roots() {
                         let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
@@ -573,6 +575,8 @@ impl GrammarConstraint {
                             if tokens_to_push.is_empty() {
                                 continue;
                             }
+
+                            let edge_key = (0, None);
 
                             // Build an iterator of all eligible strong children under edge_key = (0, None)
                             let eligible_iter_builder = || {
