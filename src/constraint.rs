@@ -570,13 +570,14 @@ impl GrammarConstraint {
                         crate::debug!(4, "Trie2: For GSS root, active LLM tokens: {:?}", active_llm_tokens_for_root);
 
                         for src_wr in gss_root_acc.trie2_nodes.iter() {
-                            crate::debug!(4, "Trie2: Considering source Trie2 node for end edge insertion");
                             let src_arc = src_wr.as_arc().clone();
                             let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
                             let tokens_to_push = &active_llm_tokens_for_root & &src_live;
                             if tokens_to_push.is_empty() {
+                                crate::debug!(4, "Trie2: No tokens to push from this source node");
                                 continue;
                             }
+                            crate::debug!(4, "Trie2: Pushing tokens {:?} from source node", tokens_to_push);
 
                             let edge_key = (0, None);
 
