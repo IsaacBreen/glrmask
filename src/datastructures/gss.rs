@@ -447,7 +447,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
         let final_node = if iter.len() == 0 {
             first
         } else {
-            let mut merged_node = (*first).clone();
+            let mut merged_node = first.as_ref().clone();
             for other_arc in iter {
                 merged_node.merge_with_depth(1, &other_arc);
             }
@@ -1128,30 +1128,37 @@ pub fn merge_trie2_nodes_if_needed(
                     continue;
                 }
 
-                // Try to find an eligible existing child under (0, None)
-                let eligible_dest_opt: Option<Arc<RwLock<PrecomputeNode2>>> = {
+                // Build an iterator of all eligible strong children under edge_key
+                let eligible_iter_builder = || {
                     let g = source_arc.read().expect("poison");
-                    g.children().get(&edge_key).and_then(|dest_map| {
-                        for (node_ptr, _edge_bv) in dest_map.iter() {
+                    let mut v = Vec::new();
+                    if let Some(dest_map) = g.children().get(&edge_key) {
+                        for (node_ptr, _ev) in dest_map.iter() {
+                            if !node_ptr.is_strong() { continue; }
                             if let Some(dest_arc) = node_ptr.upgrade() {
                                 let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
                                 if (&dl & &tokens_to_push).is_empty() {
-                                    return Some(dest_arc); // eligible
+                                    v.push(dest_arc.clone());
                                 }
                             }
                         }
-                        None
-                    })
+                    }
+                    v.into_iter()
                 };
 
-                let chosen_dest = eligible_dest_opt.unwrap_or_else(|| fallback_dest.clone());
                 let inserter = EdgeInserter::new(
                     source_arc.clone(),
                     edge_key,
                     tokens_to_push.clone(),
                     |e, n| *e |= n,
-                    |_, _| {}, // delay live_tokens updates; do them in bulk at the end
-                ).try_destination_auto(chosen_dest.clone());
+                    |_, _| {}, // defer live_tokens updates; do them in bulk at the end
+                ).try_destinations_iter_with(eligible_iter_builder);
+
+                let inserter = if inserter.clone_into_option().is_none() {
+                    inserter.try_destination_auto(fallback_dest.clone())
+                } else {
+                    inserter
+                };
 
                 let final_dest_arc = inserter.clone_into_option().expect("merge_trie2_nodes_if_needed: insert failed");
                 let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
@@ -1159,6 +1166,7 @@ pub fn merge_trie2_nodes_if_needed(
                 dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
             }
 
+            // After the loop, update destinations’ live_tokens in one go:
             for (dst_wr, added) in &dest_agg {
                 let mut dg = dst_wr.as_arc().write().expect("poison");
                 dg.value.live_tokens |= added.clone();
@@ -1238,7 +1246,7 @@ pub fn fuse_predecessors_recursive(
         let final_pred_arc = if iter.len() == 0 {
             first
         } else {
-            let mut merged_node = (*first).clone();
+            let mut merged_node = first.as_ref().clone();
             for other_arc in iter {
                 merged_node.merge_with_depth(1, &other_arc);
             }
