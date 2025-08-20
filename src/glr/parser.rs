@@ -1145,7 +1145,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_default_reductions")]
     pub fn process_default_reductions(&mut self) {
-        return;
         self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
@@ -1329,6 +1328,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub fn step(&mut self, token_id: TerminalID) {
         self.process_token(token_id);
+        self.process_default_reductions();
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {

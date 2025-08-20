@@ -173,7 +173,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}. Stepping with LLM token ID {}", i, a_id);
         let mask = constraint_state.get_mask();
         constraint_state.commit(LLMTokenID(a_id));
-        assert!(constraint_state.is_active(), "Constraint state should be active after committing token {} (ID {})", a_id, a_id);
+        assert!(constraint_state.is_active_or_accepted(), "Constraint state should be active after committing token {} (ID {})", a_id, a_id);
     }
 
     Ok(())
@@ -890,7 +890,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
 
             assert!(
-                constraint_state.is_active(),
+                constraint_state.is_active_or_accepted(),
                 "Constraint state should be active before processing token {} ('{}')",
                 i + 1, current_token_str
             );
@@ -920,7 +920,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             println!("  Committed LLMTokenID({}) for '{:?}'.", llm_token_id.0, current_token_str);
 
             assert!(
-                constraint_state.is_active(),
+                constraint_state.is_active_or_accepted(),
                 "Constraint state should be active after committing token {} ('{}')",
                 i + 1, current_token_str
             );
@@ -965,7 +965,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         println!("\nFinished processing token sequence with GrammarConstraint.");
         if !test_token_sequence_ids.is_empty() { // Only assert if there were tokens to process
             assert!(
-                constraint_state.is_active(),
+                constraint_state.is_active_or_accepted(),
                 "Constraint state should still be active after processing the entire sequence."
             );
             println!("Constraint state is active after the full sequence.");
@@ -1198,7 +1198,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
             }
 
             constraint_state.commit(*import_token_id);
-            if !constraint_state.is_active() {
+            if !constraint_state.is_active_or_accepted() {
                 println!("BUG: State should be active after a valid token.");
                 return true; // BUG: State should be active after a valid token.
             }

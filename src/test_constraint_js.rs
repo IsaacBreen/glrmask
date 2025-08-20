@@ -660,7 +660,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
         print_token_context(&full_text_to_tokenize, &all_code_lines, token_start_byte, token_end_byte, 2);
 
-        assert!(constraint_state.is_active(), "State became inactive before token {}", i + 1);
+        assert!(constraint_state.is_active_or_accepted(), "State became inactive before token {}", i + 1);
 
         let mask_start = Instant::now();
         let current_mask = constraint_state.get_mask();
@@ -678,7 +678,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\nFinished processing token sequence.");
-    assert!(constraint_state.is_active(), "Final state should be active.");
+    assert!(constraint_state.is_active_or_accepted(), "Final state should be active.");
 
     // This is a useful, but very verbose, debugging tool.
     // It checks if committing tokens one-by-one is equivalent to committing the whole prefix.
@@ -818,7 +818,7 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
         let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
         print_token_context(&input_string, &all_code_lines, token_start_byte, token_end_byte, 2);
 
-        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+        assert!(state.is_active_or_accepted(), "State became inactive before token {}", i + 1);
 
         let mask_start = Instant::now();
         let current_mask = state.get_mask();
@@ -834,7 +834,7 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
 
         current_text_byte_offset = token_end_byte;
     }
-    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    assert!(state.is_active_or_accepted(), "Constraint state became inactive after committing '{}'", input_string);
     println!("Successfully processed '{}' with minimized grammar constraint.", input_string);
 
     Ok(())
@@ -921,7 +921,7 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
         let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
         print_token_context(&input_string, &all_code_lines, token_start_byte, token_end_byte, 2);
 
-        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+        assert!(state.is_active_or_accepted(), "State became inactive before token {}", i + 1);
 
         let mask_start = Instant::now();
         let current_mask = state.get_mask();
@@ -937,7 +937,7 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
 
         current_text_byte_offset = token_end_byte;
     }
-    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    assert!(state.is_active_or_accepted(), "Constraint state became inactive after committing '{}'", input_string);
     println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
 
     Ok(())
@@ -1022,7 +1022,7 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
         let token_end_byte = token_start_byte + current_token_str.as_bytes().len();
         print_token_context(&input_string, &all_code_lines, token_start_byte, token_end_byte, 2);
 
-        assert!(state.is_active(), "State became inactive before token {}", i + 1);
+        assert!(state.is_active_or_accepted(), "State became inactive before token {}", i + 1);
 
         let mask_start = Instant::now();
         let current_mask = state.get_mask();
@@ -1038,7 +1038,7 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
 
         current_text_byte_offset = token_end_byte;
     }
-    assert!(state.is_active(), "Constraint state became inactive after committing '{}'", input_string);
+    assert!(state.is_active_or_accepted(), "Constraint state became inactive after committing '{}'", input_string);
     println!("Successfully processed '{}' with loaded grammar constraint.", input_string);
 
     Ok(())
