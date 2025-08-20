@@ -143,6 +143,7 @@ fn test_super_simple_grammar() {
     // Test case 1: Valid input "a$"
     let mut state_ok = parser.init_glr_parser(None);
     state_ok.step(a_token);
+    assert!(state_ok.is_ok(), "Parse should succeed for 'a'");
     state_ok.step(eof_token);
     assert!(state_ok.is_ok(), "Parse should succeed for 'a$'");
 
