@@ -46,16 +46,16 @@ pub struct PrecomputedNodeContents {
 }
 
 impl PrecomputedNodeContents {
+    pub fn root(internal_max_llm_token_id: usize) -> Self {
+        Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
+    }
+
     pub fn internal() -> Self {
         Self { end: false, live_tokens: LLMTokenBV::zeros() }
     }
 
     pub fn leaf() -> Self {
         Self { end: true, live_tokens: LLMTokenBV::zeros() }
-    }
-
-    pub fn root(internal_max_llm_token_id: usize) -> Self {
-        Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
     }
 }
 
