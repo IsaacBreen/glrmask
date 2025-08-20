@@ -596,7 +596,7 @@ impl GrammarConstraint {
                                 v.into_iter()
                             };
 
-                            let inserter = EdgeInserter::new(
+                            let mut inserter = EdgeInserter::new(
                                 src_arc.clone(),
                                 edge_key,
                                 tokens_to_push.clone(),
@@ -604,11 +604,7 @@ impl GrammarConstraint {
                                 |_, _| {}, // defer live_tokens
                             ).try_destinations_iter_with(eligible_iter_builder);
 
-                            let inserter = if inserter.clone_into_option().is_none() {
-                                inserter.try_destination(trie2_end.clone())
-                            } else {
-                                inserter
-                            };
+                            inserter = inserter.try_destination(trie2_end.clone());
 
                             let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie2 node");
                             let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
