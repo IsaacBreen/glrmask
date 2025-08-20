@@ -552,7 +552,7 @@ impl GrammarConstraint {
                     MERGE_THRESHOLD,
                     &mut HashMap::new(),
                 );
-                glr_s.process_default_reductions_advanced(&ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                // glr_s.process_default_reductions_advanced(&ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !active_llm_tokens.is_empty();
                 if precomputed_node_data.value.end {
