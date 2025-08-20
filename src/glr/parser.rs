@@ -965,12 +965,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
                                             // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
                         let inserter = EdgeInserter::new(
-                            |ev, t| *ev &= &t.live_tokens,
                             existing_trie2_node.as_arc().clone(),
                             (k, Some(goto_info.source_state_id)),
                             active_llm_tokens.clone(),
                             |e, n| *e |= n,
                             |node_value, edge_value| node_value.live_tokens |= edge_value,
+                            |ev, t| *ev &= &t.live_tokens,
                         ).to_destination_weakly(cached_trie2_node.as_arc().clone());
                         inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                     }
@@ -1025,12 +1025,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             };
 
                                             let mut inserter = EdgeInserter::new(
-                                                |ev, t| *ev &= &t.live_tokens,
                                                 source_arc.clone(),
                                                 edge_key,
                                                 tokens_to_push.clone(),
                                                 |e, n| *e |= n,
                                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                                |ev, t| *ev &= &t.live_tokens,
                                             ).try_destinations_iter_with(eligible_iter_builder);
 
                                             inserter = inserter.try_destination_auto(new_trie2_node.clone());
@@ -1100,12 +1100,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
                                     for existing_trie2_node in &trie2_nodes {
                                         let inserter = EdgeInserter::new(
-                                            |ev, t| *ev &= &t.live_tokens,
                                             existing_trie2_node.as_arc().clone(),
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
                                             |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                            |ev, t| *ev &= &t.live_tokens,
                                         ).to_destination_weakly(cached_trie2_node.as_arc().clone());
                                         inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                                     }
@@ -1125,12 +1125,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                                     for existing_trie2_node in &trie2_nodes {
                                         let inserter = EdgeInserter::new(
-                                            |ev, t| *ev &= &t.live_tokens,
                                             existing_trie2_node.as_arc().clone(),
                                             (k, Some(goto_info.source_state_id)),
                                             active_llm_tokens.clone(),
                                             |e, n| *e |= n,
                                             |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                            |ev, t| *ev &= &t.live_tokens,
                                         ).try_destination_auto(new_trie2_node.clone());
                                         inserter.expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     }
