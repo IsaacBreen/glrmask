@@ -1,5 +1,5 @@
 # This line needs to come before anything else in Cargo.toml
-cargo-features = ["codegen-backend"]
+#cargo-features = ["codegen-backend"]
 
 [package]
 name = "sep1"
@@ -37,7 +37,10 @@ parking_lot = "0.12.4"
 reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 
 [profile.dev]
-codegen-backend = "cranelift"
+#codegen-backend = "cranelift"
+debug = 0
 #debug = true
 #opt-level = 1
 
+[profile.test]
+debug = 0
