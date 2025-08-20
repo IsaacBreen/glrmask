@@ -10,7 +10,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |+
@@ -8377,9 +8377,22 @@ local_system:
 
               writeln!(f, "\nSubstring Gotos ({} entries):", self.substring_gotos.len())?;
               if !self.substring_gotos.is_empty() {
-                  for (nt_id, gotos) in &self.substring_gotos {
+                  // Sort by NT name for deterministic output
+                  let mut sorted_substring_gotos: Vec<_> = self.substring_gotos.iter().collect();
+                  sorted_substring_gotos.sort_by_key(|(nt_id, _)| self.non_terminal_map.get_by_right(nt_id).unwrap());
+
+                  for (nt_id, gotos) in sorted_substring_gotos {
                       let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
-                      writeln!(f, "  - For NT '{}' (ID {}): {} possible source states", nt.0, nt_id.0, gotos.len())?;
+                      writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
+
+                      let mut sorted_gotos = gotos.clone();
+                      sorted_gotos.sort(); // SubstringGoto derives Ord
+
+                      for goto_info in &sorted_gotos {
+                          let goto_str = goto_info.goto_state_id.map_or("None".to_string(), |sid| sid.0.to_string());
+                          writeln!(f, "    - source: {:<3} -> goto: {:<4} accept: {}",
+                              goto_info.source_state_id.0, goto_str, goto_info.accept)?;
+                      }
                   }
               }
 
@@ -8581,7 +8594,7 @@ local_system:
               F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
           {
               let popper: GSSPopper = timeit!(peek.popn(len));
-              crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+              crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
               crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
               let mut any_below_bottom = !popper.below_bottom.is_empty();
               // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
@@ -8655,6 +8668,7 @@ local_system:
 
                               if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
                                   crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
+                                  println!("GLRParserState::reduce_and_goto: States to push after reduction (precomputed): {:?}", gotos_for_nt);
                                   let mut trie2_dst_nodes = HashMap::new();
                                   for (k, acc_arc) in popper.below_bottom {
                                       let mut acc: Acc = acc_arc.as_ref().clone();
@@ -9082,7 +9096,7 @@ local_system:
                           };
                           if let Some(action) = shifts_and_reduces.get(&token_id) {
                               crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
-                                            self.parser.terminal_map.get_by_by_right(&token_id).unwrap(),
+                                            self.parser.terminal_map.get_by_right(&token_id).unwrap(),
                                             peek.edge_value().state_id.0, action, peek.resolved_llm_tokens_union());
                               // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
                               timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
@@ -9091,7 +9105,7 @@ local_system:
                               });
                           } else {
                               timeit!("GLRParserState::has_action_for::no_action_found", {
-                                  crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
+                                  crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
                               });
                           }
                       }
@@ -9414,8 +9428,8 @@ local_system:
 
           loop {
               if let Some(goto) = parser.table.get(&goto_source_state_id).and_then(|row| row.gotos.get(&current_nt)) {
-                  if goto.state_id.is_some() {
-                      let next_row = &parser.table[&goto.state_id.unwrap()];
+                  if let Some(goto_state_id) = goto.state_id {
+                      let next_row = &parser.table[&goto_state_id];
                       if let Some(next_reduce) = &next_row.default_reduce.reduce {
                           if next_reduce.len == 1 {
                               // This is a unit reduction. Continue the chain with the new non-terminal.
@@ -9424,7 +9438,7 @@ local_system:
                           }
                       }
                       // Not a unit reduction, or no default reduce. This is the end of the chain.
-                      final_goto_state_ids.insert(goto.state_id.unwrap());
+                      final_goto_state_ids.insert(goto_state_id);
                       break;
                   } else {
                       // No goto state. End of chain.
@@ -18238,5 +18252,167 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Enhance GLRParser display to include
       substring goto information"'
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+      --- original version of src/glr/parser.rs+++ current version of src/glr/parser.rs@@ -856,7 +856,7 @@         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               let popper: GSSPopper = timeit!(peek.popn(len));
+      -        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+      +        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+               crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
+               let mut any_below_bottom = !popper.below_bottom.is_empty();
+               // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+      @@ -930,6 +930,7 @@ 
+                               if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
+                                   crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
+      +                            println!("GLRParserState::reduce_and_goto: States to push after reduction (precomputed): {:?}", gotos_for_nt);
+                                   let mut trie2_dst_nodes = HashMap::new();
+                                   for (k, acc_arc) in popper.below_bottom {
+                                       let mut acc: Acc = acc_arc.as_ref().clone();
+      @@ -1357,7 +1358,7 @@                     };
+                           if let Some(action) = shifts_and_reduces.get(&token_id) {
+                               crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
+      -                                      self.parser.terminal_map.get_by_by_right(&token_id).unwrap(),
+      +                                      self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                                             peek.edge_value().state_id.0, action, peek.resolved_llm_tokens_union());
+                               // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                               timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
+      @@ -1366,7 +1367,7 @@                         });
+                           } else {
+                               timeit!("GLRParserState::has_action_for::no_action_found", {
+      -                            crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
+      +                            crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
+                               });
+                           }
+                       }
+      @@ -1689,8 +1690,8 @@ 
+           loop {
+               if let Some(goto) = parser.table.get(&goto_source_state_id).and_then(|row| row.gotos.get(&current_nt)) {
+      -            if goto.state_id.is_some() {
+      -                let next_row = &parser.table[&goto.state_id.unwrap()];
+      +            if let Some(goto_state_id) = goto.state_id {
+      +                let next_row = &parser.table[&goto_state_id];
+                       if let Some(next_reduce) = &next_row.default_reduce.reduce {
+                           if next_reduce.len == 1 {
+                               // This is a unit reduction. Continue the chain with the new non-terminal.
+      @@ -1699,7 +1700,7 @@                     }
+                       }
+                       // Not a unit reduction, or no default reduce. This is the end of the chain.
+      -                final_goto_state_ids.insert(goto.state_id.unwrap());
+      +                final_goto_state_ids.insert(goto_state_id);
+                       break;
+                   } else {
+                       // No goto state. End of chain.
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      Make sure the parser printing shows `substring_gotos` as well.
+    metadata:
+  - assistant: |-
+      You got it. Displaying the full details of the `substring_gotos` table is much more informative for debugging. I'll update the `Display` implementation for `GLRParser` to iterate through the precomputed gotos and print each one's source state, destination state, and accept status.
+
+      Here is the patch for `src/glr/parser.rs`:
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -820,9 +820,22 @@
+       
+               writeln!(f, "\nSubstring Gotos ({} entries):", self.substring_gotos.len())?;
+               if !self.substring_gotos.is_empty() {
+      -            for (nt_id, gotos) in &self.substring_gotos {
+      +            // Sort by NT name for deterministic output
+      +            let mut sorted_substring_gotos: Vec<_> = self.substring_gotos.iter().collect();
+      +            sorted_substring_gotos.sort_by_key(|(nt_id, _)| self.non_terminal_map.get_by_right(nt_id).unwrap());
+      +
+      +            for (nt_id, gotos) in sorted_substring_gotos {
+                       let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
+      -                writeln!(f, "  - For NT '{}' (ID {}): {} possible source states", nt.0, nt_id.0, gotos.len())?;
+      +                writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
+      +
+      +                let mut sorted_gotos = gotos.clone();
+      +                sorted_gotos.sort(); // SubstringGoto derives Ord
+      +
+      +                for goto_info in &sorted_gotos {
+      +                    let goto_str = goto_info.goto_state_id.map_or("None".to_string(), |sid| sid.0.to_string());
+      +                    writeln!(f, "    - source: {:<3} -> goto: {:<4} accept: {}",
+      +                        goto_info.source_state_id.0, goto_str, goto_info.accept)?;
+      +                }
+                   }
+               }
+       
+
+      ```
+
+      I've updated the `Display` implementation to provide a detailed, sorted list of all precomputed substring gotos. This will make the parser's printed output much more useful for understanding its behavior in substring parsing mode.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Enhance GLRParser display to include
+      detailed substring goto information"'
     metadata:
 ...

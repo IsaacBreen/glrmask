@@ -652,9 +652,22 @@ impl Display for GLRParser {
 
         writeln!(f, "\nSubstring Gotos ({} entries):", self.substring_gotos.len())?;
         if !self.substring_gotos.is_empty() {
-            for (nt_id, gotos) in &self.substring_gotos {
+            // Sort by NT name for deterministic output
+            let mut sorted_substring_gotos: Vec<_> = self.substring_gotos.iter().collect();
+            sorted_substring_gotos.sort_by_key(|(nt_id, _)| self.non_terminal_map.get_by_right(nt_id).unwrap());
+
+            for (nt_id, gotos) in sorted_substring_gotos {
                 let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
-                writeln!(f, "  - For NT '{}' (ID {}): {} possible source states", nt.0, nt_id.0, gotos.len())?;
+                writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
+
+                let mut sorted_gotos = gotos.clone();
+                sorted_gotos.sort(); // SubstringGoto derives Ord
+
+                for goto_info in &sorted_gotos {
+                    let goto_str = goto_info.goto_state_id.map_or("None".to_string(), |sid| sid.0.to_string());
+                    writeln!(f, "    - source: {:<3} -> goto: {:<4} accept: {}",
+                        goto_info.source_state_id.0, goto_str, goto_info.accept)?;
+                }
             }
         }
 
