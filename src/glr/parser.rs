@@ -26,6 +26,15 @@ use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce, stage_9};
 use crate::datastructures::trie::EdgeInserter;
 
+// A single combined action for a given (state,row) and token:
+// - Token(...) is a concrete per-token action from the row's action map
+// - Default(...) is the row's default reduction (token-independent)
+#[derive(Debug)]
+enum Action<'a> {
+    Token(&'a Stage7ShiftsAndReducesLookaheadValue),
+    Default(&'a DefaultReduce),
+}
+
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
     /// Unwraps an option, panicking with a message from a closure on `None`.
@@ -758,33 +767,30 @@ impl<'a> GLRParserState<'a> { // No longer generic
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
-        use_full_action_map: bool,
         config: &ProcessTokenAdvancedConfig,
-    ) where
-        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+    )
+    where
+        F: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
     {
-        let action_for_token = |row: &Row| -> Option<&Stage7ShiftsAndReducesLookaheadValue> {
-            action_selector(row).get(&token_id)
-        };
-
         while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
             let row = &self.parser.table[&state_id];
-            if let Some(action) = action_for_token(row) {
+            let action_opt = action_selector(row, token_id);
+            if let Some(action) = action_opt {
                 for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                        Action::Token(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                             crate::debug!(5, "Action: Shift to state {}", to.0);
                             let new_parse_state =
                                 self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                             shifted_states_todo.push_back(new_parse_state);
                         }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                        Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id: nt,
                             len,
                             ..
-                        } => {
+                        }) => {
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_for_token, config);
+                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, token_id, config);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
                                 if let Some(ref mut r_map) = reduce_map {
@@ -794,7 +800,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
                         }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                        Action::Token(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                             crate::debug!(5, "Action: Split with shift and reduces");
                             if let Some(to) = shift {
                                 crate::debug!(5, "Action (Split): Shift to state {}", to.0);
@@ -805,7 +811,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_for_token, config);
+                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, token_id, config);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
                                         if let Some(ref mut r_map) = reduce_map {
@@ -815,6 +821,37 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }
                                     }
                                 }
+                            }
+                        }
+                        Action::Default(default_reduce) => {
+                            // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
+                            if default_reduce.clone_and_merge {
+                                shifted_states_todo.push_back(state.clone());
+                            }
+
+                            // 2) If there's a reduction in the default, do it like a normal reduce.
+                            if let Some(reduce) = &default_reduce.reduce {
+                                for peek in GSSNode::peek_iter(&state.stack) {
+                                    let s_new_arc = self.reduce_and_goto(
+                                        &peek,
+                                        reduce.nonterminal_id,
+                                        reduce.len,
+                                        &action_selector,
+                                        token_id,
+                                        config,
+                                    );
+                                    if !s_new_arc.is_empty() {
+                                        let new_parse_state = ParseState { stack: s_new_arc };
+                                        if let Some(ref mut r_map) = reduce_map {
+                                            Self::enqueue(r_map, new_parse_state);
+                                        } else {
+                                            Self::enqueue(work_map, new_parse_state);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // No reduction in default: we already handled clone_and_merge above.
+                                // Nothing else to do for this action.
                             }
                         }
                     }
@@ -835,8 +872,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 phase1_todo,
                 Some(phase2_todo),
                 shifted_states_todo,
-                |row| &row.shifts_and_reduces_without_default_reduce,
-                false, // Not using full action map
+                |row, tid| row
+                    .shifts_and_reduces_without_default_reduce
+                    .get(&tid)
+                    .map(Action::Token),
                 config,
             );
         });
@@ -851,8 +890,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 phase2_todo,
                 None,
                 shifted_states_todo,
-                |row| &row.shifts_and_reduces_full,
-                true, // Using full action map
+                |row, tid| {
+                    // Prefer a concrete token action; otherwise use the default reduce.
+                    row.shifts_and_reduces_full
+                        .get(&tid)
+                        .map(Action::Token)
+                        .or_else(|| Some(Action::Default(&row.default_reduce)))
+                },
                 config,
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
@@ -865,11 +909,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         peek: &GSSPeek,
         nt: NonTerminalID,
         len: usize,
-        action_for_token: &G,
+        action_selector: &G,
+        token_id: TerminalID,
         config: &ProcessTokenAdvancedConfig,
     ) -> Arc<GSSNode>
     where
-        G: for<'r> Fn(&'r Row) -> Option<&'r Stage7ShiftsAndReducesLookaheadValue>,
+        G: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
     {
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -899,17 +944,44 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     if let Some(goto_state_id) = goto.state_id {
                         let next_row = &self.parser.table[&goto_state_id];
-                        // Check if the action in the new state for the current token is a len-1 reduce.
-                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_for_token(next_row) {
-                            // It is. Continue the chain by updating the non-terminal and looping.
-                            current_nt = *next_nt;
-                            continue; // Continue the fast loop.
-                        } else {
-                            // It's not a len-1 reduce. This is our final state for this chain.
-                            let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                            out.push(Arc::new(new_gss_node));
-                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_for_token(next_row)), {});
-                            break; // Exit the fast loop for this path
+                        match action_selector(next_row, token_id) {
+                            Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
+                                // Token-based unit reduction: continue the chain.
+                                current_nt = *next_nt;
+                                continue;
+                            }
+                            Some(Action::Default(def)) => {
+                                // Default reduction handling.
+                                // If clone_and_merge is set, we "submit" the current goto result now,
+                                // as if we broke the chain here, but we may still continue chaining if allowed.
+                                if def.clone_and_merge {
+                                    let immediate_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                    out.push(Arc::new(immediate_node));
+                                }
+
+                                if let Some(reduce) = &def.reduce {
+                                    if reduce.len == 1 {
+                                        // Unit default reduce: continue chaining with the new non-terminal.
+                                        current_nt = reduce.nonterminal_id;
+                                        continue;
+                                    } else {
+                                        // Non-unit default reduce: treat as final at this GOTO.
+                                        let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                        out.push(Arc::new(final_node));
+                                        break;
+                                    }
+                                } else {
+                                    // No reduce in default; we already "submitted" if clone_and_merge was set.
+                                    break;
+                                }
+                            }
+                            _ => {
+                                // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
+                                // finalize at this GOTO and stop chaining.
+                                let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                out.push(Arc::new(final_node));
+                                break;
+                            }
                         }
                     } else {
                         // No further state to go to. This path terminates here.
@@ -1179,11 +1251,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let mut llm_tokens = LLMTokenBV::zeros();
                 for peek in GSSNode::peek_iter(&self.active_state.stack) {
                     let row = &self.parser.table[&peek.edge_value().state_id];
-                    let shifts_and_reduces = match self.phase {
-                        ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
-                        ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
+                    let action_opt = match self.phase {
+                        ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Token),
+                        ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Token).or_else(|| Some(Action::Default(&row.default_reduce))),
                     };
-                    if let Some(action) = shifts_and_reduces.get(&token_id) {
+                    if let Some(action) = action_opt {
                         crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
                                       self.parser.terminal_map.get_by_right(&token_id).unwrap(),
                                       peek.edge_value().state_id.0, action, peek.resolved_llm_tokens_union());
