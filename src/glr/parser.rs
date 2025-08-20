@@ -952,9 +952,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             Some(Action::Default(def)) => {
                                 // Default reduction handling.
-                                // If clone_and_merge is set, we "submit" the current goto result now,
+                                // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                 // as if we broke the chain here, but we may still continue chaining if allowed.
-                                if def.clone_and_merge {
+                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
                                     let immediate_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                                     out.push(Arc::new(immediate_node));
                                 }
@@ -965,9 +965,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         current_nt = reduce.nonterminal_id;
                                         continue;
                                     } else {
-                                        // Non-unit default reduce: treat as final at this GOTO.
-                                        let final_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                        out.push(Arc::new(final_node));
                                         break;
                                     }
                                 } else {
