@@ -463,7 +463,7 @@ impl GrammarConstraint {
                 }
 
                 let merged_gss = GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge);
-                let parse_state = ParseState { stack: merged_gss };
+                let parse_state = ParseState::with_stack(merged_gss);
                 glr_state = parser.init_glr_parser_from_parse_state(parse_state);
             } else {
                 let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
@@ -485,9 +485,7 @@ impl GrammarConstraint {
                 let gss_node = gss_root.push(ParseStateEdgeContent { state_id: parser.everything_state_id });
                 gss_nodes_to_merge.push(Arc::new(gss_node));
                 glr_state = parser.init_glr_parser_from_parse_state(
-                    ParseState {
-                        stack: GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge),
-                    },
+                    ParseState::with_stack(GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge))
                 );
             }
 
@@ -624,7 +622,7 @@ impl GrammarConstraint {
                 }
             }
         }
-        prune_dead_paths_trie2(&mut precomputed2);
+        // prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);

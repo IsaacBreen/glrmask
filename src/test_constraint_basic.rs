@@ -198,7 +198,7 @@ fn test_constraint_simple() {
 
     // For comparison, parser_state_for_comp's GSS acc needs to be "all_ones" like commit does.
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
-    let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
+    let mut comparable_parser_active_state = ParseState::with_stack(Arc::new(comparable_parser_gss));
 
     Arc::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
     Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
@@ -306,7 +306,7 @@ fn test_constraint_expression() {
 
     // For comparison, parser_state_for_comp's GSS acc needs to be "all_ones" like commit does.
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
-    let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
+    let mut comparable_parser_active_state = ParseState::with_stack(Arc::new(comparable_parser_gss));
 
     Arc::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
     Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
