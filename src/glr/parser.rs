@@ -951,23 +951,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Default reduction handling.
                                 // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                 // as if we broke the chain here, but we may still continue chaining if allowed.
-                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
-                                    let immediate_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                    out.push(Arc::new(immediate_node));
+                                if def.clone_and_merge || def.reduce.as_ref().is_some_and(|r| r.len != 1) {
+                                    out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 }
 
-                                if let Some(reduce) = &def.reduce {
-                                    if reduce.len == 1 {
-                                        // Unit default reduce: continue chaining with the new non-terminal.
-                                        current_nt = reduce.nonterminal_id;
-                                        continue;
-                                    } else {
-                                        break;
-                                    }
-                                } else {
-                                    // No reduce in default; we already "submitted" if clone_and_merge was set.
-                                    break;
+                                if let Some(r) = def.reduce.as_ref().filter(|r| r.len == 1) {
+                                    current_nt = r.nonterminal_id;
+                                    continue;
                                 }
+                                break;
                             }
                             _ => {
                                 // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
