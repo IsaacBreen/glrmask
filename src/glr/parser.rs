@@ -858,7 +858,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 crate::debug!(5, "No action found in state {}", state_id.0);
             }
         }
-        self.below_bottom_cache.clear();
     }
 
     fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
@@ -1174,6 +1173,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Reset acceptance flag for the new token
         self.accepted = false;
 
+        self.below_bottom_cache.clear();
+
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
             self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
@@ -1204,6 +1205,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         self.active_state = next_active;
         self.log_gss("Phase1/2-end", token_id, false, false);
+        self.below_bottom_cache.clear();
     }
 
     #[time_it("GLRParserState::process_default_reductions")]
