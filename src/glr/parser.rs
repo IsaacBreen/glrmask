@@ -1208,8 +1208,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.below_bottom_cache.clear();
     }
 
-    #[time_it("GLRParserState::process_default_reductions")]
     pub fn process_default_reductions(&mut self) {
+        self.process_default_reductions_advanced(&ProcessTokenAdvancedConfig::default());
+    }
+
+    #[time_it("GLRParserState::process_default_reductions_advanced")]
+    pub fn process_default_reductions_advanced(&mut self, config: &ProcessTokenAdvancedConfig) {
         self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
@@ -1224,10 +1228,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Collect survivors (clone-and-merge states and reduction results that finalize).
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
-
-        // Default config for below-bottom behavior during default reductions.
-        // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
-        let config = ProcessTokenAdvancedConfig::default();
 
         // Run the generic action-processing loop with a Default-only selector.
         // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
@@ -1297,7 +1297,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub fn step(&mut self, token_id: TerminalID) {
         self.process_token(token_id);
-        // self.process_default_reductions();
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
