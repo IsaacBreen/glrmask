@@ -763,9 +763,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
     ) where
         F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
     {
+        let action_for_token = |row: &Row| -> Option<&Stage7ShiftsAndReducesLookaheadValue> {
+            action_selector(row).get(&token_id)
+        };
+
         while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
             let row = &self.parser.table[&state_id];
-            if let Some(action) = action_selector(row).get(&token_id) {
+            if let Some(action) = action_for_token(row) {
                 for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
@@ -780,7 +784,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             ..
                         } => {
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_for_token, config);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState { stack: s_new_arc };
                                 if let Some(ref mut r_map) = reduce_map {
@@ -801,7 +805,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_for_token, config);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState { stack: s_new_arc };
                                         if let Some(ref mut r_map) = reduce_map {
@@ -856,17 +860,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     #[time_it("GLRParserState::reduce_and_goto")]
-    fn reduce_and_goto<F>(
+    fn reduce_and_goto<G>(
         &mut self,
         peek: &GSSPeek,
         nt: NonTerminalID,
         len: usize,
-        token_id: TerminalID,
-        action_selector: &F,
+        action_for_token: &G,
         config: &ProcessTokenAdvancedConfig,
     ) -> Arc<GSSNode>
     where
-        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+        G: for<'r> Fn(&'r Row) -> Option<&'r Stage7ShiftsAndReducesLookaheadValue>,
     {
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -897,7 +900,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if let Some(goto_state_id) = goto.state_id {
                         let next_row = &self.parser.table[&goto_state_id];
                         // Check if the action in the new state for the current token is a len-1 reduce.
-                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_for_token(next_row) {
                             // It is. Continue the chain by updating the non-terminal and looping.
                             current_nt = *next_nt;
                             continue; // Continue the fast loop.
@@ -905,7 +908,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // It's not a len-1 reduce. This is our final state for this chain.
                             let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
                             out.push(Arc::new(new_gss_node));
-                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
+                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_for_token(next_row)), {});
                             break; // Exit the fast loop for this path
                         }
                     } else {
@@ -1372,7 +1375,7 @@ impl GLRParser {
             writeln!(&mut dot, "    color=lightgrey;").unwrap();
             writeln!(&mut dot, "    node [style=filled,color=white];").unwrap();
             let root_node_name = format!("Root_{}", i);
-            writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, label).unwrap();
+            writeln!(&mut dot, "    {} [label=\"{}\", shape=ellipse];", root_node_name, root_id).unwrap();
             writeln!(&mut dot, "  }}").unwrap();
             writeln!(&mut dot, "  {} -> N{};", root_node_name, root_id).unwrap();
         }
