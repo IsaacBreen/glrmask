@@ -650,6 +650,14 @@ impl Display for GLRParser {
             writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
         }
 
+        writeln!(f, "\nSubstring Gotos ({} entries):", self.substring_gotos.len())?;
+        if !self.substring_gotos.is_empty() {
+            for (nt_id, gotos) in &self.substring_gotos {
+                let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
+                writeln!(f, "  - For NT '{}' (ID {}): {} possible source states", nt.0, nt_id.0, gotos.len())?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -922,6 +930,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                         if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
                             crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
+                            println!("GLRParserState::reduce_and_goto: States to push after reduction (precomputed): {:?}", gotos_for_nt);
                             let mut trie2_dst_nodes = HashMap::new();
                             for (k, acc_arc) in popper.below_bottom {
                                 let mut acc: Acc = acc_arc.as_ref().clone();
