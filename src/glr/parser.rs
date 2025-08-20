@@ -760,7 +760,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         use_full_action_map: bool,
         config: &ProcessTokenAdvancedConfig,
     ) where
-        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+        F: Fn(&Row) -> Option<&'a Stage7ShiftsAndReducesLookaheadValue>,
     {
         while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
             let row = &self.parser.table[&state_id];
@@ -823,7 +823,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
-            let action_selector = |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
+            let action_selector = move |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
             self.process_action_queue(
                 phase1_todo,
                 Some(phase2_todo),
@@ -839,7 +839,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
-            let action_selector = |row: &Row| row.shifts_and_reduces_full.get(&token_id);
+            let action_selector = move |row: &Row| row.shifts_and_reduces_full.get(&token_id);
             self.process_action_queue(
                 phase2_todo,
                 None,
@@ -862,7 +862,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         config: &ProcessTokenAdvancedConfig,
     ) -> Arc<GSSNode>
     where
-        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+        F: Fn(&Row) -> Option<&'a Stage7ShiftsAndReducesLookaheadValue>,
     {
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);

@@ -1,13 +1,13 @@
 local_system:
   attached_files:
-    - src/datastructures/trie.rs
     - src/datastructures/gss.rs
-    - src/glr/mod.rs
+    - src/datastructures/trie.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
-    - src/glr/table.rs
+    - src/glr/mod.rs
     - src/glr/parser.rs
-  conversation_file:
+    - src/glr/table.rs
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/trie.rs: |+
@@ -17200,7 +17200,7 @@ local_system:
               use_full_action_map: bool,
               config: &ProcessTokenAdvancedConfig,
           ) where
-              F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+              F: Fn(&Row) -> Option<&'a Stage7ShiftsAndReducesLookaheadValue>,
           {
               while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
                   let row = &self.parser.table[&state_id];
@@ -17263,7 +17263,7 @@ local_system:
               let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
               crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
               timeit!("GLRParserState::step::phase1", {
-                  let action_selector = |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
+                  let action_selector = move |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
                   self.process_action_queue(
                       phase1_todo,
                       Some(phase2_todo),
@@ -17279,7 +17279,7 @@ local_system:
               crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
               timeit!("GLRParserState::step::phase2", {
                   // Reduces are pushed back onto the same queue (`None`).
-                  let action_selector = |row: &Row| row.shifts_and_reduces_full.get(&token_id);
+                  let action_selector = move |row: &Row| row.shifts_and_reduces_full.get(&token_id);
                   self.process_action_queue(
                       phase2_todo,
                       None,
@@ -17302,7 +17302,7 @@ local_system:
               config: &ProcessTokenAdvancedConfig,
           ) -> Arc<GSSNode>
           where
-              F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+              F: Fn(&Row) -> Option<&'a Stage7ShiftsAndReducesLookaheadValue>,
           {
               let popper: GSSPopper = timeit!(peek.popn(len));
               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -27156,5 +27156,591 @@ messages:
       Changes committed with message: "Refactor: Remove token_id from reduce_and_goto and process_action_queue
 
       Pass token_id to the action_selector closure, making reduce_and_goto more general and less coupled to the specific token. This allows the action selector to capture the token_id contextually."
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture 2>&1 | tee .temp2; python analyze_timings.py .temp2
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error: lifetime may not live long enough
+         --> src/glr/parser.rs:826:47
+          |
+      826 |             let action_selector = |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
+          |                                         -   - ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+          |                                         |   |
+          |                                         |   return type of closure is std::option::Option<&'2 Stage7ShiftsAndReducesLookaheadValue>
+          |                                         let's call the lifetime of this reference `'1`
+
+      error[E0308]: mismatched types
+         --> src/glr/parser.rs:827:13
+          |
+      827 | /             self.process_action_queue(
+      828 | |                 phase1_todo,
+      829 | |                 Some(phase2_todo),
+      830 | |                 shifted_states_todo,
+      ...   |
+      833 | |                 config,
+      834 | |             );
+          | |_____________^ one type is more general than the other
+          |
+          = note: expected enum `std::option::Option<&Stage7ShiftsAndReducesLookaheadValue>`
+                     found enum `std::option::Option<&Stage7ShiftsAndReducesLookaheadValue>`
+      note: the lifetime requirement is introduced here
+         --> src/glr/parser.rs:763:24
+          |
+      763 |         F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+          |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error: lifetime may not live long enough
+         --> src/glr/parser.rs:842:47
+          |
+      842 |             let action_selector = |row: &Row| row.shifts_and_reduces_full.get(&token_id);
+          |                                         -   - ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+          |                                         |   |
+          |                                         |   return type of closure is std::option::Option<&'2 Stage7ShiftsAndReducesLookaheadValue>
+          |                                         let's call the lifetime of this reference `'1`
+
+      error[E0308]: mismatched types
+         --> src/glr/parser.rs:843:13
+          |
+      843 | /             self.process_action_queue(
+      844 | |                 phase2_todo,
+      845 | |                 None,
+      846 | |                 shifted_states_todo,
+      ...   |
+      849 | |                 config,
+      850 | |             );
+          | |_____________^ one type is more general than the other
+          |
+          = note: expected enum `std::option::Option<&Stage7ShiftsAndReducesLookaheadValue>`
+                     found enum `std::option::Option<&Stage7ShiftsAndReducesLookaheadValue>`
+      note: the lifetime requirement is introduced here
+         --> src/glr/parser.rs:763:24
+          |
+      763 |         F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+          |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      For more information about this error, try `rustc --explain E0308`.
+      error: could not compile `sep1` (lib test) due to 4 previous errors
+      /Users/isaacbreen/Projects2/grammars2024/analyze_timings.py:270: SyntaxWarning: invalid escape sequence '\/'
+        """
+      Error: Source code block not found in log file.
+      Please ensure the log contains a block like:
+      ---BEGIN-SOURCE-JSON---
+      "...source..."
+      ---END-SOURCE-JSON---
+    metadata:
+  - assistant: |-
+      I see you're running into some lifetime-related compilation errors after the recent refactoring. These kinds of errors with closures and higher-ranked trait bounds can be tricky. The issue stems from the closure capturing `token_id` by reference, which confuses the compiler's lifetime analysis.
+
+      Since `TerminalID` is a `Copy` type, we can fix this by using a `move` closure. This makes the closure take ownership of `token_id` (by copying it), breaking the problematic lifetime link to the outer function's scope.
+
+      Here is the patch to fix the compilation errors in `src/glr/parser.rs`:
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -762,7 +762,6 @@
+           /// `action_selector` chooses between the phase-1 or phase-2 action map.
+           fn process_action_queue<F>(
+               &mut self,
+      -        token_id: TerminalID,
+               work_map: &mut WorkMap,
+               mut reduce_map: Option<&mut WorkMap>,
+               shifted_states_todo: &mut VecDeque<ParseState>,
+      @@ -770,11 +769,10 @@
+               use_full_action_map: bool,
+               config: &ProcessTokenAdvancedConfig,
+           ) where
+      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
+                   let row = &self.parser.table[&state_id];
+      -            if let Some(action) = action_selector(row).get(&token_id) {
+      +            if let Some(action) = action_selector(row) {
+                       for peek in GSSNode::peek_iter(&state.stack) {
+                           match action {
+                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      @@ -788,7 +786,7 @@
+                                   ..
+                               } => {
+                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+      -                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+      +                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                   if !s_new_arc.is_empty() {
+                                       let new_parse_state = ParseState { stack: s_new_arc };
+                                       if let Some(ref mut r_map) = reduce_map {
+      @@ -808,7 +806,7 @@
+                                   for (len, nts) in reduces {
+                                       for (nt, _prod_ids) in nts {
+                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
+      -                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+      +                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                           if !s_new_arc.is_empty() {
+                                               let new_parse_state = ParseState { stack: s_new_arc };
+                                               if let Some(ref mut r_map) = reduce_map {
+      @@ -823,8 +821,6 @@
+                               }
+                           }
+                       }
+      -            } else {
+      -                crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
+                   }
+               }
+               self.below_bottom_cache.clear();
+      @@ -834,12 +830,11 @@
+               let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+               crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
+               timeit!("GLRParserState::step::phase1", {
+      +            let action_selector = move |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
+                   self.process_action_queue(
+      -                token_id,
+                       phase1_todo,
+                       Some(phase2_todo),
+                       shifted_states_todo,
+      -                |row| &row.shifts_and_reduces_without_default_reduce,
+      +                action_selector,
+                       false, // Not using full action map
+                       config,
+                   );
+      @@ -850,12 +845,11 @@
+               crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
+               timeit!("GLRParserState::step::phase2", {
+                   // Reduces are pushed back onto the same queue (`None`).
+      +            let action_selector = move |row: &Row| row.shifts_and_reduces_full.get(&token_id);
+                   self.process_action_queue(
+      -                token_id,
+                       phase2_todo,
+                       None,
+                       shifted_states_todo,
+      -                |row| &row.shifts_and_reduces_full,
+      +                action_selector,
+                       true, // Using full action map
+                       config,
+                   );
+      @@ -869,12 +863,10 @@
+               peek: &GSSPeek,
+               nt: NonTerminalID,
+               len: usize,
+      -        token_id: TerminalID,
+               action_selector: &F,
+               config: &ProcessTokenAdvancedConfig,
+           ) -> Arc<GSSNode>
+           where
+      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               let popper: GSSPopper = timeit!(peek.popn(len));
+               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+      @@ -905,14 +897,14 @@
+                           if let Some(goto_state_id) = goto.state_id {
+                               let next_row = &self.parser.table[&goto_state_id];
+                               // Check if the action in the new state for the current token is a len-1 reduce.
+      -                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row) {
+                                   // It is. Continue the chain by updating the non-terminal and looping.
+                                   current_nt = *next_nt;
+                                   continue; // Continue the fast loop.
+                               } else {
+                                   // It's not a len-1 reduce. This is our final state for this chain.
+                                   let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                   out.push(Arc::new(new_gss_node));
+      -                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
+      +                            timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row)), {});
+                                   break; // Exit the fast loop for this path
+                               }
+                           } else {
+
+      ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Error applying patch to src/glr/parser.rs:
+      Hunk #1 (header: @@ -762,7 +762,6 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          /// `action_selector` chooses between the phase-1 or phase-2 action map.
+          fn process_action_queue<F>(
+              &mut self,
+              token_id: TerminalID,
+              work_map: &mut WorkMap,
+              mut reduce_map: Option<&mut WorkMap>,
+              shifted_states_todo: &mut VecDeque<ParseState>,
+      --- Expected Context (from patch, after normalization): ---
+
+      fn process_action_queue<F>(
+      &mut self,
+      token_id: TerminalID,
+      work_map: &mut WorkMap,
+      mut reduce_map: Option<&mut WorkMap>,
+      shifted_states_todo: &mut VecDeque<ParseState>,
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 752 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + 
+        
+        fn process_action_queue<F>(
+        &mut self,
+      - token_id: TerminalID,
+        work_map: &mut WorkMap,
+        mut reduce_map: Option<&mut WorkMap>,
+        shifted_states_todo: &mut VecDeque<ParseState>,
+      Problematic diff content:
+      ---
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -762,7 +762,6 @@
+           /// `action_selector` chooses between the phase-1 or phase-2 action map.
+           fn process_action_queue<F>(
+               &mut self,
+      -        token_id: TerminalID,
+               work_map: &mut WorkMap,
+               mut reduce_map: Option<&mut WorkMap>,
+               shifted_states_todo: &mut VecDeque<ParseState>,
+      @@ -770,11 +769,10 @@
+               use_full_action_map: bool,
+               config: &ProcessTokenAdvancedConfig,
+           ) where
+      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
+                   let row = &self.parser.table[&state_id];
+      -            if let Some(action) = action_selector(row).get(&token_id) {
+      +            if let Some(action) = action_selector(row) {
+                       for peek in GSSNode::peek_iter(&state.stack) {
+                           match action {
+                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      @@ -788,7 +786,7 @@
+                                   ..
+                               } => {
+                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+      -                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+      +                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                   if !s_new_arc.is_empty() {
+                                       let new_parse_state = ParseState { stack: s_new_arc };
+                                       if let Some(ref mut r_map) = reduce_map {
+      @@ -808,7 +806,7 @@
+                                   for (len, nts) in reduces {
+                                       for (nt, _prod_ids) in nts {
+                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
+      -                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+      +                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                           if !s_new_arc.is_empty() {
+                                               let new_parse_state = ParseState { stack: s_new_arc };
+                                               if let Some(ref mut r_map) = reduce_map {
+      @@ -823,8 +821,6 @@
+                               }
+                           }
+                       }
+      -            } else {
+      -                crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
+                   }
+               }
+               self.below_bottom_cache.clear();
+      @@ -834,12 +830,11 @@
+               let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+               crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
+               timeit!("GLRParserState::step::phase1", {
+      +            let action_selector = move |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
+                   self.process_action_queue(
+      -                token_id,
+                       phase1_todo,
+                       Some(phase2_todo),
+                       shifted_states_todo,
+      -                |row| &row.shifts_and_reduces_without_default_reduce,
+      +                action_selector,
+                       false, // Not using full action map
+                       config,
+                   );
+      @@ -850,12 +845,11 @@
+               crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
+               timeit!("GLRParserState::step::phase2", {
+                   // Reduces are pushed back onto the same queue (`None`).
+      +            let action_selector = move |row: &Row| row.shifts_and_reduces_full.get(&token_id);
+                   self.process_action_queue(
+      -                token_id,
+                       phase2_todo,
+                       None,
+                       shifted_states_todo,
+      -                |row| &row.shifts_and_reduces_full,
+      +                action_selector,
+                       true, // Using full action map
+                       config,
+                   );
+      @@ -869,12 +863,10 @@
+               peek: &GSSPeek,
+               nt: NonTerminalID,
+               len: usize,
+      -        token_id: TerminalID,
+               action_selector: &F,
+               config: &ProcessTokenAdvancedConfig,
+           ) -> Arc<GSSNode>
+           where
+      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               let popper: GSSPopper = timeit!(peek.popn(len));
+               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+      @@ -905,14 +897,14 @@
+                           if let Some(goto_state_id) = goto.state_id {
+                               let next_row = &self.parser.table[&goto_state_id];
+                               // Check if the action in the new state for the current token is a len-1 reduce.
+      -                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row) {
+                                   // It is. Continue the chain by updating the non-terminal and looping.
+                                   current_nt = *next_nt;
+                                   continue; // Continue the fast loop.
+                               } else {
+                                   // It's not a len-1 reduce. This is our final state for this chain.
+                                   let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                   out.push(Arc::new(new_gss_node));
+      -                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
+      +                            timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row)), {});
+                                   break; // Exit the fast loop for this path
+                               }
+                           } else {
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Error applying patch to src/glr/parser.rs:
+      Hunk #1 (header: @@ -762,7 +762,6 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          /// `action_selector` chooses between the phase-1 or phase-2 action map.
+          fn process_action_queue<F>(
+              &mut self,
+              token_id: TerminalID,
+              work_map: &mut WorkMap,
+              mut reduce_map: Option<&mut WorkMap>,
+              shifted_states_todo: &mut VecDeque<ParseState>,
+      --- Expected Context (from patch, after normalization): ---
+
+      fn process_action_queue<F>(
+      &mut self,
+      token_id: TerminalID,
+      work_map: &mut WorkMap,
+      mut reduce_map: Option<&mut WorkMap>,
+      shifted_states_todo: &mut VecDeque<ParseState>,
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 752 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + 
+        
+        fn process_action_queue<F>(
+        &mut self,
+      - token_id: TerminalID,
+        work_map: &mut WorkMap,
+        mut reduce_map: Option<&mut WorkMap>,
+        shifted_states_todo: &mut VecDeque<ParseState>,
+      Problematic diff content:
+      ---
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -762,7 +762,6 @@
+           /// `action_selector` chooses between the phase-1 or phase-2 action map.
+           fn process_action_queue<F>(
+               &mut self,
+      -        token_id: TerminalID,
+               work_map: &mut WorkMap,
+               mut reduce_map: Option<&mut WorkMap>,
+               shifted_states_todo: &mut VecDeque<ParseState>,
+      @@ -770,11 +769,10 @@
+               use_full_action_map: bool,
+               config: &ProcessTokenAdvancedConfig,
+           ) where
+      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
+                   let row = &self.parser.table[&state_id];
+      -            if let Some(action) = action_selector(row).get(&token_id) {
+      +            if let Some(action) = action_selector(row) {
+                       for peek in GSSNode::peek_iter(&state.stack) {
+                           match action {
+                               Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+      @@ -788,7 +786,7 @@
+                                   ..
+                               } => {
+                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+      -                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+      +                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                   if !s_new_arc.is_empty() {
+                                       let new_parse_state = ParseState { stack: s_new_arc };
+                                       if let Some(ref mut r_map) = reduce_map {
+      @@ -808,7 +806,7 @@
+                                   for (len, nts) in reduces {
+                                       for (nt, _prod_ids) in nts {
+                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
+      -                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, token_id, &action_selector, config);
+      +                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                           if !s_new_arc.is_empty() {
+                                               let new_parse_state = ParseState { stack: s_new_arc };
+                                               if let Some(ref mut r_map) = reduce_map {
+      @@ -823,8 +821,6 @@
+                               }
+                           }
+                       }
+      -            } else {
+      -                crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
+                   }
+               }
+               self.below_bottom_cache.clear();
+      @@ -834,12 +830,11 @@
+               let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+               crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
+               timeit!("GLRParserState::step::phase1", {
+      +            let action_selector = move |row: &Row| row.shifts_and_reduces_without_default_reduce.get(&token_id);
+                   self.process_action_queue(
+      -                token_id,
+                       phase1_todo,
+                       Some(phase2_todo),
+                       shifted_states_todo,
+      -                |row| &row.shifts_and_reduces_without_default_reduce,
+      +                action_selector,
+                       false, // Not using full action map
+                       config,
+                   );
+      @@ -850,12 +845,11 @@
+               crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
+               timeit!("GLRParserState::step::phase2", {
+                   // Reduces are pushed back onto the same queue (`None`).
+      +            let action_selector = move |row: &Row| row.shifts_and_reduces_full.get(&token_id);
+                   self.process_action_queue(
+      -                token_id,
+                       phase2_todo,
+                       None,
+                       shifted_states_todo,
+      -                |row| &row.shifts_and_reduces_full,
+      +                action_selector,
+                       true, // Using full action map
+                       config,
+                   );
+      @@ -869,12 +863,10 @@
+               peek: &GSSPeek,
+               nt: NonTerminalID,
+               len: usize,
+      -        token_id: TerminalID,
+               action_selector: &F,
+               config: &ProcessTokenAdvancedConfig,
+           ) -> Arc<GSSNode>
+           where
+      -        F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      +        F: Fn(&Row) -> Option<&Stage7ShiftsAndReducesLookaheadValue>,
+           {
+               let popper: GSSPopper = timeit!(peek.popn(len));
+               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+      @@ -905,14 +897,14 @@
+                           if let Some(goto_state_id) = goto.state_id {
+                               let next_row = &self.parser.table[&goto_state_id];
+                               // Check if the action in the new state for the current token is a len-1 reduce.
+      -                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+      +                        if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row) {
+                                   // It is. Continue the chain by updating the non-terminal and looping.
+                                   current_nt = *next_nt;
+                                   continue; // Continue the fast loop.
+                               } else {
+                                   // It's not a len-1 reduce. This is our final state for this chain.
+                                   let new_gss_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
+                                   out.push(Arc::new(new_gss_node));
+      -                            // timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row).get(&token_id)), {});
+      +                            timeit!(format!("Exiting fast loop. Reason: Found incompatible action: {:?}", action_selector(next_row)), {});
+                                   break; // Exit the fast loop for this path
+                               }
+                           } else {
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/parser.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/parser.rs
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Remove token_id from reduce_and_goto
+      and process_action_queue by capturing it in action_selector"'
     metadata:
 ...
