@@ -13,11 +13,7 @@ pub const PROFILING_ENABLED: bool = true;
 pub const GSS_LOGGING_ENABLED: bool = true;
 
 /// Controls whether `tqdm` progress bars are displayed during long operations.
-#[cfg(not(rustrover))]
-pub const PROGRESS_BAR_ENABLED: bool = true;
-#[cfg(rustrover)]
-pub const PROGRESS_BAR_ENABLED: bool = false;
-
+pub const PROGRESS_BAR_ENABLED: bool = !cfg!(rustrover);
 
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
