@@ -51,7 +51,7 @@ impl PrecomputedNodeContents {
     }
 
     pub fn end() -> Self {
-        Self { end: true, live_tokens: LLMTokenBV::max_ones() }
+        Self { end: true, live_tokens: LLMTokenBV::zeros() }
     }
 }
 
