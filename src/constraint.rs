@@ -885,7 +885,7 @@ impl<'r> Precomputer<'r> {
             roots.insert(
                 sid,
                 Arc::new(RwLock::new(PrecomputeNode::new(
-                    PrecomputedNodeContents::internal(),
+                    PrecomputedNodeContents::root(internal_max_llm_token)
                 ))),
             );
         }
