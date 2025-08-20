@@ -951,15 +951,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Default reduction handling.
                                 // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                 // as if we broke the chain here, but we may still continue chaining if allowed.
-                                if def.clone_and_merge || def.reduce.as_ref().is_some_and(|r| r.len != 1) {
+                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
                                     out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 }
 
-                                if let Some(r) = def.reduce.as_ref().filter(|r| r.len == 1) {
-                                    current_nt = r.nonterminal_id;
-                                    continue;
+                                match &def.reduce {
+                                    Some(reduce) if reduce.len == 1 => {
+                                        current_nt = reduce.nonterminal_id;
+                                        continue;
+                                    }
+                                    _ => break,
                                 }
-                                break;
                             }
                             _ => {
                                 // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
