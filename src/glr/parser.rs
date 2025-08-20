@@ -1215,8 +1215,37 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
-        todo!();
+        // Phase 3: apply default reductions until fixpoint (no token involved).
+        let mut work_map: WorkMap = WorkMap::new();
+        // Seed the queue with the current active state.
+        Self::enqueue(&mut work_map, self.active_state.clone());
 
+        // Collect survivors (clone-and-merge states and reduction results that finalize).
+        let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+
+        // Default config for below-bottom behavior during default reductions.
+        // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
+        let config = ProcessTokenAdvancedConfig::default();
+
+        // Run the generic action-processing loop with a Default-only selector.
+        // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
+        // - action_selector returns the Default action for each row (no token actions here).
+        self.process_action_queue(
+            &mut work_map,
+            None,
+            &mut shifted_states_todo,
+            |row| Some(Action::Default(&row.default_reduce)),
+            &config,
+        );
+
+        // Consolidate all survivors into the new active state.
+        let mut next_active = ParseState::new();
+        for state in shifted_states_todo {
+            next_active.merge(state);
+        }
+        self.active_state = next_active;
+
+        // After Phase 3, we’re ready for the next token.
         self.phase = ParserPhase::ReadyForToken;
         self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
     }

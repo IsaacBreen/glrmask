@@ -2226,7 +2226,6 @@ local_system:
           /// `action_selector` chooses between the phase-1 or phase-2 action map.
           fn process_action_queue<F>(
               &mut self,
-              token_id: TerminalID,
               work_map: &mut WorkMap,
               mut reduce_map: Option<&mut WorkMap>,
               shifted_states_todo: &mut VecDeque<ParseState>,
@@ -2234,11 +2233,11 @@ local_system:
               config: &ProcessTokenAdvancedConfig,
           )
           where
-              F: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
+              F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
           {
               while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
                   let row = &self.parser.table[&state_id];
-                  let action_opt = action_selector(row, token_id);
+                  let action_opt = action_selector(row);
                   if let Some(action) = action_opt {
                       for peek in GSSNode::peek_iter(&state.stack) {
                           match action {
@@ -2254,7 +2253,7 @@ local_system:
                                   ..
                               }) => {
                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, token_id, config);
+                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                   if !s_new_arc.is_empty() {
                                       let new_parse_state = ParseState { stack: s_new_arc };
                                       if let Some(ref mut r_map) = reduce_map {
@@ -2275,17 +2274,17 @@ local_system:
                                   for (len, nts) in reduces {
                                       for (nt, _prod_ids) in nts {
                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                          let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, token_id, config);
+                                          let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                           if !s_new_arc.is_empty() {
                                               let new_parse_state = ParseState { stack: s_new_arc };
                                               if let Some(ref mut r_map) = reduce_map {
                                                   Self::enqueue(r_map, new_parse_state);
                                               } else {
                                                   Self::enqueue(work_map, new_parse_state);
-                                              }
                                           }
                                       }
                                   }
+                              }
                               }
                               Action::Default(default_reduce) => {
                                   // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
@@ -2301,7 +2300,6 @@ local_system:
                                               reduce.nonterminal_id,
                                               reduce.len,
                                               &action_selector,
-                                              token_id,
                                               config,
                                           );
                                           if !s_new_arc.is_empty() {
@@ -2321,7 +2319,7 @@ local_system:
                           }
                       }
                   } else {
-                      crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
+                      crate::debug!(5, "No action found in state {}", state_id.0);
                   }
               }
               self.below_bottom_cache.clear();
@@ -2331,15 +2329,16 @@ local_system:
               let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
               crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
               timeit!("GLRParserState::step::phase1", {
+                  let tid = token_id;
                   self.process_action_queue(
-                      token_id,
                       phase1_todo,
                       Some(phase2_todo),
                       shifted_states_todo,
-                      |row, tid| row
-                          .shifts_and_reduces_without_default_reduce
-                          .get(&tid)
-                          .map(Action::Token),
+                      move |row| {
+                          row.shifts_and_reduces_without_default_reduce
+                              .get(&tid)
+                              .map(Action::Token)
+                      },
                       config,
                   );
               });
@@ -2349,12 +2348,12 @@ local_system:
               crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
               timeit!("GLRParserState::step::phase2", {
                   // Reduces are pushed back onto the same queue (`None`).
+                  let tid = token_id;
                   self.process_action_queue(
-                      token_id,
                       phase2_todo,
                       None,
                       shifted_states_todo,
-                      |row, tid| {
+                      move |row| {
                           // Prefer a concrete token action; otherwise use the default reduce.
                           row.shifts_and_reduces_full
                               .get(&tid)
@@ -2373,11 +2372,10 @@ local_system:
               nt: NonTerminalID,
               len: usize,
               action_selector: &G,
-              token_id: TerminalID,
               config: &ProcessTokenAdvancedConfig,
           ) -> Arc<GSSNode>
           where
-              G: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
+              G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
           {
               let popper: GSSPopper = timeit!(peek.popn(len));
               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -2407,7 +2405,7 @@ local_system:
 
                           if let Some(goto_state_id) = goto.state_id {
                               let next_row = &self.parser.table[&goto_state_id];
-                              match action_selector(next_row, token_id) {
+                              match action_selector(next_row) {
                                   Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
                                       // Token-based unit reduction: continue the chain.
                                       current_nt = *next_nt;
@@ -2418,21 +2416,15 @@ local_system:
                                       // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                       // as if we broke the chain here, but we may still continue chaining if allowed.
                                       if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
-                                          let immediate_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                          out.push(Arc::new(immediate_node));
+                                          out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                       }
 
-                                      if let Some(reduce) = &def.reduce {
-                                          if reduce.len == 1 {
-                                              // Unit default reduce: continue chaining with the new non-terminal.
+                                      match &def.reduce {
+                                          Some(reduce) if reduce.len == 1 => {
                                               current_nt = reduce.nonterminal_id;
                                               continue;
-                                          } else {
-                                              break;
                                           }
-                                      } else {
-                                          // No reduce in default; we already "submitted" if clone_and_merge was set.
-                                          break;
+                                          _ => break,
                                       }
                                   }
                                   _ => {
@@ -5483,21 +5475,15 @@ local_system:
                                       // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                       // as if we broke the chain here, but we may still continue chaining if allowed.
                                       if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
-                                          let immediate_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                          out.push(Arc::new(immediate_node));
+                                          out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                       }
 
-                                      if let Some(reduce) = &def.reduce {
-                                          if reduce.len == 1 {
-                                              // Unit default reduce: continue chaining with the new non-terminal.
+                                      match &def.reduce {
+                                          Some(reduce) if reduce.len == 1 => {
                                               current_nt = reduce.nonterminal_id;
                                               continue;
-                                          } else {
-                                              break;
                                           }
-                                      } else {
-                                          // No reduce in default; we already "submitted" if clone_and_merge was set.
-                                          break;
+                                          _ => break,
                                       }
                                   }
                                   _ => {
@@ -5752,8 +5738,37 @@ local_system:
               }
               assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
-              todo!();
+              // Phase 3: apply default reductions until fixpoint (no token involved).
+              let mut work_map: WorkMap = WorkMap::new();
+              // Seed the queue with the current active state.
+              Self::enqueue(&mut work_map, self.active_state.clone());
 
+              // Collect survivors (clone-and-merge states and reduction results that finalize).
+              let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+
+              // Default config for below-bottom behavior during default reductions.
+              // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
+              let config = ProcessTokenAdvancedConfig::default();
+
+              // Run the generic action-processing loop with a Default-only selector.
+              // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
+              // - action_selector returns the Default action for each row (no token actions here).
+              self.process_action_queue(
+                  &mut work_map,
+                  None,
+                  &mut shifted_states_todo,
+                  |row| Some(Action::Default(&row.default_reduce)),
+                  &config,
+              );
+
+              // Consolidate all survivors into the new active state.
+              let mut next_active = ParseState::new();
+              for state in shifted_states_todo {
+                  next_active.merge(state);
+              }
+              self.active_state = next_active;
+
+              // After Phase 3, we’re ready for the next token.
               self.phase = ParserPhase::ReadyForToken;
               self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
           }
@@ -8404,7 +8419,6 @@ messages:
           /// `action_selector` chooses between the phase-1 or phase-2 action map.
           fn process_action_queue<F>(
               &mut self,
-              token_id: TerminalID,
               work_map: &mut WorkMap,
               mut reduce_map: Option<&mut WorkMap>,
               shifted_states_todo: &mut VecDeque<ParseState>,
@@ -8412,11 +8426,11 @@ messages:
               config: &ProcessTokenAdvancedConfig,
           )
           where
-              F: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
+              F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
           {
               while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
                   let row = &self.parser.table[&state_id];
-                  let action_opt = action_selector(row, token_id);
+                  let action_opt = action_selector(row);
                   if let Some(action) = action_opt {
                       for peek in GSSNode::peek_iter(&state.stack) {
                           match action {
@@ -8432,7 +8446,7 @@ messages:
                                   ..
                               }) => {
                                   crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, token_id, config);
+                                  let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                   if !s_new_arc.is_empty() {
                                       let new_parse_state = ParseState { stack: s_new_arc };
                                       if let Some(ref mut r_map) = reduce_map {
@@ -8453,17 +8467,17 @@ messages:
                                   for (len, nts) in reduces {
                                       for (nt, _prod_ids) in nts {
                                           crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                          let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, token_id, config);
+                                          let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                           if !s_new_arc.is_empty() {
                                               let new_parse_state = ParseState { stack: s_new_arc };
                                               if let Some(ref mut r_map) = reduce_map {
                                                   Self::enqueue(r_map, new_parse_state);
                                               } else {
                                                   Self::enqueue(work_map, new_parse_state);
-                                              }
                                           }
                                       }
                                   }
+                              }
                               }
                               Action::Default(default_reduce) => {
                                   // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
@@ -8479,7 +8493,6 @@ messages:
                                               reduce.nonterminal_id,
                                               reduce.len,
                                               &action_selector,
-                                              token_id,
                                               config,
                                           );
                                           if !s_new_arc.is_empty() {
@@ -8499,7 +8512,7 @@ messages:
                           }
                       }
                   } else {
-                      crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
+                      crate::debug!(5, "No action found in state {}", state_id.0);
                   }
               }
               self.below_bottom_cache.clear();
@@ -8509,15 +8522,16 @@ messages:
               let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
               crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
               timeit!("GLRParserState::step::phase1", {
+                  let tid = token_id;
                   self.process_action_queue(
-                      token_id,
                       phase1_todo,
                       Some(phase2_todo),
                       shifted_states_todo,
-                      |row, tid| row
-                          .shifts_and_reduces_without_default_reduce
-                          .get(&tid)
-                          .map(Action::Token),
+                      move |row| {
+                          row.shifts_and_reduces_without_default_reduce
+                              .get(&tid)
+                              .map(Action::Token)
+                      },
                       config,
                   );
               });
@@ -8527,12 +8541,12 @@ messages:
               crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
               timeit!("GLRParserState::step::phase2", {
                   // Reduces are pushed back onto the same queue (`None`).
+                  let tid = token_id;
                   self.process_action_queue(
-                      token_id,
                       phase2_todo,
                       None,
                       shifted_states_todo,
-                      |row, tid| {
+                      move |row| {
                           // Prefer a concrete token action; otherwise use the default reduce.
                           row.shifts_and_reduces_full
                               .get(&tid)
@@ -8551,11 +8565,10 @@ messages:
               nt: NonTerminalID,
               len: usize,
               action_selector: &G,
-              token_id: TerminalID,
               config: &ProcessTokenAdvancedConfig,
           ) -> Arc<GSSNode>
           where
-              G: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
+              G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
           {
               let popper: GSSPopper = timeit!(peek.popn(len));
               crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -8585,7 +8598,7 @@ messages:
 
                           if let Some(goto_state_id) = goto.state_id {
                               let next_row = &self.parser.table[&goto_state_id];
-                              match action_selector(next_row, token_id) {
+                              match action_selector(next_row) {
                                   Some(Action::Token(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
                                       // Token-based unit reduction: continue the chain.
                                       current_nt = *next_nt;
@@ -8596,21 +8609,15 @@ messages:
                                       // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                       // as if we broke the chain here, but we may still continue chaining if allowed.
                                       if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
-                                          let immediate_node = peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id });
-                                          out.push(Arc::new(immediate_node));
+                                          out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                       }
 
-                                      if let Some(reduce) = &def.reduce {
-                                          if reduce.len == 1 {
-                                              // Unit default reduce: continue chaining with the new non-terminal.
+                                      match &def.reduce {
+                                          Some(reduce) if reduce.len == 1 => {
                                               current_nt = reduce.nonterminal_id;
                                               continue;
-                                          } else {
-                                              break;
                                           }
-                                      } else {
-                                          // No reduce in default; we already "submitted" if clone_and_merge was set.
-                                          break;
+                                          _ => break,
                                       }
                                   }
                                   _ => {
@@ -9256,210 +9263,113 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Remove `token_id` from `reduce_and_goto` and `process_action_queue` and
-      instead modify `action_selector` to capture it. Be careful of lifetimes.
+  - user: Complete the `todo!()` in `process_default_reductions`. This function should
+      work quite similarly to normal token processing, except that it's not taking
+      a token, of course. Instead, it's looking up any default reduction and using
+      that. And only default reductions, no others. But everything else works much
+      the same way.
     metadata:
   - assistant: |-
-      Below are precise, step-by-step edits to make in src/glr/parser.rs to remove token_id from both reduce_and_goto and process_action_queue, and to have action_selector closures capture the token instead. I’ll include the exact signatures and all call sites you need to change. I will also point out the one logging line that referenced token_id and what to replace it with.
+      Below are precise, minimal instructions to implement Phase 3 (default reductions) and replace the current todo!().
 
-      1) Change the signature and bound of process_action_queue
+      File to edit: src/glr/parser.rs
 
-      - Find the definition of process_action_queue in impl<'a> GLRParserState<'a>.
-      - Replace its signature to remove token_id and change the action_selector bound to capture the token:
+      1) Locate the method:
+      - Search for fn process_default_reductions(&mut self) in impl GLRParserState<'a>.
 
-      Replace:
-      fn process_action_queue<F>(
-          &mut self,
-          token_id: TerminalID,
-          work_map: &mut WorkMap,
-          mut reduce_map: Option<&mut WorkMap>,
-          shifted_states_todo: &mut VecDeque<ParseState>,
-          action_selector: F,
-          config: &ProcessTokenAdvancedConfig,
-      )
-      where
-          F: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
+      2) Replace the todo!() body with the following code:
+      - Keep the existing logging at the start and end of the function.
+      - Insert this code exactly where todo!() appears.
 
-      With:
-      fn process_action_queue<F>(
-          &mut self,
-          work_map: &mut WorkMap,
-          mut reduce_map: Option<&mut WorkMap>,
-          shifted_states_todo: &mut VecDeque<ParseState>,
-          action_selector: F,
-          config: &ProcessTokenAdvancedConfig,
-      )
-      where
-          F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
+      ```rust
+          // Phase 3: apply default reductions until fixpoint (no token involved).
+          let mut work_map: WorkMap = WorkMap::new();
+          // Seed the queue with the current active state.
+          Self::enqueue(&mut work_map, self.active_state.clone());
 
-      - Inside the function body, change the action lookup line to drop token_id:
+          // Collect survivors (clone-and-merge states and reduction results that finalize).
+          let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
-      Replace:
-      let action_opt = action_selector(row, token_id);
+          // Default config for below-bottom behavior during default reductions.
+          // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
+          let config = ProcessTokenAdvancedConfig::default();
 
-      With:
-      let action_opt = action_selector(row);
+          // Run the generic action-processing loop with a Default-only selector.
+          // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
+          // - action_selector returns the Default action for each row (no token actions here).
+          self.process_action_queue(
+              &mut work_map,
+              None,
+              &mut shifted_states_todo,
+              |row| Some(Action::Default(&row.default_reduce)),
+              &config,
+          );
 
-      - In the “no action found” debug log, you no longer have token_id. Update that line to avoid mentioning the token:
+          // Consolidate all survivors into the new active state.
+          let mut next_active = ParseState::new();
+          for state in shifted_states_todo {
+              next_active.merge(state);
+          }
+          self.active_state = next_active;
 
-      Replace:
-      crate::debug!(5, "No action found for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), state_id.0);
+          // After Phase 3, we’re ready for the next token.
+          self.phase = ParserPhase::ReadyForToken;
+      ```
 
-      With:
-      crate::debug!(5, "No action found in state {}", state_id.0);
+      3) Final function for reference (only the function body changed; keep the signature and logging lines that are already present):
 
-      This keeps the log useful without requiring token_id.
+      ```rust
+      #[time_it("GLRParserState::process_default_reductions")]
+      pub fn process_default_reductions(&mut self) {
+          self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
+          if self.phase == ParserPhase::ReadyForToken {
+              crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
+              return;
+          }
+          assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
 
-      - In the match arms that call reduce_and_goto, remove the token_id argument from those calls. You will update reduce_and_goto next; for now, just remove the token argument. There are three places:
+          // Phase 3: apply default reductions until fixpoint (no token involved).
+          let mut work_map: WorkMap = WorkMap::new();
+          // Seed the queue with the current active state.
+          Self::enqueue(&mut work_map, self.active_state.clone());
 
-      a) In the Reduce arm:
-      let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+          // Collect survivors (clone-and-merge states and reduction results that finalize).
+          let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
-      b) In the Split arm (inside the for loops for reduces):
-      let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+          // Default config for below-bottom behavior during default reductions.
+          // If you need different behavior, adjust ProcessTokenAdvancedConfig and pass it here.
+          let config = ProcessTokenAdvancedConfig::default();
 
-      c) In the Default arm (inside if let Some(reduce) = &default_reduce.reduce):
-      let s_new_arc = self.reduce_and_goto(
-          &peek,
-          reduce.nonterminal_id,
-          reduce.len,
-          &action_selector,
-          config,
-      );
+          // Run the generic action-processing loop with a Default-only selector.
+          // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
+          // - action_selector returns the Default action for each row (no token actions here).
+          self.process_action_queue(
+              &mut work_map,
+              None,
+              &mut shifted_states_todo,
+              |row| Some(Action::Default(&row.default_reduce)),
+              &config,
+          );
 
-      2) Update the two call sites of process_action_queue to capture token_id inside action_selector
+          // Consolidate all survivors into the new active state.
+          let mut next_active = ParseState::new();
+          for state in shifted_states_todo {
+              next_active.merge(state);
+          }
+          self.active_state = next_active;
 
-      These are in _do_actions_without_default and _do_actions_with_default.
+          // After Phase 3, we’re ready for the next token.
+          self.phase = ParserPhase::ReadyForToken;
+          self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
+      }
+      ```
 
-      - In _do_actions_without_default, replace the call to process_action_queue:
-
-      Before:
-      self.process_action_queue(
-          token_id,
-          phase1_todo,
-          Some(phase2_todo),
-          shifted_states_todo,
-          |row, tid| row
-              .shifts_and_reduces_without_default_reduce
-              .get(&tid)
-              .map(Action::Token),
-          config,
-      );
-
-      After:
-      let tid = token_id;
-      self.process_action_queue(
-          phase1_todo,
-          Some(phase2_todo),
-          shifted_states_todo,
-          move |row| {
-              row.shifts_and_reduces_without_default_reduce
-                  .get(&tid)
-                  .map(Action::Token)
-          },
-          config,
-      );
-
-      - In _do_actions_with_default, replace the call similarly:
-
-      Before:
-      self.process_action_queue(
-          token_id,
-          phase2_todo,
-          None,
-          shifted_states_todo,
-          |row, tid| {
-              // Prefer a concrete token action; otherwise use the default reduce.
-              row.shifts_and_reduces_full
-                  .get(&tid)
-                  .map(Action::Token)
-          },
-          config,
-      );
-
-      After:
-      let tid = token_id;
-      self.process_action_queue(
-          phase2_todo,
-          None,
-          shifted_states_todo,
-          move |row| {
-              // Prefer a concrete token action; otherwise use the default reduce.
-              row.shifts_and_reduces_full
-                  .get(&tid)
-                  .map(Action::Token)
-          },
-          config,
-      );
-
-      Note: If/when you want to also use the default reduce in phase 2 when no token action is present, you can modify that closure to fall back to Some(Action::Default(&row.default_reduce)). Since your current code (and comments) hint at preferring token actions, I’m preserving your current behavior.
-
-      3) Change the signature and bound of reduce_and_goto
-
-      - Find the definition of reduce_and_goto in impl<'a> GLRParserState<'a>.
-      - Replace its signature to remove token_id and accept a capture-based selector:
-
-      Replace:
-      fn reduce_and_goto<G>(
-          &mut self,
-          peek: &GSSPeek,
-          nt: NonTerminalID,
-          len: usize,
-          action_selector: &G,
-          token_id: TerminalID,
-          config: &ProcessTokenAdvancedConfig,
-      ) -> Arc<GSSNode>
-      where
-          G: for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>,
-
-      With:
-      fn reduce_and_goto<G>(
-          &mut self,
-          peek: &GSSPeek,
-          nt: NonTerminalID,
-          len: usize,
-          action_selector: &G,
-          config: &ProcessTokenAdvancedConfig,
-      ) -> Arc<GSSNode>
-      where
-          G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
-
-      - Inside the function body, update every call of action_selector to drop token_id:
-
-      Replace:
-      match action_selector(next_row, token_id) {
-
-      With:
-      match action_selector(next_row) {
-
-      That match appears inside the fast loop after computing goto_state_id; there should be only that occurrence.
-
-      4) Why this compiles (lifetimes and Fn bounds)
-
-      - The important part is changing the higher-ranked trait bound (HRTB) from
-        for<'r> Fn(&'r Row, TerminalID) -> Option<Action<'r>>
-        to
-        for<'r> Fn(&'r Row) -> Option<Action<'r>>.
-
-      - The Action<'r> contains references into Row; this is preserved by the HRTB, ensuring any references returned by action_selector live no longer than the Row passed in.
-
-      - Capturing tid (TerminalID) by move in the closures ensures it is owned by the closure, so no additional lifetimes are introduced. TerminalID is a small Copy newtype, so the move is cheap.
-
-      - Passing &action_selector into reduce_and_goto is fine; the closure is immutable and callable many times.
-
-      5) Double-check and re-run
-
-      - Search in src/glr/parser.rs for process_action_queue( and ensure only the two call sites (in _do_actions_without_default and _do_actions_with_default) are updated to the new signature (no token_id argument).
-      - Search for reduce_and_goto( calls and confirm the token_id argument was removed everywhere (there are three places; see step 1).
-      - Ensure there are no remaining references to token_id inside process_action_queue and reduce_and_goto after your edits. The only place we changed a log is the “No action found…” debug.
-
-      6) Optional: keep or remove token-based log context in process_action_queue
-
-      If you really want to preserve the token’s name in process_action_queue logs, you can:
-      - Pass a small formatting closure that captures tid into process_action_queue (e.g., a Fn() -> &Terminal to use only in logs), or
-      - Pre-format the token name in the caller and pass it as a &str. But since the requirement was specifically to remove token_id (and not add new parameters), the simplest and cleanest solution is to log only the state.
-
-      That’s all. This change keeps the semantics intact while removing token_id from both APIs and relying on captured closures with a sound HRTB to handle lifetimes correctly.
+      Notes:
+      - This reuses the existing generic process_action_queue so semantics match Phase 1/2 logic:
+        - Only default actions are considered.
+        - Reductions are re-enqueued into the same work queue until a fixpoint (closure) is reached.
+        - clone_and_merge states (and any default-reduction results that survive) are merged into the next active state.
+      - Accepted paths will be flagged automatically via reduce_and_goto, consistent with token processing.
     metadata:
   - user: |
       Using model 'gf' for code completion.
@@ -9478,7 +9388,7 @@ messages:
       --- Applying Changes ---
       Successfully replaced file: src/glr/parser.rs
     metadata:
-  - user: 'Changes committed with message: "Refactor: Remove token_id from process_action_queue
-      and reduce_and_goto signatures"'
+  - user: 'Changes committed with message: "feat: Implement process_default_reductions
+      (Phase 3)"'
     metadata:
 ...
