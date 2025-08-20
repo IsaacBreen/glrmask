@@ -1760,7 +1760,7 @@ where
 pub struct EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
 where
     EK: Ord + Clone,
-    EV: Clone,
+    EV: Clone + Debug,
     T: Clone, // T needs to be Clone for else_create_destination_with_value -> Trie::new(value)
     FMergeEV: FnMut(&mut EV, EV), // Closure to merge edge values if edge exists - Changed signature
     FUpdateT: FnMut(&mut T, &EV),
@@ -1778,7 +1778,7 @@ where
 impl<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T> EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
 where
     EK: Ord + Clone + Debug,
-    EV: Clone,
+    EV: Clone + Debug,
     T: Clone,
     FMergeEV: FnMut(&mut EV, EV), // Changed signature
     FUpdateT: FnMut(&mut T, &EV),
@@ -1857,6 +1857,7 @@ where
         }
 
         if let Some((dest_arc, ev)) = update_info {
+            println!("Updating node value for destination {:p} with edge value {:?}", Arc::as_ptr(&dest_arc), ev);
             (self.update_node_value)(&mut dest_arc.write().unwrap().value, &ev);
         }
 
@@ -2103,7 +2104,7 @@ where
 
 
 // Optional: Add a convenience method to Trie to create an EdgeInserter easily.
-impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
+impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
     /// Creates an `EdgeInserter` to help add an edge starting from this node.
     ///
     /// This provides a convenient entry point for the chainable insertion pattern.
@@ -2183,7 +2184,7 @@ pub fn try_destination<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
 ) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
-    EV: Clone,
+    EV: Clone + Debug,
     T: Clone,
     FMergeEV: FnMut(&mut EV, EV), // Changed signature
     FUpdateT: FnMut(&mut T, &EV),
@@ -2207,7 +2208,7 @@ pub fn try_destination_with<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
 ) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
-    EV: Clone,
+    EV: Clone + Debug,
     T: Clone,
     FMergeEV: FnMut(&mut EV, EV), // Changed signature
     FUpdateT: FnMut(&mut T, &EV),
@@ -2231,7 +2232,7 @@ pub fn try_destination_auto<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
 ) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
-    EV: Clone,
+    EV: Clone + Debug,
     T: Clone,
     FMergeEV: FnMut(&mut EV, EV),
     FUpdateT: FnMut(&mut T, &EV),
