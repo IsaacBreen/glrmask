@@ -554,6 +554,7 @@ impl GrammarConstraint {
                     MERGE_THRESHOLD,
                     &mut HashMap::new(),
                 );
+                glr_s.process_default_reductions();
                 let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !active_llm_tokens.is_empty();
                 if precomputed_node_data.value.end {
@@ -2659,7 +2660,7 @@ impl<'a> GrammarConstraintState<'a> {
         self.state = new_overall_state.clone();
 
         for glr_parser_state in self.state.values_mut() {
-            glr_parser_state.process_default_reductions();
+            // glr_parser_state.process_default_reductions();
         }
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
