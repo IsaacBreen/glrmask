@@ -1804,19 +1804,11 @@ local_system:
           pub fn new(
               source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
               edge_key: EK,
-              mut edge_value: EV,
+              edge_value: EV,
               merge_edge_value: FMergeEV,
               update_node_value: FUpdateT,
-              mut merge_edge_value_and_source_node_value: FMergeEV_T,
+              merge_edge_value_and_source_node_value: FMergeEV_T,
           ) -> Self {
-              // Before doing anything else, merge the edge value with the source node's value.
-              // This allows the edge value to be influenced by its source context before it's
-              // used for insertion or merging with other edges.
-              {
-                  let source_guard = source_arc.read().expect("RwLock poisoned while locking source in EdgeInserter::new");
-                  (merge_edge_value_and_source_node_value)(&mut edge_value, &source_guard.value);
-              }
-
               EdgeInserter {
                   source_arc,
                   edge_key,
@@ -1841,25 +1833,23 @@ local_system:
                   return self; // Already found a destination
               }
 
-              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
+              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination"); // Renamed source to source_guard
               let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
 
               // Check if edge already exists and try merging EV
               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
                   let new_ev = self.edge_value.take().unwrap();
                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  self.result = Some(destination);
                   let updated_ev = existing_ev_mut.clone();
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+                  (self.update_node_value)(&mut source_guard.value, &updated_ev);
               } else {
                   // Edge doesn't exist, try inserting. try_insert expects the value by move.
                   let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
                   match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
                       Ok(()) => {
-                          self.result = Some(destination.clone()); // Insert successful, destination found
-                          drop(source_guard);
-                          (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                          self.result = Some(destination); // Insert successful, destination found
+                          (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
                       }
                       Err(CycleDetectedError) => {
                           // Cycle detected, insert failed, result remains None
@@ -1867,6 +1857,7 @@ local_system:
                       }
                   }
               }
+              drop(source_guard); // Use source_guard
               self
           }
 
@@ -1882,22 +1873,21 @@ local_system:
               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
                   let new_ev = self.edge_value.take().unwrap();
                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  self.result = Some(destination);
                   let updated_ev = existing_ev_mut.clone();
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+                  (self.update_node_value)(&mut source_guard.value, &updated_ev);
               } else {
                   // Attempt strong; if cycle, degrade to weak
                   let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
                   let kind = source_guard.try_insert_auto(self.edge_key.clone(), &mut self.edge_value, destination.clone());
                   match kind {
                       InsertedEdgeKind::Strong | InsertedEdgeKind::Weak => {
-                          self.result = Some(destination.clone());
-                          drop(source_guard);
-                          (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                          self.result = Some(destination);
+                          (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
                       }
                   }
               }
+              drop(source_guard);
               self
           }
 
@@ -1926,18 +1916,17 @@ local_system:
                   // An edge (strong or weak) to this destination already exists. Merge the value.
                   let new_ev = self.edge_value.take().unwrap();
                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  self.result = Some(destination);
                   let updated_ev = existing_ev_mut.clone();
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+                  (self.update_node_value)(&mut source_guard.value, &updated_ev);
               } else {
                   // No edge to this destination exists under this key. Insert a new weak one.
                   let edge_val = self.edge_value.take().unwrap();
                   source_guard.insert_weak_to_node(self.edge_key.clone(), edge_val.clone(), &destination);
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val);
+                  self.result = Some(destination);
+                  (self.update_node_value)(&mut source_guard.value, &edge_val);
               }
+              drop(source_guard);
               self
           }
 
@@ -2041,15 +2030,14 @@ local_system:
               }
 
               let new_node_arc = Arc::new(RwLock::new(Trie::new(value)));
-              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
+              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value"); // Renamed source
 
               let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
               // try_insert expects the value by move, so clone here
               match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
                   Ok(()) => {
-                      self.result = Some(new_node_arc.clone());
-                      drop(source_guard);
-                      (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
+                      self.result = Some(new_node_arc);
+                      (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
                   }
                   Err(CycleDetectedError) => {
                       // Insert failed (e.g., cycle detected even with new node - unusual)
@@ -2057,6 +2045,7 @@ local_system:
                       // result remains None
                   }
               }
+              drop(source_guard); // Use source_guard
               self
           }
 
@@ -5353,19 +5342,11 @@ local_system:
           pub fn new(
               source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
               edge_key: EK,
-              mut edge_value: EV,
+              edge_value: EV,
               merge_edge_value: FMergeEV,
               update_node_value: FUpdateT,
-              mut merge_edge_value_and_source_node_value: FMergeEV_T,
+              merge_edge_value_and_source_node_value: FMergeEV_T,
           ) -> Self {
-              // Before doing anything else, merge the edge value with the source node's value.
-              // This allows the edge value to be influenced by its source context before it's
-              // used for insertion or merging with other edges.
-              {
-                  let source_guard = source_arc.read().expect("RwLock poisoned while locking source in EdgeInserter::new");
-                  (merge_edge_value_and_source_node_value)(&mut edge_value, &source_guard.value);
-              }
-
               EdgeInserter {
                   source_arc,
                   edge_key,
@@ -5390,32 +5371,31 @@ local_system:
                   return self; // Already found a destination
               }
 
-              let mut edge_val_for_update: Option<EV> = None;
+              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
+              let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
 
-              {
-                  let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
-                  let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
-
-                  // Check if edge already exists and try merging EV
-                  if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
-                      let new_ev = self.edge_value.take().unwrap();
-                      (self.merge_edge_value)(existing_ev_mut, new_ev);
-                      edge_val_for_update = Some(existing_ev_mut.clone());
-                      self.result = Some(destination.clone());
-                  } else {
-                      // Edge doesn't exist, try inserting.
-                      let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-                      if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()).is_ok() {
+              // Check if edge already exists and try merging EV
+              if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
+                  let new_ev = self.edge_value.take().unwrap();
+                  (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  let updated_ev = existing_ev_mut.clone();
+                  self.result = Some(destination.clone());
+                  drop(source_guard);
+                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+              } else {
+                  // Edge doesn't exist, try inserting. try_insert expects the value by move.
+                  let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
+                  match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
+                      Ok(()) => {
                           self.result = Some(destination.clone()); // Insert successful, destination found
-                          edge_val_for_update = Some(edge_val_clone);
-                      } else {
+                          drop(source_guard);
+                          (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                      }
+                      Err(CycleDetectedError) => {
                           // Cycle detected, insert failed, result remains None
                           crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
                       }
                   }
-              }
-              if let Some(ev) = edge_val_for_update {
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &ev);
               }
               self
           }
@@ -5591,23 +5571,21 @@ local_system:
               }
 
               let new_node_arc = Arc::new(RwLock::new(Trie::new(value)));
+              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
+
               let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-              let mut success = false;
-
-              {
-                  let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
-
-                  if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()).is_ok() {
+              // try_insert expects the value by move, so clone here
+              match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
+                  Ok(()) => {
                       self.result = Some(new_node_arc.clone());
-                      success = true;
-                  } else {
+                      drop(source_guard);
+                      (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
+                  }
+                  Err(CycleDetectedError) => {
                       // Insert failed (e.g., cycle detected even with new node - unusual)
                       crate::debug!(1, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
                       // result remains None
                   }
-              }
-              if success {
-                  (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
               }
               self
           }
@@ -8929,19 +8907,11 @@ messages:
           pub fn new(
               source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
               edge_key: EK,
-              mut edge_value: EV,
+              edge_value: EV,
               merge_edge_value: FMergeEV,
               update_node_value: FUpdateT,
-              mut merge_edge_value_and_source_node_value: FMergeEV_T,
+              merge_edge_value_and_source_node_value: FMergeEV_T,
           ) -> Self {
-              // Before doing anything else, merge the edge value with the source node's value.
-              // This allows the edge value to be influenced by its source context before it's
-              // used for insertion or merging with other edges.
-              {
-                  let source_guard = source_arc.read().expect("RwLock poisoned while locking source in EdgeInserter::new");
-                  (merge_edge_value_and_source_node_value)(&mut edge_value, &source_guard.value);
-              }
-
               EdgeInserter {
                   source_arc,
                   edge_key,
@@ -8966,25 +8936,23 @@ messages:
                   return self; // Already found a destination
               }
 
-              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
+              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination"); // Renamed source to source_guard
               let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
 
               // Check if edge already exists and try merging EV
               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
                   let new_ev = self.edge_value.take().unwrap();
                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  self.result = Some(destination);
                   let updated_ev = existing_ev_mut.clone();
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+                  (self.update_node_value)(&mut source_guard.value, &updated_ev);
               } else {
                   // Edge doesn't exist, try inserting. try_insert expects the value by move.
                   let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
                   match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
                       Ok(()) => {
-                          self.result = Some(destination.clone()); // Insert successful, destination found
-                          drop(source_guard);
-                          (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                          self.result = Some(destination); // Insert successful, destination found
+                          (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
                       }
                       Err(CycleDetectedError) => {
                           // Cycle detected, insert failed, result remains None
@@ -8992,6 +8960,7 @@ messages:
                       }
                   }
               }
+              drop(source_guard); // Use source_guard
               self
           }
 
@@ -9007,22 +8976,21 @@ messages:
               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
                   let new_ev = self.edge_value.take().unwrap();
                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  self.result = Some(destination);
                   let updated_ev = existing_ev_mut.clone();
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+                  (self.update_node_value)(&mut source_guard.value, &updated_ev);
               } else {
                   // Attempt strong; if cycle, degrade to weak
                   let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
                   let kind = source_guard.try_insert_auto(self.edge_key.clone(), &mut self.edge_value, destination.clone());
                   match kind {
                       InsertedEdgeKind::Strong | InsertedEdgeKind::Weak => {
-                          self.result = Some(destination.clone());
-                          drop(source_guard);
-                          (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                          self.result = Some(destination);
+                          (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
                       }
                   }
               }
+              drop(source_guard);
               self
           }
 
@@ -9051,18 +9019,17 @@ messages:
                   // An edge (strong or weak) to this destination already exists. Merge the value.
                   let new_ev = self.edge_value.take().unwrap();
                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+                  self.result = Some(destination);
                   let updated_ev = existing_ev_mut.clone();
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+                  (self.update_node_value)(&mut source_guard.value, &updated_ev);
               } else {
                   // No edge to this destination exists under this key. Insert a new weak one.
                   let edge_val = self.edge_value.take().unwrap();
                   source_guard.insert_weak_to_node(self.edge_key.clone(), edge_val.clone(), &destination);
-                  self.result = Some(destination.clone());
-                  drop(source_guard);
-                  (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val);
+                  self.result = Some(destination);
+                  (self.update_node_value)(&mut source_guard.value, &edge_val);
               }
+              drop(source_guard);
               self
           }
 
@@ -9166,15 +9133,14 @@ messages:
               }
 
               let new_node_arc = Arc::new(RwLock::new(Trie::new(value)));
-              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
+              let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value"); // Renamed source
 
               let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
               // try_insert expects the value by move, so clone here
               match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
                   Ok(()) => {
-                      self.result = Some(new_node_arc.clone());
-                      drop(source_guard);
-                      (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
+                      self.result = Some(new_node_arc);
+                      (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
                   }
                   Err(CycleDetectedError) => {
                       // Insert failed (e.g., cycle detected even with new node - unusual)
@@ -9182,6 +9148,7 @@ messages:
                       // result remains None
                   }
               }
+              drop(source_guard); // Use source_guard
               self
           }
 
@@ -10681,151 +10648,143 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: |-
-      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_constraint_basic --profile test
-          Blocking waiting for file lock on build directory
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0505]: cannot move out of `self` because it is borrowed
-          --> src/datastructures/trie.rs:1863:9
-           |
-      1832 |     pub fn try_destination(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
-           |                            -------- binding `self` declared here
-      ...
-      1837 |         let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
-           |                                --------------- borrow of `self.source_arc` occurs here
-      ...
-      1863 |         self
-           |         ^^^^ move out of `self` occurs here
-      1864 |     }
-           |     - borrow might be used here, when `source_guard` is dropped and runs the `Drop` code for type `std::sync::RwLockWriteGuard`
-
-      error[E0505]: cannot move out of `self` because it is borrowed
-          --> src/datastructures/trie.rs:2053:9
-           |
-      2031 |     pub fn else_create_destination_with_value(mut self, value: T) -> Self {
-           |                                               -------- binding `self` declared here
-      ...
-      2037 |         let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
-           |                                --------------- borrow of `self.source_arc` occurs here
-      ...
-      2053 |         self
-           |         ^^^^ move out of `self` occurs here
-      2054 |     }
-           |     - borrow might be used here, when `source_guard` is dropped and runs the `Drop` code for type `std::sync::RwLockWriteGuard`
-
-      For more information about this error, try `rustc --explain E0505`.
-      error: could not compile `sep1` (lib test) due to 2 previous errors
+  - user: AH oh no, there's a fundamental misunderstanding here about `self.update_node_value`.
+      It should update the DESTINATION node, NOT the source node.
     metadata:
   - assistant: |-
-      Hello! I see you're running into some borrow checker errors. Those can be tricky! The issue here is that a `RwLockWriteGuard` is being held on a field of `self` (`self.source_arc`) at the same time the function tries to return `self` by value. This is disallowed because the guard's lifetime is tied to the `self` it was created from, and moving `self` would invalidate the guard.
+      Of course! It looks like there's a logical error in how the `update_node_value` closure is being used within the `EdgeInserter`. It's updating the *source* node's value instead of the *destination* node's value. This can also lead to deadlocks if not handled carefully, as it would require taking a write lock on the destination node while already holding one on the source.
 
-      The fix is to restructure the code slightly to ensure the lock guard is dropped *before* `self` is returned, especially in the error-handling paths where it was being missed. I'll refactor the two problematic functions, `try_destination` and `else_create_destination_with_value`, to use a scoped block for the lock guard. This ensures it's always released before the function returns.
+      Here are the patches to correct this behavior by ensuring the source node's lock is released before the destination node is locked and updated.
 
-      Here are the patches for `src/datastructures/trie.rs`:
+      ### `src/datastructures/trie.rs`
+
+      I'll adjust `try_destination`, `try_destination_auto`, `to_destination_weakly`, and `else_create_destination_with_value` to correctly update the destination node while avoiding deadlocks.
 
       ```diff
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -1836,31 +1836,29 @@
+      @@ -1659,26 +1659,26 @@
                    return self; // Already found a destination
                }
        
-      -        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
-      -        let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
-      +        let mut edge_val_for_update: Option<EV> = None;
+      -        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination"); // Renamed source to source_guard
+      +        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
+               let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
        
-      -        // Check if edge already exists and try merging EV
-      -        if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
-      -            let new_ev = self.edge_value.take().unwrap();
-      -            (self.merge_edge_value)(existing_ev_mut, new_ev);
-      -            let updated_ev = existing_ev_mut.clone();
-      -            self.result = Some(destination.clone());
-      -            drop(source_guard);
-      -            (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
-      -        } else {
-      -            // Edge doesn't exist, try inserting. try_insert expects the value by move.
-      -            let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-      -            match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
-      -                Ok(()) => {
-      -                    self.result = Some(destination.clone()); // Insert successful, destination found
-      -                    drop(source_guard);
-      -                    (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
-      -                }
-      -                Err(CycleDetectedError) => {
-      -                    // Cycle detected, insert failed, result remains None
-      -                    crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
-      -                }
-      +        {
-      +            let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
-      +            let destination_wrapper = NodePtr::Strong(ArcPtrWrapper::new(destination.clone())); // Use ArcPtrWrapper
-      +
-      +            // Check if edge already exists and try merging EV
-      +            if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
-      +                let new_ev = self.edge_value.take().unwrap();
-      +                (self.merge_edge_value)(existing_ev_mut, new_ev);
-      +                edge_val_for_update = Some(existing_ev_mut.clone());
-      +                self.result = Some(destination.clone());
-      +            } else {
-      +                // Edge doesn't exist, try inserting.
-      +                let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-      +                if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()).is_ok() {
+               // Check if edge already exists and try merging EV
+               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
+                   let new_ev = self.edge_value.take().unwrap();
+                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+      -            self.result = Some(destination);
+                   let updated_ev = existing_ev_mut.clone();
+      -            (self.update_node_value)(&mut source_guard.value, &updated_ev);
+      +            self.result = Some(destination.clone());
+      +            drop(source_guard);
+      +            (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+               } else {
+                   // Edge doesn't exist, try inserting. try_insert expects the value by move.
+                   let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
+                   match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
+                       Ok(()) => {
+      -                    self.result = Some(destination); // Insert successful, destination found
+      -                    (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
       +                    self.result = Some(destination.clone()); // Insert successful, destination found
-      +                    edge_val_for_update = Some(edge_val_clone);
-      +                } else {
-      +                    // Cycle detected, insert failed, result remains None
-      +                    crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
-      +                }
+      +                    drop(source_guard);
+      +                    (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                       }
+                       Err(CycleDetectedError) => {
+                           // Cycle detected, insert failed, result remains None
+                           crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
+                       }
                    }
                }
-      -        self
-      +        if let Some(ev) = edge_val_for_update {
-      +            (self.update_node_value)(&mut destination.write().unwrap().value, &ev);
-      +        }
-      +        self
+      -        drop(source_guard); // Use source_guard
+               self
            }
        
-           /// Like try_destination, but if a strong cycle would be created, insert a WEAK edge instead.
-      @@ -2036,24 +2034,23 @@
+      @@ -1693,21 +1693,22 @@
+               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
+                   let new_ev = self.edge_value.take().unwrap();
+                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+      -            self.result = Some(destination);
+                   let updated_ev = existing_ev_mut.clone();
+      -            (self.update_node_value)(&mut source_guard.value, &updated_ev);
+      +            self.result = Some(destination.clone());
+      +            drop(source_guard);
+      +            (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+               } else {
+                   // Attempt strong; if cycle, degrade to weak
+                   let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
+                   let kind = source_guard.try_insert_auto(self.edge_key.clone(), &mut self.edge_value, destination.clone());
+                   match kind {
+                       InsertedEdgeKind::Strong | InsertedEdgeKind::Weak => {
+      -                    self.result = Some(destination);
+      -                    (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
+      +                    self.result = Some(destination.clone());
+      +                    drop(source_guard);
+      +                    (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val_clone);
+                       }
+                   }
+               }
+      -        drop(source_guard);
+               self
+           }
+       
+      @@ -1726,18 +1727,18 @@
+               if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_wrapper)) {
+                   // An edge (strong or weak) to this destination already exists. Merge the value.
+                   let new_ev = self.edge_value.take().unwrap();
+                   (self.merge_edge_value)(existing_ev_mut, new_ev);
+      -            self.result = Some(destination);
+                   let updated_ev = existing_ev_mut.clone();
+      -            (self.update_node_value)(&mut source_guard.value, &updated_ev);
+      +            self.result = Some(destination.clone());
+      +            drop(source_guard);
+      +            (self.update_node_value)(&mut destination.write().unwrap().value, &updated_ev);
+               } else {
+                   // No edge to this destination exists under this key. Insert a new weak one.
+                   let edge_val = self.edge_value.take().unwrap();
+                   source_guard.insert_weak_to_node(self.edge_key.clone(), edge_val.clone(), &destination);
+      -            self.result = Some(destination);
+      -            (self.update_node_value)(&mut source_guard.value, &edge_val);
+      -        }
+      -        drop(source_guard);
+      +            self.result = Some(destination.clone());
+      +            drop(source_guard);
+      +            (self.update_node_value)(&mut destination.write().unwrap().value, &edge_val);
+      +        }
+               self
+           }
+       
+      @@ -1812,18 +1813,19 @@
                }
        
                let new_node_arc = Arc::new(RwLock::new(Trie::new(value)));
-      -        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
-      +        let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-      +        let mut success = false;
+      -        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value"); // Renamed source
+      +        let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
        
-      -        let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-      -        // try_insert expects the value by move, so clone here
-      -        match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
-      -            Ok(()) => {
-      -                self.result = Some(new_node_arc.clone());
-      -                drop(source_guard);
-      -                (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
-      -            }
-      -            Err(CycleDetectedError) => {
-      +        {
-      +            let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
-      +
-      +            if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()).is_ok() {
+               let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
+               // try_insert expects the value by move, so clone here
+               match source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
+                   Ok(()) => {
+      -                self.result = Some(new_node_arc);
+      -                (self.update_node_value)(&mut source_guard.value, &edge_val_clone);
       +                self.result = Some(new_node_arc.clone());
-      +                success = true;
-      +            } else {
+      +                drop(source_guard);
+      +                (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
+                   }
+                   Err(CycleDetectedError) => {
                        // Insert failed (e.g., cycle detected even with new node - unusual)
                        crate::debug!(1, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
                        // result remains None
                    }
                }
-      -        self
-      +        if success {
-      +            (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
-      +        }
-      +        self
+      -        drop(source_guard); // Use source_guard
+               self
            }
        
-           /// If no destination has been found yet, creates a new node by calling `value_fn`,
 
       ```
-
-      These changes should resolve the compilation errors. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -10836,7 +10795,7 @@ messages:
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Resolve E0505 borrow checker errors
-      in EdgeInserter methods"'
+  - user: 'Changes committed with message: "Fix: Correctly update destination node
+      value in EdgeInserter methods"'
     metadata:
 ...
