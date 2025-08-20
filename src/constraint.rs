@@ -425,7 +425,7 @@ impl GrammarConstraint {
                 continue;
             }
             let trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
-                PrecomputedNodeContents::internal(),
+                PrecomputedNodeContents::root(internal_max_llm_token),
             )));
             precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
 
