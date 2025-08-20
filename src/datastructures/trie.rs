@@ -1795,12 +1795,12 @@ where
     ///   both by value, returning a merged value. This is only called if an edge with the same `edge_key` already
     ///   points to the `destination` being tried.
     pub fn new(
-        merge_edge_value_and_source_node_value: FMergeEV_T,
         source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
         update_node_value: FUpdateT,
+        merge_edge_value_and_source_node_value: FMergeEV_T,
     ) -> Self {
         EdgeInserter {
             source_arc,
@@ -2152,7 +2152,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
          FUpdateT: FnMut(&mut T, &EV),
          FMergeEV_T: FnMut(&mut EV, &T),
     {
-            EdgeInserter::new(merge_edge_value_and_source_node_value, Arc::new(RwLock::new(self.clone())), edge_key, edge_value, merge_edge_value, update_node_value)
+            EdgeInserter::new(Arc::new(RwLock::new(self.clone())), edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value)
         }
     }
 
@@ -2177,7 +2177,7 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    EdgeInserter::new(merge_edge_value_and_source_node_value, source, edge_key, edge_value, merge_edge_value, update_node_value)
+    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value)
         .try_destination(destination)
         .into_option()
 }
@@ -2201,7 +2201,7 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    EdgeInserter::new(merge_edge_value_and_source_node_value, source, edge_key, edge_value, merge_edge_value, update_node_value)
+    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value)
         .try_destinations(destinations)
         .into_option()
 }
@@ -2225,7 +2225,7 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    EdgeInserter::new(merge_edge_value_and_source_node_value, source, edge_key, edge_value, merge_edge_value, update_node_value).try_destination_auto(destination).into_option()
+    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value).try_destination_auto(destination).into_option()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2947,7 +2947,7 @@ mod tests {
         let edge_val: HybridBitset = vec![1].into_iter().collect();
 
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node = inserter.try_destination(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
@@ -2972,7 +2972,7 @@ mod tests {
         source.write().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
         assert_eq!(dest.read().unwrap().max_depth, 1); // Check initial depth
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node = inserter.try_destination(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
@@ -2998,7 +2998,7 @@ mod tests {
         // In this case, merge_bitset_union will always return Some, so merge should succeed.
         // To test a failing merge, we'd need a different merge function or EV type.
         // Let's repurpose this to test a successful merge where existing is empty.
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_opt = inserter.try_destination(dest.clone()).into_option();
 
         assert!(result_opt.is_some()); // Merge succeeded
@@ -3023,7 +3023,7 @@ mod tests {
 
         // Now try inserting source -> dest again using EdgeInserter
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "src_to_dest", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "src_to_dest", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         // This will call try_insert which should detect the cycle
         let result_opt = inserter.try_destination(dest.clone()).into_option();
 
@@ -3045,7 +3045,7 @@ mod tests {
 
         let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         // try(dest1) -> OK
         // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
         // try(dest3) -> Skipped
@@ -3075,7 +3075,7 @@ mod tests {
 
         let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         // try(dest1) -> Cycle Error
         // try(dest2) -> OK
         // try(dest3) -> Skipped
@@ -3104,7 +3104,7 @@ mod tests {
 
         let destinations = [dest1.clone(), dest2.clone()];
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_opt = inserter.try_destinations(&destinations).into_option();
 
         assert!(result_opt.is_none()); // All attempts failed
@@ -3138,7 +3138,7 @@ mod tests {
         // 1. Test successful merge with the first child under the key.
         //    EdgeInserter is created with source, target_key, and new_ev_for_inserter.
         //    merge_bitset_union should merge new_ev_for_inserter into initial_ev_c1.
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node_opt = inserter.try_children().into_option();
 
         assert!(result_node_opt.is_some(), "Should find and merge with child1");
@@ -3183,7 +3183,7 @@ mod tests {
         let edge_key_empty = "empty_key"; // This key has no children in source_empty
         let new_ev_inserter_empty: HybridBitset = vec![7].into_iter().collect();
 
-        let inserter_empty = EdgeInserter::new(|_, _| {}, source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union, |_, _| {});
+        let inserter_empty = EdgeInserter::new(source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node_empty_opt = inserter_empty.try_children().into_option();
         assert!(result_node_empty_opt.is_none(), "try_children should return None if no children under the key");
 
@@ -3193,7 +3193,7 @@ mod tests {
         let new_ev_chain: HybridBitset = vec![8].into_iter().collect();
         let created_val = "created_node_via_fallback".to_string();
 
-        let inserter_chain = EdgeInserter::new(|_, _| {}, source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union, |_, _| {});
+        let inserter_chain = EdgeInserter::new(source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node_chain = inserter_chain
             .try_children() // Will do nothing as no children under "chain_key"
             .else_create_destination_with_value(created_val.clone()) // This should execute
@@ -3215,7 +3215,7 @@ mod tests {
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         // No try calls, should go straight to else_create
         let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
@@ -3236,7 +3236,7 @@ mod tests {
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let flag_clone = created_flag.clone();
         let result_node = inserter.else_create_destination_with(|| {
             flag_clone.fetch_add(1, Ordering::SeqCst);
@@ -3254,7 +3254,7 @@ mod tests {
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         // String::default() is ""
         let result_node = inserter.else_create_destination().unwrap();
 
@@ -3272,7 +3272,7 @@ mod tests {
         // Setup: dest1 causes cycle
         dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node = inserter
             .try_destination(dest1.clone()) // Fails (cycle)
             .else_create_destination_with_value("fallback".to_string()) // Executes
@@ -3295,7 +3295,7 @@ mod tests {
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node = inserter
             .try_destination(dest1.clone()) // Succeeds
             .else_create_destination_with_value("fallback".to_string()) // Should be skipped
@@ -3322,7 +3322,7 @@ mod tests {
         // Setup: dest1 causes cycle
         dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         // Try fails, no else_create called
         inserter.try_destination(dest1.clone()).unwrap(); // Panic here
     }
@@ -3337,7 +3337,7 @@ mod tests {
         // Setup: dest1 causes cycle
         dest1.write().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
 
         // Try fails
         let inserter_after_try = inserter.try_destination(dest1.clone());
@@ -3361,7 +3361,7 @@ mod tests {
 
         let destinations_for_slice = vec![child2.clone()];
 
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node = inserter
             .try_destination(child1.clone()) // This succeeds, result is set to child1
             // try_slice, else_create_with_value should now have no effect
@@ -3410,7 +3410,7 @@ mod tests {
         // 1. Test successful merge with the first child under the key.
         //    EdgeInserter is created with source, target_key, and new_ev_for_inserter.
         //    merge_bitset_union should merge new_ev_for_inserter into initial_ev_c1.
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node_opt = inserter.try_children().into_option();
 
         assert!(result_node_opt.is_some(), "Should find and merge with child1");
@@ -3455,7 +3455,7 @@ mod tests {
         let edge_key_empty = "empty_key"; // This key has no children in source_empty
         let new_ev_inserter_empty: HybridBitset = vec![7].into_iter().collect();
 
-        let inserter_empty = EdgeInserter::new(|_, _| {}, source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union, |_, _| {});
+        let inserter_empty = EdgeInserter::new(source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node_empty_opt = inserter_empty.try_children().into_option();
         assert!(result_node_empty_opt.is_none(), "try_children should return None if no children under the key");
 
@@ -3465,7 +3465,7 @@ mod tests {
         let new_ev_chain: HybridBitset = vec![8].into_iter().collect();
         let created_val = "created_node_via_fallback".to_string();
 
-        let inserter_chain = EdgeInserter::new(|_, _| {}, source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union, |_, _| {});
+        let inserter_chain = EdgeInserter::new(source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node_chain = inserter_chain
             .try_children() // Will do nothing as no children under "chain_key"
             .else_create_destination_with_value(created_val.clone()) // This should execute
@@ -3488,7 +3488,7 @@ mod tests {
         let edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // 1. Insert a new weak edge
-        let inserter = EdgeInserter::new(|_, _| {}, source.clone(), "key_weak", edge_val.clone(), merge_bitset_union, |_, _| {});
+        let inserter = EdgeInserter::new(source.clone(), "key_weak", edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
         let result_node = inserter.to_destination_weakly(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
@@ -3505,7 +3505,7 @@ mod tests {
         // 2. Merge with existing weak edge
         let new_edge_val: HybridBitset = vec![2].into_iter().collect();
         let merged_val: HybridBitset = vec![1, 2].into_iter().collect();
-        let inserter2 = EdgeInserter::new(|_, _| {}, source.clone(), "key_weak", new_edge_val, merge_bitset_union, |_, _| {});
+        let inserter2 = EdgeInserter::new(source.clone(), "key_weak", new_edge_val, merge_bitset_union, |_, _| {}, |_, _| {});
         inserter2.to_destination_weakly(dest.clone()).unwrap();
 
         let s2 = source.read().unwrap();
@@ -3522,7 +3522,7 @@ mod tests {
 
         let new_edge_val_for_strong: HybridBitset = vec![11].into_iter().collect();
         let merged_strong_val: HybridBitset = vec![10, 11].into_iter().collect();
-        let inserter3 = EdgeInserter::new(|_, _| {}, source.clone(), "key_strong", new_edge_val_for_strong, merge_bitset_union, |_, _| {});
+        let inserter3 = EdgeInserter::new(source.clone(), "key_strong", new_edge_val_for_strong, merge_bitset_union, |_, _| {}, |_, _| {});
         inserter3.to_destination_weakly(dest.clone()).unwrap();
 
         let s3 = source.read().unwrap();

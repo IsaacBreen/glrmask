@@ -440,12 +440,12 @@ impl GrammarConstraint {
                     )));
 
                     let mut inserter = EdgeInserter::new(
-                        |ev, t| *ev &= &t.live_tokens,
                         trie2_root.clone(),
                         (0, Some(*state_id)),
                         LLMTokenBV::ones(internal_max_llm_token + 1),
                         |e, n| *e |= n,
                         |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |ev, t| *ev &= &t.live_tokens,
                     );
                     inserter = inserter.try_destination(new_trie2_node.clone());
                     inserter.expect("Failed to insert initial edge into Trie2 root");
@@ -467,12 +467,12 @@ impl GrammarConstraint {
                     PrecomputedNodeContents::internal(),
                 )));
                 let mut inserter = EdgeInserter::new(
-                    |ev, t| *ev &= &t.live_tokens,
                     trie2_root.clone(),
                     (0, None),
                     LLMTokenBV::ones(internal_max_llm_token + 1),
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |ev, t| *ev &= &t.live_tokens,
                 );
                 inserter = inserter.try_destination(new_trie2_node.clone());
                 inserter.expect("Failed to insert initial edge into Trie2 root");
@@ -584,12 +584,12 @@ impl GrammarConstraint {
                             let edge_key = (0, None);
 
                             let mut inserter = EdgeInserter::new(
-                                |ev, t| *ev &= &t.live_tokens,
                                 src_arc.clone(),
                                 edge_key,
                                 tokens_to_push.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                |ev, t| *ev &= &t.live_tokens,
                             );
 
                             inserter = inserter.try_destination(trie2_end.clone());
@@ -1832,12 +1832,12 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    |ev, t| *ev &= &t.live_tokens,
                                     src_node_wrapper.upgrade().unwrap().clone(),
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |ev, t| *ev &= &t.live_tokens,
                                 );
                                 // Print the source node.
                                 // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
@@ -1855,12 +1855,12 @@ impl<'r> Precomputer<'r> {
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
-                                |ev, t| *ev &= &t.live_tokens,
                                 src_node_wrapper.upgrade().unwrap().clone(),
                                 Some(terminal_id),
                                 edge_bv.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                |ev, t| *ev &= &t.live_tokens,
                             );
 
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
@@ -1898,12 +1898,12 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    |ev, t| *ev &= &t.live_tokens,
                                     src_node_wrapper.upgrade().unwrap().clone(),
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |ev, t| *ev &= &t.live_tokens,
                                 );
                                 // Print the source node.
                                 // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
