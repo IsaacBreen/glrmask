@@ -1179,7 +1179,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                 if goto_info.accept {
                                     // Record the “accepted” stack at the reduce boundary for substring mode:
-                                    let accepted_arc = Arc::new(new_gss0);
+                                    let accepted_arc = Arc::new(new_gss1.clone());
                                     Arc::make_mut(&mut self.active_state.accepted_state)
                                         .merge_with_depth(usize::MAX, &accepted_arc);
                                 }
