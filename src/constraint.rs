@@ -747,21 +747,13 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes = Trie::all_nodes(&roots_vec);
 
-    let sids_to_remove: Vec<_> = roots
-        .iter()
-        .filter_map(|(sid, root_arc)| {
-            if root_arc.read().unwrap().value.live_tokens.is_empty() {
-                Some(*sid)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // We no longer remove roots from the map. A "dead" root (with an empty live_tokens set)
+    // is kept. This prevents panics in get_mask2, which expects a complete map from
+    // active tokenizer states to precomputed trie roots. The trie being empty of live
+    // tokens is sufficient to signal that no paths are valid from that state.
+    // The original implementation removed roots if their `live_tokens` set was empty.
 
-    for sid in sids_to_remove {
-        roots.remove(&sid);
-    }
-    crate::debug!(2, "Finished pruning dead paths from trie 2.");
+    crate::debug!(2, "Finished pruning dead paths from trie 2. No roots were removed.");
 }
 
 fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
@@ -1491,25 +1483,13 @@ impl<'r> Precomputer<'r> {
         // A cache of nodes to the set of "live" LLM tokens reachable from them.
         let mut live_tokens_cache: HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV> = HashMap::new();
 
-        // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
-        // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
-        // is live and prunes its dead children.
-        //
-        // We can't use `BTreeMap::retain` directly because its closure would borrow `self`
-        // immutably (to call `get_live_tokens_and_prune`) while `retain` itself holds a mutable borrow
-        // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
-        let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
+        // For each root, run the pruning process. This will modify the trie in-place.
+        // We do not remove the root from the map even if it becomes "dead" (has no live paths).
+        // This ensures that every tokenizer state ID that started with a trie root still has one,
+        // preventing panics in later stages that expect a complete map.
+        for root_arc in self.roots.values() {
             let root_wrapper = NodePtr::Strong(ArcPtrWrapper::new(root_arc.clone()));
-            // A root is dead if no live tokens are reachable from it.
-            if self.get_live_tokens_and_prune(root_wrapper, &mut live_tokens_cache).is_empty() {
-                Some(*sid) // This root is dead, mark for removal.
-            } else {
-                None // This root is live, keep it.
-            }
-        }).collect();
-
-        for sid in sids_to_remove {
-            self.roots.remove(&sid);
+            self.get_live_tokens_and_prune(root_wrapper, &mut live_tokens_cache);
         }
 
         crate::debug!(2, "Finished pruning dead paths.");
