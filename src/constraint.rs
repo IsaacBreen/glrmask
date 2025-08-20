@@ -571,20 +571,12 @@ impl GrammarConstraint {
 
                         for src_wr in gss_root_acc.trie2_nodes.iter() {
                             let src_arc = src_wr.as_arc().clone();
-                            let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
-                            let tokens_to_push = &active_llm_tokens_for_root & &src_live;
-                            if tokens_to_push.is_empty() {
-                                crate::debug!(4, "Trie2: No tokens to push from this source node");
-                                continue;
-                            }
-                            crate::debug!(4, "Trie2: Pushing tokens {:?} from source node", tokens_to_push);
-
                             let edge_key = (0, None);
 
                             let mut inserter = EdgeInserter::new(
                                 src_arc.clone(),
                                 edge_key,
-                                tokens_to_push.clone(),
+                                (&active_llm_tokens_for_root).clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                             );
@@ -593,7 +585,7 @@ impl GrammarConstraint {
 
                             let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie2 node");
                             let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                            dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                            dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &active_llm_tokens_for_root).or_insert((&active_llm_tokens_for_root).clone());
                         }
                     }
                     for (dst_wr, added) in &dest_agg {
