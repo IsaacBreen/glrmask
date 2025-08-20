@@ -1848,6 +1848,7 @@ where
                 update_info = Some((destination, updated_ev));
             } else {
                 let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
+                crate::debug!(7, "Trying to insert edge {:?} with value {:?} to node {:p}", self.edge_key, edge_val_clone, Arc::as_ptr(&destination));
                 if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()).is_ok() {
                     self.result = Some(destination.clone());
                     update_info = Some((destination, edge_val_clone));
