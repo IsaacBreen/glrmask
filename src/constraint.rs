@@ -559,7 +559,7 @@ impl GrammarConstraint {
 
                 crate::datastructures::gss::merge_trie2_nodes_if_needed(
                     &mut glr_s.active_state.stack,
-                    MERGE_THRESHOLD,
+                    1,
                     &mut HashMap::new(),
                 );
                 let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
