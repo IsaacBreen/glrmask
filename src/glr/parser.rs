@@ -1082,7 +1082,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // α lies before the substring start and must be considered unknown (but derivable),
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
-        // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
+        // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
             timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
             if any_below_bottom {
                 let gotos_for_nt_storage; // To hold the Vec for ContinueFromEverything
@@ -1115,6 +1115,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 };
 
                 if !gotos_for_nt.is_empty() {
+                    timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
@@ -1185,7 +1186,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
                         accepted_out.push(merged_accepted);
                     }
+                    });
 
+                    timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
                     timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
 
@@ -1266,7 +1269,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
-                                    used_dests.insert(final_dest_wr);
                                 }
 
                                 // Update the cache and populate used_dests
@@ -1309,10 +1311,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         })
                     });
                     out.push(merged);
+                    });
                 }
             }
             });
- 
+
         timeit!("GLRParserState::reduce_and_goto", {
         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
             (GSSNode::merge_many_with_depth(usize::MAX, out), GSSNode::merge_many_with_depth(usize::MAX, accepted_out))
@@ -1635,6 +1638,7 @@ impl GLRParser {
         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     ) -> String {
         let mut dot = String::new();
+        writeln!(&mut dot, "digraph GSS_Forest {{").unwrap();
         writeln!(&mut dot, "  rankdir=LR;").unwrap();
         writeln!(&mut dot, "  node [shape=box, fontname=\"Courier New\", style=rounded];").unwrap();
         writeln!(&mut dot, "  edge [arrowhead=vee];").unwrap();
