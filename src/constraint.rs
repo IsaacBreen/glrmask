@@ -831,9 +831,12 @@ fn deduplicate_recursive_trie2(
     }
 
     if children_changed {
+        println!("Updating children for node {:p}", node_ptr);
         let mut node_guard = node_arc.write().unwrap();
         *node_guard.children_mut() = new_children_map;
+        println!("Recomputing max_depth for node {:p}", node_ptr);
         node_guard.recompute_max_depth();
+        println!("Updated children for node {:p}", node_ptr);
     }
 
     let canonical_arc = {
