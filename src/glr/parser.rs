@@ -79,7 +79,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
@@ -709,7 +709,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1169,29 +1169,34 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let mut trie2_dst_nodes = HashMap::new();
                     for (k, acc_arc) in popper.below_bottom {
                         let mut acc: Acc = acc_arc.as_ref().clone();
+                        let active_llm_tokens = acc.union_llm_tokens();
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         for goto_info in gotos_for_nt {
+                            // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                             let cache_key = BelowBottomCacheKey {
                                 nonterminal_id: nt,
                                 source_state_id: goto_info.source_state_id,
+                                // k,
                                 acc: acc.clone(),
                             };
 
                             if let Some(goto_state_id) = goto_info.goto_state_id {
                                 let edge_key = (k, Some(goto_info.source_state_id));
                                 let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-
+                                let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+                                
+                                // Pooled fallback destination (created once per source_state_id)
                                 let new_trie2_node = trie2_dst_nodes
                                     .entry(goto_info.source_state_id)
                                     .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
                                     .clone();
-
+                                
                                 for existing_trie2_node in &trie2_nodes {
                                     let source_arc = existing_trie2_node.as_arc().clone();
                                     let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                                    let tokens_to_push = &source_live & &acc.llm_tokens_union;
+                                    let tokens_to_push = &source_live & &active_llm_tokens;
                                     if tokens_to_push.is_empty() { continue; }
-
+                                    
                                     let mut inserter = EdgeInserter::new(
                                         source_arc.clone(),
                                         edge_key,
@@ -1200,7 +1205,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                                         |ev, t| *ev &= &t.live_tokens,
                                     );
-
+                                    
                                     if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
                                         let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
                                             let dest_arc = wrapper.as_arc();
@@ -1214,7 +1219,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }).collect();
                                         inserter = inserter.try_destinations(&eligible_cached_destinations);
                                     }
-
+                                    
                                     let eligible_iter_builder = || {
                                         let g = source_arc.read().expect("poison");
                                         let mut v = Vec::new();
@@ -1231,34 +1236,34 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }
                                         v.into_iter()
                                     };
-
+                                    
                                     inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                     inserter = inserter.try_destination_auto(new_trie2_node.clone());
-
+                                    
                                     let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                                 }
-
+                                
                                 // Update live tokens on all destinations that were used
                                 for (dst_wr, added) in &dest_agg {
                                     let mut dg = dst_wr.as_arc().write().expect("poison");
                                     dg.value.live_tokens |= added.clone();
                                 }
-
-                                // Update the cache with the destinations we used and the tokens they received
+                                
+                                // Update the cache and populate used_dests
                                 let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
                                 for (dest_wrapper, new_tokens) in &dest_agg {
-                                    if let Some((_, existing_tokens)) = cache_entry.iter_mut().find(|(w, _)| w == dest_wrapper) {
-                                        *existing_tokens |= new_tokens;
-                                    } else {
-                                        cache_entry.push((dest_wrapper.clone(), new_tokens.clone()));
+                                    if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
+                                        if new_tokens.is_subset(existing_tokens) {
+                                            used_dests.insert(dest_wrapper.clone());
+                                        }
                                     }
+                                    cache_entry.entry(dest_wrapper.clone()).or_default().bitor_assign(new_tokens);
                                 }
-
-                                let used_dests = dest_agg.keys().cloned().collect();
+                                
                                 let mut acc2 = acc.clone();
-                                acc2.trie2_nodes = used_dests;
+                                acc2.trie2_nodes = used_dests.clone();
                                 let new_gss0 = GSSNode::new(acc2);
                                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                 let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
@@ -1551,7 +1556,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             final_string.push_str("\n\n--- GSS State Explanations ---\n");
                 for state_id in all_state_ids {
                     let mut explanation = String::new();
-                    writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
+                    writeln!(&explanation, "\n--- State {} ---", state_id.0).unwrap();
                     self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
                     final_string.push_str(&explanation);
                 }

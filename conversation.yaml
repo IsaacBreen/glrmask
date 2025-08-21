@@ -1,13 +1,13 @@
 local_system:
   attached_files:
-    - src/datastructures/trie.rs
     - src/datastructures/gss.rs
-    - src/glr/mod.rs
+    - src/datastructures/trie.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
-    - src/glr/table.rs
+    - src/glr/mod.rs
     - src/glr/parser.rs
-  conversation_file:
+    - src/glr/table.rs
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/trie.rs: |+
@@ -16791,7 +16791,7 @@ local_system:
       pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-      #[derive(Debug, Clone)]
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct ParseStateEdgeContent { 
           pub state_id: StateID,
       }
@@ -17421,7 +17421,7 @@ local_system:
           pub active_state: ParseState,
           accepted: bool,                // <-- NEW
           phase: ParserPhase,
-          below_bottom_cache: HashMap<BelowBottomCacheKey, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>>,
+          below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
       }
 
       #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -17881,29 +17881,34 @@ local_system:
                           let mut trie2_dst_nodes = HashMap::new();
                           for (k, acc_arc) in popper.below_bottom {
                               let mut acc: Acc = acc_arc.as_ref().clone();
+                              let active_llm_tokens = acc.union_llm_tokens();
                               let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                               for goto_info in gotos_for_nt {
+                                  // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                                   let cache_key = BelowBottomCacheKey {
                                       nonterminal_id: nt,
                                       source_state_id: goto_info.source_state_id,
+                                      // k,
                                       acc: acc.clone(),
                                   };
 
                                   if let Some(goto_state_id) = goto_info.goto_state_id {
                                       let edge_key = (k, Some(goto_info.source_state_id));
                                       let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-
+                                      let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+                                      
+                                      // Pooled fallback destination (created once per source_state_id)
                                       let new_trie2_node = trie2_dst_nodes
                                           .entry(goto_info.source_state_id)
                                           .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
                                           .clone();
-
+                                      
                                       for existing_trie2_node in &trie2_nodes {
                                           let source_arc = existing_trie2_node.as_arc().clone();
                                           let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                                          let tokens_to_push = &source_live & &acc.llm_tokens_union;
+                                          let tokens_to_push = &source_live & &active_llm_tokens;
                                           if tokens_to_push.is_empty() { continue; }
-
+                                          
                                           let mut inserter = EdgeInserter::new(
                                               source_arc.clone(),
                                               edge_key,
@@ -17912,7 +17917,7 @@ local_system:
                                               |node_value, edge_value| node_value.live_tokens |= edge_value,
                                               |ev, t| *ev &= &t.live_tokens,
                                           );
-
+                                          
                                           if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
                                               let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
                                                   let dest_arc = wrapper.as_arc();
@@ -17926,7 +17931,7 @@ local_system:
                                               }).collect();
                                               inserter = inserter.try_destinations(&eligible_cached_destinations);
                                           }
-
+                                          
                                           let eligible_iter_builder = || {
                                               let g = source_arc.read().expect("poison");
                                               let mut v = Vec::new();
@@ -17943,34 +17948,34 @@ local_system:
                                               }
                                               v.into_iter()
                                           };
-
+                                          
                                           inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                           inserter = inserter.try_destination_auto(new_trie2_node.clone());
-
+                                          
                                           let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                           let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                           dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                                       }
-
+                                      
                                       // Update live tokens on all destinations that were used
                                       for (dst_wr, added) in &dest_agg {
                                           let mut dg = dst_wr.as_arc().write().expect("poison");
                                           dg.value.live_tokens |= added.clone();
                                       }
-
-                                      // Update the cache with the destinations we used and the tokens they received
+                                      
+                                      // Update the cache and populate used_dests
                                       let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
                                       for (dest_wrapper, new_tokens) in &dest_agg {
-                                          if let Some((_, existing_tokens)) = cache_entry.iter_mut().find(|(w, _)| w == dest_wrapper) {
-                                              *existing_tokens |= new_tokens;
-                                          } else {
-                                              cache_entry.push((dest_wrapper.clone(), new_tokens.clone()));
+                                          if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
+                                              if new_tokens.is_subset(existing_tokens) {
+                                                  used_dests.insert(dest_wrapper.clone());
+                                              }
                                           }
+                                          cache_entry.entry(dest_wrapper.clone()).or_default().bitor_assign(new_tokens);
                                       }
-
-                                      let used_dests = dest_agg.keys().cloned().collect();
+                                      
                                       let mut acc2 = acc.clone();
-                                      acc2.trie2_nodes = used_dests;
+                                      acc2.trie2_nodes = used_dests.clone();
                                       let new_gss0 = GSSNode::new(acc2);
                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
@@ -18263,7 +18268,7 @@ local_system:
                   final_string.push_str("\n\n--- GSS State Explanations ---\n");
                       for state_id in all_state_ids {
                           let mut explanation = String::new();
-                          writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
+                          writeln!(&explanation, "\n--- State {} ---", state_id.0).unwrap();
                           self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
                           final_string.push_str(&explanation);
                       }
@@ -28016,5 +28021,448 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor GSSNode cache behavior in reduce_and_goto
       for improved substring parsing"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+      --- original version of src/datastructures/trie.rs+++ current version of src/datastructures/trie.rs@@ -1860,7 +1860,7 @@                     self.result = Some(destination.clone());
+                           update_info = Some((destination, edge_val_clone));
+                       } else {
+      -                    crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
+      +                    crate::debug!(6, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
+                       }
+                   }
+               }
+      @@ -2053,7 +2053,7 @@             if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()).is_ok() {
+                       self.result = Some(new_node_arc.clone());
+                   } else {
+      -                crate::debug!(1, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
+      +                crate::debug!(6, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
+                   }
+               }
+       
+      @@ -2094,6 +2094,10 @@     /// Returns the resulting destination node, if one was found or created.
+           pub fn into_option(self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
+               self.result
+      +    }
+      +
+      +    pub fn is_some(&self) -> bool {
+      +        self.result.is_some()
+           }
+       
+           pub fn clone_into_option(&self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Actually, let's make `below_bottom_cache` of type
+      ```rust
+      HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>
+      ```
+      and then in this code
+      ```rust
+      let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+      for (dest_wrapper, new_tokens) in &dest_agg {
+          if let Some((_, existing_tokens)) = cache_entry.iter_mut().find(|(w, _)| w == dest_wrapper) {
+              *existing_tokens |= new_tokens;
+          } else {
+              cache_entry.push((dest_wrapper.clone(), new_tokens.clone()));
+          }
+      }
+      ```
+      move `let used_dests = BTreeSet::new(); // make this earlier` earlier,
+      and iff `new_tokens` is a subset of the tokens in the existing entry, add it to `used_dests`.
+    metadata:
+  - assistant: |-
+      Of course. Based on your request to modify the caching behavior and data structure for `below_bottom_cache`, I've prepared the necessary patch.
+
+      This patch assumes the changes from our previous conversation have already been applied. It modifies `below_bottom_cache` to use a `HashMap` for its values and implements the specific logic you described for updating the cache and populating the `used_dests` set.
+
+      Here is the git diff for the modified file:
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -151,7 +151,7 @@
+           pub active_state: ParseState,
+           accepted: bool,                // <-- NEW
+           phase: ParserPhase,
+      -    below_bottom_cache: HashMap<BelowBottomCacheKey, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>>,
+      +    below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
+       }
+       
+       #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      @@ -490,6 +490,7 @@
+                                   if let Some(goto_state_id) = goto_info.goto_state_id {
+                                       let edge_key = (k, Some(goto_info.source_state_id));
+                                       let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+      +                                let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+       
+                                       // Pooled fallback destination (created once per source_state_id)
+                                       let new_trie2_node = trie2_dst_nodes
+      @@ -506,16 +507,16 @@
+                                           );
+       
+                                           if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
+      -                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+      +                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+                                                   let dest_arc = wrapper.as_arc();
+                                                   let guard = dest_arc.read().expect("poison");
+                                                   let live_and_push = &guard.value.live_tokens & &tokens_to_push;
+      -                                            if live_and_push.is_subset(cached_tokens) {
+      +                                            if live_and_push.is_subset(cached_tokens) {
+                                                       Some(dest_arc.clone())
+                                                   } else {
+                                                       None
+                                                   }
+      -                                        }).collect();
+      +                                        }).collect();
+                                               inserter = inserter.try_destinations(&eligible_cached_destinations);
+                                           }
+       
+      @@ -546,24 +547,23 @@
+                                           let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                           let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                                           dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+      -                                    used_dests.insert(final_dest_wr);
+                                       }
+       
+                                       // Update live tokens on all destinations that were used
+                                       for (dst_wr, added) in &dest_agg {
+                                           let mut dg = dst_wr.as_arc().write().expect("poison");
+                                           dg.value.live_tokens |= added.clone();
+                                       }
+       
+      -                                // Update the cache with the destinations we used and the tokens they received
+      +                                // Update the cache and populate used_dests
+                                       let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+                                       for (dest_wrapper, new_tokens) in &dest_agg {
+      -                                    if let Some((_, existing_tokens)) = cache_entry.iter_mut().find(|(w, _)| w == dest_wrapper) {
+      -                                        *existing_tokens |= new_tokens;
+      -                                    } else {
+      -                                        cache_entry.push((dest_wrapper.clone(), new_tokens.clone()));
+      -                                    }
+      +                                    if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
+      +                                        if new_tokens.is_subset(existing_tokens) {
+      +                                            used_dests.insert(dest_wrapper.clone());
+      +                                        }
+      +                                    }
+      +                                    cache_entry.entry(dest_wrapper.clone()).or_default().bitor_assign(new_tokens);
+                                       }
+       
+      -                                let used_dests = dest_agg.keys().cloned().collect();
+                                       let mut acc2 = acc.clone();
+      -                                acc2.trie2_nodes = used_dests;
+      +                                acc2.trie2_nodes = used_dests.clone();
+                                       let new_gss0 = GSSNode::new(acc2);
+                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+
+      ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Error applying patch to src/glr/parser.rs:
+      Hunk #2 (header: @@ -490,6 +490,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+                                  if let Some(goto_state_id) = goto_info.goto_state_id {
+                                      let edge_key = (k, Some(goto_info.source_state_id));
+                                      let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+
+                                      // Pooled fallback destination (created once per source_state_id)
+                                      let new_trie2_node = trie2_dst_nodes
+      --- Expected Context (from patch, after normalization): ---
+      if let Some(goto_state_id) = goto_info.goto_state_id {
+      let edge_key = (k, Some(goto_info.source_state_id));
+      let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+
+
+      let new_trie2_node = trie2_dst_nodes
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1179 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + 
+        if let Some(goto_state_id) = goto_info.goto_state_id {
+        let edge_key = (k, Some(goto_info.source_state_id));
+        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+        
+      - 
+        let new_trie2_node = trie2_dst_nodes
+      Problematic diff content:
+      ---
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -151,7 +151,7 @@
+           pub active_state: ParseState,
+           accepted: bool,                // <-- NEW
+           phase: ParserPhase,
+      -    below_bottom_cache: HashMap<BelowBottomCacheKey, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>>,
+      +    below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
+       }
+       
+       #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      @@ -490,6 +490,7 @@
+                                   if let Some(goto_state_id) = goto_info.goto_state_id {
+                                       let edge_key = (k, Some(goto_info.source_state_id));
+                                       let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+      +                                let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+       
+                                       // Pooled fallback destination (created once per source_state_id)
+                                       let new_trie2_node = trie2_dst_nodes
+      @@ -506,16 +507,16 @@
+                                           );
+       
+                                           if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
+      -                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+      +                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+                                                   let dest_arc = wrapper.as_arc();
+                                                   let guard = dest_arc.read().expect("poison");
+                                                   let live_and_push = &guard.value.live_tokens & &tokens_to_push;
+      -                                            if live_and_push.is_subset(cached_tokens) {
+      +                                            if live_and_push.is_subset(cached_tokens) {
+                                                       Some(dest_arc.clone())
+                                                   } else {
+                                                       None
+                                                   }
+      -                                        }).collect();
+      +                                        }).collect();
+                                               inserter = inserter.try_destinations(&eligible_cached_destinations);
+                                           }
+       
+      @@ -546,24 +547,23 @@
+                                           let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                           let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                                           dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+      -                                    used_dests.insert(final_dest_wr);
+                                       }
+       
+                                       // Update live tokens on all destinations that were used
+                                       for (dst_wr, added) in &dest_agg {
+                                           let mut dg = dst_wr.as_arc().write().expect("poison");
+                                           dg.value.live_tokens |= added.clone();
+                                       }
+       
+      -                                // Update the cache with the destinations we used and the tokens they received
+      +                                // Update the cache and populate used_dests
+                                       let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+                                       for (dest_wrapper, new_tokens) in &dest_agg {
+      -                                    if let Some((_, existing_tokens)) = cache_entry.iter_mut().find(|(w, _)| w == dest_wrapper) {
+      -                                        *existing_tokens |= new_tokens;
+      -                                    } else {
+      -                                        cache_entry.push((dest_wrapper.clone(), new_tokens.clone()));
+      -                                    }
+      +                                    if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
+      +                                        if new_tokens.is_subset(existing_tokens) {
+      +                                            used_dests.insert(dest_wrapper.clone());
+      +                                        }
+      +                                    }
+      +                                    cache_entry.entry(dest_wrapper.clone()).or_default().bitor_assign(new_tokens);
+                                       }
+       
+      -                                let used_dests = dest_agg.keys().cloned().collect();
+                                       let mut acc2 = acc.clone();
+      -                                acc2.trie2_nodes = used_dests;
+      +                                acc2.trie2_nodes = used_dests.clone();
+                                       let new_gss0 = GSSNode::new(acc2);
+                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Error applying patch to src/glr/parser.rs:
+      Hunk #2 (header: @@ -490,6 +490,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+                                  if let Some(goto_state_id) = goto_info.goto_state_id {
+                                      let edge_key = (k, Some(goto_info.source_state_id));
+                                      let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+
+                                      // Pooled fallback destination (created once per source_state_id)
+                                      let new_trie2_node = trie2_dst_nodes
+      --- Expected Context (from patch, after normalization): ---
+      if let Some(goto_state_id) = goto_info.goto_state_id {
+      let edge_key = (k, Some(goto_info.source_state_id));
+      let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+
+
+      let new_trie2_node = trie2_dst_nodes
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 1179 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + 
+        if let Some(goto_state_id) = goto_info.goto_state_id {
+        let edge_key = (k, Some(goto_info.source_state_id));
+        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+        
+      - 
+        let new_trie2_node = trie2_dst_nodes
+      Problematic diff content:
+      ---
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -151,7 +151,7 @@
+           pub active_state: ParseState,
+           accepted: bool,                // <-- NEW
+           phase: ParserPhase,
+      -    below_bottom_cache: HashMap<BelowBottomCacheKey, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>>,
+      +    below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
+       }
+       
+       #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+      @@ -490,6 +490,7 @@
+                                   if let Some(goto_state_id) = goto_info.goto_state_id {
+                                       let edge_key = (k, Some(goto_info.source_state_id));
+                                       let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+      +                                let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+       
+                                       // Pooled fallback destination (created once per source_state_id)
+                                       let new_trie2_node = trie2_dst_nodes
+      @@ -506,16 +507,16 @@
+                                           );
+       
+                                           if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
+      -                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+      +                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+                                                   let dest_arc = wrapper.as_arc();
+                                                   let guard = dest_arc.read().expect("poison");
+                                                   let live_and_push = &guard.value.live_tokens & &tokens_to_push;
+      -                                            if live_and_push.is_subset(cached_tokens) {
+      +                                            if live_and_push.is_subset(cached_tokens) {
+                                                       Some(dest_arc.clone())
+                                                   } else {
+                                                       None
+                                                   }
+      -                                        }).collect();
+      +                                        }).collect();
+                                               inserter = inserter.try_destinations(&eligible_cached_destinations);
+                                           }
+       
+      @@ -546,24 +547,23 @@
+                                           let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                           let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                                           dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+      -                                    used_dests.insert(final_dest_wr);
+                                       }
+       
+                                       // Update live tokens on all destinations that were used
+                                       for (dst_wr, added) in &dest_agg {
+                                           let mut dg = dst_wr.as_arc().write().expect("poison");
+                                           dg.value.live_tokens |= added.clone();
+                                       }
+       
+      -                                // Update the cache with the destinations we used and the tokens they received
+      +                                // Update the cache and populate used_dests
+                                       let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+                                       for (dest_wrapper, new_tokens) in &dest_agg {
+      -                                    if let Some((_, existing_tokens)) = cache_entry.iter_mut().find(|(w, _)| w == dest_wrapper) {
+      -                                        *existing_tokens |= new_tokens;
+      -                                    } else {
+      -                                        cache_entry.push((dest_wrapper.clone(), new_tokens.clone()));
+      -                                    }
+      +                                    if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
+      +                                        if new_tokens.is_subset(existing_tokens) {
+      +                                            used_dests.insert(dest_wrapper.clone());
+      +                                        }
+      +                                    }
+      +                                    cache_entry.entry(dest_wrapper.clone()).or_default().bitor_assign(new_tokens);
+                                       }
+       
+      -                                let used_dests = dest_agg.keys().cloned().collect();
+                                       let mut acc2 = acc.clone();
+      -                                acc2.trie2_nodes = used_dests;
+      +                                acc2.trie2_nodes = used_dests.clone();
+                                       let new_gss0 = GSSNode::new(acc2);
+                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/parser.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/parser.rs
+    metadata:
+  - user: 'Changes committed with message: "Refactor GSSNode cache in reduce_and_goto:
+      Use HashMap for cached destinations and refine lookup logic"'
     metadata:
 ...
