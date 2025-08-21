@@ -2530,6 +2530,25 @@ local_system:
                       };
 
                       if !gotos_for_nt.is_empty() {
+                          let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
+                          if !accepting_gotos.is_empty() {
+                              crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
+                              self.accepted = true;
+                              let mut accepted_stacks = Vec::new();
+                              for (_k, acc_arc) in popper.below_bottom.iter() {
+                                  for goto_info in &accepting_gotos {
+                                      // Create the stack that is being accepted: a new root with the accumulated `acc`,
+                                      // with the `source_state_id` on top.
+                                      let acc = acc_arc.as_ref().clone();
+                                      let accepted_gss0 = GSSNode::new(acc);
+                                      let accepted_gss1 = accepted_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                      accepted_stacks.push(Arc::new(accepted_gss1));
+                                  }
+                              }
+                              let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
+                              Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
+                          }
+
                           timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                           let mut below_zero = Vec::new();
 
@@ -2565,11 +2584,6 @@ local_system:
                                           inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                                       }
                                       });
-
-                                      if goto_info.accept {
-                                          self.accepted = true;
-                                      }
-
                                       // IMPORTANT: No need to push a new GSS node here.
                                       // It would be equivalent to the one created when this key was first seen.
                                       continue;
@@ -2643,10 +2657,6 @@ local_system:
                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                                       below_zero.push(Arc::new(new_gss2));
-                                  }
-
-                                  if goto_info.accept {
-                                      self.accepted = true;
                                   }
                               }
                           }
@@ -2871,40 +2881,60 @@ local_system:
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 1_000_000;
 
-              let roots: Vec<_> = vec![self.active_state.stack.clone()];
-              let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-              crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                            phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+              let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
+              if !self.active_state.accepted_state.is_empty() {
+                  roots_to_log.push(("Accepted", self.active_state.accepted_state.clone()));
+              }
 
-              let (gss_string, state_ids) = {
-                  let print_full_forest = stats.unique_nodes <= MAX;
-                  let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
-                  let config = GSSPrintConfig {
-                      max_nodes: max_nodes_to_print,
-                      ..Default::default()
-                  };
-                  let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
-                  let final_string = if print_full_forest {
-                      format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
-                  } else {
-                      match find_longest_path(&self.active_state.stack) {
-                          Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                             stats.unique_nodes,
-                                             p.len(),
-                                             p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-                                                  .map(|id| id.to_string())
-                                                  .collect::<Vec<_>>()
-                                              .join(" → ")),
-                          None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                      }
-                  };
-                  (final_string, state_ids)
-              };
+              let stats_breakdown = roots_to_log.iter().map(|(name, root)| {
+                  let stats = gather_gss_stats(&[root.as_ref()]);
+                  format!("{}_nodes: {:?}", name.to_lowercase(), stats)
+              }).collect::<Vec<_>>().join(" ");
 
-              let mut final_string = gss_string;
-              if explain_states && !state_ids.is_empty() {
+              crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - {}",
+                            phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
+
+              let mut gss_strings = vec![];
+              let mut all_state_ids = BTreeSet::new();
+              let mut total_nodes = 0;
+
+              for (name, root) in &roots_to_log {
+                  let stats = gather_gss_stats(&[root.as_ref()]);
+                  total_nodes += stats.unique_nodes;
+
+                  let (current_gss_string, current_state_ids) = {
+                      let print_full_forest = stats.unique_nodes <= MAX;
+                      let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
+                      let config = GSSPrintConfig {
+                          max_nodes: max_nodes_to_print,
+                          ..Default::default()
+                      };
+                      let (gss_string, state_ids) = print_gss_forest(&[root.clone()], &self.parser.terminal_map, &config);
+                      let final_string = if print_full_forest {
+                          format!("{} GSS ({} nodes):\n{}", name, stats.unique_nodes, gss_string)
+                      } else {
+                          match find_longest_path(root) {
+                              Some(p) => format!("{} GSS too big ({} nodes). Longest path ({}): {}",
+                                                 name,
+                                                 stats.unique_nodes,
+                                                 p.len(),
+                                                 p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
+                                                      .map(|id| id.to_string())
+                                                      .collect::<Vec<_>>()
+                                                  .join(" → ")),
+                              None => format!("{} GSS too big ({} nodes) – path not found", name, stats.unique_nodes),
+                          }
+                      };
+                      (final_string, state_ids)
+                  };
+                  gss_strings.push(current_gss_string);
+                  all_state_ids.extend(current_state_ids);
+              }
+
+              let mut final_string = gss_strings.join("\n\n");
+              if explain_states && !all_state_ids.is_empty() {
                   final_string.push_str("\n\n--- GSS State Explanations ---\n");
-                      for state_id in state_ids {
+                      for state_id in all_state_ids {
                           let mut explanation = String::new();
                           writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
                           self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
@@ -2912,8 +2942,8 @@ local_system:
                       }
               }
 
-              if stats.unique_nodes > PANIC_THRESHOLD {
-                  panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
+              if total_nodes > PANIC_THRESHOLD {
+                  panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
               }
 
               debug!(3, "{}", final_string);
@@ -2928,7 +2958,11 @@ local_system:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_to_dot(&self.active_state.stack, None, None)
+              let mut roots: Vec<(&str, &GSSNode)> = vec![("Active", &self.active_state.stack)];
+              if !self.active_state.accepted_state.is_empty() {
+                  roots.push(("Accepted", &self.active_state.accepted_state));
+              }
+              self.parser.gss_forest_to_dot(&roots, None, None)
           }
       }
 
@@ -5660,6 +5694,25 @@ local_system:
                       };
 
                       if !gotos_for_nt.is_empty() {
+                          let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
+                          if !accepting_gotos.is_empty() {
+                              crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
+                              self.accepted = true;
+                              let mut accepted_stacks = Vec::new();
+                              for (_k, acc_arc) in popper.below_bottom.iter() {
+                                  for goto_info in &accepting_gotos {
+                                      // Create the stack that is being accepted: a new root with the accumulated `acc`,
+                                      // with the `source_state_id` on top.
+                                      let acc = acc_arc.as_ref().clone();
+                                      let accepted_gss0 = GSSNode::new(acc);
+                                      let accepted_gss1 = accepted_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                      accepted_stacks.push(Arc::new(accepted_gss1));
+                                  }
+                              }
+                              let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
+                              Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
+                          }
+
                           timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                           let mut below_zero = Vec::new();
 
@@ -5695,11 +5748,6 @@ local_system:
                                           inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                                       }
                                       });
-
-                                      if goto_info.accept {
-                                          self.accepted = true;
-                                      }
-
                                       // IMPORTANT: No need to push a new GSS node here.
                                       // It would be equivalent to the one created when this key was first seen.
                                       continue;
@@ -5773,10 +5821,6 @@ local_system:
                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                                       below_zero.push(Arc::new(new_gss2));
-                                  }
-
-                                  if goto_info.accept {
-                                      self.accepted = true;
                                   }
                               }
                           }
@@ -5878,6 +5922,19 @@ local_system:
               let mut next_active = ParseState::new();
               for state in shifted_states_todo {
                   next_active.merge(state);
+              }
+
+              // If any paths were accepted during this step, create new parse branches
+              // starting from the initial state, with the accepted GSS as their history.
+              // This allows parsing of subsequent independent constructs (e.g. in a REPL).
+              if !next_active.accepted_state.is_empty() {
+                  let new_content = ParseStateEdgeContent {
+                      state_id: self.parser.start_state_id,
+                  };
+                  let continued_stack = next_active.accepted_state.push(new_content);
+                  let continued_parse_state = ParseState::with_stack(Arc::new(continued_stack));
+                  next_active.merge(continued_parse_state);
+                  next_active.accepted_state = Arc::new(GSSNode::new_fresh());
               }
               self.active_state = next_active;
 
@@ -8858,6 +8915,25 @@ messages:
                       };
 
                       if !gotos_for_nt.is_empty() {
+                          let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
+                          if !accepting_gotos.is_empty() {
+                              crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
+                              self.accepted = true;
+                              let mut accepted_stacks = Vec::new();
+                              for (_k, acc_arc) in popper.below_bottom.iter() {
+                                  for goto_info in &accepting_gotos {
+                                      // Create the stack that is being accepted: a new root with the accumulated `acc`,
+                                      // with the `source_state_id` on top.
+                                      let acc = acc_arc.as_ref().clone();
+                                      let accepted_gss0 = GSSNode::new(acc);
+                                      let accepted_gss1 = accepted_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                      accepted_stacks.push(Arc::new(accepted_gss1));
+                                  }
+                              }
+                              let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
+                              Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
+                          }
+
                           timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                           let mut below_zero = Vec::new();
 
@@ -8893,11 +8969,6 @@ messages:
                                           inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
                                       }
                                       });
-
-                                      if goto_info.accept {
-                                          self.accepted = true;
-                                      }
-
                                       // IMPORTANT: No need to push a new GSS node here.
                                       // It would be equivalent to the one created when this key was first seen.
                                       continue;
@@ -8971,10 +9042,6 @@ messages:
                                       let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                       let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                                       below_zero.push(Arc::new(new_gss2));
-                                  }
-
-                                  if goto_info.accept {
-                                      self.accepted = true;
                                   }
                               }
                           }
@@ -9199,40 +9266,60 @@ messages:
               const MAX: usize = 30;
               const PANIC_THRESHOLD: usize = 1_000_000;
 
-              let roots: Vec<_> = vec![self.active_state.stack.clone()];
-              let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-              crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                            phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+              let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
+              if !self.active_state.accepted_state.is_empty() {
+                  roots_to_log.push(("Accepted", self.active_state.accepted_state.clone()));
+              }
 
-              let (gss_string, state_ids) = {
-                  let print_full_forest = stats.unique_nodes <= MAX;
-                  let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
-                  let config = GSSPrintConfig {
-                      max_nodes: max_nodes_to_print,
-                      ..Default::default()
-                  };
-                  let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
-                  let final_string = if print_full_forest {
-                      format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
-                  } else {
-                      match find_longest_path(&self.active_state.stack) {
-                          Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                             stats.unique_nodes,
-                                             p.len(),
-                                             p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-                                                  .map(|id| id.to_string())
-                                                  .collect::<Vec<_>>()
-                                              .join(" → ")),
-                          None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                      }
-                  };
-                  (final_string, state_ids)
-              };
+              let stats_breakdown = roots_to_log.iter().map(|(name, root)| {
+                  let stats = gather_gss_stats(&[root.as_ref()]);
+                  format!("{}_nodes: {:?}", name.to_lowercase(), stats)
+              }).collect::<Vec<_>>().join(" ");
 
-              let mut final_string = gss_string;
-              if explain_states && !state_ids.is_empty() {
+              crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - {}",
+                            phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
+
+              let mut gss_strings = vec![];
+              let mut all_state_ids = BTreeSet::new();
+              let mut total_nodes = 0;
+
+              for (name, root) in &roots_to_log {
+                  let stats = gather_gss_stats(&[root.as_ref()]);
+                  total_nodes += stats.unique_nodes;
+
+                  let (current_gss_string, current_state_ids) = {
+                      let print_full_forest = stats.unique_nodes <= MAX;
+                      let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
+                      let config = GSSPrintConfig {
+                          max_nodes: max_nodes_to_print,
+                          ..Default::default()
+                      };
+                      let (gss_string, state_ids) = print_gss_forest(&[root.clone()], &self.parser.terminal_map, &config);
+                      let final_string = if print_full_forest {
+                          format!("{} GSS ({} nodes):\n{}", name, stats.unique_nodes, gss_string)
+                      } else {
+                          match find_longest_path(root) {
+                              Some(p) => format!("{} GSS too big ({} nodes). Longest path ({}): {}",
+                                                 name,
+                                                 stats.unique_nodes,
+                                                 p.len(),
+                                                 p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
+                                                      .map(|id| id.to_string())
+                                                      .collect::<Vec<_>>()
+                                                  .join(" → ")),
+                              None => format!("{} GSS too big ({} nodes) – path not found", name, stats.unique_nodes),
+                          }
+                      };
+                      (final_string, state_ids)
+                  };
+                  gss_strings.push(current_gss_string);
+                  all_state_ids.extend(current_state_ids);
+              }
+
+              let mut final_string = gss_strings.join("\n\n");
+              if explain_states && !all_state_ids.is_empty() {
                   final_string.push_str("\n\n--- GSS State Explanations ---\n");
-                      for state_id in state_ids {
+                      for state_id in all_state_ids {
                           let mut explanation = String::new();
                           writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
                           self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
@@ -9240,8 +9327,8 @@ messages:
                       }
               }
 
-              if stats.unique_nodes > PANIC_THRESHOLD {
-                  panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
+              if total_nodes > PANIC_THRESHOLD {
+                  panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
               }
 
               debug!(3, "{}", final_string);
@@ -9256,7 +9343,11 @@ messages:
 
           /// Generates a Graphviz DOT representation of the GSS state graph.
           pub fn gss_to_dot(&self) -> String {
-              self.parser.gss_to_dot(&self.active_state.stack, None, None)
+              let mut roots: Vec<(&str, &GSSNode)> = vec![("Active", &self.active_state.stack)];
+              if !self.active_state.accepted_state.is_empty() {
+                  roots.push(("Accepted", &self.active_state.accepted_state));
+              }
+              self.parser.gss_forest_to_dot(&roots, None, None)
           }
       }
 
@@ -9469,148 +9560,64 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Modify `log_gss` to also show the accepted GSS.
+  - user: |-
+      Right now, the accepted states/GSSs aren't actually getting put into `process_action_queue`, because e.g. we're doing
+      ```rust
+              self.process_action_queue(
+                  &mut work_map,
+                  None,
+                  &mut shifted_states_todo,
+                  |row| Some(Action::Default(&row.default_reduce)),
+                  &config,
+              );
+
+              // Consolidate all survivors into the new active state.
+              let mut next_active = ParseState::new();
+              for state in shifted_states_todo {
+                  next_active.merge(state);
+              }
+              self.active_state = next_active;
+      ```
+      Fix this.
     metadata:
   - assistant: |-
-      Of course, I can help with that. Here are the modifications to display the accepted GSS in your `log_gss` function.
+      Of course, I can help with that. It seems you've correctly identified that accepted parse states are not being handled in a way that allows for continuous parsing, such as in a REPL environment. When a valid parse is found and accepted, the parser should be able to reset and continue parsing subsequent input.
 
-      I'll update `log_gss` to iterate over both the active and accepted GSS roots, generating a combined log output. I'll also adjust `gss_to_dot` to include both in its graphical representation.
+      Here is the git diff patch to fix this issue in `src/glr/parser.rs`. This change modifies the `process_default_reductions_advanced` function to take any accepted GSS forests, use them to start new parsing branches from the initial state, and then clear the accepted states to prevent reprocessing.
 
-      Here is the git diff for the changes:
+      ### Modified File: `src/glr/parser.rs`
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -1415,58 +1415,78 @@
-           pub fn has_accepted(&self) -> bool {
-               self.accepted
-           }
-       
-           // #[time_it("GLRParserState::log_gss")]
-           pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
-               if !GSS_LOGGING_ENABLED {
-                   return;
+      @@ -1218,8 +1218,19 @@
+               // Consolidate all survivors into the new active state.
+               let mut next_active = ParseState::new();
+               for state in shifted_states_todo {
+                   next_active.merge(state);
                }
-               // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-               const MAX: usize = 30;
-               const PANIC_THRESHOLD: usize = 1_000_000;
-       
-      -        let roots: Vec<_> = vec![self.active_state.stack.clone()];
-      -        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-      -        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-      -                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
-      -
-      -        let (gss_string, state_ids) = {
-      -            let print_full_forest = stats.unique_nodes <= MAX;
-      -            let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
-      -            let config = GSSPrintConfig {
-      -                max_nodes: max_nodes_to_print,
-      -                ..Default::default()
-      -            };
-      -            let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
-      -            let final_string = if print_full_forest {
-      -                format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
-      -            } else {
-      -                match find_longest_path(&self.active_state.stack) {
-      -                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-      -                                       stats.unique_nodes,
-      -                                       p.len(),
-      -                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-      -                                            .map(|id| id.to_string())
-      -                                            .collect::<Vec<_>>()
-      -                                        .join(" → ")),
-      -                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-      -                }
-      -            };
-      -            (final_string, state_ids)
-      -        };
-      -
-      -        let mut final_string = gss_string;
-      -        if explain_states && !state_ids.is_empty() {
-      +        let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
-      +        if !self.active_state.accepted_state.is_empty() {
-      +            roots_to_log.push(("Accepted", self.active_state.accepted_state.clone()));
-      +        }
+      -        self.active_state = next_active;
       +
-      +        let stats_breakdown = roots_to_log.iter().map(|(name, root)| {
-      +            let stats = gather_gss_stats(&[root.as_ref()]);
-      +            format!("{}_nodes: {:?}", name.to_lowercase(), stats)
-      +        }).collect::<Vec<_>>().join(" ");
-      +
-      +        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - {}",
-      +                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
-      +
-      +        let mut gss_strings = vec![];
-      +        let mut all_state_ids = BTreeSet::new();
-      +        let mut total_nodes = 0;
-      +
-      +        for (name, root) in &roots_to_log {
-      +            let stats = gather_gss_stats(&[root.as_ref()]);
-      +            total_nodes += stats.unique_nodes;
-      +
-      +            let (current_gss_string, current_state_ids) = {
-      +                let print_full_forest = stats.unique_nodes <= MAX;
-      +                let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
-      +                let config = GSSPrintConfig {
-      +                    max_nodes: max_nodes_to_print,
-      +                    ..Default::default()
-      +                };
-      +                let (gss_string, state_ids) = print_gss_forest(&[root.clone()], &self.parser.terminal_map, &config);
-      +                let final_string = if print_full_forest {
-      +                    format!("{} GSS ({} nodes):\n{}", name, stats.unique_nodes, gss_string)
-      +                } else {
-      +                    match find_longest_path(root) {
-      +                        Some(p) => format!("{} GSS too big ({} nodes). Longest path ({}): {}",
-      +                                           name,
-      +                                           stats.unique_nodes,
-      +                                           p.len(),
-      +                                           p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-      +                                                .map(|id| id.to_string())
-      +                                                .collect::<Vec<_>>()
-      +                                            .join(" → ")),
-      +                        None => format!("{} GSS too big ({} nodes) – path not found", name, stats.unique_nodes),
-      +                    }
-      +                };
-      +                (final_string, state_ids)
+      +        // If any paths were accepted during this step, create new parse branches
+      +        // starting from the initial state, with the accepted GSS as their history.
+      +        // This allows parsing of subsequent independent constructs (e.g. in a REPL).
+      +        if !next_active.accepted_state.is_empty() {
+      +            let new_content = ParseStateEdgeContent {
+      +                state_id: self.parser.start_state_id,
       +            };
-      +            gss_strings.push(current_gss_string);
-      +            all_state_ids.extend(current_state_ids);
+      +            let continued_stack = next_active.accepted_state.push(new_content);
+      +            let continued_parse_state = ParseState::with_stack(Arc::new(continued_stack));
+      +            next_active.merge(continued_parse_state);
+      +            next_active.accepted_state = Arc::new(GSSNode::new_fresh());
       +        }
-      +
-      +        let mut final_string = gss_strings.join("\n\n");
-      +        if explain_states && !all_state_ids.is_empty() {
-                   final_string.push_str("\n\n--- GSS State Explanations ---\n");
-      -                for state_id in state_ids {
-      +                for state_id in all_state_ids {
-                           let mut explanation = String::new();
-                           writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
-                           self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-                           final_string.push_str(&explanation);
-                       }
-               }
+      +        self.active_state = next_active;
        
-      -        if stats.unique_nodes > PANIC_THRESHOLD {
-      -            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
-      +        if total_nodes > PANIC_THRESHOLD {
-      +            panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
-               }
-       
-               debug!(3, "{}", final_string);
-      @@ -1479,7 +1499,11 @@
-       
-           /// Generates a Graphviz DOT representation of the GSS state graph.
-           pub fn gss_to_dot(&self) -> String {
-      -        self.parser.gss_to_dot(&self.active_state.stack, None, None)
-      +        let mut roots: Vec<(&str, &GSSNode)> = vec![("Active", &self.active_state.stack)];
-      +        if !self.active_state.accepted_state.is_empty() {
-      +            roots.push(("Accepted", &self.active_state.accepted_state));
-      +        }
-      +        self.parser.gss_forest_to_dot(&roots, None, None)
-           }
-       }
-       
+               // After Phase 3, we’re ready for the next token.
+               self.phase = ParserPhase::ReadyForToken;
 
       ```
+
+      This patch ensures that after the default reduction phase completes, any fully parsed (accepted) inputs will effectively reset the parser to the start state while preserving the parse history in the GSS. This allows for parsing a stream of inputs correctly. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -9621,7 +9628,7 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Include accepted GSS in logging
-      and DOT output"'
+  - user: 'Changes committed with message: "feat: Handle accepted states for continuous
+      parsing in GLR"'
     metadata:
 ...

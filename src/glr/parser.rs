@@ -1295,6 +1295,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for state in shifted_states_todo {
             next_active.merge(state);
         }
+
+        // If any paths were accepted during this step, create new parse branches
+        // starting from the initial state, with the accepted GSS as their history.
+        // This allows parsing of subsequent independent constructs (e.g. in a REPL).
+        if !next_active.accepted_state.is_empty() {
+            let new_content = ParseStateEdgeContent {
+                state_id: self.parser.start_state_id,
+            };
+            let continued_stack = next_active.accepted_state.push(new_content);
+            let continued_parse_state = ParseState::with_stack(Arc::new(continued_stack));
+            next_active.merge(continued_parse_state);
+            next_active.accepted_state = Arc::new(GSSNode::new_fresh());
+        }
         self.active_state = next_active;
 
         // After Phase 3, we’re ready for the next token.
