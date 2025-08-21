@@ -1065,9 +1065,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 };
 
-                if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
+                if !gotos_for_nt.is_empty() {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
+                        crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         self.accepted = true;
                         let mut accepted_stacks = Vec::new();
                         for (_k, acc_arc) in popper.below_bottom.iter() {
@@ -1083,9 +1084,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
                         Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
                     }
-                }
 
-                if !gotos_for_nt.is_empty() {
                     timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
 
