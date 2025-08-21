@@ -418,10 +418,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
-        #[cfg(rustrover)]
-        let it = precomputed.iter();
+        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED);
         for (tokenizer_state_id, trie1_root) in it {
             if let Some(trie2_root) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
                 precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
