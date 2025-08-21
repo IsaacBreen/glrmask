@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
+use std::cell::RefCell;
+use std::env;
+// Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 use ordered_hash_map::OrderedHashMap;
 
 
@@ -1188,6 +1190,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         println!("Including progress bar");
         #[cfg(not(rustrover))]
         println!("Omitting progress bar");
+        // Print the COMPILED_IN_RUSTROVER flag
+        if let Ok(val) = env::var("COMPILED_IN_RUSTROVER") {
+            println!("COMPILED_IN_RUSTROVER is set to: {}", val);
+        } else {
+            println!("COMPILED_IN_RUSTROVER is not set");
+        }
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
         // Seed with the user-supplied starting set
