@@ -1115,6 +1115,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 };
 
                 if !gotos_for_nt.is_empty() {
+                    timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
@@ -1185,7 +1186,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
                         accepted_out.push(merged_accepted);
                     }
+                    });
 
+                    timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
                     timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
 
@@ -1308,10 +1311,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         })
                     });
                     out.push(merged);
+                    });
                 }
             }
             });
- 
+
         timeit!("GLRParserState::reduce_and_goto", {
         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
             (GSSNode::merge_many_with_depth(usize::MAX, out), GSSNode::merge_many_with_depth(usize::MAX, accepted_out))
