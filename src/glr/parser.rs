@@ -1252,7 +1252,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
                                 for (dest_wrapper, new_tokens) in &dest_agg {
                                     if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
-                                        if new_tokens.is_subset(existing_tokens) {
+                                        if !new_tokens.is_subset(existing_tokens) {
                                             used_dests.insert(dest_wrapper.clone());
                                         }
                                     }
