@@ -904,9 +904,9 @@ fn prune_and_transform_recursive(
             let mut new_predecessors_map: NodeMap = BTreeMap::new();
 
             for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                let mut new_preds_by_depth = BTreeMap::new();
+                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
                 for (dest_key, pred_vec) in preds_by_depth {
-                    let mut new_vec = Vec::new();
+                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
                     for pred_arc in pred_vec {
                         had_any_pred = true;
                         match prune_and_transform_recursive(pred_arc, closure, memo) {
