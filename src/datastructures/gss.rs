@@ -604,6 +604,7 @@ impl GSSNode {
     }
 
     pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+        timeit!(format!("GSSNode::merge_many_with_depth({})", merge_depth), {
         let mut iter = nodes.into_iter();
         if let Some(first) = iter.next() {
             let mut merged = first.as_ref().clone();
@@ -614,6 +615,7 @@ impl GSSNode {
         } else {
             Arc::new(GSSNode::new_fresh())
         }
+        })
     }
 }
 
