@@ -1209,8 +1209,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             let guard = dest_arc.read().expect("poison");
                                             let temp = &guard.value.live_tokens - &cached_tokens;
                                             if (&temp & &tokens_to_push).is_empty() && !guard.value.end {
+                                                crate::debug!(6, "Using cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
                                                 Some(dest_arc.clone())
                                             } else {
+                                                crate::debug!(6, "Skipping cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
                                                 None
                                             }
                                         }).collect();
@@ -1247,9 +1249,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 for (dest_wrapper, new_tokens) in &dest_agg {
                                     if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
                                         if !new_tokens.is_subset(existing_tokens) {
+                                            crate::debug!(6, "Updating cache for below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, dest_wrapper);
                                             used_dests.insert(dest_wrapper.clone());
+                                        } else {
+                                            crate::debug!(6, "Not updating cache for below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, dest_wrapper);
                                         }
                                     } else {
+                                        crate::debug!(6, "Adding to cache for below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, dest_wrapper);
                                         used_dests.insert(dest_wrapper.clone());
                                     }
                                     cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());

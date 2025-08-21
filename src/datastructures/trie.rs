@@ -1860,7 +1860,7 @@ where
                     self.result = Some(destination.clone());
                     update_info = Some((destination, edge_val_clone));
                 } else {
-                    crate::debug!(6, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
+                    crate::debug!(7, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
                 }
             }
         }
@@ -2053,7 +2053,7 @@ where
             if source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()).is_ok() {
                 self.result = Some(new_node_arc.clone());
             } else {
-                crate::debug!(6, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
+                crate::debug!(7, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
             }
         }
 
