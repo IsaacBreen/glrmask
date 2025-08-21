@@ -1946,6 +1946,17 @@ where
         self
     }
 
+    pub fn to_destinations_weakly_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>) -> Self {
+        for destination in destinations {
+            if self.result.is_some() {
+                break; // Stop trying once a destination is found
+            }
+            // Need to consume and reassign self because to_destination_weakly takes self
+            self = self.to_destination_weakly(destination.clone()); // destination is already Arc, clone it
+        }
+        self
+    }
+
     /// Tries to establish an edge to any destination in the provided slice.
     ///
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.

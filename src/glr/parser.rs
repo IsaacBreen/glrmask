@@ -1209,14 +1209,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             let guard = dest_arc.read().expect("poison");
                                             let temp = &guard.value.live_tokens - &cached_tokens;
                                             if (&temp & &tokens_to_push).is_empty() && !guard.value.end {
-                                                crate::debug!(6, "Using cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
+                                                // crate::debug!(6, "Using cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
                                                 Some(dest_arc.clone())
                                             } else {
-                                                crate::debug!(6, "Skipping cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
+                                                // crate::debug!(6, "Skipping cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
                                                 None
                                             }
                                         }).collect();
-                                        inserter = inserter.try_destinations(&eligible_cached_destinations);
+                                        inserter = inserter.to_destinations_weakly_iter(eligible_cached_destinations.into_iter());
                                     }
 
                                     let eligible_iter_builder = || {
