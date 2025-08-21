@@ -193,11 +193,21 @@ pub enum BelowBottomReductionMode {
     Panic,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessTokenAdvancedConfig {
     pub below_bottom_mode: BelowBottomReductionMode,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProcessDefaultReductionsAdvancedConfig {
+    pub fuel: Option<usize>,
+}
+
+impl Default for ProcessDefaultReductionsAdvancedConfig {
+    fn default() -> Self {
+        Self { fuel: None }
+    }
+}
 
 #[derive(Clone)]
 pub struct GLRParser {
@@ -793,11 +803,22 @@ impl<'a> GLRParserState<'a> { // No longer generic
         accepted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
         config: &ProcessTokenAdvancedConfig,
+        fuel: &mut Option<usize>,
     )
     where
         F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
-        while let Some((WorkMapKey(_depth, state_id), state)) = work_map.pop_first() {
+        while let Some(entry) = work_map.pop_first() {
+            let (key, state) = entry;
+            if let Some(f) = fuel {
+                if *f == 0 {
+                    // Out of fuel. Put the state back and return.
+                    work_map.insert(key, state);
+                    return;
+                }
+                *f -= 1;
+            }
+            let WorkMapKey(_depth, state_id) = key;
             let row = &self.parser.table[&state_id];
             let action_opt = action_selector(row);
             if let Some(action) = action_opt {
@@ -935,6 +956,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         .map(Action::Normal)
                 },
                 config,
+                &mut None,
             );
         });
     }
@@ -956,6 +978,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         .map(Action::Normal)
                 },
                 config,
+                &mut None,
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
         });
@@ -1345,11 +1368,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn process_default_reductions(&mut self) {
-        self.process_default_reductions_advanced(&ProcessTokenAdvancedConfig::default());
+        self.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig::default());
     }
 
     #[time_it("GLRParserState::process_default_reductions_advanced")]
-    pub fn process_default_reductions_advanced(&mut self, config: &ProcessTokenAdvancedConfig) {
+    pub fn process_default_reductions_advanced(&mut self, config: &ProcessDefaultReductionsAdvancedConfig) {
         self.log_gss("Phase3-start", TerminalID(0), false, false); // Log with dummy token ID
         if self.phase == ParserPhase::ReadyForToken {
             crate::debug!(4, "Phase 3 skipped, parser is ready for Phase 1");
@@ -1366,6 +1389,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
         let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
+        let mut fuel = config.fuel;
+
         // Run the generic action-processing loop with a Default-only selector.
         // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
         // - action_selector returns the Default action for each row (no token actions here).
@@ -1375,7 +1400,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             &mut shifted_states_todo,
             &mut accepted_states_todo,
             |row| Some(Action::Default(&row.default_reduce)),
-            &config,
+            &ProcessTokenAdvancedConfig::default(),
+            &mut fuel,
         );
 
         // Consolidate all survivors into the new active state.
@@ -1384,6 +1410,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             next_active.merge(state);
         }
         for state in accepted_states_todo {
+            next_active.merge(state);
+        }
+        for (_, state) in work_map {
             next_active.merge(state);
         }
         self.active_state = next_active;
