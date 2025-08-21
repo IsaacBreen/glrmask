@@ -1189,7 +1189,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     });
 
                     timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
-                    timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
+                    // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
 
                     crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
