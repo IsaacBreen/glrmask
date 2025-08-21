@@ -543,6 +543,7 @@ impl GrammarConstraint {
             },
             // process_fn
             |precomputed_node_data, glr_s| {
+                crate::debug!(3, "Trie2: At precomputed node {:p}, processing GLR state", precomputed_node_data);
                 // Dump precomputed2
                 // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
                 // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
