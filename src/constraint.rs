@@ -1991,7 +1991,7 @@ impl<'a> GrammarConstraintState<'a> {
     #[time_it]
     pub fn get_mask1(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
-        crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
@@ -2338,7 +2338,7 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn get_mask2(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
-        crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
