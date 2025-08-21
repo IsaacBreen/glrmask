@@ -1210,6 +1210,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                 let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
+                                timeit!("GLRParserState::reduce_and_goto::BLOCK_1: Below-bottom reduction goto processing", {
                                 let new_trie2_node = trie2_dst_nodes
                                     .entry(goto_info.source_state_id)
                                     .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
@@ -1270,6 +1271,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                                 }
+                                });
+                                timeit!("GLRParserState::reduce_and_goto::BLOCK_2: Below-bottom reduction goto processing", {
 
                                 // Update the cache and populate used_dests
                                 let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
@@ -1293,7 +1296,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let mut dg = dst_wr.as_arc().write().expect("poison");
                                     dg.value.live_tokens |= added.clone();
                                 }
-
+                                });
+                                timeit!("GLRParserState::reduce_and_goto::BLOCK_3: Below-bottom reduction goto processing", {
                                 if !used_dests.is_empty() {
                                     let mut acc2 = acc.clone();
                                     acc2.trie2_nodes = used_dests.clone();
@@ -1302,6 +1306,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
                                     below_zero.push(Arc::new(new_gss2));
                                 }
+                                });
                             }
                         }
                     }
