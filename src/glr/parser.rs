@@ -1255,7 +1255,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     }
                                     });
                                     let eligible_iter_builder;
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_2: Below-bottom reduction goto processing", {
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_3: Below-bottom reduction goto processing", {
 
                                     eligible_iter_builder = || {
                                         let g = source_arc.read().expect("poison");
@@ -1274,13 +1274,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         v.into_iter()
                                     };
                                     });
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_2: Below-bottom reduction goto processing", {
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_4: Below-bottom reduction goto processing", {
 
                                     inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                     inserter = inserter.try_destination_auto(new_trie2_node.clone());
 
                                     });
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_2: Below-bottom reduction goto processing", {
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_5: Below-bottom reduction goto processing", {
 
                                     let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
