@@ -198,7 +198,7 @@ pub struct ProcessTokenAdvancedConfig {
     pub below_bottom_mode: BelowBottomReductionMode,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProcessDefaultReductionsAdvancedConfig {
     pub fuel: Option<usize>,
     pub below_bottom_mode: BelowBottomReductionMode,
@@ -647,7 +647,7 @@ fn format_actions<W: std::fmt::Write>(
                 if let Some(shift_state) = shift {
                     let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
                 }
-                for (_len, nts) {
+                for (_len, nts) in reduces {
                     for (_nt_id, prod_ids) in nts {
                         for prod_id_val in prod_ids {
                             let prod = productions.get(prod_id_val.0).unwrap();
@@ -1759,19 +1759,6 @@ impl GLRParser {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
-}
-
-impl ParseState { // No longer generic
-    pub fn merge(&mut self, mut other: ParseState) {
-        // if self.stack.max_depth() > other.stack.max_depth() {
-        //     std::mem::swap(self, &mut other);
-        // }
-        // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
-        // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
-        // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
-        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
-        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
-    }
 }
 
 pub trait InsertWith<K, V> {
