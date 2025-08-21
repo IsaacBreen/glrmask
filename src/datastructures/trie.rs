@@ -1184,6 +1184,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
+        #[cfg(not(rustrover))]
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
         // Seed with the user-supplied starting set
@@ -1237,6 +1238,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 for (ek, ev, child_arc) in edges {
+                    #[cfg(not(rustrover))]
                     let _ = pb.update(1);
                     let child_ptr = NodePtr::as_ptr(&child_arc);
 
@@ -1288,6 +1290,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
+        #[cfg(not(rustrover))]
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
         // Seed with the user-supplied starting set
@@ -1334,6 +1337,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 for (ek, dest_map) in children_by_ek {
+                    #[cfg(not(rustrover))]
                     let _ = pb.update(dest_map.len());
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
                     for (child_node_ptr, new_v) in new_values_for_children {
