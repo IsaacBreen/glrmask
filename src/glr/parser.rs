@@ -1207,8 +1207,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
                                             let dest_arc = wrapper.as_arc();
                                             let guard = dest_arc.read().expect("poison");
-                                            let live_and_push = &guard.value.live_tokens & &tokens_to_push;
-                                            if live_and_push.is_subset(cached_tokens) {
+                                            let temp = &guard.value.live_tokens - &cached_tokens;
+                                            if (&temp & &tokens_to_push).is_empty() && !guard.value.end {
                                                 Some(dest_arc.clone())
                                             } else {
                                                 None
@@ -1242,12 +1242,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                                 }
 
-                                // Update live tokens on all destinations that were used
-                                for (dst_wr, added) in &dest_agg {
-                                    let mut dg = dst_wr.as_arc().write().expect("poison");
-                                    dg.value.live_tokens |= added.clone();
-                                }
-
                                 // Update the cache and populate used_dests
                                 let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
                                 for (dest_wrapper, new_tokens) in &dest_agg {
@@ -1257,6 +1251,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }
                                     }
                                     cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());
+                                }
+
+                                // Update live tokens on all destinations that were used
+                                for (dst_wr, added) in &dest_agg {
+                                    let mut dg = dst_wr.as_arc().write().expect("poison");
+                                    dg.value.live_tokens |= added.clone();
                                 }
 
                                 if !used_dests.is_empty() {
