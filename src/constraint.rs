@@ -26,7 +26,7 @@ use crate::datastructures::gss::{gather_gss_stats, GSSNode, allow_only_llm_token
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::datastructures::ArcPtrWrapper;
+use crate::datastructures::arc_wrapper::{ArcPtrWrapper};
 use crate::finite_automata::Regex;
 use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig, ProcessDefaultReductionsAdvancedConfig};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -413,86 +413,95 @@ impl GrammarConstraint {
         };
 
         let mut precomputed2 = BTreeMap::new();
-        let mut memo: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, Arc<RwLock<_>>> = HashMap::new();
+        // let mut memo: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, Arc<RwLock<_>>> = HashMap::new(); // Old memo, removed
 
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-        #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
-        #[cfg(rustrover)]
-        let it = precomputed.iter();
-        for (tokenizer_state_id, trie1_root) in it {
-            if let Some(trie2_root) = memo.get(&ArcPtrWrapper::new(trie1_root.clone())) {
-                precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
-                continue;
-            }
-            let trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
-                PrecomputedNodeContents::root(internal_max_llm_token),
-            )));
-            precomputed2.insert(*tokenizer_state_id, trie2_root.clone());
 
-            let mut gss_nodes_to_merge = Vec::new();
+        // 1) Build a single base Trie2 root and all its (0, Some(state_id)) children once.
+        let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
+            PrecomputedNodeContents::root(internal_max_llm_token),
+        )));
 
-            let glr_state;
+        let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
 
-            if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-                for state_id in parser.table.keys() {
-                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
-                        PrecomputedNodeContents::internal(),
-                    )));
-
-                    let mut inserter = EdgeInserter::new(
-                        trie2_root.clone(),
+        if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+            // one child per parser state
+            for state_id in parser.table.keys() {
+                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                // Insert (0, Some(state_id)) edge with full (ones) BV
+                {
+                    let mut ins = EdgeInserter::new(
+                        base_trie2_root.clone(),
                         (0, Some(*state_id)),
                         LLMTokenBV::ones(internal_max_llm_token + 1),
                         |e, n| *e |= n,
                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                         |ev, t| *ev &= &t.live_tokens,
                     );
-                    inserter = inserter.try_destination(new_trie2_node.clone());
-                    inserter.expect("Failed to insert initial edge into Trie2 root");
-
-                    let mut acc = Acc::new_fresh();
-                    acc.trie2_nodes
-                        .insert(ArcPtrWrapper::new(new_trie2_node));
-                    let gss_root = GSSNode::new(acc);
-                    let gss_node =
-                        gss_root.push(ParseStateEdgeContent { state_id: *state_id });
-                    gss_nodes_to_merge.push(Arc::new(gss_node));
+                    ins = ins.try_destination(new_trie2_node.clone());
+                    ins.expect("Failed to insert initial edge into base Trie2 root");
                 }
 
-                let merged_gss = GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge);
-                let parse_state = ParseState::with_stack(merged_gss);
-                glr_state = parser.init_glr_parser_from_parse_state(parse_state);
-            } else {
-                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::internal(),
-                )));
-                let mut inserter = EdgeInserter::new(
-                    trie2_root.clone(),
+                // Build the per-state initial GSS leaf pointing to the new_trie2_node
+                let mut acc = Acc::new_fresh();
+                acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+                let gss_leaf = Arc::new(GSSNode::new(acc));
+                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
+            }
+        } else {
+            // everything-state variant
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            {
+                let mut ins = EdgeInserter::new(
+                    base_trie2_root.clone(),
                     (0, Some(parser.everything_state_id)),
                     LLMTokenBV::ones(internal_max_llm_token + 1),
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                     |ev, t| *ev &= &t.live_tokens,
                 );
-                inserter = inserter.try_destination(new_trie2_node.clone());
-                inserter.expect("Failed to insert initial edge into Trie2 root");
-                let mut acc = Acc::new_fresh();
-                acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node));
-                let gss_root = GSSNode::new(acc);
-                let gss_node = gss_root.push(ParseStateEdgeContent { state_id: parser.everything_state_id });
-                gss_nodes_to_merge.push(Arc::new(gss_node));
-                glr_state = parser.init_glr_parser_from_parse_state(
-                    ParseState::with_stack(GSSNode::merge_many_with_depth(usize::MAX, gss_nodes_to_merge))
-                );
+                ins = ins.try_destination(new_trie2_node.clone());
+                ins.expect("Failed to insert initial edge into base Trie2 root");
             }
 
-            memo.insert(ArcPtrWrapper::new(trie1_root.clone()), trie2_root.clone());
+            let mut acc = Acc::new_fresh();
+            acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+            let gss_leaf = Arc::new(GSSNode::new(acc));
+            base_gss_nodes.push(Arc::new(
+                gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
+            ));
+        }
 
-            initial_values_for_map.push((trie1_root.clone(), glr_state));
+        // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
+        let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
+        let mut base_glr_state = parser.init_glr_parser_from_parse_state(ParseState::with_stack(base_gss_merged));
 
+        // Optional: pre-warm once with default reductions (your idea)
+        base_glr_state.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
+            fuel: None,
+            below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE,
+        });
+
+        #[cfg(not(rustrover))]
+        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
+        #[cfg(rustrover)]
+        let it = precomputed.iter();
+        for (tokenizer_state_id, trie1_root) in it {
+            // Deep clone Trie2
+            let (cloned_trie2_root, trie2_map) = clone_trie2_graph(&base_trie2_root);
+
+            // Deep clone the base GSS, remapping trie2_nodes
+            let cloned_gss = crate::datastructures::gss::deep_clone_gss_with_trie2_map(
+                &base_glr_state.active_state.stack,
+                &trie2_map,
+            );
+            let glr_state_for_sid = parser.init_glr_parser_from_parse_state(ParseState::with_stack(cloned_gss));
+
+            // Record per tokenizer state
+            precomputed2.insert(*tokenizer_state_id, cloned_trie2_root);
+            initial_values_for_map.push((trie1_root.clone(), glr_state_for_sid));
         }
 
         let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::leaf(), )));
@@ -786,8 +795,8 @@ fn deduplicate_recursive_trie2(
     visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
 ) -> Arc<RwLock<PrecomputeNode2>> {
     let node_ptr = Arc::as_ptr(&node_arc);
-    if let Some(canonical_arc) = visited.get(&node_ptr) {
-        return canonical_arc.clone();
+    if let Some(cached_node) = visited.get(&node_ptr) {
+        return cached_node.clone();
     }
 
     // Pre-emptively insert the current node's arc. This breaks cycles.
@@ -836,6 +845,83 @@ fn deduplicate_recursive_trie2(
     // Update the visited map with the final canonical arc.
     visited.insert(node_ptr, canonical_arc.clone());
     canonical_arc
+}
+
+fn clone_trie2_graph(
+    root: &Arc<RwLock<PrecomputeNode2>>,
+) -> (
+    Arc<RwLock<PrecomputeNode2>>,
+    HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+) {
+    // old_ptr -> new arc
+    let mut map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+    let mut q: VecDeque<Arc<RwLock<PrecomputeNode2>>> = VecDeque::new();
+
+    let root_ptr = Arc::as_ptr(root);
+    let root_value = { root.read().expect("poison").value.clone() };
+    let new_root = Arc::new(RwLock::new(PrecomputeNode2::new(root_value)));
+    map.insert(root_ptr, new_root.clone());
+    q.push_back(root.clone());
+
+    while let Some(old_arc) = q.pop_front() {
+        let old_ptr = Arc::as_ptr(&old_arc);
+        let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
+
+        // Snapshot children outside of lock to avoid recursive lock explosion.
+        let children_snapshot: Vec<( (usize, Option<StateID>), Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)> )> = {
+            let g = old_arc.read().expect("poison");
+            g.children()
+                .iter()
+                .map(|(ek, dest_map)| {
+                    let entries = dest_map
+                        .iter()
+                        .filter_map(|(node_ptr, ev)| {
+                            node_ptr.upgrade().map(|child_arc| (node_ptr.clone(), ev.clone()))
+                        })
+                        .collect::<Vec<_>>();
+                    (ek.clone(), entries)
+                })
+                .collect()
+        };
+
+        // For each child, ensure it exists in map (create a blank new node with same value).
+        for (_ek, entries) in &children_snapshot {
+            for (node_ptr, _ev) in entries {
+                let child_arc_old = node_ptr.upgrade().expect("child must exist");
+                let child_ptr_old = Arc::as_ptr(&child_arc_old);
+                if !map.contains_key(&child_ptr_old) {
+                    let child_value = { child_arc_old.read().expect("poison").value.clone() };
+                    let child_arc_new = Arc::new(RwLock::new(PrecomputeNode2::new(child_value)));
+                    map.insert(child_ptr_old, child_arc_new);
+                    q.push_back(child_arc_old);
+                }
+            }
+        }
+
+        // Now wire edges on new_arc
+        {
+            let mut new_g = new_arc.write().expect("poison");
+            for (ek, entries) in children_snapshot {
+                let dest_map = new_g.children_mut().entry(ek).or_default();
+                for (old_node_ptr, ev) in entries {
+                    let child_arc_old = old_node_ptr.upgrade().expect("child must exist");
+                    let child_ptr_old = Arc::as_ptr(&child_arc_old);
+                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
+                    // Preserve strong/weak kind of the original key
+                    let new_key = if old_node_ptr.is_strong() {
+                        NodePtr::Strong(ArcPtrWrapper::new(child_arc_new))
+                    } else {
+                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc_new)))
+                    };
+                    dest_map.insert(new_key, ev);
+                }
+            }
+        }
+    }
+
+    // Recompute max_depths in the clone to keep invariants consistent.
+    Trie::recompute_all_max_depths(&[new_root.clone()]);
+    (new_root, map)
 }
 
 struct Precomputer<'r> {
@@ -1920,6 +2006,42 @@ fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
         .sum::<u64>()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParseStateKey {
+    stack_state_id: StateID,
+}
+
+impl ParseState { // No longer generic
+    pub fn merge(&mut self, mut other: ParseState) {
+        // if self.stack.max_depth() > other.stack.max_depth() {
+        //     std::mem::swap(self, &mut other);
+        // }
+        // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
+        // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
+        // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
+    }
+}
+
+pub trait InsertWith<K, V> {
+    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
+}
+
+impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
+    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
+        match self.entry(k) {
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                let value = occupied.get_mut();
+                combine(value, v);
+            }
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(v);
+            }
+        }
+    }
+}
+ 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
@@ -2707,4 +2829,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-

@@ -904,9 +904,9 @@ fn prune_and_transform_recursive(
             let mut new_predecessors_map: NodeMap = BTreeMap::new();
 
             for (edge_val, preds_by_depth) in &node_arc.predecessors {
-                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                let mut new_preds_by_depth = BTreeMap::new();
                 for (dest_key, pred_vec) in preds_by_depth {
-                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
+                    let mut new_vec = Vec::new();
                     for pred_arc in pred_vec {
                         had_any_pred = true;
                         match prune_and_transform_recursive(pred_arc, closure, memo) {
@@ -1262,6 +1262,63 @@ pub fn fuse_predecessors_recursive(
     let result_arc = Arc::new(fused_node);
     memo.insert(node_ptr, result_arc.clone());
     result_arc
+}
+
+pub fn deep_clone_gss_with_trie2_map(
+    root: &Arc<GSSNode>,
+    trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+) -> Arc<GSSNode> {
+    fn clone_one(
+        node: &Arc<GSSNode>,
+        trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+        memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+    ) -> Arc<GSSNode> {
+        let ptr = Arc::as_ptr(node);
+        if let Some(cached) = memo.get(&ptr) {
+            return cached.clone();
+        }
+
+        // 1) Clone predecessors recursively
+        let mut new_preds: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
+        for (edge_val, preds_by_depth) in &node.predecessors {
+            let mut new_by_depth = BTreeMap::new();
+            for (dest_key, pred_vec) in preds_by_depth {
+                let mut new_vec = Vec::with_capacity(pred_vec.len());
+                for pred in pred_vec {
+                    new_vec.push(clone_one(pred, trie2_map, memo));
+                }
+                new_by_depth.insert(*dest_key, new_vec);
+            }
+            new_preds.insert(edge_val.clone(), new_by_depth);
+        }
+
+        // 2) Clone Acc, remapping trie2_nodes via trie2_map
+        let mut new_acc = (*node.acc).clone();
+        if !new_acc.trie2_nodes.is_empty() {
+            let mut new_set = BTreeSet::new();
+            for old_wr in &new_acc.trie2_nodes {
+                let old_arc = old_wr.as_arc().clone();
+                let old_ptr = Arc::as_ptr(&old_arc);
+                if let Some(new_arc) = trie2_map.get(&old_ptr) {
+                    new_set.insert(ArcPtrWrapper::new(new_arc.clone()));
+                } else {
+                    // Should not happen if the cloned Trie2 was complete
+                    // Fallback to original (not ideal, but prevents panic)
+                    new_set.insert(ArcPtrWrapper::new(old_arc));
+                }
+            }
+            new_acc.trie2_nodes = new_set;
+        }
+
+        // 3) Build a new node; new_with_map recomputes hash and depth
+        let new_node = GSSNode::new_with_map(Arc::new(new_acc), new_preds);
+        let out = Arc::new(new_node);
+        memo.insert(ptr, out.clone());
+        out
+    }
+
+    let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+    clone_one(root, trie2_map, &mut memo)
 }
 
 // --- Analysis and Debugging ---

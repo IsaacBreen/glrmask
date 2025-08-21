@@ -1867,7 +1867,6 @@ where
         }
 
         if let Some((dest_arc, ev)) = update_info {
-            crate::debug!(7, "Updating node value for destination {:p} with edge value {:?}. self.edge_value: {:?}", Arc::as_ptr(&dest_arc), ev, self.edge_value);
             (self.update_node_value)(&mut dest_arc.write().unwrap().value, &ev);
         }
 
@@ -3573,4 +3572,5 @@ mod tests {
         assert_eq!(*ev3, merged_strong_val);
     }
 }
+
 
