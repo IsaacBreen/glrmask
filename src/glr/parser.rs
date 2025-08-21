@@ -1181,27 +1181,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             };
 
                             // If we have seen this exact situation before, reuse the cached Trie-2 node
-                            if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
-                                crate::debug!(5, "Using cached Trie-2 node for NT '{}' from state {:?} with source_state_id {:?} and Acc {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), k, goto_info.source_state_id, cache_key.acc);
-                                timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
-                                for existing_trie2_node in &trie2_nodes {
-                                    timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
-                                    // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
-                                    let inserter = EdgeInserter::new(
-                                        existing_trie2_node.as_arc().clone(),
-                                        (k, Some(goto_info.source_state_id)),
-                                        active_llm_tokens.clone(),
-                                        |e, n| *e |= n,
-                                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                        |ev, t| *ev &= &t.live_tokens,
-                                    ).to_destination_weakly(cached_trie2_node.as_arc().clone());
-                                    inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
-                                }
-                                });
-                                // IMPORTANT: No need to push a new GSS node here.
-                                // It would be equivalent to the one created when this key was first seen.
-                                continue;
-                            }
+                            // if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                            //     crate::debug!(5, "Using cached Trie-2 node for NT '{}' from state {:?} with source_state_id {:?} and Acc {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), k, goto_info.source_state_id, cache_key.acc);
+                            //     timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
+                            //     for existing_trie2_node in &trie2_nodes {
+                            //         timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
+                            //         // Use auto-insert to degrade to a WEAK edge if a strong cycle would be formed.
+                            //         let inserter = EdgeInserter::new(
+                            //             existing_trie2_node.as_arc().clone(),
+                            //             (k, Some(goto_info.source_state_id)),
+                            //             active_llm_tokens.clone(),
+                            //             |e, n| *e |= n,
+                            //             |node_value, edge_value| node_value.live_tokens |= edge_value,
+                            //             |ev, t| *ev &= &t.live_tokens,
+                            //         ).to_destination_weakly(cached_trie2_node.as_arc().clone());
+                            //         inserter.expect("GLRParserState::reduce_and_goto: cached insert failed");
+                            //     }
+                            //     });
+                            //     // IMPORTANT: No need to push a new GSS node here.
+                            //     // It would be equivalent to the one created when this key was first seen.
+                            //     continue;
+                            // }
                             if let Some(goto_state_id) = goto_info.goto_state_id {
                                 let edge_key = (k, Some(goto_info.source_state_id));
                                 let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
@@ -1249,8 +1249,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         |e, n| *e |= n,
                                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                                         |ev, t| *ev &= &t.live_tokens,
-                                    ).try_destinations_iter_with(eligible_iter_builder);
+                                    );
 
+                                    if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                                        todo!()
+                                    }
+
+                                    inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                     inserter = inserter.try_destination_auto(new_trie2_node.clone());
 
                                     let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
