@@ -1065,6 +1065,26 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 };
 
+                if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
+                    let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
+                    if !accepting_gotos.is_empty() {
+                        self.accepted = true;
+                        let mut accepted_stacks = Vec::new();
+                        for (_k, acc_arc) in popper.below_bottom.iter() {
+                            for goto_info in &accepting_gotos {
+                                // Create the stack that is being accepted: a new root with the accumulated `acc`,
+                                // with the `source_state_id` on top.
+                                let acc = acc_arc.as_ref().clone();
+                                let accepted_gss0 = GSSNode::new(acc);
+                                let accepted_gss1 = accepted_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                accepted_stacks.push(Arc::new(accepted_gss1));
+                            }
+                        }
+                        let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
+                        Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
+                    }
+                }
+
                 if !gotos_for_nt.is_empty() {
                     timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
