@@ -1217,12 +1217,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     .clone();
 
                                 for existing_trie2_node in &trie2_nodes {
-                                    let source_arc = existing_trie2_node.as_arc().clone();
-                                    let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                                    let tokens_to_push = &source_live & &acc.llm_tokens_union;
-                                    if tokens_to_push.is_empty() { continue; }
+                                    let mut inserter;
+                                    let tokens_to_push;
+                                    let source_arc;
 
-                                    let mut inserter = EdgeInserter::new(
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1: Below-bottom reduction goto processing", {
+                                    source_arc = existing_trie2_node.as_arc().clone();
+                                    let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
+                                    tokens_to_push = &source_live & &acc.llm_tokens_union;
+                                    if tokens_to_push.is_empty() { continue; }
+                                    });
+
+                                    inserter = EdgeInserter::new(
                                         source_arc.clone(),
                                         edge_key,
                                         tokens_to_push.clone(),
@@ -1231,6 +1237,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         |ev, t| *ev &= &t.live_tokens,
                                     );
 
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1.3: Below-bottom reduction goto processing", {
                                     if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
                                         let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
                                             let dest_arc = wrapper.as_arc();
@@ -1246,8 +1253,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }).collect();
                                         inserter = inserter.to_destinations_weakly_iter(eligible_cached_destinations.into_iter());
                                     }
+                                    });
+                                    let eligible_iter_builder;
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_2: Below-bottom reduction goto processing", {
 
-                                    let eligible_iter_builder = || {
+                                    eligible_iter_builder = || {
                                         let g = source_arc.read().expect("poison");
                                         let mut v = Vec::new();
                                         if let Some(dest_map) = g.children().get(&edge_key) {
@@ -1263,13 +1273,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }
                                         v.into_iter()
                                     };
+                                    });
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_2: Below-bottom reduction goto processing", {
 
                                     inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                     inserter = inserter.try_destination_auto(new_trie2_node.clone());
 
+                                    });
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_2: Below-bottom reduction goto processing", {
+
                                     let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                                    });
                                 }
                                 });
                                 timeit!("GLRParserState::reduce_and_goto::BLOCK_2: Below-bottom reduction goto processing", {
