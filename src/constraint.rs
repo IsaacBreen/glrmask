@@ -697,13 +697,14 @@ impl GrammarConstraint {
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node.reachable_token_ids();
+                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
@@ -726,7 +727,7 @@ impl GrammarConstraint {
                 if !new_grammar_tokens_to_look_for.is_empty() {
                     let next_results = Self::compute_possible_matches_for_vocab_node(
                         tokenizer,
-                        child_vocab_node, // Recurse with the child node
+                        child_vocab_node_ref, // Recurse with the child node
                         final_tokenizer_state_id,
                         cache,
                     );
@@ -1054,9 +1055,7 @@ impl<'r> Precomputer<'r> {
             if let Some(cached) = memo.get(&this_ptr) {
                 return cached.clone();
             }
-            // Insert a temporary empty BV to break cycles. If we revisit this node during this
-            // recursion, it will return an empty set, which is correct as no new live paths
-            // have been found through it yet.
+            // Mark as visited with an empty set to handle cycles.
             memo.insert(this_ptr, LLMTokenBV::zeros());
 
             // Snapshot children to avoid holding the lock during recursion.
@@ -2102,17 +2101,17 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, dest_map| {
                 if true {
                     timeit!("get_mask try to avoid step for no additional llm tokens", {
-                        let mut all_edge_llm_tokens = HybridBitset::zeros();
-                        for edge_llm_tokens_bv in dest_map.values() {
-                            all_edge_llm_tokens |= edge_llm_tokens_bv;
-                        }
-                        let glr_s_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                        let potential_additional_llm_tokens = &glr_s_llm_tokens & &all_edge_llm_tokens;
-                        if potential_additional_llm_tokens.is_subset(&final_mask_internal.borrow()) {
-                            // If the potential additional tokens are already in the final mask, skip stepping.
-                            crate::debug!(4, "Skipping step for grammar token {:?} as all edge LLM tokens are already in final mask.", grammar_token_opt);
-                            return Vec::new();
-                        }
+                    let mut all_edge_llm_tokens = HybridBitset::zeros();
+                    for edge_llm_tokens_bv in dest_map.values() {
+                        all_edge_llm_tokens |= edge_llm_tokens_bv;
+                    }
+                    let glr_s_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                    let potential_additional_llm_tokens = &glr_s_llm_tokens & &all_edge_llm_tokens;
+                    if potential_additional_llm_tokens.is_subset(&final_mask_internal.borrow()) {
+                        // If the potential additional tokens are already in the final mask, skip stepping.
+                        crate::debug!(4, "Skipping step for grammar token {:?} as all edge LLM tokens are already in final mask.", grammar_token_opt);
+                        return Vec::new();
+                    }
                     });
                 }
 
@@ -2171,9 +2170,9 @@ impl<'a> GrammarConstraintState<'a> {
                         let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
                             .map(|s| s.to_string())
                             .unwrap_or("UNKNOWN_TERMINAL".to_string());
-                        timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
-                            glr_s.process_token_advanced(*gtid, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
-                        });
+                        // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
+                        glr_s.process_token(*gtid);
+                        // });
 
                         crate::debug!(4, "glr_s.is_ok()_after_process_token: {}", glr_s.is_ok());
 
@@ -2275,9 +2274,7 @@ impl<'a> GrammarConstraintState<'a> {
                             // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
                             crate::debug!(4, "Processing non-end precomputed node data");
                             crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
-                            glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
-                                fuel: None, below_bottom_mode: BelowBottomReductionMode::ContinueFromAll
-                            });
+                            glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                             Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
