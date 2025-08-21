@@ -419,7 +419,7 @@ impl GrammarConstraint {
             Vec::new();
         let parser = parser.unwrap();
         #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED);
+        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
         #[cfg(rustrover)]
         let it = precomputed.iter();
         for (tokenizer_state_id, trie1_root) in it {

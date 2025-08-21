@@ -723,7 +723,7 @@ impl GrammarDefinition {
         ];
         let start_production_id = 0; // The augmented start production is always the first one.
 
-        for (name, expr) in tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED) {
+        for (name, expr) in tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED, leave=false) {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
