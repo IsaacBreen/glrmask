@@ -980,8 +980,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
-        let mut out = Vec::new();
-        let mut accepted_out = Vec::new();
+        let mut out: Vec<Arc<GSSNode>> = Vec::new();
+        let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
         for popper_item in popper.iter() {
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
@@ -1000,8 +1000,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                         // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
                         let accepted_stack_instance = peek2.isolated_parent();
-                        let accepted_stack_arc = Arc::new(accepted_stack_instance);
-                        accepted_out.push(accepted_stack_arc);
+                        accepted_out.push(accepted_stack_instance);
                     }
 
                     if let Some(goto_state_id) = goto.state_id {
