@@ -1407,40 +1407,60 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const MAX: usize = 30;
         const PANIC_THRESHOLD: usize = 1_000_000;
 
-        let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - nodes: {:?}",
-                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats);
+        let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
+        if !self.active_state.accepted_state.is_empty() {
+            roots_to_log.push(("Accepted", self.active_state.accepted_state.clone()));
+        }
 
-        let (gss_string, state_ids) = {
-            let print_full_forest = stats.unique_nodes <= MAX;
-            let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
-            let config = GSSPrintConfig {
-                max_nodes: max_nodes_to_print,
-                ..Default::default()
-            };
-            let (gss_string, state_ids) = print_gss_forest(&roots, &self.parser.terminal_map, &config);
-            let final_string = if print_full_forest {
-                format!("GSS ({} nodes):\n{}", stats.unique_nodes, gss_string)
-            } else {
-                match find_longest_path(&self.active_state.stack) {
-                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                       stats.unique_nodes,
-                                       p.len(),
-                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-                                            .map(|id| id.to_string())
-                                            .collect::<Vec<_>>()
-                                        .join(" → ")),
-                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                }
-            };
-            (final_string, state_ids)
-        };
+        let stats_breakdown = roots_to_log.iter().map(|(name, root)| {
+            let stats = gather_gss_stats(&[root.as_ref()]);
+            format!("{}_nodes: {:?}", name.to_lowercase(), stats)
+        }).collect::<Vec<_>>().join(" ");
 
-        let mut final_string = gss_string;
-        if explain_states && !state_ids.is_empty() {
+        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - {}",
+                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
+
+        let mut gss_strings = vec![];
+        let mut all_state_ids = BTreeSet::new();
+        let mut total_nodes = 0;
+
+        for (name, root) in &roots_to_log {
+            let stats = gather_gss_stats(&[root.as_ref()]);
+            total_nodes += stats.unique_nodes;
+
+            let (current_gss_string, current_state_ids) = {
+                let print_full_forest = stats.unique_nodes <= MAX;
+                let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
+                let config = GSSPrintConfig {
+                    max_nodes: max_nodes_to_print,
+                    ..Default::default()
+                };
+                let (gss_string, state_ids) = print_gss_forest(&[root.clone()], &self.parser.terminal_map, &config);
+                let final_string = if print_full_forest {
+                    format!("{} GSS ({} nodes):\n{}", name, stats.unique_nodes, gss_string)
+                } else {
+                    match find_longest_path(root) {
+                        Some(p) => format!("{} GSS too big ({} nodes). Longest path ({}): {}",
+                                           name,
+                                           stats.unique_nodes,
+                                           p.len(),
+                                           p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
+                                                .map(|id| id.to_string())
+                                                .collect::<Vec<_>>()
+                                            .join(" → ")),
+                        None => format!("{} GSS too big ({} nodes) – path not found", name, stats.unique_nodes),
+                    }
+                };
+                (final_string, state_ids)
+            };
+            gss_strings.push(current_gss_string);
+            all_state_ids.extend(current_state_ids);
+        }
+
+        let mut final_string = gss_strings.join("\n\n");
+        if explain_states && !all_state_ids.is_empty() {
             final_string.push_str("\n\n--- GSS State Explanations ---\n");
-                for state_id in state_ids {
+                for state_id in all_state_ids {
                     let mut explanation = String::new();
                     writeln!(&mut explanation, "\n--- State {} ---", state_id.0).unwrap();
                     self.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
@@ -1448,8 +1468,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
         }
 
-        if stats.unique_nodes > PANIC_THRESHOLD {
-            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, final_string);
+        if total_nodes > PANIC_THRESHOLD {
+            panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
         }
 
         debug!(3, "{}", final_string);
@@ -1464,7 +1484,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     /// Generates a Graphviz DOT representation of the GSS state graph.
     pub fn gss_to_dot(&self) -> String {
-        self.parser.gss_to_dot(&self.active_state.stack, None, None)
+        let mut roots: Vec<(&str, &GSSNode)> = vec![("Active", &self.active_state.stack)];
+        if !self.active_state.accepted_state.is_empty() {
+            roots.push(("Accepted", &self.active_state.accepted_state));
+        }
+        self.parser.gss_forest_to_dot(&roots, None, None)
     }
 }
 
