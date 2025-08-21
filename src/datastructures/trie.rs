@@ -1835,6 +1835,7 @@ where
     ///
     /// This operation only proceeds if a successful destination hasn't already been found.
     /// Returns `self` to allow chaining.
+    #[time_it]
     pub fn try_destination(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
         if self.result.is_some() {
             return self; // Already found a destination
@@ -1961,6 +1962,7 @@ where
     ///
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
     /// Returns `self` to allow chaining.
+    #[time_it]
     pub fn try_destinations(mut self, destinations: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Self {
         for destination in destinations {
             if self.result.is_some() {
@@ -1972,6 +1974,7 @@ where
         self
     }
 
+    #[time_it]
     pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>) -> Self {
         for destination in destinations {
             if self.result.is_some() {
@@ -1983,6 +1986,7 @@ where
         self
     }
 
+    #[time_it]
     pub fn try_destinations_iter_with<F, R>(mut self, destinations: F) -> Self
     where
         F: Fn() -> R,
