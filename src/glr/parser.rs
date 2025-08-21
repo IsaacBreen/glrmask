@@ -1249,6 +1249,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         if !new_tokens.is_subset(existing_tokens) {
                                             used_dests.insert(dest_wrapper.clone());
                                         }
+                                    } else {
+                                        used_dests.insert(dest_wrapper.clone());
                                     }
                                     cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());
                                 }
