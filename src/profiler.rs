@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ pub const GSS_LOGGING_ENABLED: bool = true;
 
 /// Controls whether `tqdm` progress bars are displayed during long operations.
 // pub const PROGRESS_BAR_ENABLED: bool = !cfg!(rustrover);
-pub const PROGRESS_BAR_ENABLED: bool = true;
+pub const PROGRESS_BAR_ENABLED: bool = option_env!("COMPILED_IN_RUSTROVER").is_none();
 
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
