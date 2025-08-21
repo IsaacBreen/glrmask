@@ -1184,6 +1184,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
+        #[cfg(rustrover)]
+        println!("Including progress bar");
+        #[cfg(not(rustrover))]
+        println!("Omitting progress bar");
         #[cfg(not(rustrover))]
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED);
 
