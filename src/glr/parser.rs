@@ -709,7 +709,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: std::collections::HashMap<BelowBottomCacheKey, ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
