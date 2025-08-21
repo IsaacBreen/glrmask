@@ -1187,9 +1187,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
         #[cfg(rustrover)]
-        println!("Including progress bar");
+        println!("#[cfg(rustrover)]");
         #[cfg(not(rustrover))]
-        println!("Omitting progress bar");
+        println!("#[cfg(not(rustrover))]");
         // Print the COMPILED_IN_RUSTROVER flag
         if let Ok(val) = env::var("COMPILED_IN_RUSTROVER") {
             println!("COMPILED_IN_RUSTROVER is set to: {}", val);

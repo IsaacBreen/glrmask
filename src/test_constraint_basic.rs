@@ -1231,7 +1231,7 @@ fn test_constraint_expression_no_times_parens() {
 
     // Tokenizer regex for grammar tokens '+' 'i'
     let expr = groups![
-        eat_u8(b'+'),
+        eat_u8(b'+'), 
         eat_u8(b'i'),
     ];
     let tokenizer = expr.build();
