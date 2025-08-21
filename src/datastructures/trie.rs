@@ -1572,59 +1572,85 @@ where
         let mut comparison_cache: HashMap<(NodeRwLockPtr<EK, EV, T>, NodeRwLockPtr<EK, EV, T>), bool> = HashMap::new();
 
 
-        // 3. Compare strong and weak children for each edge key.
+        // 3. Compare children for each edge key.
         for (self_ek, self_dest_map) in &self.children {
             match other.children.get(self_ek) {
                 None => { // Edge key present in self but not in other.
                     return false;
                 }
                 Some(other_dest_map) => {
-                    // Partition into strong and weak to compare them separately.
                     let (self_strong, self_weak): (Vec<_>, Vec<_>) = self_dest_map.iter().partition(|(k, _)| k.is_strong());
                     let (other_strong, other_weak): (Vec<_>, Vec<_>) = other_dest_map.iter().partition(|(k, _)| k.is_strong());
 
-                    // --- Compare strong children ---
                     if self_strong.len() != other_strong.len() { return false; }
 
-                    let self_strong_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_strong
+                    // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_strong
                         .iter()
                         .map(|(np, ev)| (np.upgrade().unwrap(), *ev))
                         .collect();
 
-                    let mut other_strong_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_strong
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_strong
                         .iter()
                         .map(|(np, ev)| (np.upgrade().unwrap(), (*ev).clone()))
                         .collect();
 
-                    'self_strong_loop: for (s_arc, s_ev) in self_strong_pairs {
-                        for i in (0..other_strong_pairs.len()).rev() {
-                            if s_ev == &other_strong_pairs[i].1 {
-                                if Trie::compare_arcs_recursive(s_arc, &other_strong_pairs[i].0, &mut comparison_cache) {
-                                    other_strong_pairs.remove(i);
-                                    continue 'self_strong_loop;
+
+                    // For each child in self_child_pairs, find a matching child in other_child_pairs.
+                    // A match requires equal edge values (EV) and recursively equal Trie nodes.
+                    'self_pair_loop: for (s_arc, s_ev) in self_child_pairs {
+                        let mut found_match_for_current_self_pair = false;
+                        for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
+                            if s_ev == &other_child_pairs[i].1 { // Compare EV (s_ev is &EV, other_child_pairs[i].1 is EV)
+                                // Edge values match, now recursively compare the pointed-to Trie nodes.
+                                let o_arc_for_recursion = other_child_pairs[i].0.clone();
+                                if Trie::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
+                                    other_child_pairs.remove(i); // Match found.
+                                    found_match_for_current_self_pair = true;
+                                    break; // Found match for current s_arc, move to next s_arc.
                                 }
                             }
                         }
-                        return false; // No match found for this self_strong_pair
+                        if !found_match_for_current_self_pair {
+                            // No match found for the current s_arc/s_ev.
+                            return false;
+                        }
                     }
+                    // If all self_child_pairs found matches, other_child_pairs should be empty.
+                }
+            }
+        }
 
-                    // --- Compare weak children ---
-                    if self_weak.len() != other_weak.len() { return false; }
+        // 4. Compare weak children structure.
+        for (self_ek, self_dest_map) in &self.children {
+            if let Some(other_dest_map) = other.children.get(self_ek) {
+                let self_weak_pairs: Vec<_> = self_dest_map.iter().filter_map(|(np, ev)| if !np.is_strong() { np.upgrade().map(|arc| (arc, ev.clone())) } else { None }).collect();
+                let mut other_weak_pairs: Vec<_> = other_dest_map.iter().filter_map(|(np, ev)| if !np.is_strong() { np.upgrade().map(|arc| (arc, ev.clone())) } else { None }).collect();
 
-                    let self_weak_pairs: Vec<_> = self_weak.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (**ev).clone()))).collect();
-                    let mut other_weak_pairs: Vec<_> = other_weak.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (**ev).clone()))).collect();
+                if self_weak_pairs.len() != other_weak_pairs.len() {
+                    return false;
+                }
 
-                    'self_weak_loop: for (s_arc, s_ev) in &self_weak_pairs {
-                        for i in (0..other_weak_pairs.len()).rev() {
+                'self_weak_loop: for (s_arc, s_ev) in &self_weak_pairs {
+                        let mut found_match = false;
+                        for i in 0..other_weak_pairs.len() {
                             if s_ev == &other_weak_pairs[i].1 {
-                                if Trie::compare_arcs_recursive(s_arc, &other_weak_pairs[i].0, &mut comparison_cache) {
+                                let o_arc = other_weak_pairs[i].0.clone();
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc, &mut comparison_cache) {
                                     other_weak_pairs.remove(i);
-                                    continue 'self_weak_loop;
+                                    found_match = true;
+                                    break;
                                 }
                             }
                         }
-                        return false; // No match found for this self_weak_pair
+                        if !found_match {
+                            return false;
+                        }
                     }
+            } else {
+                // If self has this edge key but other doesn't, and there are weak edges, it's a mismatch.
+                if self_dest_map.iter().any(|(np, _)| !np.is_strong()) {
+                    return false;
                 }
             }
         }
@@ -1809,7 +1835,6 @@ where
     ///
     /// This operation only proceeds if a successful destination hasn't already been found.
     /// Returns `self` to allow chaining.
-    #[time_it]
     pub fn try_destination(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
         if self.result.is_some() {
             return self; // Already found a destination
@@ -1936,7 +1961,6 @@ where
     ///
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
     /// Returns `self` to allow chaining.
-    #[time_it]
     pub fn try_destinations(mut self, destinations: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Self {
         for destination in destinations {
             if self.result.is_some() {
@@ -1948,7 +1972,6 @@ where
         self
     }
 
-    #[time_it]
     pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>) -> Self {
         for destination in destinations {
             if self.result.is_some() {
@@ -1960,7 +1983,6 @@ where
         self
     }
 
-    #[time_it]
     pub fn try_destinations_iter_with<F, R>(mut self, destinations: F) -> Self
     where
         F: Fn() -> R,
