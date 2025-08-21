@@ -2096,6 +2096,10 @@ where
         self.result
     }
 
+    pub fn is_some(&self) -> bool {
+        self.result.is_some()
+    }
+
     pub fn clone_into_option(&self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
         self.result.clone()
     }
