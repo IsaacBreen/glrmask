@@ -553,7 +553,6 @@ impl GrammarConstraint {
                     MERGE_THRESHOLD,
                     &mut HashMap::new(),
                 );
-                glr_s.process_default_reductions_advanced(&ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !active_llm_tokens.is_empty();
                 if precomputed_node_data.value.end {
@@ -569,8 +568,8 @@ impl GrammarConstraint {
 
                     let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
 
-                    // for gss_root in get_roots([glr_s.active_state.stack.as_ref(), glr_s.active_state.accepted_state.as_ref()]) {
-                    for gss_root in get_roots([glr_s.active_state.stack.as_ref()]) {
+                    for gss_root in get_roots([glr_s.active_state.stack.as_ref(), glr_s.active_state.accepted_state.as_ref()]) {
+                    // for gss_root in get_roots([glr_s.active_state.stack.as_ref()]) {
                         let gss_root_acc: Arc<Acc> = gss_root.resolved_acc();
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                         crate::debug!(4, "Trie2: For GSS root, active LLM tokens: {:?}", active_llm_tokens_for_root);
@@ -608,6 +607,7 @@ impl GrammarConstraint {
                         g.value.live_tokens |= added.clone();
                     }
                 }
+                glr_s.process_default_reductions_advanced(&ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 keep_going
             },
         );
