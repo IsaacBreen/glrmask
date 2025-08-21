@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use crate::datastructures::ArcPtrWrapper;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -201,11 +201,12 @@ pub struct ProcessTokenAdvancedConfig {
 #[derive(Debug, Clone)]
 pub struct ProcessDefaultReductionsAdvancedConfig {
     pub fuel: Option<usize>,
+    pub below_bottom_mode: BelowBottomReductionMode,
 }
 
 impl Default for ProcessDefaultReductionsAdvancedConfig {
     fn default() -> Self {
-        Self { fuel: None }
+        Self { fuel: None, below_bottom_mode: BelowBottomReductionMode::default() }
     }
 }
 
@@ -1390,6 +1391,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
         let mut fuel = config.fuel;
+        let token_config = ProcessTokenAdvancedConfig { below_bottom_mode: config.below_bottom_mode };
 
         // Run the generic action-processing loop with a Default-only selector.
         // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
@@ -1400,7 +1402,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             &mut shifted_states_todo,
             &mut accepted_states_todo,
             |row| Some(Action::Default(&row.default_reduce)),
-            &ProcessTokenAdvancedConfig::default(),
+            &token_config,
             &mut fuel,
         );
 
@@ -1419,7 +1421,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // After Phase 3, we’re ready for the next token.
         self.phase = ParserPhase::ReadyForToken;
-        self.log_gss("Phase3-end", TerminalID(0), false, false); // Log with dummy token ID
+        self.log_gss("Phase3-end", TerminalID(0), false, false);
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
