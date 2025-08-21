@@ -607,7 +607,7 @@ impl GrammarConstraint {
                         g.value.live_tokens |= added.clone();
                     }
                 }
-                glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 keep_going
             },
         );
