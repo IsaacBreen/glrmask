@@ -1259,12 +1259,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());
                                 }
 
-                                let mut acc2 = acc.clone();
-                                acc2.trie2_nodes = used_dests.clone();
-                                let new_gss0 = GSSNode::new(acc2);
-                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-                                let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
-                                below_zero.push(Arc::new(new_gss2));
+                                if !used_dests.is_empty() {
+                                    let mut acc2 = acc.clone();
+                                    acc2.trie2_nodes = used_dests.clone();
+                                    let new_gss0 = GSSNode::new(acc2);
+                                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
+                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                                    below_zero.push(Arc::new(new_gss2));
+                                }
                             }
                         }
                     }
