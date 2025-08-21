@@ -790,6 +790,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         work_map: &mut WorkMap,
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
+        accepted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
         config: &ProcessTokenAdvancedConfig,
     )
@@ -814,17 +815,25 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             ..
                         }) => {
                             crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState {
                                     stack: s_new_arc,
-                                    accepted_state: self.active_state.accepted_state.clone(),
+                                    accepted_state: state.accepted_state.clone(),
                                 };
                                 if let Some(ref mut r_map) = reduce_map {
                                     Self::enqueue(r_map, new_parse_state);
                                 } else {
                                     Self::enqueue(work_map, new_parse_state);
                                 }
+                            }
+                            if !accepted_s_new_arc.is_empty() {
+                                self.accepted = true;
+                                let accepted_parse_state = ParseState {
+                                    stack: Arc::new(GSSNode::new_fresh()),
+                                    accepted_state: accepted_s_new_arc,
+                                };
+                                accepted_states_todo.push_back(accepted_parse_state);
                             }
                         }
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
@@ -838,11 +847,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (len, nts) in reduces {
                                 for (nt, _prod_ids) in nts {
                                     crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState {
                                             stack: s_new_arc,
-                                            accepted_state: self.active_state.accepted_state.clone(),
+                                            accepted_state: state.accepted_state.clone(),
                                         };
                                         if let Some(ref mut r_map) = reduce_map {
                                             Self::enqueue(r_map, new_parse_state);
@@ -850,8 +859,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             Self::enqueue(work_map, new_parse_state);
                                     }
                                 }
+                                    if !accepted_s_new_arc.is_empty() {
+                                        self.accepted = true;
+                                        let accepted_parse_state = ParseState {
+                                            stack: Arc::new(GSSNode::new_fresh()),
+                                            accepted_state: accepted_s_new_arc,
+                                        };
+                                        accepted_states_todo.push_back(accepted_parse_state);
+                                    }
+                                }
                             }
-                        }
                         }
                         Action::Default(default_reduce) => {
                             // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
@@ -862,7 +879,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // 2) If there's a reduction in the default, do it like a normal reduce.
                             if let Some(reduce) = &default_reduce.reduce {
                                 for peek in GSSNode::peek_iter(&state.stack) {
-                                    let s_new_arc = self.reduce_and_goto(
+                                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
                                         &peek,
                                         reduce.nonterminal_id,
                                         reduce.len,
@@ -872,13 +889,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if !s_new_arc.is_empty() {
                                         let new_parse_state = ParseState {
                                             stack: s_new_arc,
-                                            accepted_state: self.active_state.accepted_state.clone(),
+                                            accepted_state: state.accepted_state.clone(),
                                         };
                                         if let Some(ref mut r_map) = reduce_map {
                                             Self::enqueue(r_map, new_parse_state);
                                         } else {
                                             Self::enqueue(work_map, new_parse_state);
                                         }
+                                    }
+                                    if !accepted_s_new_arc.is_empty() {
+                                        self.accepted = true;
+                                        let accepted_parse_state = ParseState {
+                                            stack: Arc::new(GSSNode::new_fresh()),
+                                            accepted_state: accepted_s_new_arc,
+                                        };
+                                        accepted_states_todo.push_back(accepted_parse_state);
                                     }
                                 }
                             } else {
@@ -894,7 +919,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
+    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
@@ -903,6 +928,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 phase1_todo,
                 Some(phase2_todo),
                 shifted_states_todo,
+                accepted_states_todo,
                 move |row| {
                     row.shifts_and_reduces_without_default_reduce
                         .get(&tid)
@@ -913,7 +939,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
     }
 
-    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
+    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
@@ -922,6 +948,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 phase2_todo,
                 None,
                 shifted_states_todo,
+                accepted_states_todo,
                 move |row| {
                     // Prefer a concrete token action; otherwise use the default reduce.
                     row.shifts_and_reduces_full
@@ -942,7 +969,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
         action_selector: &G,
         config: &ProcessTokenAdvancedConfig,
-    ) -> Arc<GSSNode>
+    ) -> (Arc<GSSNode>, Arc<GSSNode>)
     where
         G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
@@ -954,6 +981,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
         let mut out = Vec::new();
+        let mut accepted_out = Vec::new();
         for popper_item in popper.iter() {
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
@@ -969,13 +997,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     if goto.accept {
                         crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
-                        self.accepted = true;
 
                         // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
                         let accepted_stack_instance = peek2.isolated_parent();
                         let accepted_stack_arc = Arc::new(accepted_stack_instance);
-                        Arc::make_mut(&mut self.active_state.accepted_state)
-                            .merge_with_depth(usize::MAX, &accepted_stack_arc);
+                        accepted_out.push(accepted_stack_arc);
                     }
 
                     if let Some(goto_state_id) = goto.state_id {
@@ -1069,7 +1095,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
-                        self.accepted = true;
                         let mut accepted_stacks = Vec::new();
                         for (_k, acc_arc) in popper.below_bottom.iter() {
                             for goto_info in &accepting_gotos {
@@ -1082,7 +1107,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                         }
                         let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
-                        Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
+                        accepted_out.push(merged_accepted);
                     }
 
                     timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
@@ -1208,7 +1233,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
  
         timeit!("GLRParserState::reduce_and_goto", {
         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
-            GSSNode::merge_many_with_depth(usize::MAX, out)
+            (GSSNode::merge_many_with_depth(usize::MAX, out), GSSNode::merge_many_with_depth(usize::MAX, accepted_out))
         })
         })
     }
@@ -1235,22 +1260,26 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+        let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, self.active_state.clone());
-            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, config);
+            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config);
         } else { // ParserPhase::ReadyForDefaultReductions
             Self::enqueue(&mut phase2_todo, self.active_state.clone());
         }
 
         // --- Phase 2 ---
-        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo, config);
+        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config);
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState::new();
         for state in shifted_states_todo {
+            next_active.merge(state);
+        }
+        for state in accepted_states_todo {
             next_active.merge(state);
         }
         self.active_state = next_active;
@@ -1278,6 +1307,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Collect survivors (clone-and-merge states and reduction results that finalize).
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+        let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
         // Run the generic action-processing loop with a Default-only selector.
         // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
@@ -1286,6 +1316,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             &mut work_map,
             None,
             &mut shifted_states_todo,
+            &mut accepted_states_todo,
             |row| Some(Action::Default(&row.default_reduce)),
             &config,
         );
@@ -1293,6 +1324,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Consolidate all survivors into the new active state.
         let mut next_active = ParseState::new();
         for state in shifted_states_todo {
+            next_active.merge(state);
+        }
+        for state in accepted_states_todo {
             next_active.merge(state);
         }
         self.active_state = next_active;
