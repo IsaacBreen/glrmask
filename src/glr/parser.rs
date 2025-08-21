@@ -1034,27 +1034,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
-            if any_below_bottom {
-                if let Some(gotos_for_nt) = self.parser.substring_gotos.get(&nt) {
-                    let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
-                    if !accepting_gotos.is_empty() {
-                        self.accepted = true;
-                        let mut accepted_stacks = Vec::new();
-                        for (_k, acc_arc) in popper.below_bottom.iter() {
-                            for goto_info in &accepting_gotos {
-                                // Create the stack that is being accepted: a new root with the accumulated `acc`,
-                                // with the `source_state_id` on top.
-                                let acc = acc_arc.as_ref().clone();
-                                let accepted_gss0 = GSSNode::new(acc);
-                                let accepted_gss1 = accepted_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-                                accepted_stacks.push(Arc::new(accepted_gss1));
-                            }
-                        }
-                        let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
-                        Arc::make_mut(&mut self.active_state.accepted_state).merge_with_depth(usize::MAX, &merged_accepted);
-                    }
-                }
-            }
             timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
             if any_below_bottom {
                 let gotos_for_nt_storage; // To hold the Vec for ContinueFromEverything
