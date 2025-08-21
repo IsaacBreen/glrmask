@@ -1197,6 +1197,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     for (k, acc_arc) in popper.below_bottom {
                         let mut acc: Acc = acc_arc.as_ref().clone();
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                        timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
                         for goto_info in gotos_for_nt {
                             // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                             let cache_key = BelowBottomCacheKey {
