@@ -1182,6 +1182,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                             // If we have seen this exact situation before, reuse the cached Trie-2 node
                             if let Some(cached_trie2_node) = self.below_bottom_cache.get(&cache_key) {
+                                crate::debug!(5, "Using cached Trie-2 node for NT '{}' from state {:?} with source_state_id {:?} and Acc {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), k, goto_info.source_state_id, cache_key.acc);
                                 timeit!("GLRParserState::reduce_and_goto: Using cached Trie-2 node", {
                                 for existing_trie2_node in &trie2_nodes {
                                     timeit!("GLRParserState::reduce_and_goto: Inserting cached Trie-2 node (loop iteration)", {});
