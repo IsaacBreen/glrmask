@@ -479,10 +479,10 @@ impl GrammarConstraint {
         let mut base_glr_state = parser.init_glr_parser_from_parse_state(ParseState::with_stack(base_gss_merged));
 
         // Optional: pre-warm once with default reductions (your idea)
-        base_glr_state.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
-            fuel: None,
-            below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE,
-        });
+        // base_glr_state.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
+        //     fuel: None,
+        //     below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE,
+        // });
 
         #[cfg(not(rustrover))]
         let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
