@@ -25,7 +25,7 @@ macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         // --- Configuration (Defined Once) ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 6;
+        const MACRO_DEBUG_LEVEL: usize = 3;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
