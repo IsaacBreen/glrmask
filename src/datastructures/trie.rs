@@ -930,9 +930,17 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// if the depth of this node changes and it has parents. This is typically safe
     /// to call in a post-order traversal where children's depths are finalized first.
     pub fn recompute_max_depth(&mut self) -> bool {
+        // Only consider STRONG edges when recomputing max_depth.
+        // Weak edges should not affect max_depth, otherwise depth computations
+        // can follow weak links and produce inflated/infinite depths.
         let new_max_depth = self.children.values()
             .flat_map(|dest_map| dest_map.keys())
-            .filter_map(|node_ptr| node_ptr.upgrade())
+            .filter_map(|node_ptr| {
+                match node_ptr {
+                    NodePtr::Strong(arc_wrapped) => Some(arc_wrapped.as_arc().clone()),
+                    NodePtr::Weak(_) => None,
+                }
+            })
             .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
             .max()
             .unwrap_or(0);

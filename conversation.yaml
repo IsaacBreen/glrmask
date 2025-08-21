@@ -4996,9 +4996,17 @@ local_system:
           /// if the depth of this node changes and it has parents. This is typically safe
           /// to call in a post-order traversal where children's depths are finalized first.
           pub fn recompute_max_depth(&mut self) -> bool {
+              // Only consider STRONG edges when recomputing max_depth.
+              // Weak edges should not affect max_depth, otherwise depth computations
+              // can follow weak links and produce inflated/infinite depths.
               let new_max_depth = self.children.values()
                   .flat_map(|dest_map| dest_map.keys())
-                  .filter_map(|node_ptr| node_ptr.upgrade())
+                  .filter_map(|node_ptr| {
+                      match node_ptr {
+                          NodePtr::Strong(arc_wrapped) => Some(arc_wrapped.as_arc().clone()),
+                          NodePtr::Weak(_) => None,
+                      }
+                  })
                   .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
                   .max()
                   .unwrap_or(0);
@@ -7640,31 +7648,29 @@ local_system:
           }
       }
 
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
     You are a helpful assistant.
     Respond in markdown format.
-    If asked for full code, provide it.
-    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
-    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
-    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
-    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
+    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
+    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
+    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gpt-5-mini
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: llm
+  apply_mode: git-llm
 messages:
   - user: |-
       ```rust 'src/datastructures/arc_wrapper.rs'
@@ -11493,8 +11499,62 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: |-
-      Make `recompute_max_depth` work even if there are cycles.
-      And add a method with same params as `promote_weak_edges_to_strong` but which removes strong reference cycles that cause garbage collection errors.
+  - user: Rewrite `recompute_max_depth` to only consider strong edges. Otherwise we
+      can get infinite depth.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      index e69de29..e69de29 100644
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@
+           /// Recomputes the max_depth of this node based on its children's depths.
+           /// Returns true if the depth changed.
+           /// NOTE: This does NOT propagate changes. The caller is responsible for propagation
+           /// if the depth of this node changes and it has parents. This is typically safe
+           /// to call in a post-order traversal where children's depths are finalized first.
+           pub fn recompute_max_depth(&mut self) -> bool {
+      -        let new_max_depth = self.children.values()
+      -            .flat_map(|dest_map| dest_map.keys())
+      -            .filter_map(|node_ptr| node_ptr.upgrade())
+      -            .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
+      -            .max()
+      -            .unwrap_or(0);
+      +        // Only consider STRONG edges when recomputing max_depth.
+      +        // Weak edges should not affect max_depth, otherwise depth computations
+      +        // can follow weak links and produce inflated/infinite depths.
+      +        let new_max_depth = self.children.values()
+      +            .flat_map(|dest_map| dest_map.keys())
+      +            .filter_map(|node_ptr| {
+      +                match node_ptr {
+      +                    NodePtr::Strong(arc_wrapped) => Some(arc_wrapped.as_arc().clone()),
+      +                    NodePtr::Weak(_) => None,
+      +                }
+      +            })
+      +            .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
+      +            .max()
+      +            .unwrap_or(0);
+       
+               if new_max_depth != self.max_depth {
+                   self.max_depth = new_max_depth;
+                   true
+               } else {
+                   false
+               }
+           }
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Only consider strong edges for
+      recomputing max_depth"'
     metadata:
 ...
