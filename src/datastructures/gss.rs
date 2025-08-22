@@ -74,9 +74,9 @@ impl JSONConvertible for PrecomputedNodeContents {
         match node {
             JSONNode::Object(mut obj) => {
                 let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                       .and_then(bool::from_json)?;
+                                   .and_then(bool::from_json)?;
                 let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents".to_string())
-                                           .and_then(LLMTokenBV::from_json)?;
+                                       .and_then(LLMTokenBV::from_json)?;
                 Ok(PrecomputedNodeContents { end, live_tokens })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
@@ -146,6 +146,12 @@ impl Acc {
             // Keep trie2 nodes conservative: intersect sets to avoid leaking edges upward.
             trie2_nodes: to.trie2_nodes.clone(),
         }
+        // Acc {
+        //     llm_tokens_union: timeit!(&from.llm_tokens_union & &to.llm_tokens_union),
+        //     llm_tokens_intersection: timeit!(&from.llm_tokens_union & &to.llm_tokens_intersection),
+        //     terminals_union: timeit!(&from.terminals_union & &to.terminals_union),
+        //     terminals_intersection: timeit!(&from.terminals_union & &to.terminals_intersection),
+        // }
     }
 
     pub fn merge(lhs: &Self, rhs: &Self) -> Self {
@@ -221,6 +227,7 @@ impl GSSPopper {
         };
         if node.is_root() {
             // At bottom with no last-edge yet: record an empty edge map at depth 0.
+            // We intentionally do not associate an Acc because there is no “last edge” to key it under.
             popper.below_bottom.entry(0).or_insert_with(BTreeMap::new);
         } else {
             popper.paths.insert(node, acc);
@@ -712,6 +719,11 @@ impl GSSNode {
 
     fn narrow_with_acc(node: &mut Arc<GSSNode>, acc: &Acc) {
         let mut new_acc = Acc::narrow(acc, &node.acc);
+        // let acc_changed = new_acc.llm_tokens_union != node.acc.llm_tokens_union ||
+        //                   new_acc.llm_tokens_intersection != node.acc.llm_tokens_intersection ||
+        //                   new_acc.terminals_union != node.acc.terminals_union ||
+        //                   new_acc.terminals_intersection != node.acc.terminals_intersection ||
+        //                   new_acc.trie2_nodes != node.acc.trie2_nodes;
         let acc_changed = *node.acc != new_acc;
 
         if !acc_changed {
@@ -745,10 +757,6 @@ impl GSSNode {
                 })
             })
         })
-    }
-
-    pub fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, Arc<Acc>> {
-        get_roots(std::iter::once(self))
     }
 }
 
@@ -1036,8 +1044,9 @@ pub fn prune_disallowed_terminals(
                 return None;
             }
         }
-        // If any of the matched terminals is missing from the intersection of allowed terminals, we continue recursion.
-        // This means it's missing from at least one sub-node.
+        // If any of the matched terminals is missing from the intersection of allowed terminals, we continue recursion,
+        // because this means it's missing from one of the subnode's union of allowed terminals.
+        // (In other words, since the intersection is the intersection of all sub-nodes, if it's missing from the intersection then it's missing from at least one sub-node.)
         for (state_id, matched_bv) in matched_terminals {
             let allowed_terminals_intersection = node.acc.terminals_intersection.get_l2_bitset(state_id.0).unwrap();
             if !matched_bv.is_subset(allowed_terminals_intersection) {
@@ -1168,9 +1177,14 @@ pub fn merge_trie2_nodes_if_needed(
         }
         Some((new_acc, true))
     };
+    // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+    // println!("Before merge_trie2_nodes_if_needed:\n{s}");
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
+        // let (s, _) = print_gss_forest(&[root_arc.clone()], &BiBTreeMap::new(), &GSSPrintConfig::default());
+        // println!("After merge_trie2_nodes_if_needed:\n{}", s);
     } else {
+        // This shouldn't happen as we never return None from closure
         unreachable!();
     }
 }
@@ -1391,6 +1405,20 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
     results
 }
 
+impl GSSNode {
+    pub fn reset_llm_tokens(&mut self) {
+        let mut node_arc = Arc::new(self.clone());
+        let mut memo = HashMap::new();
+        reset_llm_tokens(&mut node_arc, &mut memo);
+        *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+    }
+
+    pub fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, Arc<Acc>> {
+        get_roots(std::iter::once(self))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GSSStats {
     pub num_roots: usize,
     pub num_root_predecessors: usize,
@@ -1542,8 +1570,8 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
         let mut longest_path = Vec::new();
         for (edge_val, preds_by_depth) in node_arc.predecessors.iter() {
             for pred_vec in preds_by_depth.values() {
-                for child in pred_vec {
-                    let mut path_from_pred = find_longest_recursive(child, memo);
+                for pred_arc in pred_vec {
+                    let mut path_from_pred = find_longest_recursive(pred_arc, memo);
                     // The path ends with the edge leading to `node_arc` and `node_arc` itself.
                     path_from_pred.push((edge_val.clone(), node_arc.clone()));
                     if path_from_pred.len() > longest_path.len() {
@@ -1647,9 +1675,7 @@ pub fn print_gss_forest(
             .iter()
             .flat_map(|(edge_val, preds_by_depth)| {
                 preds_by_depth.values().flat_map(move |pred_vec| {
-                    pred_vec.iter().map(move |pred_arc| {
-                        (edge_val, pred_arc)
-                    })
+                    pred_vec.iter().map(move |pred_arc| (edge_val, pred_arc))
                 })
             })
             .collect();
@@ -1957,13 +1983,21 @@ mod tests {
         let pushed = Arc::new(root.push(mock_edge(10))); // Now inherits root's acc.
 
         // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path.
-        let popper = pushed.popn(1);
+        let pop_result = pushed.popn(1);
         // We should not keep root nodes in paths.
-        assert_eq!(popper.paths.len(), 0);
-        assert_eq!(popper.below_bottom.len(), 1);
-        // We reached the bottom exactly (depth 0) with no edge recorded.
-        let by_edge = popper.below_bottom.get(&0).unwrap();
-        assert!(by_edge.is_empty());
+        assert_eq!(pop_result.paths.len(), 0);
+        assert_eq!(pop_result.below_bottom.len(), 1);
+        // We reached the bottom exactly (depth 0).
+        let combined_acc_map = pop_result.below_bottom.get(&1).unwrap(); // Depth 1 entry holds last-edge grouped map
+        // The map should contain the edge 10 leading to the root
+        let combined_acc = combined_acc_map.get(&mock_edge(10)).unwrap();
+
+        // `pushed.acc` (same as `root.acc`) allows all but 1.
+        // The intersection should allow all but 1.
+        let mut disallowed = HybridBitset::zeros();
+        disallowed.insert(1);
+        let expected_allowed = HybridBitset::max_ones() - disallowed;
+        assert_eq!(combined_acc.llm_tokens_union, expected_allowed);
     }
 
     #[test]
@@ -1984,21 +2018,19 @@ mod tests {
     fn test_popper_new_from_root_and_shift() {
         let root = Arc::new(GSSNode::new(mock_acc(1)));
         let mut popper = GSSPopper::new_from_node(root.clone(), Arc::new(Acc::new_fresh()));
+        // Should not store roots in paths.
         assert!(popper.paths.is_empty());
         // Now below_bottom has an empty map at depth 0
         assert_eq!(popper.below_bottom.len(), 1);
         assert!(popper.below_bottom.get(&0).unwrap().is_empty());
-
-        // Pop once; it stays empty since there are no predecessors/edges to assign
+        // Pop once; it shifts down since no edges are present
         popper.popn(1);
         assert!(popper.below_bottom.get(&0).is_none());
         assert!(popper.below_bottom.get(&1).unwrap().is_empty());
-
-        // Pop two more; still empty maps
+        // Pop two more steps; now it should be at 3 (still empty maps)
         popper.popn(2);
         assert!(popper.below_bottom.get(&1).is_none());
-        let map = popper.below_bottom.get(&3).unwrap();
-        assert!(map.is_empty());
+        assert!(popper.below_bottom.get(&3).unwrap().is_empty());
     }
 
     #[test]
@@ -2011,8 +2043,9 @@ mod tests {
         let by_edge_1 = popper.below_bottom.get(&1).expect("depth 1 entry missing");
         assert_eq!(by_edge_1.len(), 1);
         let acc0 = by_edge_1.get(&mock_edge(10)).expect("edge 10 missing at depth 1").clone();
-
+        // Shift down by 2 more pops.
         popper.popn(2);
+        assert!(popper.below_bottom.get(&1).is_none());
         let by_edge_3 = popper.below_bottom.get(&3).expect("depth 3 entry missing");
         let acc2 = by_edge_3.get(&mock_edge(10)).expect("edge 10 missing at depth 3").clone();
         assert_eq!(*acc0, *acc2);
@@ -2020,7 +2053,7 @@ mod tests {
 
     #[test]
     fn test_popper_merges_below_bottom_accs() {
-        // Setup is unchanged...
+        // Build a node that has two root predecessors with different disallowed tokens.
         let root1 = Arc::new(GSSNode::new(mock_acc(1))); // disallow token 1
         let root2 = Arc::new(GSSNode::new(mock_acc(2))); // disallow token 2
         let mut preds = NodeSet::new();
@@ -2037,10 +2070,10 @@ mod tests {
         // Edge 100 (root1)
         {
             let acc_below_100 = by_edge.get(&mock_edge(100)).expect("edge 100 missing at depth 1");
-            // Union should be all tokens allowed (since edges are independent here)
+            // Union should be all tokens allowed (since each root disallows a different single token).
             assert_eq!(acc_below_100.llm_tokens_union, HybridBitset::max_ones());
 
-            // Intersection should reflect the path via root1 (disallow token 1)
+            // Intersection should disallow token 1.
             let mut disallowed = HybridBitset::zeros();
             disallowed.insert(1);
             let expected_intersection = HybridBitset::max_ones() - disallowed;
@@ -2060,53 +2093,69 @@ mod tests {
     }
 
     #[test]
-    fn test_get_roots() {
-        let acc1 = Arc::new(mock_acc(1));
-        let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
-        let acc2 = Arc::new(mock_acc(2));
-        let leaf2 = Arc::new(GSSNode::new((*acc2).clone()));
+    fn test_gss_fuse_predecessors() {
+        let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+        let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
+        let b = Arc::new(leaf1.push(mock_edge(1)));
+        let c_tmp = Arc::new(leaf2.push(mock_edge(2)));
+        let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3)));
+        let c = Arc::new(c_tmp2.push(mock_edge(4)));
 
-        let acc_b = Arc::new(mock_acc(3));
-        let b = Arc::new(GSSNode::new_with_single_predecessor(leaf1.clone(), mock_edge(1), (*acc_b).clone()));
+        assert_eq!(b.max_depth, 1);
+        assert_eq!(c.max_depth, 3);
 
-        let acc_c = Arc::new(mock_acc(4));
-        let c = Arc::new(GSSNode::new_with_single_predecessor(leaf2.clone(), mock_edge(2), (*acc_c).clone()));
+        let mut preds_map = NodeMap::new();
+        preds_map.entry(mock_edge(100)).or_default().insert(b.dest_key(), vec![b.clone()]);
+        preds_map.entry(mock_edge(100)).or_default().insert(c.dest_key(), vec![c.clone()]);
 
-        let mut preds_map: NodeMap = BTreeMap::new();
-        preds_map.entry(mock_edge(10)).or_default().insert(b.dest_key(), vec![b.clone()]);
-        preds_map.entry(mock_edge(20)).or_default().insert(c.dest_key(), vec![c.clone()]);
-        let acc_root = Arc::new(mock_acc(5));
-        let root = GSSNode::new_with_map(acc_root.clone(), preds_map);
+        let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
+        assert_eq!(root.num_predecessors(), 2);
 
-        // Test from root
-        let roots_map = get_roots(std::iter::once(&root));
-        assert_eq!(roots_map.len(), 2);
-        let expected_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
-        let expected_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
-        assert_eq!(*roots_map.get(&mock_edge(1)).expect("edge 1 missing"), *expected_acc1);
-        assert_eq!(*roots_map.get(&mock_edge(2)).expect("edge 2 missing"), *expected_acc2);
+        root.fuse_predecessors(1);
 
-        // Test from multiple sources (root and b)
-        let roots_multi = get_roots(vec![&root, b.as_ref()]);
-        // Both contributions for edge 1 are merged with Acc::merge
-        let merged_edge1 = roots_multi.get(&mock_edge(1)).expect("edge 1 missing");
-        let from_root_edge1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
-        let from_b_edge1 = Arc::new(Acc::narrow(&acc_b, &acc1));
-        let expected_merged_edge1 = Arc::new(Acc::merge(&from_root_edge1, &from_b_edge1));
-        assert_eq!(**merged_edge1, *expected_merged_edge1);
-        // Edge 2 remains the same as before
-        assert_eq!(*roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), *expected_acc2);
+        assert_eq!(root.num_predecessors(), 1);
+        let fused_pred_arc = root
+            .predecessors()
+            .values()
+            .next()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()[0]
+            .clone();
 
-        // Test from leaves -> no last edge, so contributes nothing
-        let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
-        assert!(roots_leaves.is_empty());
-
-        // Test empty
-        assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
+        assert_eq!(fused_pred_arc.acc.llm_tokens_union, HybridBitset::max_ones());
+        assert_eq!(fused_pred_arc.num_predecessors(), 2);
     }
 
     #[test]
-    fn test_merge_and_structural_sharing() {
+    fn test_sample_path() {
+        let d = Arc::new(GSSNode::new(empty_acc()));
+        let e = Arc::new(GSSNode::new(empty_acc()));
+
+        let mut c_preds = NodeSet::new();
+        c_preds.insert((d, mock_edge(30)));
+        c_preds.insert((e, mock_edge(40)));
+        let c_preds_map = process_predecessors(&c_preds);
+        let c = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), c_preds_map));
+
+        let b = Arc::new(c.push(mock_edge(20)));
+        let root = b.push(mock_edge(10));
+
+        let path1 = sample_path(&[&root], 0).unwrap();
+        let path2 = sample_path(&[&root], 1).unwrap();
+
+        assert_eq!(path1.len(), 3);
+        assert_eq!(path1[0], mock_edge(10));
+        assert_eq!(path1[1], mock_edge(20));
+        assert!(path1[2] == mock_edge(30) || path1[2] == mock_edge(40));
+
+        let path1_again = sample_path(&[&root], 0).unwrap();
+        assert_eq!(path1, path1_again);
+    }
+
+    #[test]
+    fn test_merge_maintains_structural_sharing() {
         // This test reproduces a scenario where merging two GSSs with shared
         // sub-structure leads to duplicated nodes instead of sharing them.
 
@@ -2160,6 +2209,99 @@ mod tests {
             stats
         );
         assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
+    }
+
+#[test]
+    fn test_get_roots() {
+        let acc1 = Arc::new(mock_acc(1));
+        let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
+        let acc2 = Arc::new(mock_acc(2));
+        let leaf2 = Arc::new(GSSNode::new((*acc2).clone()));
+
+        let acc_b = Arc::new(mock_acc(3));
+        let b = Arc::new(GSSNode::new_with_single_predecessor(leaf1.clone(), mock_edge(1), (*acc_b).clone()));
+
+        let acc_c = Arc::new(mock_acc(4));
+        let c = Arc::new(GSSNode::new_with_single_predecessor(leaf2.clone(), mock_edge(2), (*acc_c).clone()));
+
+        let mut preds_map = NodeMap::new();
+        preds_map.entry(mock_edge(10)).or_default().insert(b.dest_key(), vec![b.clone()]);
+        preds_map.entry(mock_edge(20)).or_default().insert(c.dest_key(), vec![c.clone()]);
+        let acc_root = Arc::new(mock_acc(5));
+        let root = GSSNode::new_with_map(acc_root.clone(), preds_map);
+
+        // Test from root
+        let roots_map = get_roots(std::iter::once(&root));
+        let mut expected = BTreeMap::new();
+        let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
+        expected.insert(mock_edge(1), path_acc1.clone());
+        let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
+        expected.insert(mock_edge(2), path_acc2.clone());
+        assert_eq!(roots_map, expected);
+
+        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
+        // because its initial `fresh` acc has a wider union of possibilities.
+        let roots_multi = get_roots(vec![&root, b.as_ref()]);
+        let from_root_edge1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
+        let from_b_edge1 = Arc::new(Acc::narrow(&acc_b, &acc1));
+        let expected_merged_edge1 = Arc::new(Acc::merge(&from_root_edge1, &from_b_edge1));
+        assert_eq!(*roots_multi.get(&mock_edge(1)).expect("edge 1 missing"), *expected_merged_edge1);
+        assert_eq!(*roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), *path_acc2);
+
+        // Test from leaves -> no last edge, so contributes nothing
+        let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
+        assert!(roots_leaves.is_empty());
+
+        // Test empty
+        assert!(get_roots(Vec::<&GSSNode>::new()).is_empty());
+    }
+
+    #[test]
+    fn test_prune_and_transform_noop_does_not_merge_distinct_predecessors() {
+        // This test checks for a bug where prune_and_transform_recursive with a no-op
+        // closure would still modify the GSS by merging structurally distinct predecessor
+        // nodes that happen to share the same edge value and depth.
+
+        // 1. Create two distinct leaf nodes.
+        let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+        let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
+
+        // 2. Create two intermediate nodes that are structurally different because they
+        // have different predecessors.
+        let intermediate1 = Arc::new(leaf1.push(mock_edge(10)));
+        let intermediate2 = Arc::new(leaf2.push(mock_edge(10)));
+        assert_ne!(*intermediate1, *intermediate2, "Intermediates should be structurally different");
+        assert_eq!(intermediate1.max_depth, 1);
+        assert_eq!(intermediate2.max_depth, 1);
+
+        // 3. Manually construct a root node that has both intermediates as predecessors
+        // under the same edge value and at the same depth. This structure is key to
+        // reproducing the bug. The `Vec` in the NodeMap contains multiple distinct nodes.
+        let mut root_preds = NodeMap::new();
+        root_preds
+            .entry(mock_edge(100))
+            .or_default()
+            .insert(1, vec![intermediate1.clone(), intermediate2.clone()]);
+
+        let root = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), root_preds));
+        assert_eq!(root.num_predecessors(), 2);
+
+        // 4. Run prune_and_transform_recursive with a no-op closure.
+        // This should not change the structure of the GSS at all.
+        let mut memo = HashMap::new();
+        let new_root_opt = prune_and_transform_recursive(
+            &root,
+            &|node| Some(((*node.acc).clone(), true)), // No-op: keep node, recurse
+            &mut memo,
+        );
+
+        // 5. Assert that the structure is unchanged.
+        let new_root = new_root_opt.expect("Root should not be pruned");
+
+        // Check full equality for good measure. This is the most important check.
+        // With the bug, this fails because the new_root will have its predecessors merged.
+        assert_eq!(*root, *new_root, "The GSS structure should be identical after a no-op transform");
+        assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
     }
 
     #[test]
@@ -2267,7 +2409,8 @@ mod tests {
         // --- Assertions ---
         // The merged GSS should have two distinct predecessors under edge 1, because
         // they have different depths and structures. The incorrect behavior collapses them into one.
-        assert_eq!(merged_gss.num_predecessors(), 2);
+        assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
+
         let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
         assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
     }
@@ -2312,7 +2455,8 @@ mod tests {
         // --- Assertions ---
         // The merged GSS should have two distinct predecessors under edge 1, because
         // they have different depths and structures. The incorrect behavior collapses them into one.
-        assert_eq!(merged_gss.num_predecessors(), 2);
+        assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
+
         let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
         assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
     }
