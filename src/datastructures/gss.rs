@@ -2223,9 +2223,9 @@ mod tests {
         let roots_map = get_roots(std::iter::once(&root));
         let mut expected = BTreeMap::new();
         let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
-        expected.insert(mock_edge(1), path_acc1.clone());
+        expected.insert(mock_edge(1), BTreeSet::from([path_acc1.clone()]));
         let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
-        expected.insert(mock_edge(2), path_acc2.clone());
+        expected.insert(mock_edge(2), BTreeSet::from([path_acc2.clone()]));
         assert_eq!(roots_map, expected);
 
         // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
@@ -2234,8 +2234,8 @@ mod tests {
         let from_root_edge1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
         let from_b_edge1 = Arc::new(Acc::narrow(&acc_b, &acc1));
         let expected_merged_edge1 = Arc::new(Acc::merge(&from_root_edge1, &from_b_edge1));
-        assert_eq!(**roots_multi.get(&mock_edge(1)).expect("edge 1 missing"), *expected_merged_edge1);
-        assert_eq!(**roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), *path_acc2);
+        assert_eq!(*roots_multi.get(&mock_edge(1)).expect("edge 1 missing"), BTreeSet::from([expected_merged_edge1]));
+        assert_eq!(*roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), BTreeSet::from([path_acc2.clone()]));
 
         // Test from leaves -> no last edge, so contributes nothing
         let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
