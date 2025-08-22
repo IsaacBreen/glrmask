@@ -1,7 +1,8 @@
+use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::fmt::{Debug, Ordering, Write};
+use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use bimap::BiBTreeMap;
@@ -16,7 +17,6 @@ use crate::glr::parser::ParseStateEdgeContent;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::grammar::Terminal;
-use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use crate::profiler::GSS_LOGGING_ENABLED;
@@ -200,7 +200,6 @@ pub struct GSSPopper {
     /// Key is the number of extra pops beyond reaching the bottom (0 means exactly at bottom),
     /// and the value is the combined Acc for all paths that resulted in that depth.
     /// Multiple contributions to the same depth are merged via Acc::merge.
-    pub(crate) below_bottom: BTreeMap<usize, Arc<Acc>>,
     pub(crate) below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
 }
 
@@ -1329,7 +1328,7 @@ pub fn deep_clone_gss_with_trie2_map(
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, Arc<Acc>> {
     let mut queue: BTreeMap<MaxDepth, BTreeMap<*const GSSNode, Arc<Acc>>> = BTreeMap::new();
-    let mut found_roots = BTreeMap::new();
+    let mut found_roots: BTreeMap<ParseStateEdgeContent, Arc<Acc>> = BTreeMap::new();
 
     for node in nodes {
         let node_ptr = node as *const GSSNode;
@@ -1967,7 +1966,8 @@ mod tests {
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
         let expected_allowed = HybridBitset::max_ones() - disallowed;
-        assert_eq!(combined_acc.llm_tokens_union, expected_allowed);
+        // assert_eq!(combined_acc.llm_tokens_union, expected_allowed);
+        todo!()
     }
 
     #[test]
@@ -2006,7 +2006,8 @@ mod tests {
         popper.popn(2);
         assert!(popper.below_bottom.get(&1).is_none());
         let acc3 = popper.below_bottom.get(&3).unwrap();
-        assert_eq!(**acc3, *root.acc);
+        // assert_eq!(**acc3, *root.acc);
+        todo!()
     }
 
     #[test]
