@@ -1158,8 +1158,32 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // - Number of entries for which goto_state_id is Some vs None
                 // - Number of entries that share the same Some(value) = goto_state_id
                 // - Number of entries for which goto_state_id is Some and the goto state has an action (found via action_selector)
-                todo!("Compute and print some stats on gotos_for_nt");
+                let num_total = gotos_for_nt.len();
+                let num_with_goto_state = gotos_for_nt.iter().filter(|g| g.goto_state_id.is_some()).count();
+                let num_without_goto_state = num_total - num_with_goto_state;
 
+                let mut goto_state_counts = BTreeMap::new();
+                for goto in gotos_for_nt.iter().filter_map(|g| g.goto_state_id) {
+                    *goto_state_counts.entry(goto).or_insert(0) += 1;
+                }
+                let num_unique_destinations = goto_state_counts.len();
+                let num_shared_destinations = goto_state_counts.values().filter(|&&c| c > 1).count();
+
+                let num_with_action = gotos_for_nt.iter().filter_map(|g| g.goto_state_id).filter(|sid| {
+                    self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
+                }).count();
+
+                crate::debug!(5,
+                    "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total {}): with_state={}, without_state={}, unique_dests={}, shared_dests={}, with_action={}",
+                    self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
+                    len,
+                    num_total,
+                    num_with_goto_state,
+                    num_without_goto_state,
+                    num_unique_destinations,
+                    num_shared_destinations,
+                    num_with_action
+                );
                 if !gotos_for_nt.is_empty() {
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
