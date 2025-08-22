@@ -1319,7 +1319,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let cache_key = BelowBottomCacheKey {
                                     nonterminal_id: nt,
                                     // source_state_id: *source_state_id,
-                                    source_state_id: *goto_state_id,
+                                    // source_state_id: *goto_state_id,
+                                    source_state_id: StateID(0),
                                     // k: 0,
                                     k,
                                     // acc: acc.clone(),
