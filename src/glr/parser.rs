@@ -1139,19 +1139,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                             let active_llm_tokens = acc.union_llm_tokens();
                             for goto_info in &accepting_gotos {
-                                let edge_key = (*k, Some(goto_info.source_state_id));
-                                // let edge_key = (*k, None);
+                                let edge_key_step1 = (*k, None);
+                                let edge_key_step2 = (0, Some(goto_info.source_state_id));
                                 for existing_trie2_node in &trie2_nodes {
                                     let source_arc = existing_trie2_node.as_arc().clone();
                                     let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
                                     let tokens_to_push = &source_live & &active_llm_tokens;
                                     if tokens_to_push.is_empty() { continue; }
 
-                                    // Build an iterator of all eligible strong children under edge_key
-                                    let eligible_iter_builder = || {
+                                    let eligible_iter_builder_step1 = || {
                                         let g = source_arc.read().expect("poison");
                                         let mut v = Vec::new();
-                                        if let Some(dest_map) = g.children().get(&edge_key) {
+                                        if let Some(dest_map) = g.children().get(&edge_key_step1) {
                                             for (node_ptr, _ev) in dest_map.iter() {
                                                 if !node_ptr.is_strong() { continue; }
                                                 if let Some(dest_arc) = node_ptr.upgrade() {
@@ -1165,18 +1164,30 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         v.into_iter()
                                     };
 
-                                    let mut inserter = EdgeInserter::new(
+                                    let mut ins1 = EdgeInserter::new(
                                         source_arc.clone(),
-                                        edge_key,
+                                        edge_key_step1,
                                         tokens_to_push.clone(),
                                         |e, n| *e |= n,
                                         |node_value, edge_value| {},
                                         |ev, t| *ev &= &t.live_tokens,
-                                    ).try_destinations_iter_with(eligible_iter_builder);
+                                    ).try_destinations_iter_with(eligible_iter_builder_step1);
 
-                                    inserter = inserter.try_destination_auto(new_trie2_node.clone());
+                                    let mid_arc = {
+                                        let mid = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                        ins1.try_destination_auto(mid.clone()).unwrap()
+                                    };
 
-                                    let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                    let mut ins2 = EdgeInserter::new(
+                                        mid_arc.clone(),
+                                        edge_key_step2,
+                                        tokens_to_push.clone(),
+                                        |e, n| *e |= n,
+                                        |node_value, edge_value| {},
+                                        |ev, t| *ev &= &t.live_tokens,
+                                    );
+                                    ins2 = ins2.try_destination_auto(new_trie2_node.clone());
+                                    let final_dest_arc = ins2.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed (accepting)");
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                                     used_dests.insert(final_dest_wr);
@@ -1228,7 +1239,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             };
 
                             if let Some(goto_state_id) = goto_info.goto_state_id {
-                                let edge_key = (k, Some(goto_info.source_state_id));
+                                let edge_key_step1 = (k, None);
+                                let edge_key_step2 = (0, Some(goto_info.source_state_id));
                                 let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                 let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
@@ -1239,7 +1251,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     .clone();
 
                                 for existing_trie2_node in &trie2_nodes {
-                                    let mut inserter;
                                     let tokens_to_push;
                                     let source_arc;
 
@@ -1250,16 +1261,49 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if tokens_to_push.is_empty() { continue; }
                                     });
 
-                                    inserter = EdgeInserter::new(
+                                    // Step 1: (k, None) edge to intermediate node
+                                    let eligible_iter_builder_step1 = || {
+                                        let g = source_arc.read().expect("poison");
+                                        let mut v = Vec::new();
+                                        if let Some(dest_map) = g.children().get(&edge_key_step1) {
+                                            for (node_ptr, _ev) in dest_map.iter() {
+                                                if !node_ptr.is_strong() { continue; }
+                                                if let Some(dest_arc) = node_ptr.upgrade() {
+                                                    let dest_guard = dest_arc.read().expect("poison");
+                                                    if (&dest_guard.value.live_tokens & &tokens_to_push).is_empty() && !dest_guard.value.end {
+                                                        v.push(dest_arc.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        v.into_iter()
+                                    };
+
+                                    let mut ins1 = EdgeInserter::new(
                                         source_arc.clone(),
-                                        edge_key,
+                                        edge_key_step1,
+                                        tokens_to_push.clone(),
+                                        |e, n| *e |= n,
+                                        |node_value, edge_value| {},
+                                        |ev, t| *ev &= &t.live_tokens,
+                                    ).try_destinations_iter_with(eligible_iter_builder_step1);
+
+                                    let mid_arc = {
+                                        let mid = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                        ins1.try_destination_auto(mid.clone()).unwrap()
+                                    };
+
+                                    let mut inserter;
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1.3: Below-bottom reduction goto processing", {
+                                    // Step 2: (0, Some(state)) edge from intermediate to final, with caching
+                                    inserter = EdgeInserter::new(
+                                        mid_arc.clone(),
+                                        edge_key_step2,
                                         tokens_to_push.clone(),
                                         |e, n| *e |= n,
                                         |node_value, edge_value| {},
                                         |ev, t| *ev &= &t.live_tokens,
                                     );
-
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1.3: Below-bottom reduction goto processing", {
                                     if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
                                         let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
                                             let dest_arc = wrapper.as_arc();
@@ -1279,10 +1323,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let eligible_iter_builder;
                                     timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_3: Below-bottom reduction goto processing", {
 
-                                    eligible_iter_builder = || {
-                                        let g = source_arc.read().expect("poison");
+                                    eligible_iter_builder = || { // eligible_iter_builder_step2
+                                        let g = mid_arc.read().expect("poison");
                                         let mut v = Vec::new();
-                                        if let Some(dest_map) = g.children().get(&edge_key) {
+                                        if let Some(dest_map) = g.children().get(&edge_key_step2) {
                                             for (node_ptr, _ev) in dest_map.iter() {
                                                 if !node_ptr.is_strong() { continue; }
                                                 if let Some(dest_arc) = node_ptr.upgrade() {
@@ -1304,7 +1348,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     });
                                     timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_5: Below-bottom reduction goto processing", {
 
-                                    let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                    let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed (non-accepting)");
                                     let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                     dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                                     });
