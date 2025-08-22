@@ -611,8 +611,8 @@ impl GrammarConstraint {
                         }
                     }
                     for (dst_wr, added) in &dest_agg {
-                        let mut dg = dst_wr.as_arc().write().expect("poison");
-                        dg.value.live_tokens |= added.clone();
+                        let mut g = dst_wr.as_arc().write().expect("poison");
+                        g.value.live_tokens |= added.clone();
                     }
                 }
                 // glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
@@ -764,12 +764,6 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     // active tokenizer states to precomputed trie roots. The trie being empty of live
     // tokens is sufficient to signal that no paths are valid from that state.
     // The original implementation removed roots if their `live_tokens` set was empty.
-    
-    // The actual pruning logic for Trie2 (removing edges with empty BVs) is handled by
-    // the `get_live_tokens_and_prune` equivalent for Trie2, which is implicitly part of
-    // the `special_map_grouped` process_fn logic in `precompute2`.
-    // If a node's `live_tokens` becomes empty, it will eventually be pruned by `merge_nodes_trie2`
-    // if it becomes structurally identical to another empty node, or simply ignored.
 
     crate::debug!(2, "Finished pruning dead paths from trie 2. No roots were removed.");
 }
@@ -2273,7 +2267,7 @@ impl<'a> GrammarConstraintState<'a> {
                                         crate::debug!(4, "Step with grammar token {:?} ({}) has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid, self.parent.parser.terminal_map.get_by_right(gtid).map_or("UNKNOWN_TERMINAL".to_string(), |s| s.to_string()));
                                         let mut edge_llm_tokens = HybridBitset::zeros();
                                         for edge_llm_tokens_bv in dest_map.values() {
-                                            all_edge_llm_tokens |= edge_llm_tokens_bv;
+                                            edge_llm_tokens |= edge_llm_tokens_bv;
                                         }
                                         let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
                                         crate::debug!(4, "Adding active tokens {:?} to final mask", llm_tokens);

@@ -79,7 +79,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
@@ -998,7 +998,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
         let popper: GSSPopper = timeit!(peek.popn(len));
-        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
         let mut any_below_bottom = !popper.below_bottom.is_empty();
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
@@ -1293,7 +1293,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         v.into_iter()
                                     };
                                     });
-                                    timeiter!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_4: Below-bottom reduction goto processing", {
+                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_4: Below-bottom reduction goto processing", {
 
                                     inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                     inserter = inserter.try_destination_auto(new_trie2_node.clone());
