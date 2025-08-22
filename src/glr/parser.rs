@@ -1262,12 +1262,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let mut below_zero = Vec::new();
 
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, mut acc) in below_bottom_integrated {
-                        let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                        timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
-                        let edge_key = (k, None);
-                        for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
-                            for source_state_id in source_state_ids {
+                    timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
+                    for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
+                        for source_state_id in source_state_ids {
+                            for (k, acc) in &below_bottom_integrated {
+                                let edge_key = (*k, None);
+                                let mut acc = acc.clone();
+                                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+
                                 // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                                 let cache_key = BelowBottomCacheKey {
                                     nonterminal_id: nt,
