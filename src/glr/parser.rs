@@ -1256,150 +1256,98 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         accepted_out.push(merged_accepted);
                     }
                     });
-
-                    timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
-                    // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
+                // ==================================================================
+                // START: OPTIMIZED BLOCK FOR NON-ACCEPTING BELOW-BOTTOM REDUCTIONS
+                // ==================================================================
+                timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
                     let mut below_zero = Vec::new();
 
-                    let mut trie2_dst_nodes = HashMap::new();
                     for (k, mut acc) in below_bottom_integrated {
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                        timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
+                        if trie2_nodes.is_empty() {
+                            continue;
+                        }
+
+                        // --- Stage 1: Perform expensive Trie manipulations ONCE ---
+                        // For each source trie node in the popped accumulator, we create exactly one
+                        // corresponding destination node representing the state after the reduction.
+                        // This avoids re-computing the same edge insertions inside the GOTO loop.
+                        let mut intermediate_dest_nodes = BTreeSet::new();
                         let edge_key = (k, None);
+
+                        for existing_trie_node in &trie2_nodes {
+                            let source_arc = existing_trie_node.as_arc().clone();
+                            let tokens_to_push = {
+                                let source_live = source_arc.read().expect("poison").value.live_tokens.clone();
+                                &source_live & &acc.llm_tokens_union
+                            };
+                            if tokens_to_push.is_empty() { continue; }
+
+                            // Create a new destination node for this path. All GOTO paths originating
+                            // from this `existing_trie_node` will share this new destination.
+                            let new_dest_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+
+                            let inserter = EdgeInserter::new(
+                                source_arc.clone(),
+                                edge_key,
+                                tokens_to_push.clone(),
+                                |e, n| *e |= n,
+                                |_, _| {},
+                                |ev, t| *ev &= &t.live_tokens,
+                            ).try_destination_auto(new_dest_node);
+
+                            let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
+                            
+                            // Update live tokens on the newly created destination
+                            {
+                                let mut dg = final_dest_arc.write().expect("poison");
+                                dg.value.live_tokens |= &tokens_to_push;
+                            }
+                            
+                            intermediate_dest_nodes.insert(ArcPtrWrapper::new(final_dest_arc));
+                        }
+
+                        if intermediate_dest_nodes.is_empty() {
+                            continue;
+                        }
+
+                        // --- Stage 2: Create a single, shared GSS base node ---
+                        // This node represents the "virtual root" after the reduction, containing all
+                        // the new intermediate trie nodes. All subsequent GOTO paths will be built upon this base.
+                        let mut intermediate_acc = acc.clone();
+                        intermediate_acc.trie2_nodes = intermediate_dest_nodes;
+                        let base_gss_node = GSSNode::new(intermediate_acc);
+
+                        // --- Stage 3: Efficiently build all GOTO paths from the shared base ---
+                        // Group all source states by their common destination (goto) state. This allows
+                        // us to use `push_many` for maximum GSS structural sharing.
+                        let mut gotos_to_sources: BTreeMap<StateID, Vec<ParseStateEdgeContent>> = BTreeMap::new();
                         for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
+                            let entry = gotos_to_sources.entry(*goto_state_id).or_default();
                             for source_state_id in source_state_ids {
-                                // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
-                                let cache_key = BelowBottomCacheKey {
-                                    nonterminal_id: nt,
-                                    source_state_id: *source_state_id,
-                                    // acc: acc.clone(),
-                                };
-
-                                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                                let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
-
-                                timeit!("GLRParserState::reduce_and_goto::BLOCK_1: Below-bottom reduction goto processing", {
-                                let new_trie2_node = trie2_dst_nodes
-                                    .entry(*source_state_id)
-                                    .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
-                                    .clone();
-
-                                for existing_trie2_node in &trie2_nodes {
-                                    let mut inserter;
-                                    let tokens_to_push;
-                                    let source_arc;
-
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1: Below-bottom reduction goto processing", {
-                                    source_arc = existing_trie2_node.as_arc().clone();
-                                    let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                                    tokens_to_push = &source_live & &acc.llm_tokens_union;
-                                    if tokens_to_push.is_empty() { continue; }
-
-                                    inserter = EdgeInserter::new(
-                                        source_arc.clone(),
-                                        edge_key,
-                                        tokens_to_push.clone(),
-                                        |e, n| *e |= n,
-                                        |node_value, edge_value| {},
-                                        |ev, t| *ev &= &t.live_tokens,
-                                    );
-                                    });
-
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1.3: Below-bottom reduction goto processing", {
-                                    if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
-                                        let eligible_cached_destinations: Vec<_> = cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
-                                            let dest_arc = wrapper.as_arc();
-                                            let guard = dest_arc.read().expect("poison");
-                                            let temp = &guard.value.live_tokens - &cached_tokens;
-                                            if (&temp & &tokens_to_push).is_empty() && !guard.value.end {
-                                                // crate::debug!(6, "Using cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
-                                                Some(dest_arc.clone())
-                                            } else {
-                                                // crate::debug!(6, "Skipping cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
-                                                None
-                                            }
-                                        }).collect();
-                                        inserter = inserter.to_destinations_weakly_iter(eligible_cached_destinations.into_iter());
-                                    }
-                                    });
-                                    let eligible_iter_builder;
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_3: Below-bottom reduction goto processing", {
-
-                                    eligible_iter_builder = || {
-                                        let g = source_arc.read().expect("poison");
-                                        let mut v = Vec::new();
-                                        if let Some(dest_map) = g.children().get(&edge_key) {
-                                            for (node_ptr, _ev) in dest_map.iter() {
-                                                if !node_ptr.is_strong() { continue; }
-                                                if let Some(dest_arc) = node_ptr.upgrade() {
-                                                    let dest_guard = dest_arc.read().expect("poison");
-                                                    if (&dest_guard.value.live_tokens & &tokens_to_push).is_empty() && !dest_guard.value.end {
-                                                        v.push(dest_arc.clone());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        v.into_iter()
-                                    };
-                                    });
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_4: Below-bottom reduction goto processing", {
-
-                                    inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
-                                    inserter = inserter.try_destination_auto(new_trie2_node.clone());
-
-                                    });
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_5: Below-bottom reduction goto processing", {
-
-                                    let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                    let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                                    dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
-                                    });
-                                }
-                                });
-                                timeit!("GLRParserState::reduce_and_goto::BLOCK_2: Below-bottom reduction goto processing", {
-
-                                // Update the cache and populate used_dests
-                                let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
-                                for (dest_wrapper, new_tokens) in &dest_agg {
-                                    if let Some(existing_tokens) = cache_entry.get(dest_wrapper) {
-                                        if !new_tokens.is_subset(existing_tokens) {
-                                            crate::debug!(6, "Updating cache for below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, dest_wrapper);
-                                            used_dests.insert(dest_wrapper.clone());
-                                        } else {
-                                            crate::debug!(6, "Not updating cache for below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, dest_wrapper);
-                                        }
-                                    } else {
-                                        crate::debug!(6, "Adding to cache for below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, dest_wrapper);
-                                        used_dests.insert(dest_wrapper.clone());
-                                    }
-                                    cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());
-                                }
-
-                                // Update live tokens on all destinations that were used
-                                for (dst_wr, added) in &dest_agg {
-                                    let mut dg = dst_wr.as_arc().write().expect("poison");
-                                    dg.value.live_tokens |= added.clone();
-                                }
-                                });
-                                timeit!("GLRParserState::reduce_and_goto::BLOCK_3: Below-bottom reduction goto processing", {
-                                if !used_dests.is_empty() {
-                                    let mut acc2 = acc.clone();
-                                    acc2.trie2_nodes = used_dests.clone();
-                                    let new_gss0 = GSSNode::new(acc2);
-                                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
-                                    below_zero.push(Arc::new(new_gss2));
-                                }
-                                });
+                                entry.push(ParseStateEdgeContent { state_id: *source_state_id });
                             }
                         }
+
+                        for (goto_state_id, source_edges) in gotos_to_sources {
+                            // For each destination, create a GSS node with all its sources as predecessors.
+                            let sources_node = base_gss_node.push_many(source_edges);
+                            // Then, push the final goto state on top.
+                            let final_node = sources_node.push(ParseStateEdgeContent { state_id: goto_state_id });
+                            below_zero.push(Arc::new(final_node));
+                        }
                     }
-                    let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
-                        timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
-                        GSSNode::merge_many_with_depth(usize::MAX, below_zero)
-                    })
-                    });
-                    out.push(merged);});
+
+                    if !below_zero.is_empty() {
+                        let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
+                            GSSNode::merge_many_with_depth(usize::MAX, below_zero)
+                        });
+                        out.push(merged);
+                    }
+                });
+                // ================================================================
+                // END: OPTIMIZED BLOCK
+                // ================================================================
                 }
             }
             });
