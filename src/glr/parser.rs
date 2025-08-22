@@ -1265,6 +1265,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     for (k, mut acc) in below_bottom_integrated {
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
+                        let edge_key = (k, None);
                         for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
                             for source_state_id in source_state_ids {
                                 // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
@@ -1274,7 +1275,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     // acc: acc.clone(),
                                 };
 
-                                let edge_key = (k, None);
                                 let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                 let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
