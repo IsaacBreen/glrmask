@@ -601,7 +601,8 @@ impl GrammarConstraint {
                         );
                         disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
                     }
-                    glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: Some(3), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                    // glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: Some(2), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                    glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: None, below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                     reset_terminals(&mut glr_s.active_state.stack, &mut HashMap::new());
                 }
 
