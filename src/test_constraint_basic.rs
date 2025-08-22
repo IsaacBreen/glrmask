@@ -208,6 +208,89 @@ fn test_constraint_simple() {
 }
 
 #[test]
+fn test_constraint_simple_simplified() {
+    // LLM tokens: "a", "$"
+    // Grammar tokens: "a", "$" (EOF)
+    // Grammar: S -> X $ ; X -> "a"
+    let expr = groups![
+        eat_u8(b'a'), // ID 0
+        eat_u8(b'$'), // ID 1
+    ];
+    let tokenizer = expr.build();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+
+    // Grammar Terminals mapped to Tokenizer IDs
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(1)); // Corresponds to eat_u8(b'$')
+
+    let productions = vec![
+        prod("S", vec![nt("X"), t("EOF")]),
+        prod("X", vec![t("A")]),
+    ];
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("{}", &parser);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        1, // max_llm_token_id should be 1 for 0, 1
+    );
+    constraint.dump_precomputed();
+    constraint.dump_precomputed2();
+
+    let mut constraint_state = constraint.init();
+
+    // Initial mask
+    let mask = constraint_state.get_mask();
+    println!("Initial mask: {:?}", mask);
+    assert_eq!(mask, HybridBitset::from_iter(vec![0])); // Expect "a"
+
+    // Commit "a" (LLMTokenID 0)
+    println!("{}", &constraint_state);
+    constraint_state.commit(LLMTokenID(0));
+    assert!(constraint_state.is_active_or_accepted());
+
+    // Mask after committing "a"
+    println!("Constraint state:\n{}", &constraint_state);
+    let mask_after_commit = constraint_state.get_mask();
+    assert_eq!(mask_after_commit, HybridBitset::from_iter(vec![1])); // Expect "$" (EOF)
+
+    // Test Serialization/Deserialization
+    let json = constraint.to_json();
+    let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
+    constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
+
+    // Ensure the parse state after stepping the constraint with an LLM token is the same as the parse state after stepping the parser itself with tokens emitted by the tokenizer for that same LLM token.
+    let llm_token = b"a".to_vec();
+    let grammar_tokenss = vec![vec!["A"]];
+    let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
+
+    let mut constraint_state_for_comp = constraint.init();
+    constraint_state_for_comp.commit(*llm_token_id_for_comp);
+
+    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
+    let grammar_token_id = grammar_token_map.get_by_left(&regex_name("A")).unwrap();
+    parser_state_for_comp.step(*grammar_token_id);
+
+    assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
+    let (_tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
+
+    assert_eq!(actual_constraint_parser_state.active_state, parser_state_for_comp.active_state, "GSS structures should match");
+}
+
+#[test]
 fn test_constraint_expression() {
     // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
     // LLM token vocabulary: i, +, *, (, ), (i, +i
