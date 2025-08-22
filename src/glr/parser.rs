@@ -1120,13 +1120,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         let mut accepted_stacks = Vec::new();
-                        for (k, edge_map) in popper.below_bottom.iter() {
-                            if edge_map.is_empty() { continue; }
-                            let mut acc_iter = edge_map.values();
-                            let first_acc = acc_iter.next().unwrap().as_ref().clone();
-                            let merged_acc = acc_iter.fold(first_acc, |acc, next| Acc::merge(&acc, next));
-                            let acc_arc = Arc::new(merged_acc);
-
+                        for (k, acc_arc) in popper.below_bottom.iter() {
                             let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                             let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
@@ -1201,14 +1195,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, edge_map) in popper.below_bottom {
-                        if edge_map.is_empty() { continue; }
-                        let mut acc_iter = edge_map.into_values();
-                        let first_acc_arc = acc_iter.next().unwrap();
-                        let first_acc = first_acc_arc.as_ref().clone();
-                        let merged_acc = acc_iter.fold(first_acc, |acc, next_arc| Acc::merge(&acc, &next_arc));
-                        let acc_arc = Arc::new(merged_acc);
-
+                    for (k, acc_arc) in popper.below_bottom {
                         let mut acc: Acc = acc_arc.as_ref().clone();
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
