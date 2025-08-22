@@ -79,7 +79,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
@@ -998,7 +998,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
         let popper: GSSPopper = timeit!(peek.popn(len));
-        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
+        crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
         let mut any_below_bottom = !popper.below_bottom.is_empty();
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
@@ -1120,11 +1120,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         let mut accepted_stacks = Vec::new();
-                        for (k, acc_arc) in popper.below_bottom.iter() {
-                            let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                            let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+                        for (k, accs_by_edge) in popper.below_bottom.iter() {
+                            // Merge Acc across all last-edge buckets for this depth
+                            let mut acc_merged_opt: Option<Acc> = None;
+                            for acc_arc in accs_by_edge.values() {
+                                let a = acc_arc.as_ref().clone();
+                                acc_merged_opt = Some(match acc_merged_opt {
+                                    None => a,
+                                    Some(prev) => Acc::merge(&prev, &a),
+                                });
+                            }
+                            let mut acc = acc_merged_opt.unwrap_or_else(Acc::new_fresh);
 
-                            let mut acc = acc_arc.as_ref().clone();
                             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                             let active_llm_tokens = acc.union_llm_tokens();
@@ -1195,8 +1202,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, acc_arc) in popper.below_bottom {
-                        let mut acc: Acc = acc_arc.as_ref().clone();
+                    for (k, accs_by_edge) in popper.below_bottom {
+                        // Merge Acc across all last-edge buckets for this depth
+                        let mut acc_merged_opt: Option<Acc> = None;
+                        for acc_arc in accs_by_edge.into_values() {
+                            let a = acc_arc.as_ref().clone();
+                            acc_merged_opt = Some(match acc_merged_opt {
+                                None => a,
+                                Some(prev) => Acc::merge(&prev, &a),
+                            });
+                        }
+                        let mut acc: Acc = acc_merged_opt.unwrap_or_else(Acc::new_fresh);
+
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
                         for goto_info in gotos_for_nt {
@@ -1276,7 +1293,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         v.into_iter()
                                     };
                                     });
-                                    timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_4: Below-bottom reduction goto processing", {
+                                    timeiter!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_4: Below-bottom reduction goto processing", {
 
                                     inserter = inserter.try_destinations_iter_with(eligible_iter_builder);
                                     inserter = inserter.try_destination_auto(new_trie2_node.clone());
