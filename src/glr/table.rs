@@ -158,28 +158,25 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SubstringGoto {
-    pub source_state_id: StateID,
-    pub goto_state_id: Option<StateID>,
-    pub accept: bool,
+pub struct SubstringGotos {
+    pub accepting_sources: Vec<StateID>,
+    pub gotos_by_dest: BTreeMap<StateID, Vec<StateID>>,
 }
 
-impl JSONConvertible for SubstringGoto {
+impl JSONConvertible for SubstringGotos {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("source_state_id".to_string(), self.source_state_id.to_json());
-        obj.insert("goto_state_id".to_string(), self.goto_state_id.to_json());
-        obj.insert("accept".to_string(), self.accept.to_json());
+        obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
+        obj.insert("gotos_by_dest".to_string(), self.gotos_by_dest.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => Ok(SubstringGoto {
-                source_state_id: StateID::from_json(obj.remove("source_state_id").ok_or_else(|| "Missing field source_state_id for SubstringGoto".to_string())?)?,
-                goto_state_id: Option::<StateID>::from_json(obj.remove("goto_state_id").ok_or_else(|| "Missing field goto_state_id for SubstringGoto".to_string())?)?,
-                accept: bool::from_json(obj.remove("accept").ok_or_else(|| "Missing field accept for SubstringGoto".to_string())?)?,
+            JSONNode::Object(mut obj) => Ok(SubstringGotos {
+                accepting_sources: Vec::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGotos".to_string())?)?,
+                gotos_by_dest: BTreeMap::<StateID, Vec<StateID>>::from_json(obj.remove("gotos_by_dest").ok_or_else(|| "Missing field gotos_by_dest for SubstringGotos".to_string())?)?,
             }),
-            _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
+            _ => Err("Expected JSONNode::Object for SubstringGotos".to_string()),
         }
     }
 }
@@ -818,27 +815,35 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
 pub fn stage_9(
     table: &Table,
     non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> BTreeMap<NonTerminalID, Vec<SubstringGoto>> {
+) -> BTreeMap<NonTerminalID, SubstringGotos> {
     let mut substring_gotos = BTreeMap::new();
 
     let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
 
     for &nt_id in &all_nt_ids {
-        let mut gotos_for_nt = Vec::new();
+        let mut accepting_sources = Vec::new();
+        let mut gotos_by_dest: BTreeMap<StateID, Vec<StateID>> = BTreeMap::new();
+
         for (&source_state_id, row) in table {
             if let Some(goto) = row.gotos.get(&nt_id) {
-                if goto.state_id.is_some() || goto.accept {
-                    gotos_for_nt.push(SubstringGoto {
-                        source_state_id,
-                        goto_state_id: goto.state_id,
-                        accept: goto.accept,
-                    });
+                if goto.accept {
+                    accepting_sources.push(source_state_id);
+                }
+                if let Some(goto_state_id) = goto.state_id {
+                    gotos_by_dest.entry(goto_state_id).or_default().push(source_state_id);
                 }
             }
         }
 
-        if !gotos_for_nt.is_empty() {
-            substring_gotos.insert(nt_id, gotos_for_nt);
+        if !accepting_sources.is_empty() || !gotos_by_dest.is_empty() {
+            accepting_sources.sort();
+            for sources in gotos_by_dest.values_mut() {
+                sources.sort();
+            }
+            substring_gotos.insert(nt_id, SubstringGotos {
+                accepting_sources,
+                gotos_by_dest,
+            });
         }
     }
 
