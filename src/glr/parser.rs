@@ -361,7 +361,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_edge_cache: HashMap::new(),
         }
     }
 
@@ -372,31 +371,28 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_edge_cache: HashMap::new(),
         }
     }
 
     pub fn init_glr_parser_with_acc(&self) -> GLRParserState { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc();
-        let parser_state = GLRParserState {
+        let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_edge_cache: HashMap::new(),
         };
         parser_state
     }
 
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
-        let parser_state = GLRParserState {
+        let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_edge_cache: HashMap::new(),
         };
         parser_state
     }
@@ -416,7 +412,6 @@ impl GLRParser {
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
             accepted: false,
-            trie2_edge_cache: HashMap::new(),
         }
     }
 
@@ -442,7 +437,6 @@ impl GLRParser {
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
             accepted: false,
-            trie2_edge_cache: HashMap::new(),
         }
     }
 
@@ -727,29 +721,14 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
-    accepted: bool,
+    accepted: bool,                // <-- NEW
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
-    trie2_edge_cache: HashMap<
-        (*const RwLock<PrecomputeNode2>, (usize, Option<StateID>)),
-        Arc<RwLock<PrecomputeNode2>>,
-    >,
 }
-
-impl PartialEq for GLRParserState<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.parser as *const GLRParser == other.parser as *const GLRParser &&
-        self.active_state == other.active_state &&
-        self.accepted == other.accepted &&
-        self.phase == other.phase
-        // Note: below_bottom_cache and trie2_edge_cache are not considered for equality
-    }
-}
-impl Eq for GLRParserState<'_> {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BelowBottomCacheKey {
@@ -792,36 +771,6 @@ impl Ord for WorkMapKey {
 type WorkMap = BTreeMap<WorkMapKey, ParseState>;
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    fn get_or_make_trie2_child(
-        &mut self,
-        src: &Arc<RwLock<PrecomputeNode2>>,
-        edge_key: (usize, Option<StateID>),
-    ) -> Arc<RwLock<PrecomputeNode2>> {
-        let key = (Arc::as_ptr(src), edge_key);
-        if let Some(dst) = self.trie2_edge_cache.get(&key) {
-            return dst.clone();
-        }
-
-        if let Ok(g) = src.read() {
-            if let Some(dest_map) = g.children().get(&edge_key) {
-                for (node_ptr, _ev) in dest_map.iter() {
-                    if node_ptr.is_strong() {
-                        if let Some(dst_arc) = node_ptr.upgrade() {
-                            if !dst_arc.read().expect("poison").value.end {
-                                self.trie2_edge_cache.insert(key, dst_arc.clone());
-                                return dst_arc;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let new_arc = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-        self.trie2_edge_cache.insert(key, new_arc.clone());
-        new_arc
-    }
-
     fn enqueue(work_map: &mut WorkMap, state: ParseState) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.
@@ -1058,7 +1007,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-        let any_below_bottom = !popper.below_bottom.is_empty();
+        let mut any_below_bottom = !popper.below_bottom.is_empty();
+        // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
+        // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
         let mut out: Vec<Arc<GSSNode>> = Vec::new();
         let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
@@ -1067,6 +1018,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let predecessor_state_id = peek2.edge_value().state_id;
                 let mut current_nt = nt;
 
+                // Fast loop for unit reduction chains based on the current lookahead token.
                 let mut i = 0;
                 loop {
                     i += 1;
@@ -1076,6 +1028,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     if goto.accept {
                         crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
+
+                        // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
                         let accepted_stack_instance = peek2.isolated_parent();
                         accepted_out.push(accepted_stack_instance);
                     }
@@ -1084,13 +1038,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let next_row = &self.parser.table[&goto_state_id];
                         match action_selector(next_row) {
                             Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
+                                // Token-based unit reduction: continue the chain.
                                 current_nt = *next_nt;
                                 continue;
                             }
                             Some(Action::Default(def)) => {
+                                // Default reduction handling.
+                                // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
+                                // as if we broke the chain here, but we may still continue chaining if allowed.
                                 if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
                                     out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 }
+
                                 match &def.reduce {
                                     Some(reduce) if reduce.len == 1 => {
                                         current_nt = reduce.nonterminal_id;
@@ -1100,20 +1059,37 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
                             _ => {
+                                // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
+                                // finalize at this GOTO and stop chaining.
                                 out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 break;
                             }
                         }
                     } else {
+                        // No further state to go to. This path terminates here.
                         timeit!(format!("Exloring path. Reason: No goto state found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id), {});
-                        break;
+                        break; // Exit the fast loop for this path
                     }
                 }
-                let i_rounded_to_nearest_pow = if i == 0 { 1 } else { 1 << (32 - (i as u32 - 1).leading_zeros()) };
+                // Round to nearest power of 2
+                let i_rounded_to_nearest_pow = if i == 0 {
+                    1
+                } else {
+                    1 << (32 - (i as u32 - 1).leading_zeros())
+                };
+ 
                 timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
             }
         }
-
+ 
+        // Handle “popped below bottom” cases:
+        //
+        // If the reduction pops below the bottom, we have recognized only the
+        // suffix β of a rule A ::= α β. Per substring parsing semantics,
+        // α lies before the substring start and must be considered unknown (but derivable),
+        // so we continue in every state that has a GOTO on A. We also merge the Acc
+        // accumulated along these paths to create a new virtual root to push onto.
+        // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
         timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
         let mut gotos_for_nt_storage = SubstringGoto::default();
         let empty_substring_goto = SubstringGoto::default();
@@ -1138,13 +1114,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             state_id_edge_key,
                             tokens_to_push.clone(),
                             |e, n| *e |= n,
-                            |node_value, edge_value| node_value.live_tokens |= edge_value,
+                            |node_value, edge_value| {},
                             |ev, t| *ev &= &t.live_tokens,
                         );
                         inserter = inserter.try_destination_auto(new_trie2_node.clone());
                         let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
                         let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                         dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                    }
+
+                    for (dst_wr, added) in &dest_agg {
+                        let mut dg = dst_wr.as_arc().write().expect("poison");
+                        dg.value.live_tokens |= added.clone();
                     }
 
                     let mut integrated_acc = acc.clone();
@@ -1184,6 +1165,25 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 };
 
+                let num_total_gotos = gotos_for_nt.gotos.values().map(|s| s.len()).sum::<usize>();
+                let num_accepting_sources = gotos_for_nt.accepting_sources.len();
+                let num_unique_destinations = gotos_for_nt.gotos.len();
+                let num_shared_destinations = gotos_for_nt.gotos.values().filter(|s| s.len() > 1).count();
+
+                let num_with_action = gotos_for_nt.gotos.keys().filter(|sid| {
+                    self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
+                }).count();
+
+                // println!(
+                //     "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total gotos {}, accepting sources {}): unique_dests={}, shared_dests={}, with_action={}",
+                //     self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
+                //     len,
+                //     num_total_gotos,
+                //     num_accepting_sources,
+                //     num_unique_destinations,
+                //     num_shared_destinations,
+                //     num_with_action
+                // );
                 if !gotos_for_nt.accepting_sources.is_empty() || !gotos_for_nt.gotos.is_empty() {
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_sources = &gotos_for_nt.accepting_sources;
@@ -1191,9 +1191,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let mut accepted_stacks = Vec::new();
                         for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
                             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                             let active_llm_tokens = acc.union_llm_tokens();
                             for source_state_id in accepting_sources {
                                 let edge_key = (*k, Some(*source_state_id));
+                                // let edge_key = (*k, None);
+                                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                 let mut used_dests = BTreeSet::new();
 
                                 for existing_trie2_node in &trie2_nodes {
@@ -1202,16 +1205,44 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let tokens_to_push = &source_live & &active_llm_tokens;
                                     if tokens_to_push.is_empty() { continue; }
 
-                                    let dst_arc = self.get_or_make_trie2_child(&source_arc, edge_key);
-                                    let _inserter = EdgeInserter::new(
+                                    // Build an iterator of all eligible strong children under edge_key
+                                    let eligible_iter_builder = || {
+                                        let g = source_arc.read().expect("poison");
+                                        let mut v = Vec::new();
+                                        if let Some(dest_map) = g.children().get(&edge_key) {
+                                            for (node_ptr, _ev) in dest_map.iter() {
+                                                if !node_ptr.is_strong() { continue; }
+                                                if let Some(dest_arc) = node_ptr.upgrade() {
+                                                    let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
+                                                    if (&dl & &tokens_to_push).is_empty() && !dest_arc.read().expect("poison").value.end {
+                                                        v.push(dest_arc.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        v.into_iter()
+                                    };
+
+                                    let mut inserter = EdgeInserter::new(
                                         source_arc.clone(),
                                         edge_key,
                                         tokens_to_push.clone(),
                                         |e, n| *e |= n,
-                                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                        |node_value, edge_value| {},
                                         |ev, t| *ev &= &t.live_tokens,
-                                    ).try_destination_auto(dst_arc.clone());
-                                    used_dests.insert(ArcPtrWrapper::new(dst_arc));
+                                    ).try_destinations_iter_with(eligible_iter_builder);
+
+                                    inserter = inserter.try_destination_auto(new_trie2_node.clone());
+
+                                    let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                                    let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                                    dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                                    used_dests.insert(final_dest_wr);
+                                }
+
+                                for (dst_wr, added) in &dest_agg {
+                                    let mut dg = dst_wr.as_arc().write().expect("poison");
+                                    dg.value.live_tokens |= added.clone();
                                 }
 
                                 let mut acc2 = acc.clone();
@@ -1225,14 +1256,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         accepted_out.push(merged_accepted);
                     }
                     });
+                // ==================================================================
+                // START: OPTIMIZED BLOCK FOR NON-ACCEPTING BELOW-BOTTOM REDUCTIONS
+                // ==================================================================
                 timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
                     let mut below_zero = Vec::new();
+
                     for (k, mut acc) in below_bottom_integrated {
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                        if trie2_nodes.is_empty() { continue; }
+                        if trie2_nodes.is_empty() {
+                            continue;
+                        }
 
-                        let edge_key = (k, None);
+                        // --- Stage 1: Perform expensive Trie manipulations ONCE ---
+                        // For each source trie node in the popped accumulator, we create exactly one
+                        // corresponding destination node representing the state after the reduction.
+                        // This avoids re-computing the same edge insertions inside the GOTO loop.
                         let mut intermediate_dest_nodes = BTreeSet::new();
+                        let edge_key = (k, None);
 
                         for existing_trie_node in &trie2_nodes {
                             let source_arc = existing_trie_node.as_arc().clone();
@@ -1242,24 +1283,44 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             };
                             if tokens_to_push.is_empty() { continue; }
 
-                            let dst_arc = self.get_or_make_trie2_child(&source_arc, edge_key);
-                            let _ = EdgeInserter::new(
+                            // Create a new destination node for this path. All GOTO paths originating
+                            // from this `existing_trie_node` will share this new destination.
+                            let new_dest_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+
+                            let inserter = EdgeInserter::new(
                                 source_arc.clone(),
                                 edge_key,
                                 tokens_to_push.clone(),
                                 |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                |_, _| {},
                                 |ev, t| *ev &= &t.live_tokens,
-                            ).try_destination_auto(dst_arc.clone());
-                            intermediate_dest_nodes.insert(ArcPtrWrapper::new(dst_arc));
+                            ).try_destination_auto(new_dest_node);
+
+                            let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
+                            
+                            // Update live tokens on the newly created destination
+                            {
+                                let mut dg = final_dest_arc.write().expect("poison");
+                                dg.value.live_tokens |= &tokens_to_push;
+                            }
+                            
+                            intermediate_dest_nodes.insert(ArcPtrWrapper::new(final_dest_arc));
                         }
 
-                        if intermediate_dest_nodes.is_empty() { continue; }
+                        if intermediate_dest_nodes.is_empty() {
+                            continue;
+                        }
 
+                        // --- Stage 2: Create a single, shared GSS base node ---
+                        // This node represents the "virtual root" after the reduction, containing all
+                        // the new intermediate trie nodes. All subsequent GOTO paths will be built upon this base.
                         let mut intermediate_acc = acc.clone();
                         intermediate_acc.trie2_nodes = intermediate_dest_nodes;
                         let base_gss_node = GSSNode::new(intermediate_acc);
 
+                        // --- Stage 3: Efficiently build all GOTO paths from the shared base ---
+                        // Group all source states by their common destination (goto) state. This allows
+                        // us to use `push_many` for maximum GSS structural sharing.
                         let mut gotos_to_sources: BTreeMap<StateID, Vec<ParseStateEdgeContent>> = BTreeMap::new();
                         for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
                             let entry = gotos_to_sources.entry(*goto_state_id).or_default();
@@ -1269,7 +1330,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
 
                         for (goto_state_id, source_edges) in gotos_to_sources {
+                            // For each destination, create a GSS node with all its sources as predecessors.
                             let sources_node = base_gss_node.push_many(source_edges);
+                            // Then, push the final goto state on top.
                             let final_node = sources_node.push(ParseStateEdgeContent { state_id: goto_state_id });
                             below_zero.push(Arc::new(final_node));
                         }
@@ -1282,6 +1345,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         out.push(merged);
                     }
                 });
+                // ================================================================
+                // END: OPTIMIZED BLOCK
+                // ================================================================
                 }
             }
             });
@@ -1647,7 +1713,7 @@ impl GLRParser {
             if visited_nodes.contains(&node_ptr) {
                 continue;
             }
-
+            
             let parent_id = *node_ids.entry(node_ptr).or_insert_with(|| {
                 let id = next_id_counter;
                 next_id_counter += 1;
@@ -1678,11 +1744,11 @@ impl GLRParser {
             for (edge_val, preds_by_depth) in &node_arc.predecessors {
                 let state_id = edge_val.state_id;
                 let edge_key = (node_ptr, edge_val.clone());
-
+                
                 let edge_node_id = *edge_node_ids.entry(edge_key).or_insert_with(|| {
                     let id = next_id_counter;
                     next_id_counter += 1;
-
+                    
                     // Define the edge node
                     let mut explanation = String::new();
                     self.format_state_details(&mut explanation, state_id, "").unwrap();
@@ -1695,7 +1761,7 @@ impl GLRParser {
                         .replace('<', "\\<")
                         .replace('>', "\\>")
                         .replace('\'', "\\'"); // Escape single quotes for DOT
-
+                    
                     writeln!(&mut dot, "  E{} [label=\"State {}\\l{}\", shape=plaintext, fontname=\"Courier New\"];", id, state_id.0, escaped_explanation).unwrap();
                     id
                 });
@@ -1711,7 +1777,7 @@ impl GLRParser {
                             next_id_counter += 1;
                             id
                         });
-
+                        
                         // Connect edge node to predecessor
                         writeln!(&mut dot, "  E{} -> N{} [arrowhead=none];", edge_node_id, pred_id).unwrap();
                         queue.push_back(pred_arc.clone());
@@ -1753,7 +1819,7 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
-
+ 
 // Helper for default reductions' fast unit-reduction chain
 fn default_reduce_chain(
     parser: &GLRParser,
@@ -1790,3 +1856,4 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
+
