@@ -263,17 +263,19 @@ impl GSSPopper {
                         for child in pred_vec {
                             if child.is_root() {
                                 // Reached the bottom on this pop. Do not keep root in paths.
-                                // When a path terminates at a root, the resulting Acc is special.
-                                // The union of possibilities is defined by the path taken to get here (the context from above).
-                                // The intersection, however, must satisfy both the path and the root's local constraints.
-                                let combined = Arc::new(Acc {
-                                    llm_tokens_union: new_path_acc.llm_tokens_union.clone(),
-                                    llm_tokens_intersection: &new_path_acc.llm_tokens_intersection & &child.acc.llm_tokens_intersection,
-                                    terminals_union: new_path_acc.terminals_union.clone(),
-                                    terminals_intersection: &new_path_acc.terminals_intersection & &child.acc.terminals_intersection,
-                                    needs_push_down: false,
-                                    trie2_nodes: child.acc.trie2_nodes.clone(),
-                                });
+                                // Register as "at bottom" under the last edge, and merge accs per edge.
+                                let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
+                                // // When a path terminates at a root, the resulting Acc is special.
+                                // // The union of possibilities is defined by the path taken to get here (the context from above).
+                                // // The intersection, however, must satisfy both the path and the root's local constraints.
+                                // let combined = Arc::new(Acc {
+                                //     llm_tokens_union: new_path_acc.llm_tokens_union.clone(),
+                                //     llm_tokens_intersection: &new_path_acc.llm_tokens_intersection & &child.acc.llm_tokens_intersection,
+                                //     terminals_union: new_path_acc.terminals_union.clone(),
+                                //     terminals_intersection: &new_path_acc.terminals_intersection & &child.acc.terminals_intersection,
+                                //     needs_push_down: false,
+                                //     trie2_nodes: child.acc.trie2_nodes.clone(),
+                                // });
                                 Self::merge_below_into(&mut new_below, 1, edge_val.clone(), combined);
                             } else {
                                 if let Some(existing_acc) = new_paths.get_mut(child) {
