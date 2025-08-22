@@ -729,7 +729,7 @@ struct BelowBottomCacheKey {
     // source_state_id: StateID,
     // k: usize,
     // Important: this Acc must have trie2_nodes cleared before being placed here.
-    acc: Acc,
+    // acc: Acc,
 }
 
 impl Display for GLRParserState<'_> {
@@ -1240,7 +1240,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let cache_key = BelowBottomCacheKey {
                                 nonterminal_id: nt,
                                 // source_state_id: goto_info.source_state_id,
-                                acc: acc.clone(),
+                                // acc: acc.clone(),
                             };
 
                             if let Some(goto_state_id) = goto_info.goto_state_id {
