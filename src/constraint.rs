@@ -24,7 +24,6 @@ use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recurs
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
 use crate::datastructures::gss::{gather_gss_stats, GSSNode, allow_only_llm_tokens_and_prune_arc, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::arc_wrapper::{ArcPtrWrapper};
@@ -418,33 +417,61 @@ impl GrammarConstraint {
 
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
-        let parser = parser.expect("GLRParser must be provided for precompute2");
+        let parser = parser.unwrap();
 
-        // 1) Build a single base Trie2 root. All initial GSS states will point to this.
+        // 1) Build a single base Trie2 root and all its (0, Some(state_id)) children once.
         let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
             PrecomputedNodeContents::root(internal_max_llm_token),
         )));
-        let base_trie2_root_wr = ArcPtrWrapper::new(base_trie2_root.clone());
 
         let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
 
-        if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+        if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+            // one child per parser state
+            for state_id in parser.table.keys() {
+                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                // Insert (0, Some(state_id)) edge with full (ones) BV
+                {
+                    let mut ins = EdgeInserter::new(
+                        base_trie2_root.clone(),
+                        (0, Some(*state_id)),
+                        LLMTokenBV::ones(internal_max_llm_token + 1),
+                        |e, n| *e |= n,
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |ev, t| *ev &= &t.live_tokens,
+                    );
+                    ins = ins.try_destination(new_trie2_node.clone());
+                    ins.expect("Failed to insert initial edge into base Trie2 root");
+                }
+
+                // Build the per-state initial GSS leaf pointing to the new_trie2_node
+                let mut acc = Acc::new_fresh();
+                acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+                let gss_leaf = Arc::new(GSSNode::new(acc));
+                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
+            }
+        } else {
             // everything-state variant
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            {
+                let mut ins = EdgeInserter::new(
+                    base_trie2_root.clone(),
+                    (0, Some(parser.everything_state_id)),
+                    LLMTokenBV::ones(internal_max_llm_token + 1),
+                    |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |ev, t| *ev &= &t.live_tokens,
+                );
+                ins = ins.try_destination(new_trie2_node.clone());
+                ins.expect("Failed to insert initial edge into base Trie2 root");
+            }
+
             let mut acc = Acc::new_fresh();
-            acc.trie2_nodes.insert(base_trie2_root_wr.clone());
+            acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
             let gss_leaf = Arc::new(GSSNode::new(acc));
             base_gss_nodes.push(Arc::new(
                 gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
             ));
-        } else {
-            // one initial GSS path per parser state
-            for state_id in parser.table.keys() {
-                // Build the per-state initial GSS leaf pointing to the new_trie2_node
-                let mut acc = Acc::new_fresh();
-                acc.trie2_nodes.insert(base_trie2_root_wr.clone());
-                let gss_leaf = Arc::new(GSSNode::new(acc));
-                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
-            }
         }
 
         // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
@@ -566,7 +593,7 @@ impl GrammarConstraint {
                                 }
                                 crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
 
-                                let edge_key = (0, Some(last_edge.state_id));
+                                let edge_key = (0, None);
 
                                 let mut inserter = EdgeInserter::new(
                                     src_arc.clone(),
@@ -680,13 +707,14 @@ impl GrammarConstraint {
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node.reachable_token_ids();
+                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
@@ -709,7 +737,7 @@ impl GrammarConstraint {
                 if !new_grammar_tokens_to_look_for.is_empty() {
                     let next_results = Self::compute_possible_matches_for_vocab_node(
                         tokenizer,
-                        child_vocab_node, // Recurse with the child node
+                        child_vocab_node_ref, // Recurse with the child node
                         final_tokenizer_state_id,
                         cache,
                     );
@@ -2807,4 +2835,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-

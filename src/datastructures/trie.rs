@@ -3034,6 +3034,32 @@ mod tests {
     }
 
     #[test]
+    fn test_ei_try_destination_fail_merge_ev() {
+        let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
+        let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
+        // Pre-insert edge with empty HybridBitset
+        let initial_edge_val = HybridBitset::zeros();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+        source.write().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
+
+        // In this case, merge_bitset_union will always return Some, so merge should succeed.
+        // To test a failing merge, we'd need a different merge function or EV type.
+        // Let's repurpose this to test a successful merge where existing is empty.
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union, |_, _| {}, |_, _| {});
+        let result_opt = inserter.try_destination(dest.clone()).into_option();
+
+        assert!(result_opt.is_some()); // Merge succeeded
+        let s = source.read().unwrap();
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(children_map.len(), 1);
+        let (node_ptr, ev) = children_map.iter().next().unwrap();
+        // The result of merge_bitset_union(&empty, &new_edge_val) is new_edge_val
+        assert_eq!(*ev, new_edge_val);
+        assert!(Arc::ptr_eq(&node_ptr.upgrade().unwrap(), &dest));
+    }
+
+    #[test]
     fn test_ei_try_destination_fail_cycle() {
         let source: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(RwLock::new(TestTrieEI::new("dest".to_string())));
