@@ -1364,13 +1364,12 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
             let current_node = unsafe { &*node_ptr };
 
             if current_node.is_root() {
-                // A path ending at a root node means we've fully traversed a branch.
-                // The `last_edge_opt` contains the final state transition information.
-                if let Some(edge) = last_edge_opt.clone() {
-                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc)); // Final constraints
-                    results.entry(edge).or_default().insert(final_acc);
-                } else {
-                    // This case handles being called on a root node directly. No path, no edge.
+                if let Some(edge) = last_edge_opt {
+                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+                    results
+                        .entry(edge)
+                        .or_default()
+                        .insert(final_acc);
                 }
             } else {
                 let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));

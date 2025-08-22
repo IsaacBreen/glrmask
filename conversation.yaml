@@ -12112,7 +12112,7 @@ local_system:
               // ------------------------------------------------------------------
               let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
               let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
-              let mut todo: BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
+              let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
               let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
               let total_edges = Self::count_all_edges(&initial_nodes);
@@ -12126,20 +12126,20 @@ local_system:
                       .and_modify(|old| merge(old, v0.clone()))
                       .or_insert(v0);
                   let depth = node_arc.read().expect("poison").max_depth;
-                  todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
+                  todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
               }
 
               // Main loop ---------------------------------------------------------
               while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
                   for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                      let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
+                      let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
                       if done.contains(&ptr) { continue; }
 
                       let mut agg_v = match values.remove(&ptr) {
                           Some(v) => v,
                           None => continue,
                       };
-                      let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
+                      let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
                           let mut guard = node_arc.read().expect("poison");
@@ -12166,10 +12166,10 @@ local_system:
                           let new_values_for_children = step(&agg_v, &ek, &dest_map);
                           for (child_node_ptr, new_v) in new_values_for_children {
                               let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-                              let child_arc = child_node_ptr.upgrade().unwrap();
+                              let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
                               values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
                               let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(child_node_ptr);
+                              todo.entry(child_depth).or_default().insert(child_arc);
                           }
                       }
                   }
@@ -15537,8 +15537,7 @@ local_system:
                                   let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                                   let active_llm_tokens = acc.union_llm_tokens();
                                   for goto_info in &accepting_gotos {
-                                      let edge_key = (*k, Some(goto_info.source_state_id));
-                                      // let edge_key = (*k, None);
+                                      let edge_key = (*k, None);
                                       for existing_trie2_node in &trie2_nodes {
                                           let source_arc = existing_trie2_node.as_arc().clone();
                                           let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
@@ -15631,8 +15630,10 @@ local_system:
                                       let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
                                       timeit!("GLRParserState::reduce_and_goto::BLOCK_1: Below-bottom reduction goto processing", {
-                                      // Create a new intermediate node. This will later be connected via a (0, Some(state)) edge.
-                                      let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                      let new_trie2_node = trie2_dst_nodes
+                                          .entry(goto_info.source_state_id)
+                                          .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+                                          .clone();
 
                                       for existing_trie2_node in &trie2_nodes {
                                           let mut inserter;
@@ -15736,9 +15737,9 @@ local_system:
                                           let mut acc2 = acc.clone();
                                           acc2.trie2_nodes = used_dests.clone();
                                           let new_gss0 = GSSNode::new(acc2);
-                                          // Push only the source_state_id. The goto_state_id is implicitly handled by the trie structure.
                                           let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-                                          below_zero.push(Arc::new(new_gss1));
+                                          let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                                          below_zero.push(Arc::new(new_gss2));
                                       }
                                       });
                                   }
@@ -16686,51 +16687,21 @@ local_system:
                   PrecomputedNodeContents::root(internal_max_llm_token),
               )));
 
-              let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
+              let mut base_gss_nodes = Vec::new();
+
+              // All initial GSS states will point to the single base_trie2_root.
+              // The state-specific edges will be added later during traversal when needed.
+              let mut acc = Acc::new_fresh();
+              acc.trie2_nodes.insert(ArcPtrWrapper::new(base_trie2_root.clone()));
+              let gss_leaf = Arc::new(GSSNode::new(acc));
 
               if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                   // one child per parser state
                   for state_id in parser.table.keys() {
-                      let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                      // Insert (0, Some(state_id)) edge with full (ones) BV
-                      {
-                          let mut ins = EdgeInserter::new(
-                              base_trie2_root.clone(),
-                              (0, Some(*state_id)),
-                              LLMTokenBV::ones(internal_max_llm_token + 1),
-                              |e, n| *e |= n,
-                              |node_value, edge_value| node_value.live_tokens |= edge_value,
-                              |ev, t| *ev &= &t.live_tokens,
-                          );
-                          ins = ins.try_destination(new_trie2_node.clone());
-                          ins.expect("Failed to insert initial edge into base Trie2 root");
-                      }
-
-                      // Build the per-state initial GSS leaf pointing to the new_trie2_node
-                      let mut acc = Acc::new_fresh();
-                      acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
-                      let gss_leaf = Arc::new(GSSNode::new(acc));
                       base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
                   }
               } else {
                   // everything-state variant
-                  let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                  {
-                      let mut ins = EdgeInserter::new(
-                          base_trie2_root.clone(),
-                          (0, Some(parser.everything_state_id)),
-                          LLMTokenBV::ones(internal_max_llm_token + 1),
-                          |e, n| *e |= n,
-                          |node_value, edge_value| node_value.live_tokens |= edge_value,
-                          |ev, t| *ev &= &t.live_tokens,
-                      );
-                      ins = ins.try_destination(new_trie2_node.clone());
-                      ins.expect("Failed to insert initial edge into base Trie2 root");
-                  }
-
-                  let mut acc = Acc::new_fresh();
-                  acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
-                  let gss_leaf = Arc::new(GSSNode::new(acc));
                   base_gss_nodes.push(Arc::new(
                       gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
                   ));
@@ -16817,13 +16788,13 @@ local_system:
                       crate::debug!(3, "Trie2: At precomputed node {:p}, processing GLR state", precomputed_node_data);
                       // Dump precomputed2
                       // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
+                      // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
 
                       crate::datastructures::gss::merge_trie2_nodes_if_needed(
                           &mut glr_s.active_state.stack,
                           1,
                           &mut HashMap::new(),
                       );
-
                       let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                       let keep_going = !active_llm_tokens.is_empty();
                       if precomputed_node_data.value.end {
@@ -16834,9 +16805,12 @@ local_system:
                               false,
                               false,
                           );
+                          let mut end_dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                          let end_wr = ArcPtrWrapper::new(trie2_end.clone());
 
                           let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
 
+                          // for gss_root in get_roots([glr_s.active_state.stack.as_ref(), glr_s.active_state.accepted_state.as_ref()]) {
                           for (last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                               for gss_root_acc in gss_root_accs {
                                   let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
@@ -16852,7 +16826,7 @@ local_system:
                                       }
                                       crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
 
-                                      // Deferred edge creation: (0, Some(state_id))
+                                      // The edge from a source trie2 node to the end node is keyed by the GSS state.
                                       let edge_key = (0, Some(last_edge.state_id));
 
                                       let mut inserter = EdgeInserter::new(
@@ -18833,46 +18807,31 @@ local_system:
               Trie::special_map_grouped(
                   initial_values_for_map,
                   // step_fn: (current_glr_state, (k, option state ID), destinations_map)
-                  |glr_s, (k, state_id_opt), dest_map| {
-                      let mut out = Vec::new();
-                      if state_id_opt.is_none() { // First hop: (k, None)
-                          let popped = glr_s.active_state.stack.popn(*k);
-                          for popper_item in popped.iter() {
-                              for peek in popper_item.peek_iter() {
-                                  let revealed_state_id = peek.edge_value().state_id;
-                                  let isolated_gss_for_path = peek.isolated_parent();
-
-                                  // Now find the corresponding second-hop destination in dest_map
-                                  for (dest_node_ptr, edge_bv) in dest_map.iter() {
-                                      // The dest_node_ptr is an intermediate node. We need to check its children.
-                                      if let Some(intermediate_arc) = dest_node_ptr.upgrade() {
-                                          let intermediate_guard = intermediate_arc.read().unwrap();
-                                          if let Some(final_dest_map) = intermediate_guard.children().get(&(0, Some(revealed_state_id))) {
-                                              for (final_dest_ptr, final_edge_bv) in final_dest_map.iter() {
-                                                  let mut final_gss = isolated_gss_for_path.clone();
-                                                  let combined_bv = edge_bv & final_edge_bv;
-                                                  allow_only_llm_tokens_and_prune_arc(&mut final_gss, &combined_bv, &mut HashMap::new());
-
-                                                  let mut out_glr_s = glr_s.clone();
-                                                  out_glr_s.active_state.stack = final_gss;
-                                                  if out_glr_s.is_ok() {
-                                                      out.push((final_dest_ptr.clone(), out_glr_s));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
+                  |glr_s, (k, expected_state_id_opt ), dest_map| {
+                      crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
+                      let mut out_gsss = Vec::new();
+                      let popped = glr_s.active_state.stack.popn(*k);
+                      for popper_item in popped.iter() {
+                          for peek in popper_item.peek_iter() {
+                              let ok = if let Some(expected_state_id) = expected_state_id_opt {
+                                  expected_state_id == &peek.edge_value().state_id
+                              } else {
+                                  true
+                              };
+                              if ok {
+                                  out_gsss.push(peek.isolated_parent());
                               }
                           }
-                      } else {
-                          // This case handles the initial (0, Some(state_id)) edges from precompute2 root.
-                          // It's a single hop, no pop needed.
-                          for (dst_node_wrapper, edge_bv) in dest_map.iter() {
-                              let mut glr_s_copy = glr_s.clone();
-                              allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
-                              if glr_s_copy.is_ok() {
-                                  out.push((dst_node_wrapper.clone(), glr_s_copy));
-                              }
+                      }
+                      let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
+                      let mut out = Vec::new();
+                      for (dst_node_wrapper, edge_bv) in dest_map.iter() {
+                          let mut out_gss_filtered = out_gss.clone();
+                          allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
+                          let mut out_glr_s = glr_s.clone();
+                          out_glr_s.active_state.stack = out_gss_filtered;
+                          if out_glr_s.is_ok() {
+                              out.push((dst_node_wrapper.clone(), out_glr_s));
                           }
                       }
                       out
@@ -20477,13 +20436,12 @@ local_system:
                   let current_node = unsafe { &*node_ptr };
 
                   if current_node.is_root() {
-                      // A path ending at a root node means we've fully traversed a branch.
-                      // The `last_edge_opt` contains the final state transition information.
-                      if let Some(edge) = last_edge_opt.clone() {
-                          let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc)); // Final constraints
-                          results.entry(edge).or_default().insert(final_acc);
-                      } else {
-                          // This case handles being called on a root node directly. No path, no edge.
+                      if let Some(edge) = last_edge_opt {
+                          let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+                          results
+                              .entry(edge)
+                              .or_default()
+                              .insert(final_acc);
                       }
                   } else {
                       let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
@@ -32473,76 +32431,31 @@ messages:
   - user: |-
       Modify this so that instead of one edge on trie 2 that carries k and Some(state), we have an edge that has (k, None) followed by an edge that has (0, Some(state)).
       BUT crucially we'll defer the creation of the (0, Some(state)) edge until either we pop to a root node and have to go below bottom via `below_bottom`, or we get to an end node in `precompute2` and have to use `get_roots` to get the roots.
+      Yes, this is much better. This lets us avoid creating a lot of trie2 nodes that won't end up in the final tree. We defer creating these trie2 edges/nodes until we pop below the root (or reach an end trie1 node in `precompute2`), and THEN we push an edge for that state ID (in the GSS edge contents).
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary changes to implement the two-hop edge structure in your `PrecomputeNode2` trie. This involves modifying how these edges are created during precomputation and how they are traversed when calculating the token mask.
+      Hello! As a helpful assistant, I've analyzed your request and will provide the necessary changes to modify your trie structure as requested. Here are the git diff patches for the modified files.
 
-      Here are the git diff patches for the modified files.
+      In `src/glr/parser.rs`, I'll adjust how edges are created in the `trie2` structure during `below_bottom` reductions to only encode the pop count (`k`), deferring the state information to the GSS.
 
-      ### `src/datastructures/trie.rs`
+      In `src/constraint.rs`, I'll update the `precompute2` logic. First, the initialization will be changed so that all initial GSS states point to a single `trie2` root, deferring the creation of state-specific edges. Second, when a path terminates (at an "end" node in the `trie1`), I'll add logic to create the state-specific `(0, Some(state_id))` edges in `trie2`, using the state information from the GSS.
 
-      I've adjusted the `special_map_grouped` function to better handle the node pointer wrappers, which will be necessary for the changes in `constraint.rs`.
-
-      ```diff
-      --- a/src/datastructures/trie.rs
-      +++ b/src/datastructures/trie.rs
-      @@ -1401,7 +1401,7 @@
-               // ------------------------------------------------------------------
-               let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
-               let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
-      -        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
-      +        let mut todo: BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
-       
-               let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
-               let total_edges = Self::count_all_edges(&initial_nodes);
-      @@ -1414,18 +1414,18 @@
-                       .and_modify(|old| merge(old, v0.clone()))
-                       .or_insert(v0);
-                   let depth = node_arc.read().expect("poison").max_depth;
-      -            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
-      +            todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
-               }
-       
-               // Main loop ---------------------------------------------------------
-               while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-                   for node_ptr_wrapper in &node_arc_ptr_wrappers {
-      -                let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
-      +                let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
-                       if done.contains(&ptr) { continue; }
-       
-                       let mut agg_v = match values.remove(&ptr) {
-                           Some(v) => v,
-                           None => continue,
-                       };
-      -                let node_arc = node_ptr_wrapper.as_arc();
-      +                let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
-       
-                       let proceed = {
-                           let mut guard = node_arc.read().expect("poison");
-      @@ -1451,10 +1451,10 @@
-                           let new_values_for_children = step(&agg_v, &ek, &dest_map);
-                           for (child_node_ptr, new_v) in new_values_for_children {
-                               let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-      -                        let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
-      +                        let child_arc = child_node_ptr.upgrade().unwrap();
-                               values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                               let child_depth = child_arc.read().expect("poison").max_depth;
-      -                        todo.entry(child_depth).or_default().insert(child_arc);
-      +                        todo.entry(child_depth).or_default().insert(child_node_ptr);
-                           }
-                       }
-                   }
-
-      ```
-
-      ### `src/glr/parser.rs`
-
-      I've modified `reduce_and_goto` to implement the first part of the deferred edge creation. When a reduction pops below the bottom of the stack during substring parsing, it now creates an edge with the key `(k, None)` pointing to a new intermediate node in `PrecomputeNode2`. Crucially, I've also adjusted the GSS structure created in this case to only push the `source_state_id`, ensuring that this is the state ID retrieved later when the second part of the edge is created.
+      Here are the patches:
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -1000,13 +1000,13 @@
+      @@ -1000,8 +1000,7 @@
+                                   let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                   let active_llm_tokens = acc.union_llm_tokens();
+                                   for goto_info in &accepting_gotos {
+      -                                let edge_key = (*k, Some(goto_info.source_state_id));
+      -                                // let edge_key = (*k, None);
+      +                                let edge_key = (*k, None);
+                                       for existing_trie2_node in &trie2_nodes {
+                                           let source_arc = existing_trie2_node.as_arc().clone();
+                                           let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
+      @@ -1069,7 +1068,7 @@
                                    };
        
                                    if let Some(goto_state_id) = goto_info.goto_state_id {
@@ -32551,212 +32464,109 @@ messages:
                                        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                        let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
        
-                                       timeit!("GLRParserState::reduce_and_goto::BLOCK_1: Below-bottom reduction goto processing", {
-      -                                let new_trie2_node = trie2_dst_nodes
-      -                                    .entry(goto_info.source_state_id)
-      -                                    .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
-      -                                    .clone();
-      +                                // Create a new intermediate node. This will later be connected via a (0, Some(state)) edge.
-      +                                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-       
-                                       for existing_trie2_node in &trie2_nodes {
-                                           let mut inserter;
-      @@ -1105,8 +1105,8 @@
-                                           let mut acc2 = acc.clone();
-                                           acc2.trie2_nodes = used_dests.clone();
-                                           let new_gss0 = GSSNode::new(acc2);
-      +                                    // Push only the source_state_id. The goto_state_id is implicitly handled by the trie structure.
-                                           let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-      -                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
-      -                                    below_zero.push(Arc::new(new_gss2));
-      +                                    below_zero.push(Arc::new(new_gss1));
-                                       }
-                                       });
-                                   }
 
       ```
-
-      ### `src/datastructures/gss.rs`
-
-      To support the changes, I've updated `get_roots` to correctly handle the modified GSS structure from `reduce_and_goto`. It now correctly identifies the "last edge" which contains the crucial `source_state_id`.
-
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -710,11 +710,13 @@
-                   let current_node = unsafe { &*node_ptr };
-       
-                   if current_node.is_root() {
-      -                if let Some(edge) = last_edge_opt {
-      -                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
-      -                    results
-      -                        .entry(edge)
-      -                        .or_default()
-      -                        .insert(final_acc);
-      +                // A path ending at a root node means we've fully traversed a branch.
-      +                // The `last_edge_opt` contains the final state transition information.
-      +                if let Some(edge) = last_edge_opt.clone() {
-      +                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc)); // Final constraints
-      +                    results.entry(edge).or_default().insert(final_acc);
-      +                } else {
-      +                    // This case handles being called on a root node directly. No path, no edge.
-                       }
-                   } else {
-                       let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
-
-      ```
-
-      ### `src/constraint.rs`
-
-      This file required the most significant changes.
-
-      1.  In `precompute2`, I've implemented the second, "deferred" part of the edge creation. When processing an end node in the Trie1, it now uses `get_roots` to retrieve the intermediate `PrecomputeNode2` nodes and the corresponding `source_state_id`. It then creates the final `(0, Some(source_state_id))` edge, connecting the intermediate node to the final "end" node of the trie.
-      2.  The `get_mask2` function has been updated. Its `step` closure now handles the new two-hop edge structure. It first follows the `(k, None)` edge and then, for each resulting parser path, determines the next state from the GSS to follow the correct `(0, Some(state_id))` edge.
-
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -388,12 +388,12 @@
-                       crate::debug!(3, "Trie2: At precomputed node {:p}, processing GLR state", precomputed_node_data);
-                       // Dump precomputed2
-                       // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
-      -                // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
+      @@ -1218,48 +1218,33 @@
+                   PrecomputedNodeContents::root(internal_max_llm_token),
+               )));
        
-                       crate::datastructures::gss::merge_trie2_nodes_if_needed(
-                           &mut glr_s.active_state.stack,
-                           1,
-                           &mut HashMap::new(),
-                       );
+      -        let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
+      +        let mut base_gss_nodes = Vec::new();
       +
-                       let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                       let keep_going = !active_llm_tokens.is_empty();
-                       if precomputed_node_data.value.end {
-      @@ -403,12 +403,10 @@
-                               TerminalID(0),
-                               false,
-                               false,
-                           );
-      -                    let mut end_dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-      -                    let end_wr = ArcPtrWrapper::new(trie2_end.clone());
+      +        // All initial GSS states will point to the single base_trie2_root.
+      +        // The state-specific edges will be added later during traversal when needed.
+      +        let mut acc = Acc::new_fresh();
+      +        acc.trie2_nodes.insert(ArcPtrWrapper::new(base_trie2_root.clone()));
+      +        let gss_leaf = Arc::new(GSSNode::new(acc));
        
-                           let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+               if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+                   // one child per parser state
+                   for state_id in parser.table.keys() {
+      -                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+      -                // Insert (0, Some(state_id)) edge with full (ones) BV
+      -                {
+      -                    let mut ins = EdgeInserter::new(
+      -                        base_trie2_root.clone(),
+      -                        (0, Some(*state_id)),
+      -                        LLMTokenBV::ones(internal_max_llm_token + 1),
+      -                        |e, n| *e |= n,
+      -                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+      -                        |ev, t| *ev &= &t.live_tokens,
+      -                    );
+      -                    ins = ins.try_destination(new_trie2_node.clone());
+      -                    ins.expect("Failed to insert initial edge into base Trie2 root");
+      -                }
+      -
+      -                // Build the per-state initial GSS leaf pointing to the new_trie2_node
+      -                let mut acc = Acc::new_fresh();
+      -                acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+      -                let gss_leaf = Arc::new(GSSNode::new(acc));
+                       base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
+                   }
+               } else {
+                   // everything-state variant
+      -            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+      -            {
+      -                let mut ins = EdgeInserter::new(
+      -                    base_trie2_root.clone(),
+      -                    (0, Some(parser.everything_state_id)),
+      -                    LLMTokenBV::ones(internal_max_llm_token + 1),
+      -                    |e, n| *e |= n,
+      -                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+      -                    |ev, t| *ev &= &t.live_tokens,
+      -                );
+      -                ins = ins.try_destination(new_trie2_node.clone());
+      -                ins.expect("Failed to insert initial edge into base Trie2 root");
+      -            }
+      -
+      -            let mut acc = Acc::new_fresh();
+      -            acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+      -            let gss_leaf = Arc::new(GSSNode::new(acc));
+                   base_gss_nodes.push(Arc::new(
+                       gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
+                   ));
+               }
        
-      -                    // for gss_root in get_roots([glr_s.active_state.stack.as_ref(), glr_s.active_state.accepted_state.as_ref()]) {
-                           for (last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
-                               for gss_root_acc in gss_root_accs {
-                                   let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
-      @@ -423,7 +421,8 @@
+               // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
+               let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
+      @@ -1313,13 +1298,14 @@
+                                       if tokens_to_push.is_empty() {
+                                           crate::debug!(4, "Trie2: No tokens to push from this source node");
+                                           continue;
                                        }
                                        crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
        
       -                                let edge_key = (0, None);
-      +                                // Deferred edge creation: (0, Some(state_id))
+      +                                // The edge from a source trie2 node to the end node is keyed by the GSS state.
       +                                let edge_key = (0, Some(last_edge.state_id));
        
                                        let mut inserter = EdgeInserter::new(
                                            src_arc.clone(),
-      @@ -1000,28 +1001,39 @@
-               Trie::special_map_grouped(
-                   initial_values_for_map,
-                   // step_fn: (current_glr_state, (k, option state ID), destinations_map)
-      -            |glr_s, (k, expected_state_id_opt ), dest_map| {
-      -                crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
-      -                let mut out_gsss = Vec::new();
-      -                let popped = glr_s.active_state.stack.popn(*k);
-      -                for popper_item in popped.iter() {
-      -                    for peek in popper_item.peek_iter() {
-      -                        let ok = if let Some(expected_state_id) = expected_state_id_opt {
-      -                            expected_state_id == &peek.edge_value().state_id
-      -                        } else {
-      -                            true
-      -                        };
-      -                        if ok {
-      -                            out_gsss.push(peek.isolated_parent());
-      +            |glr_s, (k, state_id_opt), dest_map| {
-      +                let mut out = Vec::new();
-      +                if state_id_opt.is_none() { // First hop: (k, None)
-      +                    let popped = glr_s.active_state.stack.popn(*k);
-      +                    for popper_item in popped.iter() {
-      +                        for peek in popper_item.peek_iter() {
-      +                            let revealed_state_id = peek.edge_value().state_id;
-      +                            let isolated_gss_for_path = peek.isolated_parent();
-      +
-      +                            // Now find the corresponding second-hop destination in dest_map
-      +                            for (dest_node_ptr, edge_bv) in dest_map.iter() {
-      +                                // The dest_node_ptr is an intermediate node. We need to check its children.
-      +                                if let Some(intermediate_arc) = dest_node_ptr.upgrade() {
-      +                                    let intermediate_guard = intermediate_arc.read().unwrap();
-      +                                    if let Some(final_dest_map) = intermediate_guard.children().get(&(0, Some(revealed_state_id))) {
-      +                                        for (final_dest_ptr, final_edge_bv) in final_dest_map.iter() {
-      +                                            let mut final_gss = isolated_gss_for_path.clone();
-      +                                            let combined_bv = edge_bv & final_edge_bv;
-      +                                            allow_only_llm_tokens_and_prune_arc(&mut final_gss, &combined_bv, &mut HashMap::new());
-      +
-      +                                            let mut out_glr_s = glr_s.clone();
-      +                                            out_glr_s.active_state.stack = final_gss;
-      +                                            if out_glr_s.is_ok() {
-      +                                                out.push((final_dest_ptr.clone(), out_glr_s));
-      +                                            }
-      +                                        }
-      +                                    }
-      +                                }
-      +                            }
-                               }
-                           }
-      -                }
-      -                let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
-      -                let mut out = Vec::new();
-      -                for (dst_node_wrapper, edge_bv) in dest_map.iter() {
-      -                    let mut out_gss_filtered = out_gss.clone();
-      -                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
-      -                    let mut out_glr_s = glr_s.clone();
-      -                    out_glr_s.active_state.stack = out_gss_filtered;
-      -                    if out_glr_s.is_ok() {
-      -                        out.push((dst_node_wrapper.clone(), out_glr_s));
-      -                    }
-      +                } else {
-      +                    // This case handles the initial (0, Some(state_id)) edges from precompute2 root.
-      +                    // It's a single hop, no pop needed.
-      +                    for (dst_node_wrapper, edge_bv) in dest_map.iter() {
-      +                        let mut glr_s_copy = glr_s.clone();
-      +                        allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
-      +                        if glr_s_copy.is_ok() {
-      +                            out.push((dst_node_wrapper.clone(), glr_s_copy));
-      +                        }
-      +                    }
-                       }
-                       out
-                   },
+                                           edge_key,
+                                           tokens_to_push.clone(),
+                                           |e, n| *e |= n,
+                                           |node_value, edge_value| node_value.live_tokens |= edge_value,
 
       ```
-
-      These changes should correctly implement the new trie structure and update the mask generation logic accordingly. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/trie.rs
-      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/trie.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
 
-      --- Processing Diff Block 3 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 4 ---
+      --- Processing Diff Block 2 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement deferred edge creation
-      in PrecomputeNode2 for substring parsing"'
+  - user: 'Changes committed with message: "Refactor Trie2 initialization and edge
+      creation in GSS to defer state-specific edge creation until needed."'
     metadata:
 ...
