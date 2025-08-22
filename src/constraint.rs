@@ -34,7 +34,6 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use kdam::{tqdm, BarBuilder};
-use range_set_blaze::RangeMapBlaze;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::datastructures::gss::Acc;
@@ -532,36 +531,6 @@ impl GrammarConstraint {
                     1,
                     &mut HashMap::new(),
                 );
-
-                // Before doing default reductions, disallow terminals that don't have an outgoing edge from this Trie1 node.
-                // This prunes GSS paths that are waiting for a terminal that cannot possibly follow from this point in the precomputation.
-                let all_terminals: BTreeSet<TerminalID> = parser.terminal_map.right_values().cloned().collect();
-                let allowed_terminals_from_node: BTreeSet<TerminalID> = precomputed_node_data
-                    .children()
-                    .keys()
-                    .filter_map(|k| *k)
-                    .collect();
-
-                let disallowed_terminals_set: BTreeSet<TerminalID> = all_terminals.difference(&allowed_terminals_from_node).cloned().collect();
-
-                if !disallowed_terminals_set.is_empty() {
-                    let mut disallowed_bv = TerminalBV::zeros();
-                    for tid in disallowed_terminals_set {
-                        disallowed_bv.insert(tid.0);
-                    }
-
-                    let range_map = RangeMapBlaze::from_iter(std::iter::once((0..=usize::MAX, disallowed_bv)));
-                    let disallowed_terminals_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset {
-                        inner: crate::datastructures::cache::intern_l2(range_map)
-                    };
-
-                    disallow_terminals_and_prune_arc(
-                        &mut glr_s.active_state.stack,
-                        &disallowed_terminals_l2,
-                        &mut HashMap::new(),
-                    );
-                }
-
                 let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !active_llm_tokens.is_empty();
                 if precomputed_node_data.value.end {
@@ -617,7 +586,7 @@ impl GrammarConstraint {
                         g.value.live_tokens |= added.clone();
                     }
                 }
-                glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                // glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 keep_going
             },
         );
