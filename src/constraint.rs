@@ -4,7 +4,7 @@
 use std::sync::RwLock;
 use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -586,7 +586,23 @@ impl GrammarConstraint {
                         g.value.live_tokens |= added.clone();
                     }
                 }
-                // glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+
+                let mut allowed_terminals = TerminalBV::zeros();
+                for gtid_opt in precomputed_node_data.children().keys() {
+                    if let Some(gtid) = gtid_opt {
+                        allowed_terminals.insert(gtid.0);
+                    }
+                }
+                let disallowed_terminals_bv = allowed_terminals.inverted();
+                if !disallowed_terminals_bv.is_empty() {
+                    let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                        std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                    );
+                    disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                }
+                glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                reset_terminals(&mut glr_s.active_state.stack, &mut HashMap::new());
+
                 keep_going
             },
         );

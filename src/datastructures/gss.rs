@@ -997,6 +997,24 @@ pub fn reset_llm_tokens(
     }
 }
 
+pub fn reset_terminals(
+    root_arc: &mut Arc<GSSNode>,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) {
+    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+        let mut new_acc = (*node.acc).clone();
+        let continue_recursion = new_acc.terminals_intersection != HybridL2Bitset::all();
+        new_acc.terminals_union = HybridL2Bitset::all();
+        new_acc.terminals_intersection = HybridL2Bitset::all();
+        Some((new_acc, continue_recursion))
+    };
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
+        *root_arc = new_root;
+    } else {
+        unreachable!();
+    }
+}
+
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &HybridL2Bitset,
