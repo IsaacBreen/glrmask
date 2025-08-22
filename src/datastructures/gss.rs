@@ -2049,6 +2049,13 @@ mod tests {
         let preds_map = process_predecessors(&preds);
         let parent = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), preds_map));
 
+        let (s, _) = print_gss_forest(
+            &[parent.clone()],
+            &BiBTreeMap::new(),
+            &GSSPrintConfig::default(),
+        );
+        println!("GSS Forest:\n{}", s);
+
         let popper = parent.popn(1);
         assert!(popper.paths.is_empty());
         let by_edge = popper.below_bottom.get(&1).expect("depth 1 entry missing");
