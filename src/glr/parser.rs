@@ -560,9 +560,9 @@ impl GLRParser {
 
             writeln!(f, "{}Default Action:", indent)?;
             if let Some(reduce_action) = &row.default_reduce.reduce {
-                let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
-                let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
-                writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.len, pids.join(", "))?;
+                let nt_name = self.non_terminal_map.get_by_right(&reduce_action.0.nonterminal_id).unwrap();
+                let pids: Vec<String> = reduce_action.0.production_ids.iter().map(|p| p.0.to_string()).collect();
+                writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.0.len, pids.join(", "))?;
             } else {
                 writeln!(f, "{}  - No default reduce", indent)?;
             }
@@ -1082,13 +1082,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Default reduction handling.
                                 // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                 // as if we broke the chain here, but we may still continue chaining if allowed.
-                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
+                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.0.len != 1) {
                                     out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 }
 
                                 match &def.reduce {
-                                    Some(reduce) if reduce.len == 1 => {
-                                        current_nt = reduce.nonterminal_id;
+                                    Some(reduce) if reduce.0.len == 1 => {
+                                        current_nt = reduce.0.nonterminal_id;
                                         continue;
                                     }
                                     _ => break,
@@ -1925,9 +1925,9 @@ fn default_reduce_chain(
             if let Some(goto_state_id) = goto.state_id {
                 let next_row = &parser.table[&goto_state_id];
                 if let Some(next_reduce) = &next_row.default_reduce.reduce {
-                    if next_reduce.len == 1 {
+                    if next_reduce.0.len == 1 {
                         // This is a unit reduction. Continue the chain with the new non-terminal.
-                        current_nt = next_reduce.nonterminal_id;
+                        current_nt = next_reduce.0.nonterminal_id;
                         continue; // Continue the loop
                     }
                 }
