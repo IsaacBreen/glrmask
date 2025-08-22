@@ -7,6 +7,7 @@ use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
 pub use crate::types::TerminalID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::datastructures::gss::TerminalBV;
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::time_it;
 use std::sync::Arc;
@@ -215,6 +216,7 @@ impl JSONConvertible for Reduce {
 pub struct DefaultReduce {
     pub clone_and_merge: bool, // Indicates that there are phase 1 actions to be performed here.
     pub reduce: Option<Reduce>,
+    pub eligible_terminals: TerminalBV,
 }
 
 impl JSONConvertible for DefaultReduce {
@@ -222,6 +224,7 @@ impl JSONConvertible for DefaultReduce {
         let mut obj = StdMap::new();
         obj.insert("clone_and_merge".to_string(), self.clone_and_merge.to_json());
         obj.insert("reduce".to_string(), self.reduce.to_json());
+        obj.insert("eligible_terminals".to_string(), self.eligible_terminals.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -229,6 +232,7 @@ impl JSONConvertible for DefaultReduce {
             JSONNode::Object(mut obj) => Ok(DefaultReduce {
                 clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for DefaultReduce".to_string())?)?,
                 reduce: Option::<Reduce>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?)?,
+                eligible_terminals: TerminalBV::from_json(obj.remove("eligible_terminals").ok_or_else(|| "Missing field eligible_terminals for DefaultReduce".to_string())?)?,
             }),
             _ => Err("Expected JSONNode::Object for DefaultReduce".to_string()),
         }
@@ -749,6 +753,8 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
         let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
             
+            let mut eligible_terminals_for_default = BTreeSet::new();
+
             let shifts_and_reduces_without_default = shifts_and_reduces_full.iter().filter_map(|(&tid, action)| {
                 let mut new_action = action.clone();
                 let mut was_modified = false;
@@ -757,12 +763,14 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
                         if *action_nt_id == nonterminal_id && *action_len == len => {
                         // This whole action is the promoted one, so we remove it from phase1.
+                        eligible_terminals_for_default.insert(tid);
                         return None;
                     }
                     Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
                         // Check if the promoted reduce is part of this split.
                         if let Some(nts) = reduces.get_mut(&len) {
                             if nts.remove(&nonterminal_id).is_some() {
+                                eligible_terminals_for_default.insert(tid);
                                 was_modified = true;
                                 // If this was the last NT for this length, remove the length entry.
                                 if nts.is_empty() {
@@ -784,6 +792,7 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
             let default_reduce = DefaultReduce {
                 clone_and_merge: !shifts_and_reduces_without_default.is_empty(),
                 reduce: Some(Reduce { nonterminal_id, len, production_ids }),
+                eligible_terminals: eligible_terminals_for_default.into_iter().map(|tid| tid.0).collect(),
             };
             (shifts_and_reduces_without_default, default_reduce)
         } else {
@@ -791,6 +800,7 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
             let default_reduce = DefaultReduce {
                 clone_and_merge: true,
                 reduce: None,
+                eligible_terminals: TerminalBV::zeros(),
             };
             (shifts_and_reduces_without_default, default_reduce)
         };

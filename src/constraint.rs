@@ -522,6 +522,23 @@ impl GrammarConstraint {
             // process_fn
             |precomputed_node_data, glr_s| {
                 crate::debug!(3, "Trie2: At precomputed node {:p}, processing GLR state", precomputed_node_data);
+                let outgoing_terminals_bv: TerminalBV = precomputed_node_data.children()
+                    .keys()
+                    .filter_map(|k| k.as_ref().map(|tid| tid.0))
+                    .collect();
+
+                let p = parser.unwrap();
+                let num_terminals = p.terminal_map.len();
+                let all_terminals_bv = HybridBitset::ones(num_terminals);
+                let disallowed_terminals_bv = &all_terminals_bv - &outgoing_terminals_bv;
+
+                if !disallowed_terminals_bv.is_empty() {
+                    let max_sid = tokenizer.iter_states().map(|s| s.0).max().unwrap_or(0);
+                    let range_set = range_set_blaze::RangeSetBlaze::from_iter([(0..=max_sid, disallowed_terminals_bv)]);
+                    let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset { inner: crate::datastructures::cache::intern_l2(range_set) };
+                    disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                }
+
                 // Dump precomputed2
                 // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
                 // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
@@ -586,7 +603,7 @@ impl GrammarConstraint {
                         g.value.live_tokens |= added.clone();
                     }
                 }
-                // glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: Some(1000), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 keep_going
             },
         );
