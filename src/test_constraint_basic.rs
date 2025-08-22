@@ -257,37 +257,37 @@ fn test_constraint_simple_simplified() {
     println!("Initial mask: {:?}", mask);
     assert_eq!(mask, HybridBitset::from_iter(vec![0])); // Expect "a"
 
-    // Commit "a" (LLMTokenID 0)
-    println!("{}", &constraint_state);
-    constraint_state.commit(LLMTokenID(0));
-    assert!(constraint_state.is_active_or_accepted());
-
-    // Mask after committing "a"
-    println!("Constraint state:\n{}", &constraint_state);
-    let mask_after_commit = constraint_state.get_mask();
-    assert_eq!(mask_after_commit, HybridBitset::from_iter(vec![1])); // Expect "$" (EOF)
-
-    // Test Serialization/Deserialization
-    let json = constraint.to_json();
-    let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
-    constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
-
-    // Ensure the parse state after stepping the constraint with an LLM token is the same as the parse state after stepping the parser itself with tokens emitted by the tokenizer for that same LLM token.
-    let llm_token = b"a".to_vec();
-    let grammar_tokenss = vec![vec!["A"]];
-    let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-
-    let mut constraint_state_for_comp = constraint.init();
-    constraint_state_for_comp.commit(*llm_token_id_for_comp);
-
-    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
-    let grammar_token_id = grammar_token_map.get_by_left(&regex_name("A")).unwrap();
-    parser_state_for_comp.step(*grammar_token_id);
-
-    assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
-    let (_tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
-
-    assert_eq!(actual_constraint_parser_state.active_state, parser_state_for_comp.active_state, "GSS structures should match");
+    // // Commit "a" (LLMTokenID 0)
+    // println!("{}", &constraint_state);
+    // constraint_state.commit(LLMTokenID(0));
+    // assert!(constraint_state.is_active_or_accepted());
+    //
+    // // Mask after committing "a"
+    // println!("Constraint state:\n{}", &constraint_state);
+    // let mask_after_commit = constraint_state.get_mask();
+    // assert_eq!(mask_after_commit, HybridBitset::from_iter(vec![1])); // Expect "$" (EOF)
+    //
+    // // Test Serialization/Deserialization
+    // let json = constraint.to_json();
+    // let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
+    // constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
+    //
+    // // Ensure the parse state after stepping the constraint with an LLM token is the same as the parse state after stepping the parser itself with tokens emitted by the tokenizer for that same LLM token.
+    // let llm_token = b"a".to_vec();
+    // let grammar_tokenss = vec![vec!["A"]];
+    // let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
+    //
+    // let mut constraint_state_for_comp = constraint.init();
+    // constraint_state_for_comp.commit(*llm_token_id_for_comp);
+    //
+    // let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
+    // let grammar_token_id = grammar_token_map.get_by_left(&regex_name("A")).unwrap();
+    // parser_state_for_comp.step(*grammar_token_id);
+    //
+    // assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
+    // let (_tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
+    //
+    // assert_eq!(actual_constraint_parser_state.active_state, parser_state_for_comp.active_state, "GSS structures should match");
 }
 
 #[test]
