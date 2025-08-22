@@ -2430,6 +2430,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Done computing mask");
         let t1 = std::time::Instant::now();
         println!("get_mask took: {:>15?}", t1.duration_since(t0));
+        println!("after special_map: {:>15?}", t1.duration_since(t0));
 
         final_mask_mapped
     }
@@ -2593,6 +2594,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Done main part of get_mask");
         let t1 = std::time::Instant::now();
         println!("get_mask took: {:>15?}", t1.duration_since(t0));
+        println!("after special_map: {:>15?}", t1.duration_since(t0));
 
         crate::profiler::print_summary_flat();
 
