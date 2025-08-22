@@ -1264,7 +1264,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
                                     tokens_to_push = &source_live & &acc.llm_tokens_union;
                                     if tokens_to_push.is_empty() { continue; }
-                                    });
 
                                     inserter = EdgeInserter::new(
                                         source_arc.clone(),
@@ -1274,6 +1273,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         |node_value, edge_value| {},
                                         |ev, t| *ev &= &t.live_tokens,
                                     );
+                                    });
 
                                     timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1.3: Below-bottom reduction goto processing", {
                                     if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
