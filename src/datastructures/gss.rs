@@ -201,7 +201,6 @@ pub struct GSSPopper {
     /// Key is the number of extra pops beyond reaching the bottom (0 means exactly at bottom),
     /// and the value is the combined Acc for all paths that resulted in that depth.
     /// Multiple contributions to the same depth are merged via Acc::merge.
-    pub(crate) below_bottom: BTreeMap<usize, Arc<Acc>>,
     pub(crate) below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
 }
 
@@ -1306,7 +1305,7 @@ pub fn deep_clone_gss_with_trie2_map(
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, Arc<Acc>> {
     let mut queue: BTreeMap<MaxDepth, BTreeMap<*const GSSNode, Arc<Acc>>> = BTreeMap::new();
-    let mut found_roots = BTreeMap::new();
+    let mut found_roots: BTreeMap<ParseStateEdgeContent, Arc<Acc>> = BTreeMap::new();
 
     for node in nodes {
         let node_ptr = node as *const GSSNode;
@@ -1986,7 +1985,7 @@ mod tests {
         popper.popn(2);
         assert!(popper.below_bottom.get(&1).is_none());
         let acc2 = popper.below_bottom.get(&3).unwrap().values().next().unwrap().clone();
-        assert_eq!(*acc0, **acc2);
+        assert_eq!(*acc0, *acc2);
     }
 
     #[test]
