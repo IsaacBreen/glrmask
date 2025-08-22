@@ -1103,6 +1103,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 if !gotos_for_nt.is_empty() {
                     let below_bottom = popper.below_bottom;
 
+                    // For each below_bottom entry, push an edge (0, Some(pre_pop_edge_content)) from each trie2 node
+
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
