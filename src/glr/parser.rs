@@ -560,9 +560,9 @@ impl GLRParser {
 
             writeln!(f, "{}Default Action:", indent)?;
             if let Some(reduce_action) = &row.default_reduce.reduce {
-                let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
-                let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
-                writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.len, pids.join(", "))?;
+                let nt_name = self.non_terminal_map.get_by_right(&reduce_action.0.nonterminal_id).unwrap();
+                let pids: Vec<String> = reduce_action.0.production_ids.iter().map(|p| p.0.to_string()).collect();
+                writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.0.len, pids.join(", "))?;
             } else {
                 writeln!(f, "{}  - No default reduce", indent)?;
             }
@@ -906,33 +906,61 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
 
                             // 2) If there's a reduction in the default, do it like a normal reduce.
-                            if let Some(reduce) = &default_reduce.reduce {
-                                for peek in GSSNode::peek_iter(&state.stack) {
-                                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
-                                        &peek,
-                                        reduce.nonterminal_id,
-                                        reduce.len,
-                                        &action_selector,
-                                        config,
-                                    );
-                                    if !s_new_arc.is_empty() {
-                                        let new_parse_state = ParseState {
-                                            stack: s_new_arc,
-                                            accepted_state: state.accepted_state.clone(),
-                                        };
-                                        if let Some(ref mut r_map) = reduce_map {
-                                            Self::enqueue(r_map, new_parse_state);
-                                        } else {
-                                            Self::enqueue(work_map, new_parse_state);
-                                        }
+                            if let Some((reduce, allowed_terminals)) = &default_reduce.reduce {
+                                let mut constrained_state = state.clone();
+
+                                // Check if any allowed terminals are possible from the current GSS state.
+                                let mut can_proceed = false;
+                                for (_, l2_bitset) in constrained_state.stack.acc.terminals_union.range_values() {
+                                    if !(&*l2_bitset & allowed_terminals).is_empty() {
+                                        can_proceed = true;
+                                        break;
                                     }
-                                    if !accepted_s_new_arc.is_empty() {
-                                        self.accepted = true;
-                                        let accepted_parse_state = ParseState {
-                                            stack: Arc::new(GSSNode::new_fresh()),
-                                            accepted_state: accepted_s_new_arc,
-                                        };
-                                        accepted_states_todo.push_back(accepted_parse_state);
+                                }
+
+                                if can_proceed {
+                                    let disallowed_terminals_bv = allowed_terminals.inverted();
+                                    if !disallowed_terminals_bv.is_empty() {
+                                        let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                                            std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                                        );
+
+                                        crate::datastructures::gss::disallow_terminals_and_prune_arc(
+                                            &mut constrained_state.stack,
+                                            &disallowed_l2,
+                                            &mut HashMap::new(),
+                                        );
+                                    }
+
+                                    if !constrained_state.stack.is_empty() {
+                                        for peek in GSSNode::peek_iter(&constrained_state.stack) {
+                                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
+                                                &peek,
+                                                reduce.nonterminal_id,
+                                                reduce.len,
+                                                &action_selector,
+                                                config,
+                                            );
+                                            if !s_new_arc.is_empty() {
+                                                let new_parse_state = ParseState {
+                                                    stack: s_new_arc,
+                                                    accepted_state: state.accepted_state.clone(),
+                                                };
+                                                if let Some(ref mut r_map) = reduce_map {
+                                                    Self::enqueue(r_map, new_parse_state);
+                                                } else {
+                                                    Self::enqueue(work_map, new_parse_state);
+                                                }
+                                            }
+                                            if !accepted_s_new_arc.is_empty() {
+                                                self.accepted = true;
+                                                let accepted_parse_state = ParseState {
+                                                    stack: Arc::new(GSSNode::new_fresh()),
+                                                    accepted_state: accepted_s_new_arc,
+                                                };
+                                                accepted_states_todo.push_back(accepted_parse_state);
+                                            }
+                                        }
                                     }
                                 }
                             } else {
@@ -1046,13 +1074,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Default reduction handling.
                                 // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
                                 // as if we broke the chain here, but we may still continue chaining if allowed.
-                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
+                                if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.0.len != 1) {
                                     out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
                                 }
 
                                 match &def.reduce {
-                                    Some(reduce) if reduce.len == 1 => {
-                                        current_nt = reduce.nonterminal_id;
+                                    Some(reduce) if reduce.0.len == 1 => {
+                                        current_nt = reduce.0.nonterminal_id;
                                         continue;
                                     }
                                     _ => break,
@@ -1888,9 +1916,9 @@ fn default_reduce_chain(
             if let Some(goto_state_id) = goto.state_id {
                 let next_row = &parser.table[&goto_state_id];
                 if let Some(next_reduce) = &next_row.default_reduce.reduce {
-                    if next_reduce.len == 1 {
+                    if next_reduce.0.len == 1 {
                         // This is a unit reduction. Continue the chain with the new non-terminal.
-                        current_nt = next_reduce.nonterminal_id;
+                        current_nt = next_reduce.0.nonterminal_id;
                         continue; // Continue the loop
                     }
                 }
