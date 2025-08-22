@@ -1161,15 +1161,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         let mut accepted_stacks = Vec::new();
                         for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
                             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                            let mut used_dests = BTreeSet::new();
                             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                             let active_llm_tokens = acc.union_llm_tokens();
                             for goto_info in &accepting_gotos {
                                 let edge_key = (*k, Some(goto_info.source_state_id));
                                 // let edge_key = (*k, None);
+                                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                                let mut used_dests = BTreeSet::new();
+
                                 for existing_trie2_node in &trie2_nodes {
                                     let source_arc = existing_trie2_node.as_arc().clone();
-                                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                     let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
                                     let tokens_to_push = &source_live & &active_llm_tokens;
                                     if tokens_to_push.is_empty() { continue; }
