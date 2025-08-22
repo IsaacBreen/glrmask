@@ -1120,7 +1120,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         let mut accepted_stacks = Vec::new();
-                        for (k, acc_arc) in popper.below_bottom.iter() {
+                        for (k, edge_map) in popper.below_bottom.iter() { for acc_arc in edge_map.values() {
                             let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                             let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
@@ -1183,7 +1183,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                 accepted_stacks.push(Arc::new(new_gss1));
                             }
-                        }
+                        }}
                         let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
                         accepted_out.push(merged_accepted);
                     }
@@ -1195,7 +1195,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, acc_arc) in popper.below_bottom {
+                    for (k, edge_map) in popper.below_bottom { for acc_arc in edge_map.into_values() {
                         let mut acc: Acc = acc_arc.as_ref().clone();
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
@@ -1327,7 +1327,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 });
                             }
                         }
-                    }
+                    }}
                     let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
                         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
                             GSSNode::merge_many_with_depth(usize::MAX, below_zero)
