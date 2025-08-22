@@ -727,7 +727,7 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
@@ -739,6 +739,17 @@ pub struct GLRParserState<'a> { // No longer generic
         Arc<RwLock<PrecomputeNode2>>,
     >,
 }
+
+impl PartialEq for GLRParserState<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.parser as *const GLRParser == other.parser as *const GLRParser &&
+        self.active_state == other.active_state &&
+        self.accepted == other.accepted &&
+        self.phase == other.phase
+        // Note: below_bottom_cache and trie2_edge_cache are not considered for equality
+    }
+}
+impl Eq for GLRParserState<'_> {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BelowBottomCacheKey {
