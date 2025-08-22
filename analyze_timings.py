@@ -123,7 +123,7 @@ def main():
             commit_time = parse_duration(m_commit.group(1))
             
         special_map_time = None
-        m_after_special_map = re.search(r"(after special_map|get_mask took):\s*(.*?)\n", token_log)
+        m_after_special_map = re.search(r"after special_map:\s*(.*?)\n", token_log)
         m_initial_values = re.search(r"after initial_values_for_map:\s*(.*?)\n", token_log)
 
         if m_after_special_map and m_initial_values:
