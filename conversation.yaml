@@ -16065,26 +16065,26 @@ local_system:
           }
       }
 
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct SubstringGotos {
-          pub accepting_sources: Vec<StateID>,
-          pub gotos_by_dest: BTreeMap<StateID, Vec<StateID>>,
+      #[derive(Debug, Default, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      pub struct SubstringGoto {
+          pub accepting_sources: BTreeSet<StateID>,
+          pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
       }
 
-      impl JSONConvertible for SubstringGotos {
+      impl JSONConvertible for SubstringGoto {
           fn to_json(&self) -> JSONNode {
               let mut obj = StdMap::new();
               obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
-              obj.insert("gotos_by_dest".to_string(), self.gotos_by_dest.to_json());
+              obj.insert("gotos".to_string(), self.gotos.to_json());
               JSONNode::Object(obj)
           }
           fn from_json(node: JSONNode) -> Result<Self, String> {
               match node {
-                  JSONNode::Object(mut obj) => Ok(SubstringGotos {
-                      accepting_sources: Vec::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGotos".to_string())?)?,
-                      gotos_by_dest: BTreeMap::<StateID, Vec<StateID>>::from_json(obj.remove("gotos_by_dest").ok_or_else(|| "Missing field gotos_by_dest for SubstringGotos".to_string())?)?,
+                  JSONNode::Object(mut obj) => Ok(SubstringGoto {
+                      accepting_sources: BTreeSet::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?)?,
+                      gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?)?,
                   }),
-                  _ => Err("Expected JSONNode::Object for SubstringGotos".to_string()),
+                  _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
               }
           }
       }
@@ -16723,34 +16723,30 @@ local_system:
       pub fn stage_9(
           table: &Table,
           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-      ) -> BTreeMap<NonTerminalID, SubstringGotos> {
+      ) -> BTreeMap<NonTerminalID, SubstringGoto> {
           let mut substring_gotos = BTreeMap::new();
 
           let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
 
           for &nt_id in &all_nt_ids {
-              let mut accepting_sources = Vec::new();
-              let mut gotos_by_dest: BTreeMap<StateID, Vec<StateID>> = BTreeMap::new();
+              let mut accepting_sources = BTreeSet::new();
+              let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
 
               for (&source_state_id, row) in table {
                   if let Some(goto) = row.gotos.get(&nt_id) {
                       if goto.accept {
-                          accepting_sources.push(source_state_id);
+                          accepting_sources.insert(source_state_id);
                       }
                       if let Some(goto_state_id) = goto.state_id {
-                          gotos_by_dest.entry(goto_state_id).or_default().push(source_state_id);
+                          gotos.entry(goto_state_id).or_default().insert(source_state_id);
                       }
                   }
               }
 
-              if !accepting_sources.is_empty() || !gotos_by_dest.is_empty() {
-                  accepting_sources.sort();
-                  for sources in gotos_by_dest.values_mut() {
-                      sources.sort();
-                  }
-                  substring_gotos.insert(nt_id, SubstringGotos {
+              if !accepting_sources.is_empty() || !gotos.is_empty() {
+                  substring_gotos.insert(nt_id, SubstringGoto {
                       accepting_sources,
-                      gotos_by_dest,
+                      gotos,
                   });
               }
           }
@@ -17045,7 +17041,7 @@ local_system:
       use crate::tokenizer::LLMTokenID;
       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGotos};
+      use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGoto};
       use crate::constraint::LLMVocab; // Import LLMTokenInfo
 
       use bimap::BiBTreeMap;
@@ -17260,7 +17256,7 @@ local_system:
           pub everything_state_id: StateID,
           pub ignore_terminal_id: Option<TerminalID>,
           // Precomputed tables for substring parsing reductions.
-          pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGotos>,
+          pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
       }
 
       impl JSONConvertible for GLRParser {
@@ -17365,7 +17361,7 @@ local_system:
               everything_state_id: StateID,
               actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
               ignore_terminal_id: Option<TerminalID>,
-              substring_gotos: BTreeMap<NonTerminalID, SubstringGotos>,
+              substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
           ) -> Self {
               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
                   .into_iter()
@@ -17734,20 +17730,24 @@ local_system:
                   let mut sorted_substring_gotos: Vec<_> = self.substring_gotos.iter().collect();
                   sorted_substring_gotos.sort_by_key(|(nt_id, _)| self.non_terminal_map.get_by_right(nt_id).unwrap());
 
-                  for (nt_id, gotos_info) in sorted_substring_gotos {
+                  for (nt_id, gotos) in sorted_substring_gotos {
                       let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
                       writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
-
-                      if !gotos_info.accepting_sources.is_empty() {
-                          let sources_str: Vec<_> = gotos_info.accepting_sources.iter().map(|s| s.0.to_string()).collect();
-                          writeln!(f, "    - Accept from sources: [{}]", sources_str.join(", "))?;
+                      if !gotos.accepting_sources.is_empty() {
+                          let sources: Vec<String> = gotos.accepting_sources.iter().map(|s| s.0.to_string()).collect();
+                          writeln!(f, "    - accepting sources: [{}]", sources.join(", "))?;
                       }
+                      let mut sorted_gotos_by_dest: Vec<_> = gotos.gotos.iter().collect();
+                      sorted_gotos_by_dest.sort_by_key(|(k, _)| *k);
 
-                      let mut sorted_gotos_by_dest: Vec<_> = gotos_info.gotos_by_dest.iter().collect();
-                      sorted_gotos_by_dest.sort_by_key(|(dest_id, _)| *dest_id);
-                      for (dest_id, source_ids) in sorted_gotos_by_dest {
-                          let sources_str: Vec<_> = source_ids.iter().map(|s| s.0.to_string()).collect();
-                          writeln!(f, "    - GOTO {}: from sources [{}]", dest_id.0, sources_str.join(", "))?;
+                      for (goto_id, source_ids) in sorted_gotos_by_dest {
+                          let sources: Vec<String> = source_ids.iter().map(|s| s.0.to_string()).collect();
+                          writeln!(
+                              f,
+                              "    - goto: {:<4} from sources: [{}]",
+                              goto_id.0,
+                              sources.join(", ")
+                          )?;
                       }
                   }
               }
@@ -18126,14 +18126,16 @@ local_system:
               // accumulated along these paths to create a new virtual root to push onto.
               // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
               timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
-              if any_below_bottom { // ...
+              let mut gotos_for_nt_storage = SubstringGoto::default();
+              let empty_substring_goto = SubstringGoto::default();
+              if any_below_bottom {
                   let mut below_bottom_integrated: BTreeMap<usize, Acc> = BTreeMap::new();
                   for (k, accs_by_edge) in popper.below_bottom.iter() {
                       for (last_edge_content, acc_arc) in accs_by_edge {
                           let acc = acc_arc.as_ref();
                           let state_id_edge_key = (0, Some(last_edge_content.state_id));
 
-                          let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new(); // ...
+                          let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                           let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
                           for existing_trie2_node in &acc.trie2_nodes {
@@ -18167,71 +18169,67 @@ local_system:
                       }
                   }
 
-                      let gotos_for_nt_storage; // To hold the struct for ContinueFromEverything
-                      let gotos_for_nt: Option<&SubstringGotos> = match config.below_bottom_mode {
+                      let gotos_for_nt: &SubstringGoto = match config.below_bottom_mode {
                           BelowBottomReductionMode::ContinueFromAll => {
                               crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromAll", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-                              self.parser.substring_gotos.get(&nt)
+                              self.parser.substring_gotos.get(&nt).unwrap_or(&empty_substring_goto)
                           }
                           BelowBottomReductionMode::ContinueFromEverything => {
                               crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromEverything", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
                               let everything_state_id = self.parser.everything_state_id;
                               if let Some(goto) = self.parser.table.get(&everything_state_id).and_then(|row| row.gotos.get(&nt)) {
-                                  let mut gotos_by_dest = BTreeMap::new();
-                                  if let Some(goto_state_id) = goto.state_id {
-                                      gotos_by_dest.insert(goto_state_id, vec![everything_state_id]);
+                                  let mut compacted = SubstringGoto::default();
+                                  if goto.accept {
+                                      compacted.accepting_sources.insert(everything_state_id);
                                   }
-                                  let accepting_sources = if goto.accept { vec![everything_state_id] } else { vec![] };
-
-                                  gotos_for_nt_storage = Some(SubstringGotos {
-                                      accepting_sources,
-                                      gotos_by_dest,
-                                  });
-                                  gotos_for_nt_storage.as_ref()
+                                  if let Some(goto_state_id) = goto.state_id {
+                                      compacted.gotos.insert(goto_state_id, BTreeSet::from([everything_state_id]));
+                                  }
+                                  gotos_for_nt_storage = compacted;
+                                  &gotos_for_nt_storage
                               } else {
-                                  None
+                                  &empty_substring_goto
                               }
                           }
                           BelowBottomReductionMode::Fail => {
                               crate::debug!(5, "Popped below bottom, failing these parse paths.");
-                              None // None will cause the loop to be skipped.
+                              &empty_substring_goto
                           }
                           BelowBottomReductionMode::Panic => {
                               panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
                           }
                       };
 
-                      if let Some(gotos_for_nt) = gotos_for_nt {
-                          let num_total = gotos_for_nt.gotos_by_dest.values().map(|v| v.len()).sum::<usize>();
-                          let num_with_goto_state = num_total;
-                          let num_without_goto_state = 0;
-                          let num_unique_destinations = gotos_for_nt.gotos_by_dest.len();
-                          let num_shared_destinations = gotos_for_nt.gotos_by_dest.values().filter(|v| v.len() > 1).count();
-                          let num_with_action = gotos_for_nt.gotos_by_dest.keys().filter(|sid| {
-                              self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
-                          }).count();
+                      let num_total_gotos = gotos_for_nt.gotos.values().map(|s| s.len()).sum::<usize>();
+                      let num_accepting_sources = gotos_for_nt.accepting_sources.len();
+                      let num_unique_destinations = gotos_for_nt.gotos.len();
+                      let num_shared_destinations = gotos_for_nt.gotos.values().filter(|s| s.len() > 1).count();
 
-                          println!(
-                              "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total {}): with_state={}, without_state={}, unique_dests={}, shared_dests={}, with_action={}",
-                              self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
-                              len,
-                              num_total,
-                              num_with_goto_state,
-                              num_without_goto_state,
-                              num_unique_destinations,
-                              num_shared_destinations,
-                              num_with_action
-                          );
+                      let num_with_action = gotos_for_nt.gotos.keys().filter(|sid| {
+                          self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
+                      }).count();
 
+                      println!(
+                          "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total gotos {}, accepting sources {}): unique_dests={}, shared_dests={}, with_action={}",
+                          self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
+                          len,
+                          num_total_gotos,
+                          num_accepting_sources,
+                          num_unique_destinations,
+                          num_shared_destinations,
+                          num_with_action
+                      );
+                      if !gotos_for_nt.accepting_sources.is_empty() || !gotos_for_nt.gotos.is_empty() {
                           timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
-                          if !gotos_for_nt.accepting_sources.is_empty() {
+                          let accepting_sources = &gotos_for_nt.accepting_sources;
+                          if !accepting_sources.is_empty() {
                               let mut accepted_stacks = Vec::new();
                               for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
                                   let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                                   let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                                   let active_llm_tokens = acc.union_llm_tokens();
-                                  for &source_state_id in &gotos_for_nt.accepting_sources {
-                                      let edge_key = (*k, Some(source_state_id));
+                                  for source_state_id in accepting_sources {
+                                      let edge_key = (*k, Some(*source_state_id));
                                       // let edge_key = (*k, None);
                                       let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                       let mut used_dests = BTreeSet::new();
@@ -18285,7 +18283,7 @@ local_system:
                                       let mut acc2 = acc.clone();
                                       acc2.trie2_nodes = used_dests.clone();
                                       let new_gss0 = GSSNode::new(acc2);
-                                      let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: source_state_id });
+                                      let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                                       accepted_stacks.push(Arc::new(new_gss1));
                                   }
                               }
@@ -18302,21 +18300,22 @@ local_system:
                           for (k, mut acc) in below_bottom_integrated {
                               let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                               timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
-                              for (&goto_state_id, source_state_ids) in &gotos_for_nt.gotos_by_dest {
-                                  for &source_state_id in source_state_ids {
+                              for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
+                                  for source_state_id in source_state_ids {
                                       // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                                       let cache_key = BelowBottomCacheKey {
                                           nonterminal_id: nt,
-                                          source_state_id: source_state_id,
+                                          source_state_id: *source_state_id,
                                           // acc: acc.clone(),
                                       };
+
                                       let edge_key = (k, None);
                                       let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                       let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
                                       timeit!("GLRParserState::reduce_and_goto::BLOCK_1: Below-bottom reduction goto processing", {
                                       let new_trie2_node = trie2_dst_nodes
-                                          .entry(source_state_id)
+                                          .entry(*source_state_id)
                                           .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
                                           .clone();
 
@@ -18422,8 +18421,8 @@ local_system:
                                           let mut acc2 = acc.clone();
                                           acc2.trie2_nodes = used_dests.clone();
                                           let new_gss0 = GSSNode::new(acc2);
-                                          let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: source_state_id });
-                                          let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+                                          let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                                          let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
                                           below_zero.push(Arc::new(new_gss2));
                                       }
                                       });
@@ -18436,7 +18435,7 @@ local_system:
                           })
                           });
                           out.push(merged);});
-                      } // end if let Some(gotos_for_nt)
+                      }
                   }
                   });
 
@@ -28477,71 +28476,69 @@ messages:
       Then modify `reduce_and_goto` accordingly.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary changes to optimize the `substring_gotos` structure. This involves refactoring how these transitions are stored and updating the parser logic to leverage the new, more efficient format. Here are the git diff patches for the modified files.
+      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary changes to optimize the `substring_gotos` structure. Here are the git diff patches for the modified files.
 
       ### `src/glr/table.rs`
 
-      I've replaced the `SubstringGoto` struct with a new `SubstringGotos` struct that groups source states by their destination. This reduces redundancy in the stored data. The `stage_9` function, which computes these gotos, has been updated accordingly.
+      I've updated the `SubstringGoto` struct to group source states by their destination, which will improve performance and reduce memory usage. The `stage_9` function has been modified to generate this new compacted structure.
 
       ```diff
       --- a/src/glr/table.rs
       +++ b/src/glr/table.rs
-      @@ -100,30 +100,32 @@
+      @@ -107,26 +107,29 @@
+           }
        }
        
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      -pub struct SubstringGoto {
+      -#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      +#[derive(Debug, Default, Clone, Eq, Ord, PartialEq, PartialOrd)]
+       pub struct SubstringGoto {
       -    pub source_state_id: StateID,
       -    pub goto_state_id: Option<StateID>,
       -    pub accept: bool,
-      +pub struct SubstringGotos {
-      +    pub accepting_sources: Vec<StateID>,
-      +    pub gotos_by_dest: BTreeMap<StateID, Vec<StateID>>,
+      +    pub accepting_sources: BTreeSet<StateID>,
+      +    pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
        }
        
-      -impl JSONConvertible for SubstringGoto {
-      +impl JSONConvertible for SubstringGotos {
+       impl JSONConvertible for SubstringGoto {
            fn to_json(&self) -> JSONNode {
                let mut obj = StdMap::new();
       -        obj.insert("source_state_id".to_string(), self.source_state_id.to_json());
       -        obj.insert("goto_state_id".to_string(), self.goto_state_id.to_json());
       -        obj.insert("accept".to_string(), self.accept.to_json());
       +        obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
-      +        obj.insert("gotos_by_dest".to_string(), self.gotos_by_dest.to_json());
+      +        obj.insert("gotos".to_string(), self.gotos.to_json());
                JSONNode::Object(obj)
            }
            fn from_json(node: JSONNode) -> Result<Self, String> {
                match node {
-      -            JSONNode::Object(mut obj) => Ok(SubstringGoto {
+                   JSONNode::Object(mut obj) => Ok(SubstringGoto {
       -                source_state_id: StateID::from_json(obj.remove("source_state_id").ok_or_else(|| "Missing field source_state_id for SubstringGoto".to_string())?)?,
       -                goto_state_id: Option::<StateID>::from_json(obj.remove("goto_state_id").ok_or_else(|| "Missing field goto_state_id for SubstringGoto".to_string())?)?,
       -                accept: bool::from_json(obj.remove("accept").ok_or_else(|| "Missing field accept for SubstringGoto".to_string())?)?,
-      +            JSONNode::Object(mut obj) => Ok(SubstringGotos {
-      +                accepting_sources: Vec::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGotos".to_string())?)?,
-      +                gotos_by_dest: BTreeMap::<StateID, Vec<StateID>>::from_json(obj.remove("gotos_by_dest").ok_or_else(|| "Missing field gotos_by_dest for SubstringGotos".to_string())?)?,
+      +                accepting_sources: BTreeSet::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?)?,
+      +                gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?)?,
                    }),
-      -            _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
-      +            _ => Err("Expected JSONNode::Object for SubstringGotos".to_string()),
+                   _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
                }
            }
        }
        
        pub type ShiftsAndReducesWithoutDefaultReduce = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
        pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
-      @@ -490,30 +492,35 @@
+      @@ -520,31 +523,34 @@
        pub fn stage_9(
            table: &Table,
            non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
       -) -> BTreeMap<NonTerminalID, Vec<SubstringGoto>> {
-      +) -> BTreeMap<NonTerminalID, SubstringGotos> {
+      +) -> BTreeMap<NonTerminalID, SubstringGoto> {
            let mut substring_gotos = BTreeMap::new();
        
            let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
        
            for &nt_id in &all_nt_ids {
       -        let mut gotos_for_nt = Vec::new();
-      +        let mut accepting_sources = Vec::new();
-      +        let mut gotos_by_dest: BTreeMap<StateID, Vec<StateID>> = BTreeMap::new();
+      +        let mut accepting_sources = BTreeSet::new();
+      +        let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
       +
                for (&source_state_id, row) in table {
                    if let Some(goto) = row.gotos.get(&nt_id) {
@@ -28551,122 +28548,121 @@ messages:
       -                        goto_state_id: goto.state_id,
       -                        accept: goto.accept,
       -                    });
-      +                if goto.accept {
-      +                    accepting_sources.push(source_state_id);
-      +                }
-      +                if let Some(goto_state_id) = goto.state_id {
-      +                    gotos_by_dest.entry(goto_state_id).or_default().push(source_state_id);
-                       }
-                   }
-               }
-       
+      -                }
+      -            }
+      -        }
+      -
       -        if !gotos_for_nt.is_empty() {
       -            substring_gotos.insert(nt_id, gotos_for_nt);
-      +        if !accepting_sources.is_empty() || !gotos_by_dest.is_empty() {
-      +            accepting_sources.sort();
-      +            for sources in gotos_by_dest.values_mut() {
-      +                sources.sort();
+      +                if goto.accept {
+      +                    accepting_sources.insert(source_state_id);
+      +                }
+      +                if let Some(goto_state_id) = goto.state_id {
+      +                    gotos.entry(goto_state_id).or_default().insert(source_state_id);
+      +                }
       +            }
-      +            substring_gotos.insert(nt_id, SubstringGotos {
+      +        }
+      +
+      +        if !accepting_sources.is_empty() || !gotos.is_empty() {
+      +            substring_gotos.insert(nt_id, SubstringGoto {
       +                accepting_sources,
-      +                gotos_by_dest,
+      +                gotos,
       +            });
                }
            }
        
+           substring_gotos
+       }
+       
+       /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
 
       ```
 
       ### `src/glr/parser.rs`
 
-      Here, I've updated the `GLRParser` struct and the `reduce_and_goto` function to work with the new `SubstringGotos` structure. The logic for handling reductions that pop below the stack is now more efficient, as it iterates over the grouped source states. I've also improved the `Display` implementation for `GLRParser` to provide a clearer printout of the new structure.
+      Here, I've updated the `GLRParser` struct and its methods, particularly `reduce_and_goto`, to work with the new `SubstringGoto` structure. This change enables more efficient handling of reductions that pop below the stack during substring parsing.
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -4,7 +4,7 @@
-       use crate::tokenizer::LLMTokenID;
-       use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      -use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGoto};
-      +use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGotos};
-       use crate::constraint::LLMVocab; // Import LLMTokenInfo
-       
-       use bimap::BiBTreeMap;
-      @@ -161,7 +161,7 @@
+      @@ -204,7 +204,7 @@
            pub start_state_id: StateID,
            pub everything_state_id: StateID,
            pub ignore_terminal_id: Option<TerminalID>,
            // Precomputed tables for substring parsing reductions.
       -    pub(crate) substring_gotos: BTreeMap<NonTerminalID, Vec<SubstringGoto>>,
-      +    pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGotos>,
+      +    pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
        }
        
        impl JSONConvertible for GLRParser {
-      @@ -236,7 +236,7 @@
+      @@ -268,7 +268,7 @@
                everything_state_id: StateID,
                actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
                ignore_terminal_id: Option<TerminalID>,
       -        substring_gotos: BTreeMap<NonTerminalID, Vec<SubstringGoto>>,
-      +        substring_gotos: BTreeMap<NonTerminalID, SubstringGotos>,
+      +        substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
            ) -> Self {
                let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
                    .into_iter()
-      @@ -478,24 +478,28 @@
+      @@ -299,7 +299,7 @@
+               self.start_state_id == other.start_state_id &&
+               self.everything_state_id == other.everything_state_id &&
+               self.ignore_terminal_id == other.ignore_terminal_id &&
+      -        self.substring_gotos == other.substring_gotos
+      +        self.substring_gotos == other.substring_gotos
+           }
+       }
+       
+      @@ -481,13 +481,19 @@
+                   for (nt_id, gotos) in sorted_substring_gotos {
+                       let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
+                       writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
+      -
+      -                let mut sorted_gotos = gotos.clone();
+      -                sorted_gotos.sort(); // SubstringGoto derives Ord
+      -
+      -                for goto_info in &sorted_gotos {
+      -                    let goto_str = goto_info.goto_state_id.map_or("None".to_string(), |sid| sid.0.to_string());
+      -                    writeln!(f, "    - source: {:<3} -> goto: {:<4} accept: {}",
+      -                        goto_info.source_state_id.0, goto_str, goto_info.accept)?;
+      +                if !gotos.accepting_sources.is_empty() {
+      +                    let sources: Vec<String> = gotos.accepting_sources.iter().map(|s| s.0.to_string()).collect();
+      +                    writeln!(f, "    - accepting sources: [{}]", sources.join(", "))?;
+      +                }
+      +                let mut sorted_gotos_by_dest: Vec<_> = gotos.gotos.iter().collect();
+      +                sorted_gotos_by_dest.sort_by_key(|(k, _)| *k);
+      +
+      +                for (goto_id, source_ids) in sorted_gotos_by_dest {
+      +                    let sources: Vec<String> = source_ids.iter().map(|s| s.0.to_string()).collect();
+      +                    writeln!(
+      +                        f,
+      +                        "    - goto: {:<4} from sources: [{}]",
+      +                        goto_id.0,
+      +                        sources.join(", ")
+      +                    )?;
+                       }
+                   }
+               }
+      @@ -743,6 +749,8 @@
                // accumulated along these paths to create a new virtual root to push onto.
                // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
                timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
-      -        if any_below_bottom {
-      +        if any_below_bottom { // ...
+      +        let mut gotos_for_nt_storage = SubstringGoto::default();
+      +        let empty_substring_goto = SubstringGoto::default();
+               if any_below_bottom {
                    let mut below_bottom_integrated: BTreeMap<usize, Acc> = BTreeMap::new();
                    for (k, accs_by_edge) in popper.below_bottom.iter() {
-                       for (last_edge_content, acc_arc) in accs_by_edge {
-                           let acc = acc_arc.as_ref();
-                           let state_id_edge_key = (0, Some(last_edge_content.state_id));
-       
-      -                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-      +                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new(); // ...
-                           let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-       
-                           for existing_trie2_node in &acc.trie2_nodes {
-                               let source_arc = existing_trie2_node.as_arc().clone();
-                               let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                               let tokens_to_push = &source_live & &acc.llm_tokens_union;
-                               if tokens_to_push.is_empty() { continue; }
-       
-                               let mut inserter = EdgeInserter::new(
-                                   source_arc.clone(),
-                                   state_id_edge_key,
-                                   tokens_to_push.clone(),
-                                   |e, n| *e |= n,
-                                   |node_value, edge_value| {},
-                                   |ev, t| *ev &= &t.live_tokens,
-                               );
-                               inserter = inserter.try_destination_auto(new_trie2_node.clone());
-                               let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                               let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                               dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
-                           }
-       
-                           for (dst_wr, added) in &dest_agg {
-                               let mut dg = dst_wr.as_arc().write().expect("poison");
-                               dg.value.live_tokens |= added.clone();
-                           }
-       
-                           let mut integrated_acc = acc.clone();
-                           integrated_acc.trie2_nodes = dest_agg.keys().cloned().collect();
-                           below_bottom_integrated.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &integrated_acc)).or_insert(integrated_acc);
+      @@ -781,74 +783,72 @@
                        }
                    }
        
       -                let gotos_for_nt_storage; // To hold the Vec for ContinueFromEverything
       -                let gotos_for_nt: &[SubstringGoto] = match config.below_bottom_mode {
-      +                let gotos_for_nt_storage; // To hold the struct for ContinueFromEverything
-      +                let gotos_for_nt: Option<&SubstringGotos> = match config.below_bottom_mode {
+      +                let gotos_for_nt: &SubstringGoto = match config.below_bottom_mode {
                            BelowBottomReductionMode::ContinueFromAll => {
                                crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromAll", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
       -                        self.parser.substring_gotos.get(&nt).map_or(&[], |v| v.as_slice())
-      +                        self.parser.substring_gotos.get(&nt)
+      +                        self.parser.substring_gotos.get(&nt).unwrap_or(&empty_substring_goto)
                            }
                            BelowBottomReductionMode::ContinueFromEverything => {
                                crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromEverything", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -28678,26 +28674,24 @@ messages:
       -                                accept: goto.accept,
       -                            }];
       -                            &gotos_for_nt_storage
-      +                            let mut gotos_by_dest = BTreeMap::new();
-      +                            if let Some(goto_state_id) = goto.state_id {
-      +                                gotos_by_dest.insert(goto_state_id, vec![everything_state_id]);
+      +                            let mut compacted = SubstringGoto::default();
+      +                            if goto.accept {
+      +                                compacted.accepting_sources.insert(everything_state_id);
       +                            }
-      +                            let accepting_sources = if goto.accept { vec![everything_state_id] } else { vec![] };
-      +
-      +                            gotos_for_nt_storage = Some(SubstringGotos {
-      +                                accepting_sources,
-      +                                gotos_by_dest,
-      +                            });
-      +                            gotos_for_nt_storage.as_ref()
+      +                            if let Some(goto_state_id) = goto.state_id {
+      +                                compacted.gotos.insert(goto_state_id, BTreeSet::from([everything_state_id]));
+      +                            }
+      +                            gotos_for_nt_storage = compacted;
+      +                            &gotos_for_nt_storage
                                } else {
       -                            &[]
-      +                            None
+      +                            &empty_substring_goto
                                }
                            }
                            BelowBottomReductionMode::Fail => {
                                crate::debug!(5, "Popped below bottom, failing these parse paths.");
       -                        &[] // Empty slice will cause the loop to be skipped.
-      +                        None // None will cause the loop to be skipped.
+      +                        &empty_substring_goto
                            }
                            BelowBottomReductionMode::Panic => {
                                panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
@@ -28720,47 +28714,36 @@ messages:
       -                let num_shared_destinations = goto_state_counts.values().filter(|&&c| c > 1).count();
       -
       -                let num_with_action = gotos_for_nt.iter().filter_map(|g| g.goto_state_id).filter(|sid| {
-      -                    self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
-      -                }).count();
-      -
-      -                println!(
+      +                let num_total_gotos = gotos_for_nt.gotos.values().map(|s| s.len()).sum::<usize>();
+      +                let num_accepting_sources = gotos_for_nt.accepting_sources.len();
+      +                let num_unique_destinations = gotos_for_nt.gotos.len();
+      +                let num_shared_destinations = gotos_for_nt.gotos.values().filter(|s| s.len() > 1).count();
+      +
+      +                let num_with_action = gotos_for_nt.gotos.keys().filter(|sid| {
+                           self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
+                       }).count();
+       
+                       println!(
       -                    "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total {}): with_state={}, without_state={}, unique_dests={}, shared_dests={}, with_action={}",
-      -                    self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
-      -                    len,
+      +                    "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total gotos {}, accepting sources {}): unique_dests={}, shared_dests={}, with_action={}",
+                           self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
+                           len,
       -                    num_total,
       -                    num_with_goto_state,
       -                    num_without_goto_state,
-      -                    num_unique_destinations,
-      -                    num_shared_destinations,
-      -                    num_with_action
-      -                );
+      +                    num_total_gotos,
+      +                    num_accepting_sources,
+                           num_unique_destinations,
+                           num_shared_destinations,
+                           num_with_action
+                       );
       -                if !gotos_for_nt.is_empty() {
-      +                if let Some(gotos_for_nt) = gotos_for_nt {
-      +                    let num_total = gotos_for_nt.gotos_by_dest.values().map(|v| v.len()).sum::<usize>();
-      +                    let num_with_goto_state = num_total;
-      +                    let num_without_goto_state = 0;
-      +                    let num_unique_destinations = gotos_for_nt.gotos_by_dest.len();
-      +                    let num_shared_destinations = gotos_for_nt.gotos_by_dest.values().filter(|v| v.len() > 1).count();
-      +                    let num_with_action = gotos_for_nt.gotos_by_dest.keys().filter(|sid| {
-      +                        self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
-      +                    }).count();
-      +
-      +                    println!(
-      +                        "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total {}): with_state={}, without_state={}, unique_dests={}, shared_dests={}, with_action={}",
-      +                        self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
-      +                        len,
-      +                        num_total,
-      +                        num_with_goto_state,
-      +                        num_without_goto_state,
-      +                        num_unique_destinations,
-      +                        num_shared_destinations,
-      +                        num_with_action
-      +                    );
-      +
+      +                if !gotos_for_nt.accepting_sources.is_empty() || !gotos_for_nt.gotos.is_empty() {
                            timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
       -                    let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
       -                    if !accepting_gotos.is_empty() {
-      +                    if !gotos_for_nt.accepting_sources.is_empty() {
+      +                    let accepting_sources = &gotos_for_nt.accepting_sources;
+      +                    if !accepting_sources.is_empty() {
                                let mut accepted_stacks = Vec::new();
                                for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
                                    let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
@@ -28768,21 +28751,22 @@ messages:
                                    let active_llm_tokens = acc.union_llm_tokens();
       -                            for goto_info in &accepting_gotos {
       -                                let edge_key = (*k, Some(goto_info.source_state_id));
-      +                            for &source_state_id in &gotos_for_nt.accepting_sources {
-      +                                let edge_key = (*k, Some(source_state_id));
+      +                            for source_state_id in accepting_sources {
+      +                                let edge_key = (*k, Some(*source_state_id));
                                        // let edge_key = (*k, None);
                                        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                        let mut used_dests = BTreeSet::new();
-      @@ -546,7 +550,7 @@
+      @@ -904,7 +904,7 @@
+       
                                        let mut acc2 = acc.clone();
                                        acc2.trie2_nodes = used_dests.clone();
                                        let new_gss0 = GSSNode::new(acc2);
       -                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-      +                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: source_state_id });
+      +                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                                        accepted_stacks.push(Arc::new(new_gss1));
                                    }
                                }
-      @@ -561,17 +565,16 @@
+      @@ -919,21 +919,22 @@
                            let mut trie2_dst_nodes = HashMap::new();
                            for (k, mut acc) in below_bottom_integrated {
                                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
@@ -28796,14 +28780,15 @@ messages:
       -                            };
       -
       -                            if let Some(goto_state_id) = goto_info.goto_state_id {
-      +                        for (&goto_state_id, source_state_ids) in &gotos_for_nt.gotos_by_dest {
-      +                            for &source_state_id in source_state_ids {
+      +                        for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
+      +                            for source_state_id in source_state_ids {
       +                                // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
       +                                let cache_key = BelowBottomCacheKey {
       +                                    nonterminal_id: nt,
-      +                                    source_state_id: source_state_id,
+      +                                    source_state_id: *source_state_id,
       +                                    // acc: acc.clone(),
       +                                };
+      +
                                        let edge_key = (k, None);
                                        let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                        let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
@@ -28811,62 +28796,26 @@ messages:
                                        timeit!("GLRParserState::reduce_and_goto::BLOCK_1: Below-bottom reduction goto processing", {
                                        let new_trie2_node = trie2_dst_nodes
       -                                    .entry(goto_info.source_state_id)
-      +                                    .entry(source_state_id)
+      +                                    .entry(*source_state_id)
                                            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
                                            .clone();
        
-      @@ -650,7 +653,7 @@
+      @@ -1014,8 +1015,8 @@
                                        if !used_dests.is_empty() {
                                            let mut acc2 = acc.clone();
                                            acc2.trie2_nodes = used_dests.clone();
                                            let new_gss0 = GSSNode::new(acc2);
       -                                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
-      +                                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: source_state_id });
-                                           let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+      -                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: goto_state_id });
+      +                                    let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+      +                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
                                            below_zero.push(Arc::new(new_gss2));
                                        }
-      @@ -663,7 +666,7 @@
-                           })
-                           });
-                           out.push(merged);});
-      -                }
-      +                } // end if let Some(gotos_for_nt)
-                   }
-                   });
-       
-      @@ -910,17 +913,20 @@
-                   let mut sorted_substring_gotos: Vec<_> = self.substring_gotos.iter().collect();
-                   sorted_substring_gotos.sort_by_key(|(nt_id, _)| self.non_terminal_map.get_by_right(nt_id).unwrap());
-       
-      -            for (nt_id, gotos) in sorted_substring_gotos {
-      +            for (nt_id, gotos_info) in sorted_substring_gotos {
-                       let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
-                       writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
-       
-      -                let mut sorted_gotos = gotos.clone();
-      -                sorted_gotos.sort(); // SubstringGoto derives Ord
-      -
-      -                for goto_info in &sorted_gotos {
-      -                    let goto_str = goto_info.goto_state_id.map_or("None".to_string(), |sid| sid.0.to_string());
-      -                    writeln!(f, "    - source: {:<3} -> goto: {:<4} accept: {}",
-      -                        goto_info.source_state_id.0, goto_str, goto_info.accept)?;
-      +                if !gotos_info.accepting_sources.is_empty() {
-      +                    let sources_str: Vec<_> = gotos_info.accepting_sources.iter().map(|s| s.0.to_string()).collect();
-      +                    writeln!(f, "    - Accept from sources: [{}]", sources_str.join(", "))?;
-      +                }
-      +
-      +                let mut sorted_gotos_by_dest: Vec<_> = gotos_info.gotos_by_dest.iter().collect();
-      +                sorted_gotos_by_dest.sort_by_key(|(dest_id, _)| *dest_id);
-      +                for (dest_id, source_ids) in sorted_gotos_by_dest {
-      +                    let sources_str: Vec<_> = source_ids.iter().map(|s| s.0.to_string()).collect();
-      +                    writeln!(f, "    - GOTO {}: from sources [{}]", dest_id.0, sources_str.join(", "))?;
-                       }
-                   }
-               }
+                                       });
 
       ```
 
-      These changes should implement the requested optimization. Let me know if you have any other questions
+      I have not modified the other files you provided as they seemed unrelated to the requested change. These patches should implement the desired optimization. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -28882,7 +28831,7 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor GSS substring goto handling for
-      optimization"'
+  - user: 'Changes committed with message: "Refactor: Optimize SubstringGoto structure
+      for GSS parsing"'
     metadata:
 ...
