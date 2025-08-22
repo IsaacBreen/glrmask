@@ -578,9 +578,9 @@ impl GrammarConstraint {
                     let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
 
                     // for gss_root in get_roots([glr_s.active_state.stack.as_ref(), glr_s.active_state.accepted_state.as_ref()]) {
-                    for (_last_edge, gss_root_acc) in get_roots([glr_s.active_state.stack.as_ref()]) {
+                    for (last_edge, gss_root_acc) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
-                        crate::debug!(4, "Trie2: For GSS root, active LLM tokens: {:?}", active_llm_tokens_for_root);
+                        crate::debug!(4, "Trie2: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
 
                         for src_wr in gss_root_acc.trie2_nodes.iter() {
                             let src_arc = src_wr.as_arc().clone();
