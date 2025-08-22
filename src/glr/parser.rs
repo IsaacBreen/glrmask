@@ -1083,8 +1083,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
-            timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
+        timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
             if any_below_bottom {
+                // First, merge all Accs for the same pop depth, ignoring the specific edge that led to the root.
+                // This simplifies the logic for now, as requested.
+                let mut merged_below_bottom: BTreeMap<usize, Arc<Acc>> = BTreeMap::new();
+                for (k, edge_map) in popper.below_bottom {
+                    for acc_arc in edge_map.values() {
+                        merged_below_bottom.entry(k)
+                            .and_modify(|existing| *existing = Arc::new(Acc::merge(existing, acc_arc)))
+                            .or_insert_with(|| acc_arc.clone());
+                    }
+                }
+
                 let gotos_for_nt_storage; // To hold the Vec for ContinueFromEverything
                 let gotos_for_nt: &[SubstringGoto] = match config.below_bottom_mode {
                     BelowBottomReductionMode::ContinueFromAll => {
@@ -1120,7 +1131,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if !accepting_gotos.is_empty() {
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         let mut accepted_stacks = Vec::new();
-                        for (k, acc_arc) in popper.below_bottom.iter() {
+                        for (k, acc_arc) in merged_below_bottom.iter() {
                             let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                             let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
@@ -1195,7 +1206,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, acc_arc) in popper.below_bottom {
+                    for (k, acc_arc) in merged_below_bottom {
                         let mut acc: Acc = acc_arc.as_ref().clone();
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
