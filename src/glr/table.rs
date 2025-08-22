@@ -1,5 +1,6 @@
 use super::items::{Item, LRMode, LR_MODE};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
+use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -214,7 +215,7 @@ impl JSONConvertible for Reduce {
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DefaultReduce {
     pub clone_and_merge: bool, // Indicates that there are phase 1 actions to be performed here.
-    pub reduce: Option<Reduce>,
+    pub reduce: Option<(Reduce, TerminalBV)>,
 }
 
 impl JSONConvertible for DefaultReduce {
@@ -228,7 +229,7 @@ impl JSONConvertible for DefaultReduce {
         match node {
             JSONNode::Object(mut obj) => Ok(DefaultReduce {
                 clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for DefaultReduce".to_string())?)?,
-                reduce: Option::<Reduce>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?)?,
+                reduce: Option::<(Reduce, TerminalBV)>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?)?,
             }),
             _ => Err("Expected JSONNode::Object for DefaultReduce".to_string()),
         }
@@ -749,6 +750,23 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
         let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
             
+            // NEW: Find all terminals that trigger this reduction.
+            let mut eligible_terminals = TerminalBV::zeros();
+            for (&tid, action) in &shifts_and_reduces_full {
+                let is_eligible = match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } => {
+                        *action_nt_id == nonterminal_id && *action_len == len
+                    },
+                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                        reduces.get(&len).map_or(false, |nts| nts.contains_key(&nonterminal_id))
+                    },
+                    _ => false,
+                };
+                if is_eligible {
+                    eligible_terminals.insert(tid.0);
+                }
+            }
+
             let shifts_and_reduces_without_default = shifts_and_reduces_full.iter().filter_map(|(&tid, action)| {
                 let mut new_action = action.clone();
                 let mut was_modified = false;
@@ -783,7 +801,7 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
 
             let default_reduce = DefaultReduce {
                 clone_and_merge: !shifts_and_reduces_without_default.is_empty(),
-                reduce: Some(Reduce { nonterminal_id, len, production_ids }),
+                reduce: Some((Reduce { nonterminal_id, len, production_ids }, eligible_terminals)),
             };
             (shifts_and_reduces_without_default, default_reduce)
         } else {

@@ -103,6 +103,15 @@ impl HybridL2Bitset {
         }
     }
 
+    pub fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (RangeInclusive<usize>, HybridBitset)>,
+    {
+        HybridL2Bitset {
+            inner: cache::intern_l2(RangeMapBlaze::from_iter(iter)),
+        }
+    }
+
     pub fn is_simple(&self) -> bool {
         self.inner.ranges_len() < cache::SIMPLE_L2_BITSET_THRESHOLD
     }

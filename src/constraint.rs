@@ -2371,6 +2371,21 @@ impl<'a> GrammarConstraintState<'a> {
                             // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
                             crate::debug!(4, "Processing non-end precomputed node data");
                             crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+
+                            let mut allowed_terminals = TerminalBV::zeros();
+                            for gtid_opt in precomputed_node_data.children().keys() {
+                                if let Some(gtid) = gtid_opt {
+                                    allowed_terminals.insert(gtid.0);
+                                }
+                            }
+                            let disallowed_terminals_bv = allowed_terminals.inverted();
+                            if !disallowed_terminals_bv.is_empty() {
+                                let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                                    std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                                );
+                                disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                            }
+
                             glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                             Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
