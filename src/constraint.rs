@@ -587,7 +587,7 @@ impl GrammarConstraint {
                     }
                 }
 
-                if false {
+                if true {
                     let mut allowed_terminals = TerminalBV::zeros();
                     for gtid_opt in precomputed_node_data.children().keys() {
                         if let Some(gtid) = gtid_opt {
@@ -601,7 +601,7 @@ impl GrammarConstraint {
                         );
                         disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
                     }
-                    glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: Some(10), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                    glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: Some(1), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                     reset_terminals(&mut glr_s.active_state.stack, &mut HashMap::new());
                 }
 
