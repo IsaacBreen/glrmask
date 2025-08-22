@@ -1099,16 +1099,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     BelowBottomReductionMode::Panic => panic!("Reduction popped below bottom of stack with Panic mode."),
                 };
 
+
                 if !gotos_for_nt.is_empty() {
+                    let below_bottom = popper.below_bottom;
+
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
                         let mut accepted_stacks = Vec::new();
-                        for (k, accs_by_edge) in popper.below_bottom.iter() {
+                        for (k, accs_by_edge) in below_bottom.iter() {
                             for (pre_pop_edge_content, acc_arc) in accs_by_edge.iter() {
                                 let pre_pop_state_id = pre_pop_edge_content.state_id;
-                                let relevant_gotos: Vec<_> = accepting_gotos.iter().filter(|g| g.source_state_id == pre_pop_state_id).collect();
-                                if relevant_gotos.is_empty() { continue; }
 
                                 let mut acc = acc_arc.as_ref().clone();
                                 let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
@@ -1167,7 +1168,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let mut acc2 = acc.clone();
                                 acc2.trie2_nodes = used_dests;
                                 let new_gss0 = GSSNode::new(acc2);
-                                for goto_info in relevant_gotos {
+                                for goto_info in &accepting_gotos {
                                     let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: goto_info.source_state_id });
                                     accepted_stacks.push(Arc::new(new_gss1));
                                 }
@@ -1181,18 +1182,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
                     let mut below_zero = Vec::new();
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, accs_by_edge) in popper.below_bottom {
+                    for (k, accs_by_edge) in below_bottom {
                         for (pre_pop_edge_content, acc_arc) in accs_by_edge {
                             let pre_pop_state_id = pre_pop_edge_content.state_id;
                             let mut acc = (*acc_arc).clone();
 
-                            let relevant_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.source_state_id == pre_pop_state_id).collect();
-                            if relevant_gotos.is_empty() { continue; }
-
                             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                             if trie2_nodes.is_empty() { continue; }
 
-                            for goto_info in relevant_gotos {
+                            for goto_info in gotos_for_nt {
                                 let cache_key = BelowBottomCacheKey { nonterminal_id: nt, source_state_id: goto_info.source_state_id, acc: acc.clone() };
                                 if let Some(goto_state_id) = goto_info.goto_state_id {
                                     let edge_key = (k, None);
