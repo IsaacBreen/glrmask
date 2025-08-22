@@ -1130,6 +1130,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let active_llm_tokens = acc.union_llm_tokens();
                             for goto_info in &accepting_gotos {
                                 let edge_key = (*k, Some(goto_info.source_state_id));
+                                // let edge_key = (*k, None);
                                 for existing_trie2_node in &trie2_nodes {
                                     let source_arc = existing_trie2_node.as_arc().clone();
                                     let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
