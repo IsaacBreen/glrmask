@@ -454,8 +454,10 @@ impl GrammarConstraint {
         // });
 
         #[cfg(not(rustrover))]
+        // #[cfg(pbar)]
         let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
         #[cfg(rustrover)]
+        // #[cfg(not(pbar))]
         let it = precomputed.iter();
         for (tokenizer_state_id, trie1_root) in it {
             // Deep clone Trie2
