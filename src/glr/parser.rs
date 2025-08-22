@@ -1154,6 +1154,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 };
 
+                // Print some stats on gotos_for_nt
+                // - Number of entries for which goto_state_id is Some vs None
+                // - Number of entries that share the same Some(value) = goto_state_id
+                // - Number of entries for which goto_state_id is Some and the goto state has an action (found via action_selector)
+                todo!("Compute and print some stats on gotos_for_nt");
+
                 if !gotos_for_nt.is_empty() {
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
