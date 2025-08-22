@@ -1303,6 +1303,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     });
 
+                    // THIS is where the program spends almost all its compute time
                     timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
                     // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
