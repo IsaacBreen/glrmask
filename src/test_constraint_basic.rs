@@ -219,7 +219,7 @@ fn test_constraint_simple_simplified() {
     let tokenizer = expr.build();
 
     let mut llm_token_map = LLMTokenMap::new();
-    // llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
     llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
 
     // Grammar Terminals mapped to Tokenizer IDs
@@ -255,8 +255,7 @@ fn test_constraint_simple_simplified() {
     // Initial mask
     let mask = constraint_state.get_mask();
     println!("Initial mask: {:?}", mask);
-    // assert_eq!(mask, HybridBitset::from_iter(vec![0])); // Expect "a"
-    assert_eq!(mask, HybridBitset::from_iter(vec![]));
+    assert_eq!(mask, HybridBitset::from_iter(vec![0])); // Expect "a"
 
     // // Commit "a" (LLMTokenID 0)
     // println!("{}", &constraint_state);
