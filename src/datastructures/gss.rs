@@ -1339,7 +1339,7 @@ impl<'a> RootItem<'a> {
 }
 
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
-pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, Arc<Acc>> {
+pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     // We carry the "last edge" used to reach the next node; when we finally hit a root,
     // that last edge is the key used for the result map.
     let mut queue: BTreeMap<
@@ -1347,7 +1347,7 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
         BTreeMap<(*const GSSNode, Option<ParseStateEdgeContent>), Arc<Acc>>
     > = BTreeMap::new();
 
-    let mut results: BTreeMap<ParseStateEdgeContent, Arc<Acc>> = BTreeMap::new();
+    let mut results: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
 
     for node in nodes {
         let node_ptr = node as *const GSSNode;
@@ -1368,8 +1368,8 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
                     let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
                     results
                         .entry(edge)
-                        .and_modify(|e| *e = Arc::new(Acc::merge(e, &final_acc)))
-                        .or_insert(final_acc);
+                        .or_default()
+                        .insert(final_acc);
                 }
             } else {
                 let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
@@ -1400,7 +1400,7 @@ impl GSSNode {
         *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
     }
 
-    pub fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, Arc<Acc>> {
+    pub fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
         get_roots(std::iter::once(self))
     }
 }

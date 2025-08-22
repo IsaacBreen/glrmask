@@ -578,36 +578,38 @@ impl GrammarConstraint {
                     let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
 
                     // for gss_root in get_roots([glr_s.active_state.stack.as_ref(), glr_s.active_state.accepted_state.as_ref()]) {
-                    for (last_edge, gss_root_acc) in get_roots([glr_s.active_state.stack.as_ref()]) {
-                        let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
-                        crate::debug!(4, "Trie2: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
+                    for (last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
+                        for gss_root_acc in gss_root_accs {
+                            let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
+                            crate::debug!(4, "Trie2: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
 
-                        for src_wr in gss_root_acc.trie2_nodes.iter() {
-                            let src_arc = src_wr.as_arc().clone();
-                            let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
-                            let tokens_to_push = &active_llm_tokens_for_root & &src_live;
-                            if tokens_to_push.is_empty() {
-                                crate::debug!(4, "Trie2: No tokens to push from this source node");
-                                continue;
+                            for src_wr in gss_root_acc.trie2_nodes.iter() {
+                                let src_arc = src_wr.as_arc().clone();
+                                let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
+                                let tokens_to_push = &active_llm_tokens_for_root & &src_live;
+                                if tokens_to_push.is_empty() {
+                                    crate::debug!(4, "Trie2: No tokens to push from this source node");
+                                    continue;
+                                }
+                                crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
+
+                                let edge_key = (0, None);
+
+                                let mut inserter = EdgeInserter::new(
+                                    src_arc.clone(),
+                                    edge_key,
+                                    tokens_to_push.clone(),
+                                    |e, n| *e |= n,
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |ev, t| *ev &= &t.live_tokens,
+                                );
+
+                                inserter = inserter.try_destination(trie2_end.clone());
+
+                                let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie2 node");
+                                let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                                dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                             }
-                            crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
-
-                            let edge_key = (0, None);
-
-                            let mut inserter = EdgeInserter::new(
-                                src_arc.clone(),
-                                edge_key,
-                                tokens_to_push.clone(),
-                                |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                |ev, t| *ev &= &t.live_tokens,
-                            );
-
-                            inserter = inserter.try_destination(trie2_end.clone());
-
-                            let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie2 node");
-                            let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                            dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                         }
                     }
                     for (dst_wr, added) in &dest_agg {
