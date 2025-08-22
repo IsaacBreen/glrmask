@@ -1372,40 +1372,24 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
         for (node_ptr, path_acc) in nodes_at_depth {
             let current_node = unsafe { &*node_ptr };
 
-            if current_node.is_root() {
-                // If the current node is a root, it means the path_acc represents the accumulated
-                // constraints *up to this root*.
-                // However, get_roots is meant to return the Acc *before* the root, associated with the edge.
-                // If we directly process a root node from the initial `nodes` input, there's no "edge before root".
-                // For now, we'll skip direct roots from the input, or if we want to include them,
-                // we'd need a special "no edge" key or a different return type.
-                // Given the current usage in precompute2, it expects an edge.
-                // The current implementation of GSSPopper::new_from_node for roots inserts an empty map for depth 0.
-                // So, if this is a root, we don't have an edge to associate it with.
-                // This case should ideally not be reached if get_roots is called on non-root nodes.
-                // If it is called on a root, it means this root is the "start" of the path, not a predecessor.
-                // For now, we'll ignore it as it doesn't have an incoming edge.
-            } else {
-                let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
-                for (edge_val, preds_by_depth) in &current_node.predecessors {
-                    for pred_vec in preds_by_depth.values() {
-                        for pred_arc in pred_vec {
-                            if pred_arc.is_root() {
-                                // This predecessor is a root node. The edge_val is the last edge before this root.
-                                let final_acc = Arc::new(Acc::narrow(&new_path_acc_base, &pred_arc.acc));
-                                found_roots.entry(edge_val.clone())
-                                    .and_modify(|e| *e = Arc::new(Acc::merge(e, &final_acc)))
-                                    .or_insert(final_acc);
-                            } else {
-                                let pred_ptr = pred_arc.as_ref() as *const GSSNode;
-                                let pred_depth = pred_arc.max_depth();
-                                queue
-                                    .entry(pred_depth)
-                                    .or_default()
-                                    .entry(pred_ptr)
-                                    .and_modify(|e| *e = Arc::new(Acc::merge(e, &new_path_acc_base)))
-                                    .or_insert_with(|| new_path_acc_base.clone());
-                            }
+            let new_path_acc_base = Arc::new(Acc::narrow(&path_acc, &current_node.acc));
+            for (edge_val, preds_by_depth) in &current_node.predecessors {
+                for pred_vec in preds_by_depth.values() {
+                    for pred_arc in pred_vec {
+                        if pred_arc.is_root() {
+                            let final_acc = Arc::new(Acc::narrow(&new_path_acc_base, &pred_arc.acc));
+                            found_roots.entry(edge_val.clone())
+                                .and_modify(|e| *e = Arc::new(Acc::merge(e, &final_acc)))
+                                .or_insert(final_acc);
+                        } else {
+                            let pred_ptr = pred_arc.as_ref() as *const GSSNode;
+                            let pred_depth = pred_arc.max_depth();
+                            queue
+                                .entry(pred_depth)
+                                .or_default()
+                                .entry(pred_ptr)
+                                .and_modify(|e| *e = Arc::new(Acc::merge(e, &new_path_acc_base)))
+                                .or_insert_with(|| new_path_acc_base.clone());
                         }
                     }
                 }
@@ -1998,8 +1982,9 @@ mod tests {
         // We should not keep root nodes in paths.
         assert_eq!(pop_result.paths.len(), 0);
         assert_eq!(pop_result.below_bottom.len(), 1);
-        // We reached the bottom exactly (depth 0).
+        // At depth 1 (one pop), the inner map should contain the edge and combined acc.
         let inner1 = pop_result.below_bottom.get(&1).unwrap();
+        assert_eq!(inner1.len(), 1);
         let combined_acc = inner1.values().next().unwrap();
 
         // `pushed.acc` (same as `root.acc`) allows all but 1.
@@ -2031,7 +2016,7 @@ mod tests {
         // Should not store roots in paths.
         assert!(popper.paths.is_empty());
         assert_eq!(popper.below_bottom.len(), 1);
-        // At bottom with depth 0 entry, which is an empty inner map.
+        // At bottom with depth 0 entry, inner map is empty.
         let inner0 = popper.below_bottom.get(&0).unwrap();
         assert!(inner0.is_empty());
         // Pop again; entry should shift from 0 -> 1.
@@ -2050,7 +2035,8 @@ mod tests {
     fn test_popper_below_bottom_shifts_from_non_root() {
         let root = Arc::new(GSSNode::new(mock_acc(1)));
         let pushed = Arc::new(root.push(mock_edge(10)));
-        let mut popper = pushed.popn(1); // Reaches bottom (depth 0)
+        let mut popper = pushed.popn(1); // Reaches bottom (depth 1)
+        assert!(popper.paths.is_empty());
         let inner1 = popper.below_bottom.get(&1).unwrap();
         assert!(!inner1.is_empty());
         let acc0 = inner1.values().next().unwrap().clone();
@@ -2080,16 +2066,17 @@ mod tests {
         let inner1 = popper.below_bottom.get(&1).unwrap();
         assert_eq!(inner1.len(), 2); // Two distinct edges
         
-        let merged_acc = inner1.values().cloned().fold(Arc::new(Acc::new_fresh()), |acc, next| Arc::new(Acc::merge(&acc, &next)));
+        // Merge all Accs in the inner map for comparison
+        let acc_below = inner1.values().cloned().fold(Arc::new(Acc::new_fresh()), |acc, next| Arc::new(Acc::merge(&acc, &next)));
 
         // Union should be all tokens allowed (since each root disallows a different single token).
-        assert_eq!(merged_acc.llm_tokens_union, HybridBitset::max_ones());
+        assert_eq!(acc_below.llm_tokens_union, HybridBitset::max_ones());
         // Intersection should disallow both 1 and 2.
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
         disallowed.insert(2);
         let expected_intersection = HybridBitset::max_ones() - disallowed;
-        assert_eq!(merged_acc.llm_tokens_intersection, expected_intersection);
+        assert_eq!(acc_below.llm_tokens_intersection, expected_intersection);
     }
 
     #[test]
@@ -2211,7 +2198,7 @@ mod tests {
         assert_eq!(stats.unique_nodes, 3, "Expected 3 unique nodes after merge, but found {}. Stats: {:?}", stats.unique_nodes, stats);
     }
 
-#[test]
+    #[test]
     fn test_get_roots() {
         let acc1 = Arc::new(mock_acc(1));
         let leaf1 = Arc::new(GSSNode::new((*acc1).clone()));
@@ -2241,16 +2228,20 @@ mod tests {
         assert_eq!(**roots.get(&mock_edge(1)).unwrap(), *path_acc1);
         assert_eq!(**roots.get(&mock_edge(2)).unwrap(), *path_acc2);
 
-        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
-        // because its initial `fresh` acc has a wider union of possibilities.
+        // Test from multiple sources. The final Acc for a given root edge will be the MERGE
+        // of the Accs from all paths that lead to it.
         let roots_multi = get_roots(vec![&root, b.as_ref()]);
         let path_acc_b_l1 = Arc::new(Acc::narrow(&acc_b, &acc1));
         
+        // FIX: The expected Acc for edge(1) is the merge of the path from `root` and the path from `b`.
+        let expected_merged_acc1 = Arc::new(Acc::merge(&path_acc1, &path_acc_b_l1));
+
         assert_eq!(roots_multi.len(), 2);
         assert!(roots_multi.contains_key(&mock_edge(1)));
         assert!(roots_multi.contains_key(&mock_edge(2)));
         // The path from `b` directly is shorter, so its Acc is less constrained (more "fresh")
-        assert_eq!(**roots_multi.get(&mock_edge(1)).unwrap(), *path_acc_b_l1);
+        assert_eq!(**roots_multi.get(&mock_edge(1)).unwrap(), *expected_merged_acc1);
+        // The path to leaf2 is unaffected as it only comes from `root`.
         assert_eq!(**roots_multi.get(&mock_edge(2)).unwrap(), *path_acc2);
 
 
@@ -2310,7 +2301,7 @@ mod tests {
         assert_eq!(new_root.num_predecessors(), 2, "Should still have 2 predecessors");
     }
 
-#[test]
+    #[test]
     fn test_merge_preserves_trie2_nodes() {
         // This test reproduces a bug where merging GSS nodes would cause
         // trie2_nodes from leaf predecessors to be lost due to incorrect
@@ -2527,4 +2518,3 @@ mod tests {
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
     }
 }
-
