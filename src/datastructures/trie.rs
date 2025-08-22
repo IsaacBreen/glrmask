@@ -1299,7 +1299,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
         let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
-        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
+        let mut todo: BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
@@ -1313,20 +1313,20 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
             let depth = node_arc.read().expect("poison").max_depth;
-            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+            todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
         }
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
             for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+                let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
                 if done.contains(&ptr) { continue; }
 
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
                     None => continue,
                 };
-                let node_arc = node_ptr_wrapper.as_arc();
+                let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
 
                 let proceed = {
                     let mut guard = node_arc.read().expect("poison");
@@ -1353,10 +1353,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
                     for (child_node_ptr, new_v) in new_values_for_children {
                         let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-                        let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
+                        let child_arc = child_node_ptr.upgrade().unwrap();
                         values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
                         let child_depth = child_arc.read().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(child_arc);
+                        todo.entry(child_depth).or_default().insert(child_node_ptr);
                     }
                 }
             }
