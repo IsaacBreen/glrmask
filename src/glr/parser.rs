@@ -1174,16 +1174,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
                 }).count();
 
-                println!(
-                    "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total gotos {}, accepting sources {}): unique_dests={}, shared_dests={}, with_action={}",
-                    self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
-                    len,
-                    num_total_gotos,
-                    num_accepting_sources,
-                    num_unique_destinations,
-                    num_shared_destinations,
-                    num_with_action
-                );
+                // println!(
+                //     "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total gotos {}, accepting sources {}): unique_dests={}, shared_dests={}, with_action={}",
+                //     self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
+                //     len,
+                //     num_total_gotos,
+                //     num_accepting_sources,
+                //     num_unique_destinations,
+                //     num_shared_destinations,
+                //     num_with_action
+                // );
                 if !gotos_for_nt.accepting_sources.is_empty() || !gotos_for_nt.gotos.is_empty() {
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_sources = &gotos_for_nt.accepting_sources;
