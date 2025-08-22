@@ -590,7 +590,7 @@ impl GrammarConstraint {
                                 crate::debug!(4, "Trie2: No tokens to push from this source node");
                                 continue;
                             }
-                            crate::debug!(4, "Trie2: Pushing tokens {:?} from source node", tokens_to_push);
+                            crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
 
                             let edge_key = (0, None);
 
