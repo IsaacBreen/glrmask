@@ -1133,7 +1133,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     Some(prev) => Acc::merge(&prev, &a),
                                 });
                             }
-                            let mut acc = acc_merged_opt.unwrap_or_else(Acc::new_fresh);
+                            let mut acc = acc_merged_opt.unwrap();
 
                             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
@@ -1215,7 +1215,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 Some(prev) => Acc::merge(&prev, &a),
                             });
                         }
-                        let mut acc: Acc = acc_merged_opt.unwrap_or_else(Acc::new_fresh);
+                        let mut acc: Acc = acc_merged_opt.unwrap();
 
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
