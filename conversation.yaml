@@ -3176,88 +3176,128 @@ local_system:
                               accepted_out.push(merged_accepted);
                           }
                           });
-                      // ==================================================================
-                      // START: OPTIMIZED BLOCK FOR NON-ACCEPTING BELOW-BOTTOM REDUCTIONS
-                      // ==================================================================
-                      timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
+
+                          timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
+                          // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                           let mut below_zero = Vec::new();
-
-                          for (k, mut acc) in below_bottom_integrated {
-                              let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                              if trie2_nodes.is_empty() {
-                                  continue;
-                              }
-
-                              // --- Stage 1: Perform expensive Trie manipulations ONCE ---
-                              // For each source trie node in the popped accumulator, we create exactly one
-                              // corresponding destination node representing the state after the reduction.
-                              // This avoids re-computing the same edge insertions inside the GOTO loop.
-                              let mut intermediate_dest_nodes = BTreeSet::new();
-                              let edge_key = (k, None);
-
-                              for existing_trie_node in &trie2_nodes {
-                                  let source_arc = existing_trie_node.as_arc().clone();
-                                  let tokens_to_push = {
-                                      let source_live = source_arc.read().expect("poison").value.live_tokens.clone();
-                                      &source_live & &acc.llm_tokens_union
-                                  };
-                                  if tokens_to_push.is_empty() { continue; }
-
-                                  // Create a new destination node for this path. All GOTO paths originating
-                                  // from this `existing_trie_node` will share this new destination.
-                                  let new_dest_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-
-                                  let inserter = EdgeInserter::new(
-                                      source_arc.clone(),
-                                      edge_key,
-                                      tokens_to_push.clone(),
-                                      |e, n| *e |= n,
-                                      |_, _| {},
-                                      |ev, t| *ev &= &t.live_tokens,
-                                  ).try_destination_auto(new_dest_node);
-
-                                  let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
-                                  
-                                  // Update live tokens on the newly created destination
-                                  {
-                                      let mut dg = final_dest_arc.write().expect("poison");
-                                      dg.value.live_tokens |= &tokens_to_push;
-                                  }
-                                  
-                                  intermediate_dest_nodes.insert(ArcPtrWrapper::new(final_dest_arc));
-                              }
-
-                              if intermediate_dest_nodes.is_empty() {
-                                  continue;
-                              }
-
-                              // --- Stage 2: Create a single, shared GSS base node ---
-                              // This node represents the "virtual root" after the reduction, containing all
-                              // the new intermediate trie nodes. All subsequent GOTO paths will be built upon this base.
-                              let mut intermediate_acc = acc.clone();
-                              intermediate_acc.trie2_nodes = intermediate_dest_nodes;
-                              let base_gss_node = GSSNode::new(intermediate_acc);
-
-                              // --- Stage 3: Efficiently build all GOTO paths from the shared base ---
-                              // Group all source states by their common destination (goto) state. This allows
-                              // us to use `push_many` for maximum GSS structural sharing.
-                              let mut gotos_to_sources: BTreeMap<StateID, Vec<ParseStateEdgeContent>> = BTreeMap::new();
-                              for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
-                                  let entry = gotos_to_sources.entry(*goto_state_id).or_default();
-                                  for source_state_id in source_state_ids {
-                                      entry.push(ParseStateEdgeContent { state_id: *source_state_id });
-                                  }
-                              }
-
-                              for (goto_state_id, source_edges) in gotos_to_sources {
-                                  // For each destination, create a GSS node with all its sources as predecessors.
-                                  let sources_node = base_gss_node.push_many(source_edges);
-                                  // Then, push the final goto state on top.
-                                  let final_node = sources_node.push(ParseStateEdgeContent { state_id: goto_state_id });
-                                  below_zero.push(Arc::new(final_node));
+                          let mut trie2_dst_nodes: HashMap<StateID, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+          
+                          // Build reverse index from source states to goto states for efficient iteration.
+                          let mut sources_to_gotos: BTreeMap<StateID, Vec<StateID>> = BTreeMap::new();
+                          for (goto_id, sources) in &gotos_for_nt.gotos {
+                              for s in sources {
+                                  sources_to_gotos.entry(*s).or_default().push(*goto_id);
                               }
                           }
-
+          
+                          for (k, mut acc) in below_bottom_integrated {
+                              let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                              if trie2_nodes.is_empty() { continue; }
+                              timeit!("GLRParserState::reduce_and_goto: pop_below_prep", {});
+                              let edge_key = (k, None);
+          
+                              // Precompute data for each trie2 source node, independent of goto logic.
+                              struct PrepData {
+                                  source_arc: Arc<RwLock<PrecomputeNode2>>,
+                                  tokens_to_push: LLMTokenBV,
+                                  existing_dests: Vec<Arc<RwLock<PrecomputeNode2>>>,
+                              }
+          
+                              let prep_data: Vec<PrepData> = trie2_nodes.iter().filter_map(|n| {
+                                  let source_arc = n.as_arc().clone();
+                                  let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
+                                  let tokens_to_push = &source_live & &acc.llm_tokens_union;
+                                  if tokens_to_push.is_empty() { return None; }
+          
+                                  let existing_dests = {
+                                      let g = source_arc.read().expect("poison");
+                                      let mut v = Vec::new();
+                                      if let Some(dest_map) = g.children().get(&edge_key) {
+                                          for (node_ptr, _ev) in dest_map.iter() {
+                                              if !node_ptr.is_strong() { continue; }
+                                              if let Some(dest_arc) = node_ptr.upgrade() {
+                                                  let dest_guard = dest_arc.read().expect("poison");
+                                                  if (&dest_guard.value.live_tokens & &tokens_to_push).is_empty() && !dest_guard.value.end {
+                                                      v.push(dest_arc.clone());
+                                                  }
+                                              }
+                                          }
+                                      }
+                                      v
+                                  };
+                                  Some(PrepData { source_arc, tokens_to_push, existing_dests })
+                              }).collect();
+          
+                              if prep_data.is_empty() { continue; }
+          
+                              // For each source_state, do the heavy lifting ONCE.
+                              timeit!("GLRParserState::reduce_and_goto: pop_below_main_loop", {
+                              for (source_state_id, goto_list) in &sources_to_gotos {
+                                  let cache_key = BelowBottomCacheKey { nonterminal_id: nt, source_state_id: *source_state_id };
+          
+                                  let new_trie2_node = trie2_dst_nodes
+                                      .entry(*source_state_id)
+                                      .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+                                      .clone();
+          
+                                  let mut dest_agg: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::with_capacity(prep_data.len());
+          
+                                  for p in &prep_data {
+                                      let mut inserter = EdgeInserter::new(
+                                          p.source_arc.clone(), edge_key, p.tokens_to_push.clone(),
+                                          |e, n| *e |= n, |_, _| {}, |ev, t| *ev &= &t.live_tokens,
+                                      );
+          
+                                      if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
+                                          inserter = inserter.to_destinations_weakly_iter(
+                                              cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+                                                  let dest_arc = wrapper.as_arc();
+                                                  let guard = dest_arc.read().expect("poison");
+                                                  if (&(&guard.value.live_tokens - cached_tokens) & &p.tokens_to_push).is_empty() && !guard.value.end {
+                                                      Some(dest_arc.clone())
+                                                  } else { None }
+                                              })
+                                          );
+                                      }
+          
+                                      inserter = inserter.try_destinations_iter(p.existing_dests.iter().cloned());
+                                      inserter = inserter.try_destination_auto(new_trie2_node.clone());
+          
+                                      let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
+                                      let final_dest_wr = ArcPtrWrapper::new(final_dest_arc);
+                                      dest_agg.entry(final_dest_wr).and_modify(|bv| *bv |= &p.tokens_to_push).or_insert(p.tokens_to_push.clone());
+                                  }
+          
+                                  if dest_agg.is_empty() { continue; }
+          
+                                  let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+                                  let mut used_dests = BTreeSet::new();
+          
+                                  for (dest_wrapper, new_tokens) in &dest_agg {
+                                      if !cache_entry.get(dest_wrapper).map_or(false, |et| new_tokens.is_subset(et)) {
+                                          used_dests.insert(dest_wrapper.clone());
+                                      }
+                                      cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());
+                                  }
+          
+                                  for (dst_wr, added) in &dest_agg {
+                                      let mut dg = dst_wr.as_arc().write().expect("poison");
+                                      dg.value.live_tokens |= added.clone();
+                                  }
+          
+                                  if !used_dests.is_empty() {
+                                      let mut acc2 = acc.clone();
+                                      acc2.trie2_nodes = used_dests;
+                                      let new_gss0 = GSSNode::new(acc2);
+                                      let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                                      for goto_state_id in goto_list {
+                                          let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
+                                          below_zero.push(Arc::new(new_gss2));
+                                      }
+                                  }
+                              }
+                              });
+                          }
                           if !below_zero.is_empty() {
                               let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
                                   GSSNode::merge_many_with_depth(usize::MAX, below_zero)
@@ -3265,9 +3305,6 @@ local_system:
                               out.push(merged);
                           }
                       });
-                      // ================================================================
-                      // END: OPTIMIZED BLOCK
-                      // ================================================================
                       }
                   }
                   });
@@ -5734,405 +5771,221 @@ messages:
 
       ``````ad-assistant_message
       collapse: closed
-      title: gemini
+      title: gpt-5
 
-      Of course. The identified bottleneck is a classic case of redundant computation within nested loops. The core issue is that for a given "popped below bottom" accumulator (`acc`), you are re-calculating the same trie edge insertions for every possible `(source_state_id, goto_state_id)` pair defined in `substring_gotos`.
+      The hotspot is the “popped below bottom” path in reduce_and_goto. In that block the code is doing a lot of duplicated work and expensive per-iteration allocations/locking. You can get a very large speedup by restructuring it so you:
 
-      The complexity of the original loop is roughly:
-      `O(num_gotos * num_sources_per_goto * num_trie_nodes_in_acc * cost_of_trie_insertion)`
+      - do the heavy work once per source_state_id (not once per (source_state_id, goto_state_id)),
+      - precompute per-trie-node data that doesn’t depend on the goto_state_id,
+      - cut lock acquisitions and bitvector work,
+      - and replace O(log n) structures with faster ones.
 
-      We can dramatically improve this by realizing that the trie manipulation part only depends on the `acc` and the reduction length `k`, not on the specific `source_state_id` or `goto_state_id`. We can perform this expensive work *once*, create a new "intermediate" GSS base node, and then efficiently build all the required GOTO paths from that single shared base.
+      The biggest win: stop recomputing the same thing for every goto_state_id
+      Right now the inner expensive block (EdgeInserter + scanning children + cache filtering + LLMTokenBV ops) is inside:
 
-      The optimized approach will have a complexity closer to:
-      `O(num_trie_nodes_in_acc * cost_of_trie_insertion + num_gotos * num_sources_per_goto)`
-
-      This changes the relationship from multiplicative to additive, which will yield a massive speedup when `num_gotos` and `num_trie_nodes_in_acc` are both large.
-
-      Here is the refactored `reduce_and_goto` function. I've replaced the entire `timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", ...)` block with the optimized version and added extensive comments explaining the new logic.
-
-      ### Optimized `reduce_and_goto` function
-
-      ```rust
-          #[time_it("GLRParserState::reduce_and_goto")]
-          fn reduce_and_goto<G>(
-              &mut self,
-              peek: &GSSPeek,
-              nt: NonTerminalID,
-              len: usize,
-              action_selector: &G,
-              config: &ProcessTokenAdvancedConfig,
-          ) -> (Arc<GSSNode>, Arc<GSSNode>)
-          where
-              G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
-          {
-              // ... (The beginning of the function remains the same) ...
-              let popper: GSSPopper = timeit!(peek.popn(len));
-              crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-              crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-              let any_below_bottom = !popper.below_bottom.is_empty();
-
-              let mut out: Vec<Arc<GSSNode>> = Vec::new();
-              let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
-              for popper_item in popper.iter() {
-                  // ... (The loop for normal, above-bottom reductions remains the same) ...
-                  for peek2 in popper_item.peek_iter() {
-                      let predecessor_state_id = peek2.edge_value().state_id;
-                      let mut current_nt = nt;
-
-                      // Fast loop for unit reduction chains based on the current lookahead token.
-                      let mut i = 0;
-                      loop {
-                          i += 1;
-                          let goto = self.parser.table.get(&predecessor_state_id).and_then(|row| row.gotos.get(&current_nt)).expect_else(|| {
-                              format!("Goto not found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id)
-                          });
-
-                          if goto.accept {
-                              crate::debug!(4, "Accepting with NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id);
-
-                              // Add the stack with the reduced state (predecessor_state_id) at the top to the accepted_state accumulator.
-                              let accepted_stack_instance = peek2.isolated_parent();
-                              accepted_out.push(accepted_stack_instance);
-                          }
-
-                          if let Some(goto_state_id) = goto.state_id {
-                              let next_row = &self.parser.table[&goto_state_id];
-                              match action_selector(next_row) {
-                                  Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. })) => {
-                                      // Token-based unit reduction: continue the chain.
-                                      current_nt = *next_nt;
-                                      continue;
-                                  }
-                                  Some(Action::Default(def)) => {
-                                      // Default reduction handling.
-                                      // If clone_and_merge or reduce.len != 1 is set, we "submit" the current goto result now,
-                                      // as if we broke the chain here, but we may still continue chaining if allowed.
-                                      if def.clone_and_merge || def.reduce.as_ref().map_or(false, |r| r.len != 1) {
-                                          out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
-                                      }
-
-                                      match &def.reduce {
-                                          Some(reduce) if reduce.len == 1 => {
-                                              current_nt = reduce.nonterminal_id;
-                                              continue;
-                                          }
-                                          _ => break,
-                                      }
-                                  }
-                                  _ => {
-                                      // Not a unit reduction (could be shift, split, non-matching reduce, or no action):
-                                      // finalize at this GOTO and stop chaining.
-                                      out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent { state_id: goto_state_id })));
-                                      break;
-                                  }
-                              }
-                          } else {
-                              // No further state to go to. This path terminates here.
-                              timeit!(format!("Exloring path. Reason: No goto state found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id), {});
-                              break; // Exit the fast loop for this path
-                          }
-                      }
-                      // Round to nearest power of 2
-                      let i_rounded_to_nearest_pow = if i == 0 {
-                          1
-                      } else {
-                          1 << (32 - (i as u32 - 1).leading_zeros())
-                      };
-       
-                      timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
-                  }
-              }
-       
-              timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
-              // ... (The logic for selecting gotos_for_nt and processing accepting_sources remains the same) ...
-              let mut gotos_for_nt_storage = SubstringGoto::default();
-              let empty_substring_goto = SubstringGoto::default();
-              if any_below_bottom {
-                  // ... (below_bottom_integrated logic is the same) ...
-                  let mut below_bottom_integrated: BTreeMap<usize, Acc> = BTreeMap::new();
-                  for (k, accs_by_edge) in popper.below_bottom.iter() {
-                      for (last_edge_content, acc_arc) in accs_by_edge {
-                          let acc = acc_arc.as_ref();
-                          let state_id_edge_key = (0, Some(last_edge_content.state_id));
-
-                          let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                          let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-
-                          for existing_trie2_node in &acc.trie2_nodes {
-                              let source_arc = existing_trie2_node.as_arc().clone();
-                              let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                              let tokens_to_push = &source_live & &acc.llm_tokens_union;
-                              if tokens_to_push.is_empty() { continue; }
-
-                              let mut inserter = EdgeInserter::new(
-                                  source_arc.clone(),
-                                  state_id_edge_key,
-                                  tokens_to_push.clone(),
-                                  |e, n| *e |= n,
-                                  |node_value, edge_value| {},
-                                  |ev, t| *ev &= &t.live_tokens,
-                              );
-                              inserter = inserter.try_destination_auto(new_trie2_node.clone());
-                              let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                              let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                              dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
-                          }
-
-                          for (dst_wr, added) in &dest_agg {
-                              let mut dg = dst_wr.as_arc().write().expect("poison");
-                              dg.value.live_tokens |= added.clone();
-                          }
-
-                          let mut integrated_acc = acc.clone();
-                          integrated_acc.trie2_nodes = dest_agg.keys().cloned().collect();
-                          below_bottom_integrated.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &integrated_acc)).or_insert(integrated_acc);
-                      }
-                  }
-
-                  let gotos_for_nt: &SubstringGoto = match config.below_bottom_mode {
-                      // ... (selection logic is the same) ...
-                      BelowBottomReductionMode::ContinueFromAll => {
-                          crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromAll", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-                          self.parser.substring_gotos.get(&nt).unwrap_or(&empty_substring_goto)
-                      }
-                      BelowBottomReductionMode::ContinueFromEverything => {
-                          crate::debug!(5, "Handling popped below bottom cases for NT '{}' and len {} with ContinueFromEverything", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-                          let everything_state_id = self.parser.everything_state_id;
-                          if let Some(goto) = self.parser.table.get(&everything_state_id).and_then(|row| row.gotos.get(&nt)) {
-                              let mut compacted = SubstringGoto::default();
-                              if goto.accept {
-                                  compacted.accepting_sources.insert(everything_state_id);
-                              }
-                              if let Some(goto_state_id) = goto.state_id {
-                                  compacted.gotos.insert(goto_state_id, BTreeSet::from([everything_state_id]));
-                              }
-                              gotos_for_nt_storage = compacted;
-                              &gotos_for_nt_storage
-                          } else {
-                              &empty_substring_goto
-                          }
-                      }
-                      BelowBottomReductionMode::Fail => {
-                          crate::debug!(5, "Popped below bottom, failing these parse paths.");
-                          &empty_substring_goto
-                      }
-                      BelowBottomReductionMode::Panic => {
-                          panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
-                      }
-                  };
-
-                  if !gotos_for_nt.accepting_sources.is_empty() || !gotos_for_nt.gotos.is_empty() {
-                      timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
-                          // ... (accepting gotos logic is the same) ...
-                          let accepting_sources = &gotos_for_nt.accepting_sources;
-                          if !accepting_sources.is_empty() {
-                              let mut accepted_stacks = Vec::new();
-                              for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
-                                  let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                                  let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                                  let active_llm_tokens = acc.union_llm_tokens();
-                                  for source_state_id in accepting_sources {
-                                      let edge_key = (*k, Some(*source_state_id));
-                                      // let edge_key = (*k, None);
-                                      let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                                      let mut used_dests = BTreeSet::new();
-
-                                      for existing_trie2_node in &trie2_nodes {
-                                          let source_arc = existing_trie2_node.as_arc().clone();
-                                          let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                                          let tokens_to_push = &source_live & &active_llm_tokens;
-                                          if tokens_to_push.is_empty() { continue; }
-
-                                          // Build an iterator of all eligible strong children under edge_key
-                                          let eligible_iter_builder = || {
-                                              let g = source_arc.read().expect("poison");
-                                              let mut v = Vec::new();
-                                              if let Some(dest_map) = g.children().get(&edge_key) {
-                                                  for (node_ptr, _ev) in dest_map.iter() {
-                                                      if !node_ptr.is_strong() { continue; }
-                                                      if let Some(dest_arc) = node_ptr.upgrade() {
-                                                          let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                                          if (&dl & &tokens_to_push).is_empty() && !dest_arc.read().expect("poison").value.end {
-                                                              v.push(dest_arc.clone());
-                                                          }
-                                                      }
-                                                  }
-                                              }
-                                              v.into_iter()
-                                          };
-
-                                          let mut inserter = EdgeInserter::new(
-                                              source_arc.clone(),
-                                              edge_key,
-                                              tokens_to_push.clone(),
-                                              |e, n| *e |= n,
-                                              |node_value, edge_value| {},
-                                              |ev, t| *ev &= &t.live_tokens,
-                                          ).try_destinations_iter_with(eligible_iter_builder);
-
-                                          inserter = inserter.try_destination_auto(new_trie2_node.clone());
-
-                                          let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                          let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                                          dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
-                                          used_dests.insert(final_dest_wr);
-                                      }
-
-                                      for (dst_wr, added) in &dest_agg {
-                                          let mut dg = dst_wr.as_arc().write().expect("poison");
-                                          dg.value.live_tokens |= added.clone();
-                                      }
-
-                                      let mut acc2 = acc.clone();
-                                      acc2.trie2_nodes = used_dests.clone();
-                                      let new_gss0 = GSSNode::new(acc2);
-                                      let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                                      accepted_stacks.push(Arc::new(new_gss1));
-                                  }
-                              }
-                              let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
-                              accepted_out.push(merged_accepted);
-                          }
-                      });
-
-                      // ==================================================================
-                      // START: OPTIMIZED BLOCK FOR NON-ACCEPTING BELOW-BOTTOM REDUCTIONS
-                      // ==================================================================
-                      timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
-                          let mut below_zero = Vec::new();
-
-                          for (k, mut acc) in below_bottom_integrated {
-                              let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                              if trie2_nodes.is_empty() {
-                                  continue;
-                              }
-
-                              // --- Stage 1: Perform expensive Trie manipulations ONCE ---
-                              // For each source trie node in the popped accumulator, we create exactly one
-                              // corresponding destination node representing the state after the reduction.
-                              // This avoids re-computing the same edge insertions inside the GOTO loop.
-                              let mut intermediate_dest_nodes = BTreeSet::new();
-                              let edge_key = (k, None);
-
-                              for existing_trie_node in &trie2_nodes {
-                                  let source_arc = existing_trie_node.as_arc().clone();
-                                  let tokens_to_push = {
-                                      let source_live = source_arc.read().expect("poison").value.live_tokens.clone();
-                                      &source_live & &acc.llm_tokens_union
-                                  };
-                                  if tokens_to_push.is_empty() { continue; }
-
-                                  // Create a new destination node for this path. All GOTO paths originating
-                                  // from this `existing_trie_node` will share this new destination.
-                                  let new_dest_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-
-                                  let inserter = EdgeInserter::new(
-                                      source_arc.clone(),
-                                      edge_key,
-                                      tokens_to_push.clone(),
-                                      |e, n| *e |= n,
-                                      |_, _| {},
-                                      |ev, t| *ev &= &t.live_tokens,
-                                  ).try_destination_auto(new_dest_node);
-
-                                  let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
-                                  
-                                  // Update live tokens on the newly created destination
-                                  {
-                                      let mut dg = final_dest_arc.write().expect("poison");
-                                      dg.value.live_tokens |= &tokens_to_push;
-                                  }
-                                  
-                                  intermediate_dest_nodes.insert(ArcPtrWrapper::new(final_dest_arc));
-                              }
-
-                              if intermediate_dest_nodes.is_empty() {
-                                  continue;
-                              }
-
-                              // --- Stage 2: Create a single, shared GSS base node ---
-                              // This node represents the "virtual root" after the reduction, containing all
-                              // the new intermediate trie nodes. All subsequent GOTO paths will be built upon this base.
-                              let mut intermediate_acc = acc.clone();
-                              intermediate_acc.trie2_nodes = intermediate_dest_nodes;
-                              let base_gss_node = GSSNode::new(intermediate_acc);
-
-                              // --- Stage 3: Efficiently build all GOTO paths from the shared base ---
-                              // Group all source states by their common destination (goto) state. This allows
-                              // us to use `push_many` for maximum GSS structural sharing.
-                              let mut gotos_to_sources: BTreeMap<StateID, Vec<ParseStateEdgeContent>> = BTreeMap::new();
-                              for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
-                                  let entry = gotos_to_sources.entry(*goto_state_id).or_default();
-                                  for source_state_id in source_state_ids {
-                                      entry.push(ParseStateEdgeContent { state_id: *source_state_id });
-                                  }
-                              }
-
-                              for (goto_state_id, source_edges) in gotos_to_sources {
-                                  // For each destination, create a GSS node with all its sources as predecessors.
-                                  let sources_node = base_gss_node.push_many(source_edges);
-                                  // Then, push the final goto state on top.
-                                  let final_node = sources_node.push(ParseStateEdgeContent { state_id: goto_state_id });
-                                  below_zero.push(Arc::new(final_node));
-                              }
-                          }
-
-                          if !below_zero.is_empty() {
-                              let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
-                                  GSSNode::merge_many_with_depth(usize::MAX, below_zero)
-                              });
-                              out.push(merged);
-                          }
-                      });
-                      // ================================================================
-                      // END: OPTIMIZED BLOCK
-                      // ================================================================
-                  }
-              }
-              });
-
-              timeit!("GLRParserState::reduce_and_goto", {
-                  timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
-                      (GSSNode::merge_many_with_depth(usize::MAX, out), GSSNode::merge_many_with_depth(usize::MAX, accepted_out))
-                  })
-              })
+      for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
+          for source_state_id in source_state_ids {
+              // heavy work
+              ...
+              // then push gss2 with goto_state_id
           }
-      ```
+      }
 
-      ### Summary of Changes and Rationale
+      Note the “heavy work” does not depend on goto_state_id at all. You are redoing it once per destination for the same source_state_id. Instead:
 
-      1.  **Hoisting Expensive Work:** The original code iterated through `gotos_for_nt.gotos`, and inside that loop, it iterated through `trie2_nodes`. This meant the `EdgeInserter` logic was executed `num_gotos * num_trie_nodes` times. The new code reverses this. It first iterates through `trie2_nodes` to perform all the expensive trie manipulations *once*, creating a set of `intermediate_dest_nodes`.
+      1) Build a reverse map once:
+      - source_state_id -> Vec<goto_state_id>
+      from gotos_for_nt.gotos.
 
-      2.  **Creating a Shared Base:** After computing all the necessary trie changes, it creates a single `base_gss_node`. This node's accumulator (`intermediate_acc`) contains all the `intermediate_dest_nodes`. This node acts as a new "virtual root" for all the paths that popped below the bottom.
+      2) For each k/acc, do the heavy work once per source_state_id, update the below_bottom_cache once, and then create one GSS stage for each goto_state_id that shares this source_state_id.
 
-      3.  **Batching GSS Construction:** Instead of creating a new GSS path for every single `(source_state, goto_state)` pair, the new code first groups all source states by their common destination (`gotos_to_sources`). This allows it to use `GSSNode::push_many`, which is highly efficient as it creates a single GSS node with multiple predecessors, maximizing structural sharing within the Graph-Structured Stack.
+      Pseudocode sketch of the non-accepting block:
 
-      4.  **Elimination of Complex Caching:** The original code had a complex `below_bottom_cache`. This optimization makes that cache unnecessary for this part of the logic because the redundant work it was trying to prevent is now eliminated by the structural refactoring of the loops. The new code is not only faster but also simpler to reason about.
+      // Build reverse index once:
+      let mut sources_to_gotos: BTreeMap<StateID, SmallVec<[StateID; 4]>> = BTreeMap::new();
+      for (goto_id, sources) in &gotos_for_nt.gotos {
+          for s in sources {
+              sources_to_gotos.entry(*s).or_default().push(*goto_id);
+          }
+      }
 
-      This refactoring directly targets the identified bottleneck and should provide a significant performance improvement, especially for grammars with many states and complex substring parsing scenarios.
+      for (k, mut acc) in below_bottom_integrated {
+          let edge_key = (k, None);
+          let trie2_nodes = mem::take(&mut acc.trie2_nodes);
+
+          // Precompute, once per trie2 source node (independent of source_state_id and goto_state_id)
+          struct Prep {
+              source_arc: Arc<RwLock<PrecomputeNode2>>,
+              tokens_to_push: LLMTokenBV,
+              existing_dests: SmallVec<[Arc<RwLock<PrecomputeNode2>>; 2]>, // children under edge_key
+          }
+          let mut prep = Vec::with_capacity(trie2_nodes.len());
+          for n in &trie2_nodes {
+              let source_arc = n.as_arc().clone();
+              let source_live = source_arc.read().expect("poison").value.live_tokens.clone();
+              let mut tokens_to_push = source_live;
+              tokens_to_push &= acc.llm_tokens_union;
+              if tokens_to_push.is_empty() { continue; }
+
+              // Scan existing children once (edge_key = (k, None) is the same for all gotos)
+              let existing_dests = {
+                  let g = source_arc.read().expect("poison");
+                  if let Some(dest_map) = g.children().get(&edge_key) {
+                      let mut v = SmallVec::new();
+                      for (node_ptr, _) in dest_map {
+                          if !node_ptr.is_strong() { continue; }
+                          if let Some(dest_arc) = node_ptr.upgrade() {
+                              // Optional: filter by !end and live_tokens & tokens_to_push == 0 here
+                              v.push(dest_arc);
+                          }
+                      }
+                      v
+                  } else {
+                      SmallVec::new()
+                  }
+              };
+              prep.push(Prep { source_arc, tokens_to_push, existing_dests });
+          }
+
+          // Now do the heavy insertion only once per source_state_id:
+          for (source_state_id, goto_list) in &sources_to_gotos {
+              let cache_key = BelowBottomCacheKey { nonterminal_id: nt, source_state_id: *source_state_id };
+
+              // Fallback “new” destination node for this source_state_id
+              let new_trie2_node = trie2_dst_nodes
+                  .entry(*source_state_id)
+                  .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+                  .clone();
+
+              // Pull cached dests once (no per-dest filtering here; let EdgeInserter decide)
+              let cached_dest_iter = self.below_bottom_cache
+                  .get(&cache_key)
+                  .map(|m| m.keys().map(|w| w.as_arc().clone()));
+
+              // Aggregate results for this source_state_id once:
+              // Use a fast hash map instead of BTreeMap.
+              let mut dest_agg: FastHashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = FastHashMap::default();
+              let mut used_dests: SmallVec<[ArcPtrWrapper<RwLock<PrecomputeNode2>>; 4]> = SmallVec::new();
+
+              for p in &prep {
+                  let mut ins = EdgeInserter::new(
+                      p.source_arc.clone(),
+                      edge_key,
+                      p.tokens_to_push.clone(),
+                      |e, n| *e |= n,
+                      |_, _| {},
+                      |ev, t| *ev &= &t.live_tokens,
+                  );
+
+                  if let Some(it) = cached_dest_iter.as_ref() {
+                      ins = ins.to_destinations_weakly_iter(it.clone());
+                  }
+                  ins = ins.try_destinations_iter(p.existing_dests.iter().cloned());
+                  ins = ins.try_destination_auto(new_trie2_node.clone());
+
+                  let final_dest_arc = ins.clone_into_option().expect("EdgeInserter failed");
+
+                  let w = ArcPtrWrapper::new(final_dest_arc.clone());
+                  dest_agg.entry(w.clone())
+                      .and_modify(|bv| *bv |= &p.tokens_to_push)
+                      .or_insert(p.tokens_to_push.clone());
+                  used_dests.push(w);
+              }
+
+              // Update cache and node live_tokens once for this source_state_id
+              let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+              for (dst_wr, added) in &dest_agg {
+                  cache_entry.entry(dst_wr.clone())
+                             .and_modify(|bv| *bv |= added)
+                             .or_insert(added.clone());
+                  let mut dg = dst_wr.as_arc().write().expect("poison");
+                  dg.value.live_tokens |= added.clone();
+              }
+
+              // Now create the GSS tails for each goto_state_id that shares this source_state_id:
+              if !used_dests.is_empty() {
+                  let mut acc2 = acc.clone();
+                  acc2.trie2_nodes = used_dests.into_iter().collect();
+                  let g0 = GSSNode::new(acc2);
+                  let g1 = g0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                  for goto_state_id in goto_list {
+                      let g2 = g1.push(ParseStateEdgeContent { state_id: *goto_state_id });
+                      below_zero.push(Arc::new(g2));
+                  }
+              }
+          }
+      }
+
+      Why this is much faster
+
+      - You eliminate a full pass of EdgeInserter + cache probing + scanning existing children for every goto_state_id. The heavy part is now O(#source_state_id) instead of O(#source_state_id × average_out_degree).
+      - You read each source Arc<RwLock<PrecomputeNode2>> at most twice (once to get live_tokens, once to fetch its children), instead of many times.
+      - You compute tokens_to_push once per trie2 node, not once per goto_state_id.
+      - You scan the child map once per trie2 node, not once per goto_state_id.
+      - Cache updates are done once per source_state_id, not repeatedly.
+      - The only per-goto_state_id work left is pushing the GSS edges, which is cheap.
+
+      Additional low-effort wins
+
+      - Use a faster hash set/map in the tight loop:
+        - Replace dest_agg: BTreeMap and used_dests: BTreeSet with hashbrown::HashMap/hashbrown::HashSet and ahash or fxhash. BTreeMap/BTreeSet dominate time with O(log n) and node allocations; hash maps are cheaper here. You don’t need ordering.
+        - below_bottom_cache is a HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<...>, LLMTokenBV>>. This is touched a lot; switching both levels to hashbrown::HashMap with ahash will help.
+
+      - Avoid allocating Vecs for cached destinations:
+        - Instead of collecting into a Vec, pass an iterator:
+          inserter = inserter.to_destinations_weakly_iter(cached_entries.keys().map(|w| w.as_arc().clone()));
+
+      - Pre-allocate:
+        - Reserve capacity for dest_agg based on prep.len() (it’s an upper bound on distinct destinations you’ll see per source_state_id).
+        - Reserve for used_dests similarly.
+
+      - Reduce locking:
+        - Switch to parking_lot::RwLock. It’s significantly faster than std::sync::RwLock under contention.
+
+      - Bitvector ops:
+        - Avoid repeated clones. You’re already computing tokens_to_push = live ∧ acc_union once per trie2 node with the refactor.
+        - If LLMTokenBV supports in-place ops, prefer them over creating new temporaries. If not, consider adding them.
+
+      - Fast path for the common case:
+        - If source_arc has no children for edge_key and the cache has no entries for cache_key, skip scanning and go straight to try_destination_auto(new_trie2_node). That turns the body into a single insertion per source trie2 node.
+
+      - Profiling overhead:
+        - timeit!(format!(...)) formats strings every time. If your macro doesn’t elide this at compile time, guard the formatting with a cheap check, or pass static strings where possible.
+
+      - Optional parallelism:
+        - The (k, source_state_id) iterations are independent after you decouple them from goto_state_id. You can par_iter over source_state_id with rayon. You’ll need a per-thread accumulation and then a short critical section to update below_bottom_cache, or you can let threads update it (it’s sharded by source_state_id keys so contention should be low), but prefer to minimize lock granularity.
+
+      - SubstringGoto shape:
+        - If this code is hit often, augment SubstringGoto so it also stores the reverse map (source -> Vec<dest>) computed once in stage_9. Then you don’t rebuild it during parsing.
+
+      What kind of speedup to expect
+      In practice, just removing the N×M recomputation (per-destination repetition) and precomputing per-trie-node data typically gives a large multiple (often 3×–10× depending on average fan-out). Switching to parking_lot and hashbrown/ahash can add another 1.5×–2× on top in this hot loop. With a fast-path for the “no-children, no-cache” case, you often see even larger improvements on realistic inputs.
+
+      If you want, I can provide a concrete patch for reduce_and_goto with the refactor applied (keeping your types and EdgeInserter usage).
 
       ``````
 
       Write a git diff to apply them to file.
     metadata:
   - assistant: |-
-      Of course. The performance bottleneck you've identified is a classic case of redundant computation within nested loops, which can be significantly optimized. The original code recalculates trie edge insertions for every combination of GOTO paths, whereas this expensive operation only depends on the accumulator state *before* considering the different GOTO destinations.
+      Of course. Dealing with performance hotspots in parsing loops can be tricky. The provided analysis is excellent. Re-structuring the loops to avoid redundant computations is key. Here are the changes to apply this optimization to `src/glr/parser.rs`.
 
-      By restructuring the logic, we can perform the expensive trie manipulations just once for each accumulator that "falls off" the bottom of the stack. From this single computed result, we can then efficiently construct all the necessary GOTO paths. This changes the complexity from multiplicative to additive, yielding a substantial speedup.
+      I've implemented the suggested refactoring in `reduce_and_goto` to significantly speed up the "popped below bottom" logic. The main changes are:
+      1.  A reverse map (`sources_to_gotos`) is created to iterate over source states first, then their corresponding goto destinations.
+      2.  Work that is independent of the source or goto state is pre-calculated and stored in `prep_data`.
+      3.  The expensive trie node insertion logic is now performed only once per source state, instead of for every source-destination pair.
+      4.  I've switched from `BTreeMap` to `HashMap` for `dest_agg` to improve performance in that aggregation step.
 
-      Here is the git diff with the optimized implementation for the `reduce_and_goto` function.
+      This should result in a substantial performance improvement.
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -1401,146 +1401,92 @@
-                               accepted_out.push(merged_accepted);
-                           }
-                           });
-      -
-      -                    timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
-      -                    // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
-      -                    let mut below_zero = Vec::new();
+      @@ -1245,152 +1245,123 @@
+       
+                           timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
+                           // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
+                           let mut below_zero = Vec::new();
       -
       -                    let mut trie2_dst_nodes = HashMap::new();
       -                    for (k, mut acc) in below_bottom_integrated {
@@ -6264,8 +6117,122 @@ messages:
       -                                    below_zero.push(Arc::new(new_gss2));
       -                                }
       -                                });
-      -                            }
-      -                        }
+      +                    let mut trie2_dst_nodes: HashMap<StateID, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+      +    
+      +                    // Build reverse index from source states to goto states for efficient iteration.
+      +                    let mut sources_to_gotos: BTreeMap<StateID, Vec<StateID>> = BTreeMap::new();
+      +                    for (goto_id, sources) in &gotos_for_nt.gotos {
+      +                        for s in sources {
+      +                            sources_to_gotos.entry(*s).or_default().push(*goto_id);
+      +                        }
+      +                    }
+      +    
+      +                    for (k, mut acc) in below_bottom_integrated {
+      +                        let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+      +                        if trie2_nodes.is_empty() { continue; }
+      +                        timeit!("GLRParserState::reduce_and_goto: pop_below_prep", {});
+      +                        let edge_key = (k, None);
+      +    
+      +                        // Precompute data for each trie2 source node, independent of goto logic.
+      +                        struct PrepData {
+      +                            source_arc: Arc<RwLock<PrecomputeNode2>>,
+      +                            tokens_to_push: LLMTokenBV,
+      +                            existing_dests: Vec<Arc<RwLock<PrecomputeNode2>>>,
+      +                        }
+      +    
+      +                        let prep_data: Vec<PrepData> = trie2_nodes.iter().filter_map(|n| {
+      +                            let source_arc = n.as_arc().clone();
+      +                            let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
+      +                            let tokens_to_push = &source_live & &acc.llm_tokens_union;
+      +                            if tokens_to_push.is_empty() { return None; }
+      +    
+      +                            let existing_dests = {
+      +                                let g = source_arc.read().expect("poison");
+      +                                let mut v = Vec::new();
+      +                                if let Some(dest_map) = g.children().get(&edge_key) {
+      +                                    for (node_ptr, _ev) in dest_map.iter() {
+      +                                        if !node_ptr.is_strong() { continue; }
+      +                                        if let Some(dest_arc) = node_ptr.upgrade() {
+      +                                            let dest_guard = dest_arc.read().expect("poison");
+      +                                            if (&dest_guard.value.live_tokens & &tokens_to_push).is_empty() && !dest_guard.value.end {
+      +                                                v.push(dest_arc.clone());
+      +                                            }
+      +                                        }
+      +                                    }
+      +                                }
+      +                                v
+      +                            };
+      +                            Some(PrepData { source_arc, tokens_to_push, existing_dests })
+      +                        }).collect();
+      +    
+      +                        if prep_data.is_empty() { continue; }
+      +    
+      +                        // For each source_state, do the heavy lifting ONCE.
+      +                        timeit!("GLRParserState::reduce_and_goto: pop_below_main_loop", {
+      +                        for (source_state_id, goto_list) in &sources_to_gotos {
+      +                            let cache_key = BelowBottomCacheKey { nonterminal_id: nt, source_state_id: *source_state_id };
+      +    
+      +                            let new_trie2_node = trie2_dst_nodes
+      +                                .entry(*source_state_id)
+      +                                .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+      +                                .clone();
+      +    
+      +                            let mut dest_agg: HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = HashMap::with_capacity(prep_data.len());
+      +    
+      +                            for p in &prep_data {
+      +                                let mut inserter = EdgeInserter::new(
+      +                                    p.source_arc.clone(), edge_key, p.tokens_to_push.clone(),
+      +                                    |e, n| *e |= n, |_, _| {}, |ev, t| *ev &= &t.live_tokens,
+      +                                );
+      +    
+      +                                if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
+      +                                    inserter = inserter.to_destinations_weakly_iter(
+      +                                        cached_entries.iter().filter_map(|(wrapper, cached_tokens)| {
+      +                                            let dest_arc = wrapper.as_arc();
+      +                                            let guard = dest_arc.read().expect("poison");
+      +                                            if (&(&guard.value.live_tokens - cached_tokens) & &p.tokens_to_push).is_empty() && !guard.value.end {
+      +                                                Some(dest_arc.clone())
+      +                                            } else { None }
+      +                                        })
+      +                                    );
+      +                                }
+      +    
+      +                                inserter = inserter.try_destinations_iter(p.existing_dests.iter().cloned());
+      +                                inserter = inserter.try_destination_auto(new_trie2_node.clone());
+      +    
+      +                                let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
+      +                                let final_dest_wr = ArcPtrWrapper::new(final_dest_arc);
+      +                                dest_agg.entry(final_dest_wr).and_modify(|bv| *bv |= &p.tokens_to_push).or_insert(p.tokens_to_push.clone());
+      +                            }
+      +    
+      +                            if dest_agg.is_empty() { continue; }
+      +    
+      +                            let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+      +                            let mut used_dests = BTreeSet::new();
+      +    
+      +                            for (dest_wrapper, new_tokens) in &dest_agg {
+      +                                if !cache_entry.get(dest_wrapper).map_or(false, |et| new_tokens.is_subset(et)) {
+      +                                    used_dests.insert(dest_wrapper.clone());
+      +                                }
+      +                                cache_entry.entry(dest_wrapper.clone()).and_modify(|bv| *bv |= new_tokens).or_insert(new_tokens.clone());
+      +                            }
+      +    
+      +                            for (dst_wr, added) in &dest_agg {
+      +                                let mut dg = dst_wr.as_arc().write().expect("poison");
+      +                                dg.value.live_tokens |= added.clone();
+      +                            }
+      +    
+      +                            if !used_dests.is_empty() {
+      +                                let mut acc2 = acc.clone();
+      +                                acc2.trie2_nodes = used_dests;
+      +                                let new_gss0 = GSSNode::new(acc2);
+      +                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+      +                                for goto_state_id in goto_list {
+      +                                    let new_gss2 = new_gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
+      +                                    below_zero.push(Arc::new(new_gss2));
+      +                                }
+                                   }
+                               }
       -                    }
       -                    let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
       -                        timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
@@ -6273,88 +6240,8 @@ messages:
       -                    })
       -                    });
       -                    out.push(merged);});
-      +                // ==================================================================
-      +                // START: OPTIMIZED BLOCK FOR NON-ACCEPTING BELOW-BOTTOM REDUCTIONS
-      +                // ==================================================================
-      +                timeit!("GLRParserState::reduce_and_goto: Processing non-accepting gotos", {
-      +                    let mut below_zero = Vec::new();
-      +
-      +                    for (k, mut acc) in below_bottom_integrated {
-      +                        let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-      +                        if trie2_nodes.is_empty() {
-      +                            continue;
-      +                        }
-      +
-      +                        // --- Stage 1: Perform expensive Trie manipulations ONCE ---
-      +                        // For each source trie node in the popped accumulator, we create exactly one
-      +                        // corresponding destination node representing the state after the reduction.
-      +                        // This avoids re-computing the same edge insertions inside the GOTO loop.
-      +                        let mut intermediate_dest_nodes = BTreeSet::new();
-      +                        let edge_key = (k, None);
-      +
-      +                        for existing_trie_node in &trie2_nodes {
-      +                            let source_arc = existing_trie_node.as_arc().clone();
-      +                            let tokens_to_push = {
-      +                                let source_live = source_arc.read().expect("poison").value.live_tokens.clone();
-      +                                &source_live & &acc.llm_tokens_union
-      +                            };
-      +                            if tokens_to_push.is_empty() { continue; }
-      +
-      +                            // Create a new destination node for this path. All GOTO paths originating
-      +                            // from this `existing_trie_node` will share this new destination.
-      +                            let new_dest_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-      +
-      +                            let inserter = EdgeInserter::new(
-      +                                source_arc.clone(),
-      +                                edge_key,
-      +                                tokens_to_push.clone(),
-      +                                |e, n| *e |= n,
-      +                                |_, _| {},
-      +                                |ev, t| *ev &= &t.live_tokens,
-      +                            ).try_destination_auto(new_dest_node);
-      +
-      +                            let final_dest_arc = inserter.clone_into_option().expect("EdgeInserter failed");
-      +                            
-      +                            // Update live tokens on the newly created destination
-      +                            {
-      +                                let mut dg = final_dest_arc.write().expect("poison");
-      +                                dg.value.live_tokens |= &tokens_to_push;
-      +                            }
-      +                            
-      +                            intermediate_dest_nodes.insert(ArcPtrWrapper::new(final_dest_arc));
-      +                        }
-      +
-      +                        if intermediate_dest_nodes.is_empty() {
-      +                            continue;
-      +                        }
-      +
-      +                        // --- Stage 2: Create a single, shared GSS base node ---
-      +                        // This node represents the "virtual root" after the reduction, containing all
-      +                        // the new intermediate trie nodes. All subsequent GOTO paths will be built upon this base.
-      +                        let mut intermediate_acc = acc.clone();
-      +                        intermediate_acc.trie2_nodes = intermediate_dest_nodes;
-      +                        let base_gss_node = GSSNode::new(intermediate_acc);
-      +
-      +                        // --- Stage 3: Efficiently build all GOTO paths from the shared base ---
-      +                        // Group all source states by their common destination (goto) state. This allows
-      +                        // us to use `push_many` for maximum GSS structural sharing.
-      +                        let mut gotos_to_sources: BTreeMap<StateID, Vec<ParseStateEdgeContent>> = BTreeMap::new();
-      +                        for (goto_state_id, source_state_ids) in &gotos_for_nt.gotos {
-      +                            let entry = gotos_to_sources.entry(*goto_state_id).or_default();
-      +                            for source_state_id in source_state_ids {
-      +                                entry.push(ParseStateEdgeContent { state_id: *source_state_id });
-      +                            }
-      +                        }
-      +
-      +                        for (goto_state_id, source_edges) in gotos_to_sources {
-      +                            // For each destination, create a GSS node with all its sources as predecessors.
-      +                            let sources_node = base_gss_node.push_many(source_edges);
-      +                            // Then, push the final goto state on top.
-      +                            let final_node = sources_node.push(ParseStateEdgeContent { state_id: goto_state_id });
-      +                            below_zero.push(Arc::new(final_node));
-      +                        }
+      +                        });
       +                    }
-      +
       +                    if !below_zero.is_empty() {
       +                        let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
       +                            GSSNode::merge_many_with_depth(usize::MAX, below_zero)
@@ -6362,9 +6249,6 @@ messages:
       +                        out.push(merged);
       +                    }
       +                });
-      +                // ================================================================
-      +                // END: OPTIMIZED BLOCK
-      +                // ================================================================
                        }
                    }
                    });
@@ -6380,7 +6264,8 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "Optimize reduce_and_goto for below-bottom
-      reductions by batching trie operations"'
+  - user: "Changes committed with message: \"Refactor: Optimize reduce_and_goto for
+      'popped below bottom' cases by reducing redundant computations and precomputing
+      data.\""
     metadata:
 ...
