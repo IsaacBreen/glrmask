@@ -208,6 +208,79 @@ fn test_constraint_simple() {
 }
 
 #[test]
+fn test_constraint_simple_simplified() {
+    // Grammar: S -> A B
+    // Tokenizer: A='a', B='b', EOF='$'
+    // LLM Vocab: "a", "b", "ab", "$"
+
+    let tokenizer_expr = groups![
+        eat_u8(b'a'), // ID 0 -> A
+        eat_u8(b'b'), // ID 1 -> B
+        eat_u8(b'$'), // ID 2 -> EOF
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_a = LLMTokenID(0);
+    let llm_b = LLMTokenID(1);
+    let llm_ab = LLMTokenID(2);
+    let llm_eof = LLMTokenID(3);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"b".to_vec(), llm_b);
+    llm_token_map.insert(b"ab".to_vec(), llm_ab);
+    llm_token_map.insert(b"$".to_vec(), llm_eof);
+
+    let productions = vec![
+        prod("S", vec![t("A"), t("B")]),
+    ];
+
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    let term_a = regex_name("A");
+    let term_b = regex_name("B");
+    let term_eof = regex_name("EOF");
+    let tid_a = TerminalID(0);
+    let tid_b = TerminalID(1);
+    let tid_eof = TerminalID(2);
+    grammar_token_map.insert(term_a.clone(), tid_a);
+    grammar_token_map.insert(term_b.clone(), tid_b);
+    grammar_token_map.insert(term_eof.clone(), tid_eof);
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
+
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(term_a, tid_a.0);
+    token_name_map.insert(term_b, tid_b.0);
+    token_name_map.insert(term_eof, tid_eof.0);
+
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        3, // max_original_llm_token_id
+    );
+
+    // Scenario 1: commit "a", then "b", then "$"
+    let mut state1 = constraint.init();
+    assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_a.0, llm_ab.0]));
+    state1.commit(llm_a);
+    assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_b.0]));
+    state1.commit(llm_b);
+    assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_eof.0]));
+    state1.commit(llm_eof);
+    assert!(state1.is_accepted());
+
+    // Scenario 2: commit "ab", then "$"
+    let mut state2 = constraint.init();
+    state2.commit(llm_ab);
+    state2.commit(llm_eof);
+    assert!(state2.is_accepted());
+
+    assert_eq!(state1.state(), state2.state(), "States from ('a','b','$') and ('ab','$') should be equivalent.");
+}
+
+#[test]
 fn test_constraint_expression() {
     // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
     // LLM token vocabulary: i, +, *, (, ), (i, +i
