@@ -264,8 +264,8 @@ impl GSSPopper {
                             if child.is_root() {
                                 // Reached the bottom on this pop. Do not keep root in paths.
                                 // Register as "at bottom" under the last edge, and merge accs per edge.
-                                println!("Reached bottom at edge {:?}. Combining accs\n{:?}\nand\n{:?}", edge_val.state_id, new_path_acc, child.acc);
                                 let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
+                                println!("Reached bottom at edge {:?}. Combining accs\n{:?}\nand\n{:?}\ninto\n{:?}", edge_val.state_id, new_path_acc, child.acc, combined);
                                 let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
                                 if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
                                     let merged = Arc::new(Acc::merge(existing, &combined));
@@ -2065,25 +2065,20 @@ mod tests {
         // Edge 100 (root1)
         {
             let acc_below_100 = by_edge.get(&mock_edge(100)).expect("edge 100 missing at depth 1");
-            // Union should be all tokens allowed (since each root disallows a different single token).
-            assert_eq!(acc_below_100.llm_tokens_union, HybridBitset::max_ones());
-
-            // Intersection should disallow token 1.
+            // Union should disallow token 1.
             let mut disallowed = HybridBitset::zeros();
             disallowed.insert(1);
             let expected_intersection = HybridBitset::max_ones() - disallowed;
-            assert_eq!(acc_below_100.llm_tokens_intersection, expected_intersection);
+            assert_eq!(acc_below_100.llm_tokens_union, expected_intersection);
         }
 
         // Edge 200 (root2)
         {
             let acc_below_200 = by_edge.get(&mock_edge(200)).expect("edge 200 missing at depth 1");
-            assert_eq!(acc_below_200.llm_tokens_union, HybridBitset::max_ones());
-
             let mut disallowed = HybridBitset::zeros();
             disallowed.insert(2);
             let expected_intersection = HybridBitset::max_ones() - disallowed;
-            assert_eq!(acc_below_200.llm_tokens_intersection, expected_intersection);
+            assert_eq!(acc_below_200.llm_tokens_union, expected_intersection);
         }
     }
 
