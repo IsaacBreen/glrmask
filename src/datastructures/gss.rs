@@ -2245,8 +2245,8 @@ mod tests {
         let from_root_edge1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
         let from_b_edge1 = Arc::new(Acc::narrow(&acc_b, &acc1));
         let expected_merged_edge1 = Arc::new(Acc::merge(&from_root_edge1, &from_b_edge1));
-        assert_eq!(*roots_multi.get(&mock_edge(1)).expect("edge 1 missing"), *expected_merged_edge1);
-        assert_eq!(*roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), *path_acc2);
+        assert_eq!(**roots_multi.get(&mock_edge(1)).expect("edge 1 missing"), *expected_merged_edge1);
+        assert_eq!(**roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), *path_acc2);
 
         // Test from leaves -> no last edge, so contributes nothing
         let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
