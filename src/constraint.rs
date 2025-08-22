@@ -587,21 +587,23 @@ impl GrammarConstraint {
                     }
                 }
 
-                let mut allowed_terminals = TerminalBV::zeros();
-                for gtid_opt in precomputed_node_data.children().keys() {
-                    if let Some(gtid) = gtid_opt {
-                        allowed_terminals.insert(gtid.0);
+                if false {
+                    let mut allowed_terminals = TerminalBV::zeros();
+                    for gtid_opt in precomputed_node_data.children().keys() {
+                        if let Some(gtid) = gtid_opt {
+                            allowed_terminals.insert(gtid.0);
+                        }
                     }
+                    let disallowed_terminals_bv = allowed_terminals.inverted();
+                    if !disallowed_terminals_bv.is_empty() {
+                        let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                            std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                        );
+                        disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                    }
+                    glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: Some(10), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                    reset_terminals(&mut glr_s.active_state.stack, &mut HashMap::new());
                 }
-                let disallowed_terminals_bv = allowed_terminals.inverted();
-                if !disallowed_terminals_bv.is_empty() {
-                    let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
-                        std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
-                    );
-                    disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
-                }
-                glr_s.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig { fuel: None, per_state_fuel: Some(10), below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
-                reset_terminals(&mut glr_s.active_state.stack, &mut HashMap::new());
 
                 keep_going
             },
