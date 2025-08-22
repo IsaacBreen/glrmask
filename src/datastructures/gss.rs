@@ -1140,7 +1140,7 @@ pub fn merge_trie2_nodes_if_needed(
                     edge_key,
                     tokens_to_push.clone(),
                     |e, n| *e |= n,
-                    |_, _| {},
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
                     |ev, t| *ev &= &t.live_tokens,
                 ).try_destinations_iter_with(eligible_iter_builder);
 

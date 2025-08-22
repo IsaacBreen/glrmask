@@ -1614,7 +1614,7 @@ where
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
                                 if Trie::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
                                     other_child_pairs.remove(i); // Match found.
-                                    found_match_for_current_self_pair = true; 
+                                    found_match_for_current_self_pair = true;
                                     break; // Found match for current s_arc, move to next s_arc.
                                 }
                             }

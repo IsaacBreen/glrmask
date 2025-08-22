@@ -1110,7 +1110,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let relevant_gotos: Vec<_> = accepting_gotos.iter().filter(|g| g.source_state_id == pre_pop_state_id).collect();
                                     if relevant_gotos.is_empty() { continue; }
 
-                                    let mut acc = (*acc_arc).clone();
+                                    let mut acc = acc_arc.as_ref().clone();
                                     let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                                     if trie2_nodes.is_empty() { continue; }
 
@@ -1215,7 +1215,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             );
 
                                             if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
-                                                inserter = inserter.to_destinations_weakly_iter(cached_entries.keys().filter_map(|w| w.upgrade()));
+                                                inserter = inserter.to_destinations_weakly_iter(cached_entries.keys().filter_map(|w| Some(w.as_arc().clone())));
                                             }
                                             let eligible_iter_builder = || {
                                                 let g = source_arc.read().expect("poison");
@@ -1257,10 +1257,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
                         }
-                    }
-                    out.push(GSSNode::merge_many_with_depth(usize::MAX, below_zero));
+                        out.push(GSSNode::merge_many_with_depth(usize::MAX, below_zero));
+                    });
                 }
-                });
             }
         });
 
