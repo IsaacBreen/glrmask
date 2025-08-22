@@ -73,8 +73,8 @@ fn test_trivial() {
         token_name_map,
         1, // max_original_llm_token_id
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     println!("Initializing constraint state...");
     let mut state = constraint.init();
@@ -146,8 +146,8 @@ fn test_constraint_simple() {
         token_name_map,
         3, // max_llm_token_id should be 3 for 0, 1, 2
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     let mut constraint_state = constraint.init();
 
@@ -247,8 +247,8 @@ fn test_constraint_simple_simplified() {
         token_name_map,
         1, // max_llm_token_id should be 1 for 0, 1
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     let mut constraint_state = constraint.init();
 
@@ -810,8 +810,8 @@ fn test_ignore_token() {
         token_name_map,
         3, // max_original_llm_token_id
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // --- Runtime check ---
     // Scenario 1: commit "a", then " ", then "b"
@@ -987,8 +987,8 @@ fn test_precompute_a_plus_tokenizer() {
         token_name_map,
         max_original_llm_token_id,
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // --- Verification ---
     // assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
@@ -1060,8 +1060,8 @@ fn test_precompute_x_eq() {
         token_name_map,
         max_original_llm_token_id,
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // LLM token "x" should result in one edge in the root precompute node for state 0 with the terminal for `X`.
     // LLM token " =" should result in one edge in the root precompute node for state 0 with the terminal for `SPACE` and a subsequent edge from its destination with the terminal for `EQUALS`.
@@ -1409,8 +1409,8 @@ fn test_constraint_expression_unbalanced_parens() {
         token_name_map,
         3,
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1473,8 +1473,8 @@ fn test_constraint_expression_cycle() {
         token_name_map,
         1, // max_original_llm_token_id
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1540,8 +1540,8 @@ fn test_constraint_expression_split_token() {
         token_name_map,
         1, // max_original_llm_token_id
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // Initial state and step
     let state = constraint.init();
@@ -1601,8 +1601,8 @@ fn test_constraint_expression_trivial_indirect() {
         token_name_map,
         3,
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1667,8 +1667,8 @@ fn test_constraint_expression_trivial_direct() {
         token_name_map,
         3,
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1733,8 +1733,8 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         token_name_map,
         3,
     );
-    constraint.dump_precomputed();
-    constraint.dump_precomputed2();
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
