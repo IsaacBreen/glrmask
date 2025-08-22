@@ -418,60 +418,29 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
-
-        // 1) Build a single base Trie2 root and all its (0, Some(state_id)) children once.
+ 
+        // 1) Build a single base Trie2 root.
         let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
             PrecomputedNodeContents::root(internal_max_llm_token),
         )));
+        let base_trie2_root_wr = ArcPtrWrapper::new(base_trie2_root.clone());
 
         let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
 
-        if !BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-            // one child per parser state
-            for state_id in parser.table.keys() {
-                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                // Insert (0, Some(state_id)) edge with full (ones) BV
-                {
-                    let mut ins = EdgeInserter::new(
-                        base_trie2_root.clone(),
-                        (0, Some(*state_id)),
-                        LLMTokenBV::ones(internal_max_llm_token + 1),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| *ev &= &t.live_tokens,
-                    );
-                    ins = ins.try_destination(new_trie2_node.clone());
-                    ins.expect("Failed to insert initial edge into base Trie2 root");
-                }
-
-                // Build the per-state initial GSS leaf pointing to the new_trie2_node
-                let mut acc = Acc::new_fresh();
-                acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
-                let gss_leaf = Arc::new(GSSNode::new(acc));
-                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
-            }
-        } else {
-            // everything-state variant
-            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-            {
-                let mut ins = EdgeInserter::new(
-                    base_trie2_root.clone(),
-                    (0, Some(parser.everything_state_id)),
-                    LLMTokenBV::ones(internal_max_llm_token + 1),
-                    |e, n| *e |= n,
-                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                    |ev, t| *ev &= &t.live_tokens,
-                );
-                ins = ins.try_destination(new_trie2_node.clone());
-                ins.expect("Failed to insert initial edge into base Trie2 root");
-            }
-
+        if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             let mut acc = Acc::new_fresh();
-            acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+            acc.trie2_nodes.insert(base_trie2_root_wr.clone());
             let gss_leaf = Arc::new(GSSNode::new(acc));
             base_gss_nodes.push(Arc::new(
                 gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
             ));
+        } else {
+            for state_id in parser.table.keys() {
+                let mut acc = Acc::new_fresh();
+                acc.trie2_nodes.insert(base_trie2_root_wr.clone());
+                let gss_leaf = Arc::new(GSSNode::new(acc));
+                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
+            }
         }
 
         // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
@@ -592,8 +561,8 @@ impl GrammarConstraint {
                                     continue;
                                 }
                                 crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
-
-                                let edge_key = (0, None);
+ 
+                                let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
                                     src_arc.clone(),

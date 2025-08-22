@@ -1083,8 +1083,48 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // so we continue in every state that has a GOTO on A. We also merge the Acc
         // accumulated along these paths to create a new virtual root to push onto.
         // timeit!(format!("GLRParserState::reduce_and_goto: Handling popped below bottom cases for NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {
-            timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
-            if any_below_bottom {
+        timeit!("GLRParserState::reduce_and_goto: Handling popped below bottom cases", {
+        if any_below_bottom {
+            let mut below_bottom_integrated: BTreeMap<usize, Acc> = BTreeMap::new();
+            for (k, accs_by_edge) in popper.below_bottom.iter() {
+                for (last_edge_content, acc_arc) in accs_by_edge {
+                    let acc = acc_arc.as_ref();
+                    let state_id_edge_key = (0, Some(last_edge_content.state_id));
+
+                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+
+                    for existing_trie2_node in &acc.trie2_nodes {
+                        let source_arc = existing_trie2_node.as_arc().clone();
+                        let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
+                        let tokens_to_push = &source_live & &acc.llm_tokens_union;
+                        if tokens_to_push.is_empty() { continue; }
+
+                        let mut inserter = EdgeInserter::new(
+                            source_arc.clone(),
+                            state_id_edge_key,
+                            tokens_to_push.clone(),
+                            |e, n| *e |= n,
+                            |node_value, edge_value| {},
+                            |ev, t| *ev &= &t.live_tokens,
+                        );
+                        inserter = inserter.try_destination_auto(new_trie2_node.clone());
+                        let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
+                        let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                        dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                    }
+
+                    for (dst_wr, added) in &dest_agg {
+                        let mut dg = dst_wr.as_arc().write().expect("poison");
+                        dg.value.live_tokens |= added.clone();
+                    }
+
+                    let mut integrated_acc = acc.clone();
+                    integrated_acc.trie2_nodes = dest_agg.keys().cloned().collect();
+                    below_bottom_integrated.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &integrated_acc)).or_insert(integrated_acc);
+                }
+            }
+
                 let gotos_for_nt_storage; // To hold the Vec for ContinueFromEverything
                 let gotos_for_nt: &[SubstringGoto] = match config.below_bottom_mode {
                     BelowBottomReductionMode::ContinueFromAll => {
@@ -1118,24 +1158,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
                     let accepting_gotos: Vec<_> = gotos_for_nt.iter().filter(|g| g.accept).collect();
                     if !accepting_gotos.is_empty() {
-                        crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         let mut accepted_stacks = Vec::new();
-                        for (k, accs_by_edge) in popper.below_bottom.iter() {
-                            let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                            let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
-
-                            // Merge Acc across all last-edge buckets for this depth
-                            let mut acc_merged_opt: Option<Acc> = None;
-                            for acc_arc in accs_by_edge.values() {
-                                let a = acc_arc.as_ref().clone();
-                                acc_merged_opt = Some(match acc_merged_opt {
-                                    None => a,
-                                    Some(prev) => Acc::merge(&prev, &a),
-                                });
-                            }
-                            let mut acc = acc_merged_opt.unwrap();
-
+                        for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
                             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                            let mut used_dests = BTreeSet::new();
                             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                             let active_llm_tokens = acc.union_llm_tokens();
                             for goto_info in &accepting_gotos {
@@ -1143,6 +1169,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // let edge_key = (*k, None);
                                 for existing_trie2_node in &trie2_nodes {
                                     let source_arc = existing_trie2_node.as_arc().clone();
+                                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                     let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
                                     let tokens_to_push = &source_live & &active_llm_tokens;
                                     if tokens_to_push.is_empty() { continue; }
@@ -1203,20 +1230,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     // timeit!(format!("GLRParserState::reduce_and_goto: Popped below bottom cases for NT '{}' and len {}, number of imagined reduces: {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, gotos_for_nt.len()), {});
                     let mut below_zero = Vec::new();
 
-                    crate::debug!(6, "States to push after reduction (precomputed): {:?}", gotos_for_nt);
                     let mut trie2_dst_nodes = HashMap::new();
-                    for (k, accs_by_edge) in popper.below_bottom {
-                        // Merge Acc across all last-edge buckets for this depth
-                        let mut acc_merged_opt: Option<Acc> = None;
-                        for acc_arc in accs_by_edge.into_values() {
-                            let a = acc_arc.as_ref().clone();
-                            acc_merged_opt = Some(match acc_merged_opt {
-                                None => a,
-                                Some(prev) => Acc::merge(&prev, &a),
-                            });
-                        }
-                        let mut acc: Acc = acc_merged_opt.unwrap();
-
+                    for (k, mut acc) in below_bottom_integrated {
                         let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
                         timeit!(format!("GLRParserState::reduce_and_goto: Processing pop below"), {});
                         for goto_info in gotos_for_nt {
@@ -1228,7 +1243,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             };
 
                             if let Some(goto_state_id) = goto_info.goto_state_id {
-                                let edge_key = (k, Some(goto_info.source_state_id));
+                                let edge_key = (k, None);
                                 let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                                 let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
 
@@ -1350,11 +1365,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
                         timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
-                            GSSNode::merge_many_with_depth(usize::MAX, below_zero)
-                        })
+                        GSSNode::merge_many_with_depth(usize::MAX, below_zero)
+                    })
                     });
-                    out.push(merged);
-                    });
+                    out.push(merged);});
                 }
             }
             });
