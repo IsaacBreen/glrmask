@@ -1173,7 +1173,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     self.parser.table.get(sid).map_or(false, |row| action_selector(row).is_some())
                 }).count();
 
-                crate::debug!(5,
+                println!(
                     "Popped below bottom: NT '{}', len {}. Substring GOTO stats (total {}): with_state={}, without_state={}, unique_dests={}, shared_dests={}, with_action={}",
                     self.parser.non_terminal_map.get_by_right(&nt).unwrap(),
                     len,
