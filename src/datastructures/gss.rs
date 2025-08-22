@@ -265,13 +265,12 @@ impl GSSPopper {
                                 // Reached the bottom on this pop. Do not keep root in paths.
                                 // Register as "at bottom" under the last edge, and merge accs per edge.
                                 let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
-                                let edge = edge_val.clone();
                                 let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
-                                if let Some(existing) = by_edge.get_mut(&edge) {
+                                if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
                                     let merged = Arc::new(Acc::merge(existing, &combined));
                                     *existing = merged;
                                 } else {
-                                    by_edge.insert(edge, combined);
+                                    by_edge.insert(edge_val.clone(), combined);
                                 }
                             } else {
                                 if let Some(existing_acc) = new_paths.get_mut(child) {
