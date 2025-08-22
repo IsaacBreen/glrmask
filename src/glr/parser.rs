@@ -1186,75 +1186,61 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // );
                 if !gotos_for_nt.accepting_sources.is_empty() || !gotos_for_nt.gotos.is_empty() {
                     timeit!("GLRParserState::reduce_and_goto: Processing accepting gotos", {
-                    let accepting_sources = &gotos_for_nt.accepting_sources;
-                    if !accepting_sources.is_empty() {
-                        let mut accepted_stacks = Vec::new();
-                        for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
-                            let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-                            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                            let active_llm_tokens = acc.union_llm_tokens();
-                            for source_state_id in accepting_sources {
-                                let edge_key = (*k, Some(*source_state_id));
-                                // let edge_key = (*k, None);
-                                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
-                                let mut used_dests = BTreeSet::new();
+                        let accepting_sources = &gotos_for_nt.accepting_sources;
+                        if !accepting_sources.is_empty() {
+                            let mut accepted_stacks = Vec::new();
+                            for (k, mut acc) in below_bottom_integrated.iter().map(|(k, acc)| (k, acc.clone())) {
+                                let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+                                if trie2_nodes.is_empty() { continue; }
 
-                                for existing_trie2_node in &trie2_nodes {
-                                    let source_arc = existing_trie2_node.as_arc().clone();
-                                    let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                                    let tokens_to_push = &source_live & &active_llm_tokens;
+                                // --- Stage 1: Perform expensive Trie manipulations ONCE ---
+                                let mut intermediate_dest_nodes = BTreeSet::new();
+                                let edge_key = (*k, None); // Use simplified key, consistent with non-accepting block
+
+                                for existing_trie_node in &trie2_nodes {
+                                    let source_arc = existing_trie_node.as_arc().clone();
+                                    let tokens_to_push = {
+                                        let source_live = source_arc.read().expect("poison").value.live_tokens.clone();
+                                        &source_live & &acc.llm_tokens_union
+                                    };
                                     if tokens_to_push.is_empty() { continue; }
 
-                                    // Build an iterator of all eligible strong children under edge_key
-                                    let eligible_iter_builder = || {
-                                        let g = source_arc.read().expect("poison");
-                                        let mut v = Vec::new();
-                                        if let Some(dest_map) = g.children().get(&edge_key) {
-                                            for (node_ptr, _ev) in dest_map.iter() {
-                                                if !node_ptr.is_strong() { continue; }
-                                                if let Some(dest_arc) = node_ptr.upgrade() {
-                                                    let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                                    if (&dl & &tokens_to_push).is_empty() && !dest_arc.read().expect("poison").value.end {
-                                                        v.push(dest_arc.clone());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        v.into_iter()
-                                    };
-
-                                    let mut inserter = EdgeInserter::new(
+                                    let new_dest_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                    let inserter = EdgeInserter::new(
                                         source_arc.clone(),
                                         edge_key,
                                         tokens_to_push.clone(),
                                         |e, n| *e |= n,
-                                        |node_value, edge_value| {},
+                                        |_, _| {},
                                         |ev, t| *ev &= &t.live_tokens,
-                                    ).try_destinations_iter_with(eligible_iter_builder);
-
-                                    inserter = inserter.try_destination_auto(new_trie2_node.clone());
-
-                                    let final_dest_arc = inserter.clone_into_option().expect("GLRParserState::reduce_and_goto: EdgeInserter failed");
-                                    let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                                    dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
-                                    used_dests.insert(final_dest_wr);
+                                    ).try_destination_auto(new_dest_node);
+                                    let final_dest_arc = inserter.unwrap();
+                                    {
+                                        let mut dg = final_dest_arc.write().expect("poison");
+                                        dg.value.live_tokens |= &tokens_to_push;
+                                    }
+                                    intermediate_dest_nodes.insert(ArcPtrWrapper::new(final_dest_arc));
                                 }
 
-                                for (dst_wr, added) in &dest_agg {
-                                    let mut dg = dst_wr.as_arc().write().expect("poison");
-                                    dg.value.live_tokens |= added.clone();
-                                }
+                                if intermediate_dest_nodes.is_empty() { continue; }
 
-                                let mut acc2 = acc.clone();
-                                acc2.trie2_nodes = used_dests.clone();
-                                let new_gss0 = GSSNode::new(acc2);
-                                let new_gss1 = new_gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                                accepted_stacks.push(Arc::new(new_gss1));
+                                // --- Stage 2: Create a single, shared GSS base node ---
+                                let mut intermediate_acc = acc.clone();
+                                intermediate_acc.trie2_nodes = intermediate_dest_nodes;
+                                let base_gss_node = GSSNode::new(intermediate_acc);
+
+                                // --- Stage 3: Build GSS paths for all accepting sources ---
+                                let source_edges: Vec<ParseStateEdgeContent> = accepting_sources
+                                    .iter()
+                                    .map(|sid| ParseStateEdgeContent { state_id: *sid })
+                                    .collect();
+
+                                let sources_node = base_gss_node.push_many(source_edges);
+                                accepted_stacks.push(Arc::new(sources_node));
                             }
+                            let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
+                            accepted_out.push(merged_accepted);
                         }
-                        let merged_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks);
-                        accepted_out.push(merged_accepted);
-                    }
                     });
                 // ==================================================================
                 // START: OPTIMIZED BLOCK FOR NON-ACCEPTING BELOW-BOTTOM REDUCTIONS
