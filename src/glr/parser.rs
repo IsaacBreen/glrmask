@@ -768,10 +768,10 @@ impl Ord for WorkMapKey {
     }
 }
 
-type WorkMap = BTreeMap<WorkMapKey, ParseState>;
+type WorkMap = BTreeMap<WorkMapKey, (ParseState, usize)>;
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    fn enqueue(work_map: &mut WorkMap, state: ParseState) {
+    fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: usize) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.
         // This merges paths that are in the same logical state, reducing redundant processing.
@@ -783,8 +783,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
             work_map.entry(WorkMapKey(depth, state_id))
-                .and_modify(|s| s.merge(isolated_state.clone()))
-                .or_insert(isolated_state);
+                .and_modify(|(s, f)| {
+                    s.merge(isolated_state.clone());
+                    *f = (*f).max(fuel);
+                })
+                .or_insert((isolated_state, fuel));
         }
     }
 
@@ -817,15 +820,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
         F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
         while let Some(entry) = work_map.pop_first() {
-            let (key, state) = entry;
+            let (key, (state, mut state_fuel)) = entry;
             if let Some(f) = fuel {
                 if *f == 0 {
                     // Out of fuel. Put the state back and return.
-                    work_map.insert(key, state);
+                    work_map.insert(key, (state, state_fuel));
                     return;
                 }
                 *f -= 1;
             }
+            if state_fuel == 0 {
+                continue;
+            }
+            state_fuel = state_fuel.saturating_sub(1);
+
             let WorkMapKey(_depth, state_id) = key;
             let row = &self.parser.table[&state_id];
             let action_opt = action_selector(row);
@@ -851,9 +859,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     accepted_state: state.accepted_state.clone(),
                                 };
                                 if let Some(ref mut r_map) = reduce_map {
-                                    Self::enqueue(r_map, new_parse_state);
+                                    Self::enqueue(r_map, new_parse_state, state_fuel);
                                 } else {
-                                    Self::enqueue(work_map, new_parse_state);
+                                    Self::enqueue(work_map, new_parse_state, state_fuel);
                                 }
                             }
                             if !accepted_s_new_arc.is_empty() {
@@ -883,9 +891,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             accepted_state: state.accepted_state.clone(),
                                         };
                                         if let Some(ref mut r_map) = reduce_map {
-                                            Self::enqueue(r_map, new_parse_state);
+                                            Self::enqueue(r_map, new_parse_state, state_fuel);
                                         } else {
-                                            Self::enqueue(work_map, new_parse_state);
+                                            Self::enqueue(work_map, new_parse_state, state_fuel);
                                     }
                                 }
                                     if !accepted_s_new_arc.is_empty() {
@@ -921,9 +929,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             accepted_state: state.accepted_state.clone(),
                                         };
                                         if let Some(ref mut r_map) = reduce_map {
-                                            Self::enqueue(r_map, new_parse_state);
+                                            Self::enqueue(r_map, new_parse_state, state_fuel);
                                         } else {
-                                            Self::enqueue(work_map, new_parse_state);
+                                            Self::enqueue(work_map, new_parse_state, state_fuel);
                                         }
                                     }
                                     if !accepted_s_new_arc.is_empty() {
@@ -1437,10 +1445,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
-            Self::enqueue(&mut phase1_todo, self.active_state.clone());
+            Self::enqueue(&mut phase1_todo, self.active_state.clone(), usize::MAX);
             self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config);
         } else { // ParserPhase::ReadyForDefaultReductions
-            Self::enqueue(&mut phase2_todo, self.active_state.clone());
+            Self::enqueue(&mut phase2_todo, self.active_state.clone(), usize::MAX);
         }
 
         // --- Phase 2 ---
@@ -1476,7 +1484,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Phase 3: apply default reductions until fixpoint (no token involved).
         let mut work_map: WorkMap = WorkMap::new();
         // Seed the queue with the current active state.
-        Self::enqueue(&mut work_map, self.active_state.clone());
+        let initial_fuel = config.fuel.unwrap_or(usize::MAX);
+        Self::enqueue(&mut work_map, self.active_state.clone(), initial_fuel);
 
         // Collect survivors (clone-and-merge states and reduction results that finalize).
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
@@ -1506,7 +1515,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for state in accepted_states_todo {
             next_active.merge(state);
         }
-        for (_, state) in work_map {
+        for (_, (state, _)) in work_map {
             next_active.merge(state);
         }
         self.active_state = next_active;
