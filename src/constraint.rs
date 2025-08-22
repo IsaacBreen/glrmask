@@ -2066,7 +2066,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
             let config = GSSPrintConfig {
                 labels: None,
-                max_nodes: 50,
+                max_edges: 50,
                 original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
@@ -2417,7 +2417,7 @@ impl<'a> GrammarConstraintState<'a> {
             let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
             let config = GSSPrintConfig {
                 labels: Some(&labels),
-                max_nodes: 300,
+                max_edges: 300,
                 original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
@@ -2621,7 +2621,7 @@ impl<'a> GrammarConstraintState<'a> {
             let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
             let config = GSSPrintConfig {
                 labels: Some(&labels),
-                max_nodes: 300,
+                max_edges: 300,
                 original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,

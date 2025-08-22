@@ -1410,6 +1410,7 @@ pub struct GSSStats {
     pub num_roots: usize,
     pub num_root_predecessors: usize,
     pub num_unique_root_predecessor_keys: usize,
+    pub total_edges: usize,
     pub unique_nodes: usize,
     pub structurally_unique_nodes: usize,
     pub structural_redundancy: f64,
@@ -1482,6 +1483,8 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
             queue.push_back((pred_arc.as_ref(), depth + 1));
         }
     }
+
+    stats.total_edges = total_preds as usize;
 
     if stats.unique_nodes > 0 {
         stats.average_depth = total_depth as f64 / stats.unique_nodes as f64;
@@ -1612,7 +1615,7 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
 
 pub struct GSSPrintConfig<'a> {
     pub labels: Option<&'a [String]>,
-    pub max_nodes: usize,
+    pub max_edges: usize,
     pub original_internal_bimap: Option<&'a BiBTreeMap<usize, usize>>,
     pub llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
     pub verbose: bool,
@@ -1622,7 +1625,7 @@ impl<'a> Default for GSSPrintConfig<'a> {
     fn default() -> Self {
         Self {
             labels: None,
-            max_nodes: usize::MAX,
+            max_edges: usize::MAX,
             original_internal_bimap: None,
             llm_token_map: None,
             verbose: false,
@@ -1668,7 +1671,7 @@ pub fn print_gss_forest(
             .collect();
 
         for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
-            if *node_count >= config.max_nodes {
+            if *node_count >= config.max_edges {
                 writeln!(output, "{}... (Truncated)", prefix)?;
                 return Ok(());
             }
@@ -1744,10 +1747,10 @@ pub fn print_gss_forest(
     let mut seen_state_ids = HashSet::new();
 
     if roots.is_empty() { return ("GSS Forest: (No roots)".to_string(), state_ids_in_order); }
-    writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", config.max_nodes).unwrap();
+    writeln!(&mut out_str, "GSS Forest (Max Edges: {}):", config.max_edges).unwrap();
 
     for (i, root_arc) in roots.iter().enumerate() {
-        if count >= config.max_nodes {
+        if count >= config.max_edges {
             writeln!(&mut out_str, "... (Truncated)").unwrap();
             break;
         }

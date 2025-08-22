@@ -1598,7 +1598,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-        const MAX: usize = 30;
+        const MAX: usize = 100;
         const PANIC_THRESHOLD: usize = 1_000_000;
 
         let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
@@ -1623,26 +1623,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
             total_nodes += stats.unique_nodes;
 
             let (current_gss_string, current_state_ids) = {
-                let print_full_forest = stats.unique_nodes <= MAX;
-                let max_nodes_to_print = if print_full_forest { usize::MAX } else { MAX };
+                let print_full_forest = stats.total_edges <= MAX;
+                let max_edges_to_print = if print_full_forest { usize::MAX } else { MAX };
                 let config = GSSPrintConfig {
-                    max_nodes: max_nodes_to_print,
+                    max_edges: max_edges_to_print,
                     ..Default::default()
                 };
                 let (gss_string, state_ids) = print_gss_forest(&[root.clone()], &self.parser.terminal_map, &config);
                 let final_string = if print_full_forest {
-                    format!("{} GSS ({} nodes):\n{}", name, stats.unique_nodes, gss_string)
+                    format!("{} GSS ({} nodes, {} edges):\n{}", name, stats.unique_nodes, stats.total_edges, gss_string)
                 } else {
                     match find_longest_path(root) {
-                        Some(p) => format!("{} GSS too big ({} nodes). Longest path ({}): {}",
+                        Some(p) => format!("{} GSS too big ({} nodes, {} edges). Longest path ({}): {}",
                                            name,
                                            stats.unique_nodes,
+                                           stats.total_edges,
                                            p.len(),
                                            p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                                 .map(|id| id.to_string())
                                                 .collect::<Vec<_>>()
                                             .join(" → ")),
-                        None => format!("{} GSS too big ({} nodes) – path not found", name, stats.unique_nodes),
+                        None => format!("{} GSS too big ({} nodes, {} edges) – path not found", name, stats.unique_nodes, stats.total_edges),
                     }
                 };
                 (final_string, state_ids)
