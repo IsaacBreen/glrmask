@@ -587,7 +587,7 @@ impl GrammarConstraint {
                     }
                 }
 
-                if true {
+                if false {
                     let mut allowed_terminals = TerminalBV::zeros();
                     for gtid_opt in precomputed_node_data.children().keys() {
                         if let Some(gtid) = gtid_opt {
