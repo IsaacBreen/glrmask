@@ -31,7 +31,7 @@ pub type TerminalBV = HybridBitset;
 pub type MaxDepth = usize;
 pub type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>;
+type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
@@ -201,7 +201,7 @@ pub struct GSSPopper {
     /// Key is the number of extra pops beyond reaching the bottom (0 means exactly at bottom),
     /// and the value is the combined Acc for all paths that resulted in that depth.
     /// Multiple contributions to the same depth are merged via Acc::merge.
-    pub(crate) below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
+    pub(crate) below_bottom: BTreeMap<usize, Arc<Acc>>,
 }
 
 /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
@@ -228,9 +228,7 @@ impl GSSPopper {
         if node.is_root() {
             // Do not store root nodes in paths. Register as "at bottom" instead.
             let combined = Arc::new(Acc::narrow(&acc, &node.acc));
-            // When starting from a root, there's no "last edge". Use a dummy value.
-            let dummy_edge = ParseStateEdgeContent { state_id: StateID(usize::MAX) };
-            Self::merge_below_into(&mut popper.below_bottom, 0, dummy_edge, combined);
+            popper.merge_below(0, combined);
         } else {
             popper.paths.insert(node, acc);
         }
@@ -252,22 +250,27 @@ impl GSSPopper {
     pub fn popn(&mut self, n: usize) {
         for _ in 0..n {
             // Shift existing "below bottom" entries down by 1, since we're popping one more time.
-            let mut new_below: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> = BTreeMap::new();
-            for (k, edge_map) in std::mem::take(&mut self.below_bottom) {
-                new_below.insert(k + 1, edge_map);
+            let mut new_below: BTreeMap<usize, Arc<Acc>> = BTreeMap::new();
+            for (k, acc) in std::mem::take(&mut self.below_bottom) {
+                new_below.insert(k + 1, acc);
             }
 
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
                 let new_path_acc = Arc::new(Acc::narrow(&path_acc, &parent.acc));
-                for (edge_value, preds_by_depth) in &parent.predecessors {
+                for preds_by_depth in parent.predecessors.values() {
                     for pred_vec in preds_by_depth.values() {
                         for child in pred_vec {
                             if child.is_root() {
                                 // Reached the bottom on this pop. Do not keep root in paths.
-                                // Register as "at bottom" (depth 1) and merge accs.
+                                // Register as "at bottom" (depth 0) and merge accs.
                                 let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
-                                Self::merge_below_into(&mut new_below, 1, edge_value.clone(), combined);
+                                if let Some(existing) = new_below.get_mut(&1) {
+                                    let merged = Arc::new(Acc::merge(existing, &combined));
+                                    *existing = merged;
+                                } else {
+                                    new_below.insert(1, combined);
+                                }
                             } else {
                                 if let Some(existing_acc) = new_paths.get_mut(child) {
                                     *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
@@ -284,13 +287,21 @@ impl GSSPopper {
         }
     }
 
-    fn merge_below_into(map: &mut BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>, depth: usize, edge: ParseStateEdgeContent, acc: Arc<Acc>) {
-        let edge_map = map.entry(depth).or_default();
-        if let Some(existing) = edge_map.get_mut(&edge) {
+    fn merge_below(&mut self, depth: usize, acc: Arc<Acc>) {
+        if let Some(existing) = self.below_bottom.get_mut(&depth) {
             let merged = Arc::new(Acc::merge(existing, &acc));
             *existing = merged;
         } else {
-            edge_map.insert(edge, acc);
+            self.below_bottom.insert(depth, acc);
+        }
+    }
+
+    fn merge_below_into(map: &mut BTreeMap<usize, Arc<Acc>>, depth: usize, acc: Arc<Acc>) {
+        if let Some(existing) = map.get_mut(&depth) {
+            let merged = Arc::new(Acc::merge(existing, &acc));
+            *existing = merged;
+        } else {
+            map.insert(depth, acc);
         }
     }
 }
@@ -663,8 +674,6 @@ impl GSSNode {
             // After merging, unify structurally identical predecessors to increase sharing.
             // This is important for preventing the GSS from bloating with redundant nodes
             // when merging branches that have common substructures.
-            // TODO: This canonicalization step is very expensive. Can we optimize it?
-            // Perhaps by using a global cache for canonical nodes.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
 
@@ -1966,9 +1975,7 @@ mod tests {
         assert_eq!(pop_result.paths.len(), 0);
         assert_eq!(pop_result.below_bottom.len(), 1);
         // We reached the bottom exactly (depth 0).
-        let edge_map = pop_result.below_bottom.get(&1).unwrap();
-        assert_eq!(edge_map.len(), 1);
-        let combined_acc = edge_map.values().next().unwrap();
+        let combined_acc = pop_result.below_bottom.get(&1).unwrap();
 
         // `pushed.acc` (same as `root.acc`) allows all but 1.
         // The intersection should allow all but 1.
@@ -2000,22 +2007,18 @@ mod tests {
         assert!(popper.paths.is_empty());
         assert_eq!(popper.below_bottom.len(), 1);
         // At bottom with depth 0 entry.
-        let edge_map0 = popper.below_bottom.get(&0).unwrap();
-        assert_eq!(edge_map0.len(), 1);
-        let acc0 = edge_map0.values().next().unwrap();
-        assert_eq!(*acc0, &*root.acc);
+        let acc0 = popper.below_bottom.get(&0).unwrap();
+        assert_eq!(**acc0, *root.acc);
         // Pop again; entry should shift from 0 -> 1.
         popper.popn(1);
         assert!(popper.below_bottom.get(&0).is_none());
-        let edge_map1 = popper.below_bottom.get(&1).unwrap();
-        let acc1 = edge_map1.values().next().unwrap();
-        assert_eq!(*acc1, &*root.acc);
+        let acc1 = popper.below_bottom.get(&1).unwrap();
+        assert_eq!(**acc1, *root.acc);
         // Pop two more steps; now it should be at 3
         popper.popn(2);
         assert!(popper.below_bottom.get(&1).is_none());
-        let edge_map3 = popper.below_bottom.get(&3).unwrap();
-        let acc3 = edge_map3.values().next().unwrap();
-        assert_eq!(*acc3, &*root.acc);
+        let acc3 = popper.below_bottom.get(&3).unwrap();
+        assert_eq!(**acc3, *root.acc);
     }
 
     #[test]
@@ -2025,13 +2028,11 @@ mod tests {
         let mut popper = pushed.popn(1); // Reaches bottom (depth 0)
         assert!(popper.paths.is_empty());
         assert!(popper.below_bottom.get(&1).is_some());
-        let edge_map0 = popper.below_bottom.get(&1).unwrap().clone();
-        let acc0 = edge_map0.values().next().unwrap().clone();
+        let acc0 = popper.below_bottom.get(&1).unwrap().clone();
         // Shift down by 2 more pops.
         popper.popn(2);
         assert!(popper.below_bottom.get(&1).is_none());
-        let edge_map2 = popper.below_bottom.get(&3).unwrap().clone();
-        let acc2 = edge_map2.values().next().unwrap().clone();
+        let acc2 = popper.below_bottom.get(&3).unwrap().clone();
         assert_eq!(*acc0, *acc2);
     }
 
@@ -2049,22 +2050,15 @@ mod tests {
         let popper = parent.popn(1);
         assert!(popper.paths.is_empty());
         assert_eq!(popper.below_bottom.len(), 1);
-        let edge_map = popper.below_bottom.get(&1).unwrap();
-
-        // With the new logic, paths with different final edges are not merged.
-        assert_eq!(edge_map.len(), 2);
-
-        // Check the path that went through root1 (disallowing token 1)
-        let acc1 = edge_map.get(&mock_edge(100)).unwrap();
-        let mut disallowed1 = HybridBitset::zeros();
-        disallowed1.insert(1);
-        assert_eq!(acc1.llm_tokens_union, HybridBitset::max_ones() - disallowed1);
-
-        // Check the path that went through root2 (disallowing token 2)
-        let acc2 = edge_map.get(&mock_edge(200)).unwrap();
-        let mut disallowed2 = HybridBitset::zeros();
-        disallowed2.insert(2);
-        assert_eq!(acc2.llm_tokens_union, HybridBitset::max_ones() - disallowed2);
+        let acc_below = popper.below_bottom.get(&1).unwrap();
+        // Union should be all tokens allowed (since each root disallows a different single token).
+        assert_eq!(acc_below.llm_tokens_union, HybridBitset::max_ones());
+        // Intersection should disallow both 1 and 2.
+        let mut disallowed = HybridBitset::zeros();
+        disallowed.insert(1);
+        disallowed.insert(2);
+        let expected_intersection = HybridBitset::max_ones() - disallowed;
+        assert_eq!(acc_below.llm_tokens_intersection, expected_intersection);
     }
 
     #[test]
@@ -2499,4 +2493,3 @@ mod tests {
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
     }
 }
-
