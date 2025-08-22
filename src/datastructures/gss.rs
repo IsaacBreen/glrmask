@@ -2509,42 +2509,4 @@ mod tests {
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t1)), "Unified leaf missing trie2 node 1");
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
     }
-
-    #[test]
-    fn test_constraint_simple_simplified() {
-        // This test simulates a simple grammar `S -> "AB" "EOF"` and checks constraint propagation.
-        // It's a simplified scenario based on a more complex `test_constraint_simple`.
-
-        // 1. Setup: Create a leaf node with an initial constraint.
-        // This represents the state before parsing anything.
-        // The constraint is that LLM token 100 is disallowed.
-        let leaf_acc = mock_acc(100);
-        let leaf = Arc::new(GSSNode::new(leaf_acc.clone()));
-
-        // 2. Simulate parsing: Push states for terminals "AB" and "EOF".
-        // `mock_edge(1)` represents seeing "AB".
-        // `mock_edge(2)` represents seeing "EOF".
-        let node1 = Arc::new(leaf.push(mock_edge(1)));
-        let node2 = Arc::new(node1.push(mock_edge(2)));
-
-        // The `push` operation should preserve the accumulator's constraints.
-        assert_eq!(*node2.acc, leaf_acc);
-
-        // 3. Simulate reduction: Pop 2 states for the production `S -> "AB" "EOF"`.
-        let popper = node2.popn(2);
-
-        // 4. Assertions: Check the result of the pop operation.
-        // After popping 2 states, we should be at the leaf node.
-        // Since `leaf` is a root, it won't be in `popper.paths`.
-        assert!(popper.paths.is_empty());
-
-        // The result should be in `below_bottom`, indicating we've reached a root.
-        assert_eq!(popper.below_bottom.len(), 1, "Should have an entry for reaching the bottom");
-        let by_edge = popper.below_bottom.get(&1).expect("Should be at depth 1 below bottom");
-        assert_eq!(by_edge.len(), 1, "Should have one resulting path");
-
-        let (_edge, final_acc) = by_edge.iter().next().unwrap();
-        assert_eq!(final_acc.llm_tokens_union, leaf_acc.llm_tokens_union);
-        assert_eq!(final_acc.llm_tokens_intersection, leaf_acc.llm_tokens_intersection);
-    }
 }
