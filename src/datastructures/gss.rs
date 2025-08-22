@@ -265,18 +265,14 @@ impl GSSPopper {
                                 // Reached the bottom on this pop. Do not keep root in paths.
                                 // Register as "at bottom" under the last edge, and merge accs per edge.
                                 let combined = Arc::new(Acc::narrow(&new_path_acc, &child.acc));
-                                // // When a path terminates at a root, the resulting Acc is special.
-                                // // The union of possibilities is defined by the path taken to get here (the context from above).
-                                // // The intersection, however, must satisfy both the path and the root's local constraints.
-                                // let combined = Arc::new(Acc {
-                                //     llm_tokens_union: new_path_acc.llm_tokens_union.clone(),
-                                //     llm_tokens_intersection: &new_path_acc.llm_tokens_intersection & &child.acc.llm_tokens_intersection,
-                                //     terminals_union: new_path_acc.terminals_union.clone(),
-                                //     terminals_intersection: &new_path_acc.terminals_intersection & &child.acc.terminals_intersection,
-                                //     needs_push_down: false,
-                                //     trie2_nodes: child.acc.trie2_nodes.clone(),
-                                // });
-                                Self::merge_below_into(&mut new_below, 1, edge_val.clone(), combined);
+                                let edge = edge_val.clone();
+                                let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
+                                if let Some(existing) = by_edge.get_mut(&edge) {
+                                    let merged = Arc::new(Acc::merge(existing, &combined));
+                                    *existing = merged;
+                                } else {
+                                    by_edge.insert(edge, combined);
+                                }
                             } else {
                                 if let Some(existing_acc) = new_paths.get_mut(child) {
                                     *existing_acc = Arc::new(Acc::merge(existing_acc, &new_path_acc));
@@ -290,25 +286,6 @@ impl GSSPopper {
             }
             self.paths = new_paths;
             self.below_bottom = new_below;
-        }
-    }
-
-    fn merge_below(&mut self, depth: usize, edge: ParseStateEdgeContent, acc: Arc<Acc>) {
-        Self::merge_below_into(&mut self.below_bottom, depth, edge, acc);
-    }
-
-    fn merge_below_into(
-        map: &mut BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
-        depth: usize,
-        edge: ParseStateEdgeContent,
-        acc: Arc<Acc>,
-    ) {
-        let by_edge = map.entry(depth).or_insert_with(BTreeMap::new);
-        if let Some(existing) = by_edge.get_mut(&edge) {
-            let merged = Arc::new(Acc::merge(existing, &acc));
-            *existing = merged;
-        } else {
-            by_edge.insert(edge, acc);
         }
     }
 }
