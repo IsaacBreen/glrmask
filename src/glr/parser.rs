@@ -1121,6 +1121,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(5, "Accepting popped below bottom cases: {:?}", accepting_gotos);
                         let mut accepted_stacks = Vec::new();
                         for (k, accs_by_edge) in popper.below_bottom.iter() {
+                            let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                            let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> = BTreeSet::new();
+
                             // Merge Acc across all last-edge buckets for this depth
                             let mut acc_merged_opt: Option<Acc> = None;
                             for acc_arc in accs_by_edge.values() {

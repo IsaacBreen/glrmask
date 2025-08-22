@@ -1154,7 +1154,7 @@ pub fn merge_trie2_nodes_if_needed(
                     v.into_iter()
                 };
 
-                inserter = EdgeInserter::new(
+                let mut inserter = EdgeInserter::new(
                     source_arc.clone(),
                     edge_key,
                     tokens_to_push.clone(),
@@ -2238,8 +2238,8 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots.contains_key(&mock_edge(1)));
         assert!(roots.contains_key(&mock_edge(2)));
-        assert_eq!(*roots.get(&mock_edge(1)).unwrap(), *path_acc1);
-        assert_eq!(*roots.get(&mock_edge(2)).unwrap(), *path_acc2);
+        assert_eq!(**roots.get(&mock_edge(1)).unwrap(), *path_acc1);
+        assert_eq!(**roots.get(&mock_edge(2)).unwrap(), *path_acc2);
 
         // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
         // because its initial `fresh` acc has a wider union of possibilities.
@@ -2250,8 +2250,8 @@ mod tests {
         assert!(roots_multi.contains_key(&mock_edge(1)));
         assert!(roots_multi.contains_key(&mock_edge(2)));
         // The path from `b` directly is shorter, so its Acc is less constrained (more "fresh")
-        assert_eq!(*roots_multi.get(&mock_edge(1)).unwrap(), *path_acc_b_l1);
-        assert_eq!(*roots_multi.get(&mock_edge(2)).unwrap(), *path_acc2);
+        assert_eq!(**roots_multi.get(&mock_edge(1)).unwrap(), *path_acc_b_l1);
+        assert_eq!(**roots_multi.get(&mock_edge(2)).unwrap(), *path_acc2);
 
 
         // Test from leaves (should return empty map as leaves are roots themselves and have no incoming edges)
