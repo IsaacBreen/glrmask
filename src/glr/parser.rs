@@ -726,7 +726,7 @@ pub struct GLRParserState<'a> { // No longer generic
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BelowBottomCacheKey {
     nonterminal_id: NonTerminalID,
-    // source_state_id: StateID,
+    source_state_id: StateID,
     // k: usize,
     // Important: this Acc must have trie2_nodes cleared before being placed here.
     // acc: Acc,
@@ -1269,7 +1269,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                             let cache_key = BelowBottomCacheKey {
                                 nonterminal_id: nt,
-                                // source_state_id: goto_info.source_state_id,
+                                source_state_id: goto_info.source_state_id,
                                 // acc: acc.clone(),
                             };
 
