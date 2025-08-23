@@ -2014,7 +2014,7 @@ mod tests {
         assert_eq!(pushed.max_depth(), 1);
 
         // The new logic for `push` is to inherit the predecessor's acc, as the local acc is fresh.
-        assert_eq!(*pushed.acc(), *root.acc());
+        assert_eq!(pushed.acc(), root.acc());
     }
 
     #[test]
@@ -2333,7 +2333,7 @@ mod tests {
         let mut memo = HashMap::new();
         let new_root_opt = prune_and_transform_recursive(
             &root,
-            &|node| Some((node.acc().as_ref().clone(), true)), // No-op: keep node, recurse
+            &|node| Some((node.acc().clone(), true)), // No-op: keep node, recurse
             &mut memo,
         );
 
