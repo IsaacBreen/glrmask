@@ -1587,9 +1587,7 @@ where
 {
     fn eq(&self, other: &Self) -> bool {
         // 1. Compare non-recursive fields: value and max_depth.
-        //    NOTE: We IGNORE max_depth for structural equality. Two nodes are equal if their
-        //    values and children are structurally identical, regardless of their position in the graph.
-        if self.value != other.value {
+        if self.value != other.value || self.max_depth != other.max_depth {
             return false;
         }
 
@@ -1616,12 +1614,12 @@ where
                     let (other_strong, other_weak): (Vec<_>, Vec<_>) = other_dest_map.iter().partition(|(k, _)| k.is_strong());
 
                     if self_strong.len() != other_strong.len() { return false; }
- 
+
                     // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
                     let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_strong
                         .iter()
-                        .filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, *ev)))
-                        .collect(); // Use filter_map to handle potential weak ptr expiry gracefully
+                        .map(|(np, ev)| (np.upgrade().unwrap(), *ev))
+                        .collect();
 
                     let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_strong
                         .iter()

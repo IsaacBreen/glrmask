@@ -741,68 +741,19 @@ impl GrammarConstraint {
 }
 
 fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-    crate::debug!(2, "Pruning dead paths from precomputed trie 2 (post-order traversal).");
+    crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
-    // A cache to store whether a node is live (can reach an END node).
-    // Using the raw pointer of the RwLock as the key.
-    let mut live_nodes_cache: HashMap<*const RwLock<PrecomputeNode2>, bool> = HashMap::new();
-
-    // Keep all nodes alive during the process to prevent dangling weak pointers.
+    // Collect all unique nodes into a Vec to hold strong references to them.
+    // This prevents any node from being dropped while we are modifying the graph structure,
+    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes = Trie::all_nodes(&roots_vec);
 
-    // Recursively determine liveness and prune.
-    fn is_live_and_prune(
-        node_arc: &Arc<RwLock<PrecomputeNode2>>,
-        cache: &mut HashMap<*const RwLock<PrecomputeNode2>, bool>,
-    ) -> bool {
-        let node_ptr = Arc::as_ptr(node_arc);
-        if let Some(&is_live) = cache.get(&node_ptr) {
-            return is_live;
-        }
-
-        // Assume not live until proven otherwise. This handles cycles correctly.
-        cache.insert(node_ptr, false);
-
-        let (is_end_node, children_snapshot) = {
-            let guard = node_arc.read().unwrap();
-            (
-                guard.value.end,
-                guard.children().iter().flat_map(|(ek, dest_map)| {
-                    dest_map.keys().map(move |node_ptr| (ek.clone(), node_ptr.clone()))
-                }).collect::<Vec<_>>(),
-            )
-        };
-
-        let mut this_node_is_live = is_end_node;
-
-        // Prune children in-place.
-        {
-            let mut guard = node_arc.write().unwrap();
-            guard.children_mut().retain(|_ek, dest_map| {
-                dest_map.retain(|node_ptr, _bv| {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        if is_live_and_prune(&child_arc, cache) {
-                            // If any child is live, this node is also live.
-                            this_node_is_live = true;
-                            return true; // Keep this destination.
-                        }
-                    }
-                    false // Prune this destination.
-                });
-                !dest_map.is_empty() // Keep the edge key if it still has live destinations.
-            });
-        }
-
-        // Update cache with the final liveness status.
-        cache.insert(node_ptr, this_node_is_live);
-        this_node_is_live
-    }
-
-    // Run the pruning process starting from each root.
-    for root_arc in roots.values() {
-        is_live_and_prune(root_arc, &mut live_nodes_cache);
-    }
+    // We no longer remove roots from the map. A "dead" root (with an empty live_tokens set)
+    // is kept. This prevents panics in get_mask2, which expects a complete map from
+    // active tokenizer states to precomputed trie roots. The trie being empty of live
+    // tokens is sufficient to signal that no paths are valid from that state.
+    // The original implementation removed roots if their `live_tokens` set was empty.
 
     crate::debug!(2, "Finished pruning dead paths from trie 2. No roots were removed.");
 }
@@ -883,9 +834,14 @@ fn deduplicate_recursive_trie2(
     }
 
     if children_changed {
+        // println!("Updating children for node {:p}", node_ptr);
+        // println!(" Existing children map: {:?}", node_arc.read().unwrap().children());
+        // println!(" New children map: {:?}", new_children_map);
         let mut node_guard = node_arc.write().unwrap();
         *node_guard.children_mut() = new_children_map;
+        // println!("Recomputing max_depth for node {:p}", node_ptr);
         node_guard.recompute_max_depth();
+        // println!("Updated children for node {:p}", node_ptr);
     }
 
     let canonical_arc = {
