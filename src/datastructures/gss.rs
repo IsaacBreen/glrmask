@@ -550,8 +550,15 @@ impl GSSNode {
     /// Private constructor for internal methods that build a node from a pre-computed map.
     /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
     fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
+        // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
+        // The provided `acc` becomes the local accumulator for this new root.
+        if predecessors.values().all(|by_depth| by_depth.values().all(Vec::is_empty)) {
+            return GSSNode::new((*acc).clone());
+        }
+
         // Push local acc into all reachable roots
-        if !predecessors.is_empty() && !acc.is_merge_neutral() {
+        // Note: predecessors is guaranteed not to be empty here due to the check above.
+        if !acc.is_merge_neutral() {
             let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
             for preds_by_depth in predecessors.values_mut() {
                 for pred_vec in preds_by_depth.values_mut() {
