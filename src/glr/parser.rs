@@ -933,7 +933,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                                     // Check if any allowed terminals are possible from the current GSS state.
                                     let mut can_proceed = false;
-                                    for (_, l2_bitset) in constrained_state.stack.acc.terminals_union.range_values() {
+                                    for (_, l2_bitset) in constrained_state.stack.acc().terminals_union.range_values() {
                                         if !(&*l2_bitset & allowed_terminals).is_empty() {
                                             can_proceed = true;
                                             break;
@@ -1849,7 +1849,7 @@ impl GLRParser {
                 writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", parent_id, parent_id, node_arc.max_depth(), escaped_acc).unwrap();
             }
 
-            for (edge_val, preds_by_depth) in &node_arc.predecessors {
+            for (edge_val, preds_by_depth) in node_arc.predecessors() {
                 let state_id = edge_val.state_id;
                 let edge_key = (node_ptr, edge_val.clone());
                 

@@ -172,8 +172,8 @@ impl Acc {
 /// A node in the Graph-Structured Stack (GSS).
 #[derive(Debug, Clone)]
 pub(crate) struct GSSNode {
-    pub(crate) acc: Arc<Acc>,
-    pub(crate) predecessors: NodeMap,
+    acc: Arc<Acc>,
+    predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
 }
@@ -551,6 +551,8 @@ impl GSSNode {
     pub(crate) fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
+
+    pub(crate) fn acc(&self) -> &Arc<Acc> { &self.acc }
 
     pub(crate) fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
