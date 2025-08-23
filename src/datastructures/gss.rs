@@ -192,12 +192,12 @@ pub(crate) struct GSSPeek<'a> {
 pub(crate) struct GSSPopper {
     /// A map where the key is a node, and the value is the accumulated `Acc` for all paths leading to it.
     /// and the value is the accumulated `Acc` for that path.
-    pub(crate) paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
+    paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
     /// Tracks how far below the bottom of the stack we've popped.
     /// Key is the number of extra pops beyond reaching the bottom (0 means exactly at bottom),
     /// and the value is the combined Acc for all paths that resulted in that depth.
     /// Multiple contributions to the same depth are merged via Acc::merge.
-    pub(crate) below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
+    below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
 }
 
 /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
@@ -237,6 +237,10 @@ impl GSSPopper {
             node,
             path_acc: acc,
         })
+    }
+
+    pub(crate) fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
+        &self.below_bottom
     }
 
     pub(crate) fn num_predecessors(&self) -> usize {

@@ -1058,7 +1058,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
-        let mut any_below_bottom = !popper.below_bottom.is_empty();
+        let mut any_below_bottom = !popper.below_bottom().is_empty();
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len), {});
         // timeit!(format!("GLRParserState::reduce_and_goto reducing with len {}", len), {});
 
@@ -1146,7 +1146,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let empty_substring_goto = SubstringGoto::default();
         if any_below_bottom {
             let mut below_bottom_integrated: BTreeMap<usize, Acc> = BTreeMap::new();
-            for (k, accs_by_edge) in popper.below_bottom.iter() {
+            for (k, accs_by_edge) in popper.below_bottom().iter() {
                 for (last_edge_content, acc_arc) in accs_by_edge {
                     let acc = acc_arc.as_ref();
                     let state_id_edge_key = (0, Some(last_edge_content.state_id));
