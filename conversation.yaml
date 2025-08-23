@@ -557,8 +557,15 @@ local_system:
           /// Private constructor for internal methods that build a node from a pre-computed map.
           /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
           fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
+              // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
+              // The provided `acc` becomes the local accumulator for this new root.
+              if predecessors.values().all(|by_depth| by_depth.values().all(Vec::is_empty)) {
+                  return GSSNode::new((*acc).clone());
+              }
+
               // Push local acc into all reachable roots
-              if !predecessors.is_empty() && !acc.is_merge_neutral() {
+              // Note: predecessors is guaranteed not to be empty here due to the check above.
+              if !acc.is_merge_neutral() {
                   let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
                   for preds_by_depth in predecessors.values_mut() {
                       for pred_vec in preds_by_depth.values_mut() {
@@ -980,23 +987,23 @@ local_system:
                                   let transformed_node = GSSNode::new(new_local_acc);
                                   let result_arc = Arc::new(transformed_node);
                                   memo.insert(node_ptr, Some(result_arc.clone()));
-                                  println!("Transformed root node due to acc change: {:?}", result_arc);
+                                  // println!("Transformed root node due to acc change: {:?}", result_arc);
                                   Some(result_arc)
                               } else {
                                   memo.insert(node_ptr, Some(node_arc.clone()));
-                                  println!("Did not transform root node; acc unchanged.");
+                                  // println!("Did not transform root node; acc unchanged.");
                                   Some(node_arc.clone())
                               }
                           }
                           GSSNode::Internal(_) => {
                               // Internal nodes don't carry local Acc; no structural change if we do not recurse.
-                              println!("Did not transform internal node; no recursion.");
+                              // println!("Did not transform internal node; no recursion.");
                               memo.insert(node_ptr, Some(node_arc.clone()));
                               Some(node_arc.clone())
                           }
                       }
                   } else {
-                      println!("Recursing into children of internal node.");
+                      // println!("Recursing into children of internal node.");
                       // Recurse into children. Preserve the original predecessor structure.
                       let mut any_child_changed = false;
                       let mut had_any_pred = false;
@@ -1041,11 +1048,11 @@ local_system:
 
                       match node_arc.as_ref() {
                           GSSNode::Root(root) => {
-                              println!("Error: Reached root node during recursion, which should not happen.");
+                              // println!("Error: Reached root node during recursion, which should not happen.");
                               unreachable!();
                           }
                           GSSNode::Internal(_) => {
-                              println!("Reconstructed internal node after recursion.");
+                              // println!("Reconstructed internal node after recursion.");
                               if !any_child_changed {
                                   memo.insert(node_ptr, Some(node_arc.clone()));
                                   return Some(node_arc.clone());
@@ -3644,23 +3651,23 @@ local_system:
                                   let transformed_node = GSSNode::new(new_local_acc);
                                   let result_arc = Arc::new(transformed_node);
                                   memo.insert(node_ptr, Some(result_arc.clone()));
-                                  println!("Transformed root node due to acc change: {:?}", result_arc);
+                                  // println!("Transformed root node due to acc change: {:?}", result_arc);
                                   Some(result_arc)
                               } else {
                                   memo.insert(node_ptr, Some(node_arc.clone()));
-                                  println!("Did not transform root node; acc unchanged.");
+                                  // println!("Did not transform root node; acc unchanged.");
                                   Some(node_arc.clone())
                               }
                           }
                           GSSNode::Internal(_) => {
                               // Internal nodes don't carry local Acc; no structural change if we do not recurse.
-                              println!("Did not transform internal node; no recursion.");
+                              // println!("Did not transform internal node; no recursion.");
                               memo.insert(node_ptr, Some(node_arc.clone()));
                               Some(node_arc.clone())
                           }
                       }
                   } else {
-                      println!("Recursing into children of internal node.");
+                      // println!("Recursing into children of internal node.");
                       // Recurse into children. Preserve the original predecessor structure.
                       let mut any_child_changed = false;
                       let mut had_any_pred = false;
@@ -3705,11 +3712,11 @@ local_system:
 
                       match node_arc.as_ref() {
                           GSSNode::Root(root) => {
-                              println!("Error: Reached root node during recursion, which should not happen.");
+                              // println!("Error: Reached root node during recursion, which should not happen.");
                               unreachable!();
                           }
                           GSSNode::Internal(_) => {
-                              println!("Reconstructed internal node after recursion.");
+                              // println!("Reconstructed internal node after recursion.");
                               if !any_child_changed {
                                   memo.insert(node_ptr, Some(node_arc.clone()));
                                   return Some(node_arc.clone());
@@ -5339,7 +5346,7 @@ system:
     Try to actually fix the error instead.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -5902,8 +5909,15 @@ messages:
           /// Private constructor for internal methods that build a node from a pre-computed map.
           /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
           fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
+              // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
+              // The provided `acc` becomes the local accumulator for this new root.
+              if predecessors.values().all(|by_depth| by_depth.values().all(Vec::is_empty)) {
+                  return GSSNode::new((*acc).clone());
+              }
+
               // Push local acc into all reachable roots
-              if !predecessors.is_empty() && !acc.is_merge_neutral() {
+              // Note: predecessors is guaranteed not to be empty here due to the check above.
+              if !acc.is_merge_neutral() {
                   let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
                   for preds_by_depth in predecessors.values_mut() {
                       for pred_vec in preds_by_depth.values_mut() {
@@ -6325,23 +6339,23 @@ messages:
                                   let transformed_node = GSSNode::new(new_local_acc);
                                   let result_arc = Arc::new(transformed_node);
                                   memo.insert(node_ptr, Some(result_arc.clone()));
-                                  println!("Transformed root node due to acc change: {:?}", result_arc);
+                                  // println!("Transformed root node due to acc change: {:?}", result_arc);
                                   Some(result_arc)
                               } else {
                                   memo.insert(node_ptr, Some(node_arc.clone()));
-                                  println!("Did not transform root node; acc unchanged.");
+                                  // println!("Did not transform root node; acc unchanged.");
                                   Some(node_arc.clone())
                               }
                           }
                           GSSNode::Internal(_) => {
                               // Internal nodes don't carry local Acc; no structural change if we do not recurse.
-                              println!("Did not transform internal node; no recursion.");
+                              // println!("Did not transform internal node; no recursion.");
                               memo.insert(node_ptr, Some(node_arc.clone()));
                               Some(node_arc.clone())
                           }
                       }
                   } else {
-                      println!("Recursing into children of internal node.");
+                      // println!("Recursing into children of internal node.");
                       // Recurse into children. Preserve the original predecessor structure.
                       let mut any_child_changed = false;
                       let mut had_any_pred = false;
@@ -6386,11 +6400,11 @@ messages:
 
                       match node_arc.as_ref() {
                           GSSNode::Root(root) => {
-                              println!("Error: Reached root node during recursion, which should not happen.");
+                              // println!("Error: Reached root node during recursion, which should not happen.");
                               unreachable!();
                           }
                           GSSNode::Internal(_) => {
-                              println!("Reconstructed internal node after recursion.");
+                              // println!("Reconstructed internal node after recursion.");
                               if !any_child_changed {
                                   memo.insert(node_ptr, Some(node_arc.clone()));
                                   return Some(node_arc.clone());
@@ -8009,57 +8023,94 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: It seems that in some places it's possible to get an internal node without
-      predecessors rather than a root node. Fix this. Internal nodes should ALWAYS
-      have at least one predecessor.
+  - user: Are root nodes shown as such in the print gss forest output?
     metadata:
   - assistant: |-
-      Of course. Dealing with graph-like data structures requires careful handling of invariants. An internal node without predecessors is semantically a root node, so ensuring they are created as such will make the data structure more robust.
+      Of course. To answer your question, the `print_gss_forest` output did not explicitly label leaf nodes of the graph as `(Root)`. The following change will modify the print function to explicitly mark any node that is a `GSSNode::Root` (i.e., has no predecessors), making the structure of the graph clearer during debugging.
 
-      Here is the patch to fix this issue:
+      Here are the required changes:
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -600,9 +600,15 @@
-           /// Private constructor for internal methods that build a node from a pre-computed map.
-           /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
-           fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
-      +        // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
-      +        // The provided `acc` becomes the local accumulator for this new root.
-      +        if predecessors.values().all(|by_depth| by_depth.values().all(Vec::is_empty)) {
-      +            return GSSNode::new((*acc).clone());
-      +        }
-      +
-               // Push local acc into all reachable roots
-      -        if !predecessors.is_empty() && !acc.is_merge_neutral() {
-      +        // Note: predecessors is guaranteed not to be empty here due to the check above.
-      +        if !acc.is_merge_neutral() {
-                   let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
-                   for preds_by_depth in predecessors.values_mut() {
-                       for pred_vec in preds_by_depth.values_mut() {
-      @@ -616,6 +622,7 @@
-               let hash_key_cache = compute_hash_key_internal(&predecessors);
-               let max_depth = compute_max_depth(&predecessors);
-               GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth })
-           }
+      @@ -1659,6 +1659,9 @@
+                   let node_ids_len = node_ids.len();
+                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
        
-           /// Helper to create a GSSNode with a single predecessor, used by `push`.
-
-      ```
-
-      I've modified `GSSNode::new_with_map`, which is the central constructor for internal nodes. It now checks if the provided predecessor map is effectively empty. If it is, it constructs a `GSSNode::Root` instead of an invalid `GSSNode::Internal`. This enforces the invariant that all internal nodes must have at least one predecessor, making the GSS structure more consistent.
+      +            // Add a label if the predecessor is a root node (a leaf of the graph)
+      +            let root_marker = if pred_arc.is_root() { " (Root)" } else { "" };
+      +
+                   // Collect state ID for explanation
+                   if seen_state_ids.insert(edge_val.state_id) {
+                       state_ids_in_order.push(edge_val.state_id);
+      @@ -1674,27 +1677,27 @@
+                       if acc_child.is_empty() {
+                           writeln!(
+                               output,
+      -                        "{}{} edge {} -> Node {} (ptr: {:p}, hash: {:x})",
+      -                        prefix, connector, edge_val.state_id.0, pred_id, pred_ptr, pred_arc.hash_code(),
+      +                        "{}{} edge {} -> Node {}{} (ptr: {:p}, hash: {:x})",
+      +                        prefix, connector, edge_val.state_id.0, pred_id, root_marker, pred_ptr, pred_arc.hash_code(),
+                           )?;
+                       } else {
+                           writeln!(
+                               output,
+      -                        "{}{} edge {} -> Node {} (ptr: {:p}, hash: {:x}) {}",
+      -                        prefix, connector, edge_val.state_id.0, pred_id, pred_ptr, pred_arc.hash_code(), acc_child,
+      +                        "{}{} edge {} -> Node {}{} (ptr: {:p}, hash: {:x}) {}",
+      +                        prefix, connector, edge_val.state_id.0, pred_id, root_marker, pred_ptr, pred_arc.hash_code(), acc_child,
+                           )?;
+                       }
+                   } else if acc_child.is_empty() {
+                       writeln!(
+                           output,
+      -                    "{}{} edge {} -> Node {}",
+      -                    prefix, connector, edge_val.state_id.0, pred_id,
+      +                    "{}{} edge {} -> Node {}{}",
+      +                    prefix, connector, edge_val.state_id.0, pred_id, root_marker,
+                       )?;
+                   } else {
+                       writeln!(
+                           output,
+      -                    "{}{} edge {} -> Node {} {}",
+      -                    prefix, connector, edge_val.state_id.0, pred_id, acc_child,
+      +                    "{}{} edge {} -> Node {}{} {}",
+      +                    prefix, connector, edge_val.state_id.0, pred_id, root_marker, acc_child,
+                       )?;
+                   }
+                   *node_count += 1;
+      @@ -1726,24 +1729,26 @@
+                   config.llm_token_map,
+               );
+               let root_label = config.labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
+      +        // The top-level nodes passed in are not necessarily GSSNode::Root variants, so we check.
+      +        let root_marker = if root_arc.is_root() { " (Root)" } else { "" };
+       
+               if config.verbose {
+                   if acc_str.is_empty() {
+                       writeln!(
+                           &mut out_str,
+      -                    "{}: Node {} (ptr: {:p}, hash: {:x})",
+      -                    root_label, root_id, root_ptr, root_arc.hash_code()
+      +                    "{}: Node {}{} (ptr: {:p}, hash: {:x})",
+      +                    root_label, root_id, root_marker, root_ptr, root_arc.hash_code()
+                       ).unwrap();
+                   } else {
+                       writeln!(
+                           &mut out_str,
+      -                    "{}: Node {} (ptr: {:p}, hash: {:x}) {}",
+      -                    root_label, root_id, root_ptr, root_arc.hash_code(), acc_str
+      +                    "{}: Node {}{} (ptr: {:p}, hash: {:x}) {}",
+      +                    root_label, root_id, root_marker, root_ptr, root_arc.hash_code(), acc_str
+                       ).unwrap();
+                   }
+               } else if acc_str.is_empty() {
+      -
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
-  - user: 'Changes committed with message: "Fix: Ensure internal GSS nodes always
-      have predecessors"'
+  - user: 'Changes committed with message: "No changes detected in the provided diff."'
     metadata:
 ...
