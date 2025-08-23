@@ -1069,10 +1069,10 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc()).clone();
-        println!("Before pruning: {:?}", new_acc.llm_tokens_union);
+        // println!("Before pruning: {:?}", new_acc.llm_tokens_union);
         new_acc.llm_tokens_union &= allowed_tokens;
         new_acc.llm_tokens_intersection &= allowed_tokens;
-        println!("After pruning: {:?}", new_acc.llm_tokens_union);
+        // println!("After pruning: {:?}", new_acc.llm_tokens_union);
 
         // Prune if the union of possibilities is empty.
         if new_acc.llm_tokens_union.is_empty() {
