@@ -883,7 +883,13 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             adj.entry(node_ptr).or_default();
 
             let node_guard = node_arc.read().unwrap();
-            for child_arc in node_guard.children.values().flat_map(|m| m.keys()).filter_map(|k| k.upgrade()) {
+            for child_arc in node_guard.children.values().flat_map(|m| m.keys()).filter_map(|node_ptr| {
+                if let NodePtr::Strong(arc_wrapper) = node_ptr {
+                    Some(arc_wrapper.as_arc().clone())
+                } else {
+                    None
+                }
+            }) {
                 let child_ptr = Arc::as_ptr(&child_arc);
                 adj.entry(node_ptr).or_default().push(child_ptr);
                 *in_degree.entry(child_ptr).or_default() += 1;
@@ -1239,9 +1245,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     guard.children
                         .iter()
                         .flat_map(|(ek, dst_map)| {
-                            dst_map.iter().filter_map(move |(node_ptr, ev)| {
-                                // Use upgrade() to follow both strong and valid weak pointers.
-                                node_ptr.upgrade().map(|child_arc| (ek.clone(), ev.clone(), child_arc))
+                            dst_map.iter().map(move |(node_ptr, ev)| {
+                                // Panic on expired weak pointers.
+                                (ek.clone(), ev.clone(), node_ptr.upgrade().expect("Dangling weak pointer during special_map traversal"))
                             })
                         })
                         .collect()
@@ -1363,22 +1369,21 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
 
                     for (child_node_ptr, new_v) in new_values_for_children {
-                        // Gracefully handle weak pointers that may have expired.
-                        if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
-                            let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+                        // Panic on expired weak pointers.
+                        let child_arc_wrapper = child_node_ptr.upgrade_wrapper().expect("Dangling weak pointer during special_map_grouped traversal");
+                        let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
 
-                            // Optimization: Don't bother queueing a child if we know its path is stopped.
-                            if stopped_nodes.contains(&child_ptr) {
-                                continue;
-                            }
-
-                            values.entry(child_ptr)
-                                .and_modify(|old| merge(old, new_v.clone()))
-                                .or_insert(new_v);
-
-                            let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
-                            todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                        // Optimization: Don't bother queueing a child if we know its path is stopped.
+                        if stopped_nodes.contains(&child_ptr) {
+                            continue;
                         }
+
+                        values.entry(child_ptr)
+                            .and_modify(|old| merge(old, new_v.clone()))
+                            .or_insert(new_v);
+
+                        let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(child_arc_wrapper);
                     }
                 }
             }
@@ -1605,82 +1610,59 @@ where
         // 3. Compare children for each edge key.
         for (self_ek, self_dest_map) in &self.children {
             match other.children.get(self_ek) {
-                None => { // Edge key present in self but not in other.
-                    return false;
-                }
+                None => return false, // Edge key present in self but not in other.
                 Some(other_dest_map) => {
                     let (self_strong, self_weak): (Vec<_>, Vec<_>) = self_dest_map.iter().partition(|(k, _)| k.is_strong());
                     let (other_strong, other_weak): (Vec<_>, Vec<_>) = other_dest_map.iter().partition(|(k, _)| k.is_strong());
 
-                    if self_strong.len() != other_strong.len() { return false; }
+                    if self_strong.len() != other_strong.len() || self_weak.len() != other_weak.len() {
+                        return false;
+                    }
 
                     // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
                     let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_strong
                         .iter()
-                        .map(|(np, ev)| (np.upgrade().unwrap(), *ev))
+                        .map(|(np, ev)| (np.upgrade().expect("Strong pointer failed to upgrade"), *ev))
                         .collect();
 
                     let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_strong
                         .iter()
-                        .map(|(np, ev)| (np.upgrade().unwrap(), (*ev).clone()))
+                        .map(|(np, ev)| (np.upgrade().expect("Strong pointer failed to upgrade"), (*ev).clone()))
                         .collect();
 
 
                     // For each child in self_child_pairs, find a matching child in other_child_pairs.
                     // A match requires equal edge values (EV) and recursively equal Trie nodes.
                     'self_pair_loop: for (s_arc, s_ev) in self_child_pairs {
-                        let mut found_match_for_current_self_pair = false;
                         for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
                             if s_ev == &other_child_pairs[i].1 { // Compare EV (s_ev is &EV, other_child_pairs[i].1 is EV)
                                 // Edge values match, now recursively compare the pointed-to Trie nodes.
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
                                 if Trie::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
                                     other_child_pairs.remove(i); // Match found.
-                                    found_match_for_current_self_pair = true;
-                                    break; // Found match for current s_arc, move to next s_arc.
+                                    continue 'self_pair_loop;
                                 }
                             }
                         }
-                        if !found_match_for_current_self_pair {
-                            // No match found for the current s_arc/s_ev.
-                            return false;
-                        }
+                        return false; // No match found for the current s_arc/s_ev.
                     }
-                    // If all self_child_pairs found matches, other_child_pairs should be empty.
-                }
-            }
-        }
 
-        // 4. Compare weak children structure.
-        for (self_ek, self_dest_map) in &self.children {
-            if let Some(other_dest_map) = other.children.get(self_ek) {
-                let self_weak_pairs: Vec<_> = self_dest_map.iter().filter_map(|(np, ev)| if !np.is_strong() { np.upgrade().map(|arc| (arc, ev.clone())) } else { None }).collect();
-                let mut other_weak_pairs: Vec<_> = other_dest_map.iter().filter_map(|(np, ev)| if !np.is_strong() { np.upgrade().map(|arc| (arc, ev.clone())) } else { None }).collect();
+                    // Now compare weak children
+                    let self_weak_pairs: Vec<_> = self_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in `self` during equality check"), (*ev).clone())).collect();
+                    let mut other_weak_pairs: Vec<_> = other_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in `other` during equality check"), (*ev).clone())).collect();
 
-                if self_weak_pairs.len() != other_weak_pairs.len() {
-                    return false;
-                }
-
-                'self_weak_loop: for (s_arc, s_ev) in &self_weak_pairs {
-                        let mut found_match = false;
+                    'self_weak_loop: for (s_arc, s_ev) in &self_weak_pairs {
                         for i in 0..other_weak_pairs.len() {
                             if s_ev == &other_weak_pairs[i].1 {
                                 let o_arc = other_weak_pairs[i].0.clone();
                                 if Trie::compare_arcs_recursive(s_arc, &o_arc, &mut comparison_cache) {
                                     other_weak_pairs.remove(i);
-                                    found_match = true;
-                                    break;
+                                    continue 'self_weak_loop;
                                 }
                             }
                         }
-                        if !found_match {
-                            return false;
-                        }
+                        return false;
                     }
-            } else {
-                // If self has this edge key but other doesn't, and there are weak edges, it's a mismatch.
-                if self_dest_map.iter().any(|(np, _)| !np.is_strong()) {
-                    return false;
                 }
             }
         }
@@ -1754,11 +1736,10 @@ where
             for (node_ptr, ev) in strong_children {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_guard = child_arc.read().expect("RwLock poisoned during Hash");
-                    Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
-                    strong_pair_hashes.push(pair_hasher.finish());
-                }
+                let child_arc = node_ptr.upgrade().expect("Strong pointer failed to upgrade during hash");
+                let child_guard = child_arc.read().expect("RwLock poisoned during Hash");
+                Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
+                strong_pair_hashes.push(pair_hasher.finish());
             }
             strong_pair_hashes.sort_unstable();
             for h in strong_pair_hashes {
@@ -1766,9 +1747,7 @@ where
             }
 
             // Hash weak children
-            let weak_upgraded: Vec<_> = weak_children.iter()
-                .filter_map(|(node_ptr, ev)| node_ptr.upgrade().map(|arc| (arc, *ev)))
-                .collect();
+            let weak_upgraded: Vec<_> = weak_children.iter().map(|(node_ptr, ev)| (node_ptr.upgrade().expect("Dangling weak pointer during hash"), *ev)).collect();
 
             weak_upgraded.len().hash(state);
             let mut weak_pair_hashes = Vec::with_capacity(weak_upgraded.len());
