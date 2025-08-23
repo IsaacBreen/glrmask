@@ -1175,120 +1175,13 @@ local_system:
               total_edges
           }
 
-          /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-          /// (special_map implementation remains unchanged)
-          #[time_it]
-          pub fn special_map<V: Clone>(
-              initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
-              mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
-              mut merge: impl FnMut(&mut V, V),
-              mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
-          ) {
-              // ------------------------------------------------------------------
-              //  Simple depth-driven scheduler.
-              //
-              //  The key observation is:
-              //      parent.max_depth  <  child.max_depth
-              //  for every edge (parent → child).
-              //  Therefore processing nodes strictly in ascending `max_depth`
-              //  guarantees every parent is handled before each of its children.
-              //
-              //  • `values`  – accumulated V for every discovered node
-              //  • `done`    – nodes that have already been processed
-              //  • `todo`    – min-heap keyed by max_depth
-              // ------------------------------------------------------------------
-              let mut values   : HashMap<*const RwLock<Self>, V> = HashMap::new();
-              let mut done     : HashSet <*const RwLock<Self>>   = HashSet ::new();
-              let mut todo     : BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
-
-              let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
-              let total_edges = Self::count_all_edges(&initial_nodes);
-              if PROGRESS_BAR_ENABLED {
-                  println!("Progress bar enabled");
-              } else {
-                  println!("Progress bar disabled")
-              }
-              let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-              // Seed with the user-supplied starting set
-              for (node_arc, v0) in initial_nodes_and_values {
-                  let ptr = Arc::as_ptr(&node_arc);
-                  values
-                      .entry(ptr)
-                      .and_modify(|old| merge(old, v0.clone()))
-                      .or_insert(v0);
-                  let depth = node_arc.read().expect("poison").max_depth;
-                  todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
-              }
-
-              // Main loop ---------------------------------------------------------
-              while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-                  // #[allow(clippy::iter_over_hash_type)]
-                  for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                      let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
-                      if done.contains(&ptr) { continue; }               // already processed
-
-                      // Pull the merged value that all parents contributed
-                      let mut agg_v = match values.remove(&ptr) {
-                          Some(v) => v,
-                          None => continue,                            // can happen if every parent’s `step` returned None
-                      };
-                      let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
-
-                      // ---------- user ‘process’ callback ----------
-                      let proceed = {
-                          let guard = node_arc.read().expect("poison");
-                          process(&guard, &mut agg_v)
-                      };
-                      done.insert(ptr);
-
-                      if !proceed { continue; }                           // user stopped traversal at this node
-
-                      // ---------- propagate to children -------------
-                      // We read children once, outside any long-lived write locks
-                      let edges: Vec<(EK, EV, NodePtr<RwLock<Self>>)> = {
-                          let guard = node_arc.read().expect("poison");
-                          guard.children
-                              .iter()
-                              .flat_map(|(ek, dst_map)| {
-                                  dst_map.iter().filter_map(move |(node_ptr, ev)| {
-                                      if node_ptr.is_strong() {
-                                          Some((ek.clone(), ev.clone(), node_ptr.clone()))
-                                      } else { None }
-                                  })
-                              })
-                              .collect()
-                      };
-
-                      for (ek, ev, child_arc) in edges {
-                          let _ = pb.update(1);
-                          let child_ptr = NodePtr::as_ptr(&child_arc);
-
-                          // user ‘step’ callback
-                          let maybe_v = {
-                              let child_arc = child_arc.upgrade().unwrap();
-                              let child_guard = child_arc.read().expect("poison");
-                              step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
-                          };
-                          if let Some(new_v) = maybe_v {
-                              values
-                                  .entry(child_ptr)
-                                  .and_modify(|old| merge(old, new_v.clone()))
-                                  .or_insert(new_v);
-
-                              // Queue child by its declared depth
-                              let child_arc = child_arc.upgrade().unwrap();
-                              let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(child_arc)));
-                          }
-                      }
-                  }
-              }
-          }
-
           /// Performs a specialized breadth-first traversal, grouping children by edge key.
           /// This is more efficient than `special_map` when many edges share the same key,
           /// as the `step` function is called once per key, not once per edge.
+          ///
+          /// This version correctly traverses both strong and weak edges. It also handles
+          /// cycles by allowing nodes to be re-processed, continuing propagation as long
+          /// as the `process` closure returns `true` for a given node.
           #[time_it]
           pub fn special_map_grouped<V, S, I>(
               initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
@@ -1307,7 +1200,8 @@ local_system:
               //  Simple depth-driven scheduler. (Same as special_map)
               // ------------------------------------------------------------------
               let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
-              let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
+              // This set now tracks nodes where `process` returned `false`, stopping propagation.
+              let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
               let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
               let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
@@ -1329,7 +1223,8 @@ local_system:
               while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
                   for node_ptr_wrapper in &node_arc_ptr_wrappers {
                       let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
-                      if done.contains(&ptr) { continue; }
+                      // A node that has been stopped should not be processed again.
+                      if stopped_nodes.contains(&ptr) { continue; }
 
                       let mut agg_v = match values.remove(&ptr) {
                           Some(v) => v,
@@ -1338,34 +1233,160 @@ local_system:
                       let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
-                          let mut guard = node_arc.read().expect("poison");
+                          let guard = node_arc.read().expect("poison");
                           process(&guard, &mut agg_v)
                       };
-                      done.insert(ptr);
 
-                      if !proceed { continue; }
+                      if !proceed {
+                          // User stopped traversal at this node. Mark it and do not propagate.
+                          stopped_nodes.insert(ptr);
+                          continue;
+                      }
 
                       // ---------- propagate to children (grouped by edge key) -------------
+                      // This block is now corrected to include BOTH strong and weak edges.
                       let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
                           let guard = node_arc.read().expect("poison");
-                          guard.children.iter().map(|(ek, dst_map)| {
-                              let strong_only_map: OrderedHashMap<_, _> = dst_map.iter()
-                                  .filter(|(k, _)| k.is_strong())
-                                  .map(|(k, v)| (k.clone(), v.clone()))
-                                  .collect();
-                              (ek.clone(), strong_only_map)
-                          }).filter(|(_, dst_map)| !dst_map.is_empty()).collect()
+                          guard.children.iter()
+                              .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                              .collect()
                       };
 
                       for (ek, dest_map) in children_by_ek {
-                          let _ = pb.update(dest_map.len());
+                          // We only count upgradable edges for the progress bar.
+                          let valid_edges_count = dest_map.keys().filter(|k| k.is_upgradable()).count();
+                          if valid_edges_count > 0 {
+                              let _ = pb.update(valid_edges_count);
+                          }
+
                           let new_values_for_children = step(&agg_v, &ek, &dest_map);
+
                           for (child_node_ptr, new_v) in new_values_for_children {
-                              let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-                              let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
-                              values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                              let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(child_arc);
+                              // Gracefully handle weak pointers that may have expired.
+                              if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
+                                  let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+
+                                  // Optimization: Don't bother queueing a child if we know its path is stopped.
+                                  if stopped_nodes.contains(&child_ptr) {
+                                      continue;
+                                  }
+
+                                  values.entry(child_ptr)
+                                      .and_modify(|old| merge(old, new_v.clone()))
+                                      .or_insert(new_v);
+
+                                  let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                                  todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          /// Performs a specialized breadth-first traversal, grouping children by edge key.
+          /// This is more efficient than `special_map` when many edges share the same key,
+          /// as the `step` function is called once per key, not once per edge.
+          ///
+          /// This version correctly traverses both strong and weak edges. It also handles
+          /// cycles by allowing nodes to be re-processed, continuing propagation as long
+          /// as the `process` closure returns `true` for a given node.
+          #[time_it]
+          pub fn special_map_grouped<V, S, I>(
+              initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
+              mut step: S,
+              mut merge: impl FnMut(&mut V, V),
+              mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+          )
+          where
+              V: Clone,
+              S: FnMut(
+                  &V, &EK, &OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>
+              ) -> I,
+              I: IntoIterator<Item = (NodePtr<RwLock<Trie<EK, EV, T>>>, V)>,
+          {
+              // ------------------------------------------------------------------
+              //  Simple depth-driven scheduler. (Same as special_map)
+              // ------------------------------------------------------------------
+              let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
+              // This set now tracks nodes where `process` returned `false`, stopping propagation.
+              let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
+              let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
+
+              let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
+              let total_edges = Self::count_all_edges(&initial_nodes);
+              let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
+              // Seed with the user-supplied starting set
+              for (node_arc, v0) in initial_nodes_and_values {
+                  let ptr = Arc::as_ptr(&node_arc);
+                  values
+                      .entry(ptr)
+                      .and_modify(|old| merge(old, v0.clone()))
+                      .or_insert(v0);
+                  let depth = node_arc.read().expect("poison").max_depth;
+                  todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+              }
+
+              // Main loop ---------------------------------------------------------
+              while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+                  for node_ptr_wrapper in &node_arc_ptr_wrappers {
+                      let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+                      // A node that has been stopped should not be processed again.
+                      if stopped_nodes.contains(&ptr) { continue; }
+
+                      let mut agg_v = match values.remove(&ptr) {
+                          Some(v) => v,
+                          None => continue,
+                      };
+                      let node_arc = node_ptr_wrapper.as_arc();
+
+                      let proceed = {
+                          let guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
+                      };
+
+                      if !proceed {
+                          // User stopped traversal at this node. Mark it and do not propagate.
+                          stopped_nodes.insert(ptr);
+                          continue;
+                      }
+
+                      // ---------- propagate to children (grouped by edge key) -------------
+                      // This block is now corrected to include BOTH strong and weak edges.
+                      let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
+                          let guard = node_arc.read().expect("poison");
+                          guard.children.iter()
+                              .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                              .collect()
+                      };
+
+                      for (ek, dest_map) in children_by_ek {
+                          // We only count upgradable edges for the progress bar.
+                          let valid_edges_count = dest_map.keys().filter(|k| k.is_upgradable()).count();
+                          if valid_edges_count > 0 {
+                              let _ = pb.update(valid_edges_count);
+                          }
+
+                          let new_values_for_children = step(&agg_v, &ek, &dest_map);
+
+                          for (child_node_ptr, new_v) in new_values_for_children {
+                              // Gracefully handle weak pointers that may have expired.
+                              if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
+                                  let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+
+                                  // Optimization: Don't bother queueing a child if we know its path is stopped.
+                                  if stopped_nodes.contains(&child_ptr) {
+                                      continue;
+                                  }
+
+                                  values.entry(child_ptr)
+                                      .and_modify(|old| merge(old, new_v.clone()))
+                                      .or_insert(new_v);
+
+                                  let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                                  todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                              }
                           }
                       }
                   }
@@ -8856,120 +8877,13 @@ local_system:
               total_edges
           }
 
-          /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-          /// (special_map implementation remains unchanged)
-          #[time_it]
-          pub fn special_map<V: Clone>(
-              initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
-              mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
-              mut merge: impl FnMut(&mut V, V),
-              mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
-          ) {
-              // ------------------------------------------------------------------
-              //  Simple depth-driven scheduler.
-              //
-              //  The key observation is:
-              //      parent.max_depth  <  child.max_depth
-              //  for every edge (parent → child).
-              //  Therefore processing nodes strictly in ascending `max_depth`
-              //  guarantees every parent is handled before each of its children.
-              //
-              //  • `values`  – accumulated V for every discovered node
-              //  • `done`    – nodes that have already been processed
-              //  • `todo`    – min-heap keyed by max_depth
-              // ------------------------------------------------------------------
-              let mut values   : HashMap<*const RwLock<Self>, V> = HashMap::new();
-              let mut done     : HashSet <*const RwLock<Self>>   = HashSet ::new();
-              let mut todo     : BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
-
-              let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
-              let total_edges = Self::count_all_edges(&initial_nodes);
-              if PROGRESS_BAR_ENABLED {
-                  println!("Progress bar enabled");
-              } else {
-                  println!("Progress bar disabled")
-              }
-              let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-              // Seed with the user-supplied starting set
-              for (node_arc, v0) in initial_nodes_and_values {
-                  let ptr = Arc::as_ptr(&node_arc);
-                  values
-                      .entry(ptr)
-                      .and_modify(|old| merge(old, v0.clone()))
-                      .or_insert(v0);
-                  let depth = node_arc.read().expect("poison").max_depth;
-                  todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
-              }
-
-              // Main loop ---------------------------------------------------------
-              while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-                  // #[allow(clippy::iter_over_hash_type)]
-                  for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                      let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
-                      if done.contains(&ptr) { continue; }               // already processed
-
-                      // Pull the merged value that all parents contributed
-                      let mut agg_v = match values.remove(&ptr) {
-                          Some(v) => v,
-                          None => continue,                            // can happen if every parent’s `step` returned None
-                      };
-                      let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
-
-                      // ---------- user ‘process’ callback ----------
-                      let proceed = {
-                          let guard = node_arc.read().expect("poison");
-                          process(&guard, &mut agg_v)
-                      };
-                      done.insert(ptr);
-
-                      if !proceed { continue; }                           // user stopped traversal at this node
-
-                      // ---------- propagate to children -------------
-                      // We read children once, outside any long-lived write locks
-                      let edges: Vec<(EK, EV, NodePtr<RwLock<Self>>)> = {
-                          let guard = node_arc.read().expect("poison");
-                          guard.children
-                              .iter()
-                              .flat_map(|(ek, dst_map)| {
-                                  dst_map.iter().filter_map(move |(node_ptr, ev)| {
-                                      if node_ptr.is_strong() {
-                                          Some((ek.clone(), ev.clone(), node_ptr.clone()))
-                                      } else { None }
-                                  })
-                              })
-                              .collect()
-                      };
-
-                      for (ek, ev, child_arc) in edges {
-                          let _ = pb.update(1);
-                          let child_ptr = NodePtr::as_ptr(&child_arc);
-
-                          // user ‘step’ callback
-                          let maybe_v = {
-                              let child_arc = child_arc.upgrade().unwrap();
-                              let child_guard = child_arc.read().expect("poison");
-                              step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
-                          };
-                          if let Some(new_v) = maybe_v {
-                              values
-                                  .entry(child_ptr)
-                                  .and_modify(|old| merge(old, new_v.clone()))
-                                  .or_insert(new_v);
-
-                              // Queue child by its declared depth
-                              let child_arc = child_arc.upgrade().unwrap();
-                              let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(child_arc)));
-                          }
-                      }
-                  }
-              }
-          }
-
           /// Performs a specialized breadth-first traversal, grouping children by edge key.
           /// This is more efficient than `special_map` when many edges share the same key,
           /// as the `step` function is called once per key, not once per edge.
+          ///
+          /// This version correctly traverses both strong and weak edges. It also handles
+          /// cycles by allowing nodes to be re-processed, continuing propagation as long
+          /// as the `process` closure returns `true` for a given node.
           #[time_it]
           pub fn special_map_grouped<V, S, I>(
               initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
@@ -8988,7 +8902,8 @@ local_system:
               //  Simple depth-driven scheduler. (Same as special_map)
               // ------------------------------------------------------------------
               let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
-              let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
+              // This set now tracks nodes where `process` returned `false`, stopping propagation.
+              let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
               let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
               let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
@@ -9010,7 +8925,8 @@ local_system:
               while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
                   for node_ptr_wrapper in &node_arc_ptr_wrappers {
                       let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
-                      if done.contains(&ptr) { continue; }
+                      // A node that has been stopped should not be processed again.
+                      if stopped_nodes.contains(&ptr) { continue; }
 
                       let mut agg_v = match values.remove(&ptr) {
                           Some(v) => v,
@@ -9019,34 +8935,160 @@ local_system:
                       let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
-                          let mut guard = node_arc.read().expect("poison");
+                          let guard = node_arc.read().expect("poison");
                           process(&guard, &mut agg_v)
                       };
-                      done.insert(ptr);
 
-                      if !proceed { continue; }
+                      if !proceed {
+                          // User stopped traversal at this node. Mark it and do not propagate.
+                          stopped_nodes.insert(ptr);
+                          continue;
+                      }
 
                       // ---------- propagate to children (grouped by edge key) -------------
+                      // This block is now corrected to include BOTH strong and weak edges.
                       let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
                           let guard = node_arc.read().expect("poison");
-                          guard.children.iter().map(|(ek, dst_map)| {
-                              let strong_only_map: OrderedHashMap<_, _> = dst_map.iter()
-                                  .filter(|(k, _)| k.is_strong())
-                                  .map(|(k, v)| (k.clone(), v.clone()))
-                                  .collect();
-                              (ek.clone(), strong_only_map)
-                          }).filter(|(_, dst_map)| !dst_map.is_empty()).collect()
+                          guard.children.iter()
+                              .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                              .collect()
                       };
 
                       for (ek, dest_map) in children_by_ek {
-                          let _ = pb.update(dest_map.len());
+                          // We only count upgradable edges for the progress bar.
+                          let valid_edges_count = dest_map.keys().filter(|k| k.is_upgradable()).count();
+                          if valid_edges_count > 0 {
+                              let _ = pb.update(valid_edges_count);
+                          }
+
                           let new_values_for_children = step(&agg_v, &ek, &dest_map);
+
                           for (child_node_ptr, new_v) in new_values_for_children {
-                              let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-                              let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
-                              values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                              let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(child_arc);
+                              // Gracefully handle weak pointers that may have expired.
+                              if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
+                                  let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+
+                                  // Optimization: Don't bother queueing a child if we know its path is stopped.
+                                  if stopped_nodes.contains(&child_ptr) {
+                                      continue;
+                                  }
+
+                                  values.entry(child_ptr)
+                                      .and_modify(|old| merge(old, new_v.clone()))
+                                      .or_insert(new_v);
+
+                                  let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                                  todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          /// Performs a specialized breadth-first traversal, grouping children by edge key.
+          /// This is more efficient than `special_map` when many edges share the same key,
+          /// as the `step` function is called once per key, not once per edge.
+          ///
+          /// This version correctly traverses both strong and weak edges. It also handles
+          /// cycles by allowing nodes to be re-processed, continuing propagation as long
+          /// as the `process` closure returns `true` for a given node.
+          #[time_it]
+          pub fn special_map_grouped<V, S, I>(
+              initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
+              mut step: S,
+              mut merge: impl FnMut(&mut V, V),
+              mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+          )
+          where
+              V: Clone,
+              S: FnMut(
+                  &V, &EK, &OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>
+              ) -> I,
+              I: IntoIterator<Item = (NodePtr<RwLock<Trie<EK, EV, T>>>, V)>,
+          {
+              // ------------------------------------------------------------------
+              //  Simple depth-driven scheduler. (Same as special_map)
+              // ------------------------------------------------------------------
+              let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
+              // This set now tracks nodes where `process` returned `false`, stopping propagation.
+              let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
+              let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
+
+              let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
+              let total_edges = Self::count_all_edges(&initial_nodes);
+              let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
+              // Seed with the user-supplied starting set
+              for (node_arc, v0) in initial_nodes_and_values {
+                  let ptr = Arc::as_ptr(&node_arc);
+                  values
+                      .entry(ptr)
+                      .and_modify(|old| merge(old, v0.clone()))
+                      .or_insert(v0);
+                  let depth = node_arc.read().expect("poison").max_depth;
+                  todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+              }
+
+              // Main loop ---------------------------------------------------------
+              while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+                  for node_ptr_wrapper in &node_arc_ptr_wrappers {
+                      let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+                      // A node that has been stopped should not be processed again.
+                      if stopped_nodes.contains(&ptr) { continue; }
+
+                      let mut agg_v = match values.remove(&ptr) {
+                          Some(v) => v,
+                          None => continue,
+                      };
+                      let node_arc = node_ptr_wrapper.as_arc();
+
+                      let proceed = {
+                          let guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
+                      };
+
+                      if !proceed {
+                          // User stopped traversal at this node. Mark it and do not propagate.
+                          stopped_nodes.insert(ptr);
+                          continue;
+                      }
+
+                      // ---------- propagate to children (grouped by edge key) -------------
+                      // This block is now corrected to include BOTH strong and weak edges.
+                      let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
+                          let guard = node_arc.read().expect("poison");
+                          guard.children.iter()
+                              .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                              .collect()
+                      };
+
+                      for (ek, dest_map) in children_by_ek {
+                          // We only count upgradable edges for the progress bar.
+                          let valid_edges_count = dest_map.keys().filter(|k| k.is_upgradable()).count();
+                          if valid_edges_count > 0 {
+                              let _ = pb.update(valid_edges_count);
+                          }
+
+                          let new_values_for_children = step(&agg_v, &ek, &dest_map);
+
+                          for (child_node_ptr, new_v) in new_values_for_children {
+                              // Gracefully handle weak pointers that may have expired.
+                              if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
+                                  let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+
+                                  // Optimization: Don't bother queueing a child if we know its path is stopped.
+                                  if stopped_nodes.contains(&child_ptr) {
+                                      continue;
+                                  }
+
+                                  values.entry(child_ptr)
+                                      .and_modify(|old| merge(old, new_v.clone()))
+                                      .or_insert(new_v);
+
+                                  let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                                  todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                              }
                           }
                       }
                   }
@@ -12530,6 +12572,7 @@ local_system:
       use crate::json_serialization::{JSONConvertible, JSONNode};
       use std::collections::BTreeMap as StdMap;
       use kdam::{tqdm, BarBuilder};
+      use deterministic_hash::DeterministicHasher;
       use profiler_macro::{time_it, timeit};
       use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
       use crate::datastructures::gss::Acc;
@@ -13123,6 +13166,10 @@ local_system:
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
+              // Recompute depths again after promotions, as they can change the graph structure.
+              let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
+              Trie::recompute_all_max_depths(&roots2_final);
+
               precomputed2
           }
 
@@ -13239,26 +13286,193 @@ local_system:
       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
-          // Collect all unique nodes into a Vec to hold strong references to them.
-          // This prevents any node from being dropped while we are modifying the graph structure,
-          // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let _all_nodes = Trie::all_nodes(&roots_vec);
+          fn prune_and_get_live_tokens_rec(
+              node_arc: &Arc<RwLock<PrecomputeNode2>>,
+              live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          ) -> LLMTokenBV {
+              let node_ptr = Arc::as_ptr(node_arc);
+              if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
+                  return cached_bv.clone();
+              }
+              live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
 
-          // We no longer remove roots from the map. A "dead" root (with an empty live_tokens set)
-          // is kept. This prevents panics in get_mask2, which expects a complete map from
-          // active tokenizer states to precomputed trie roots. The trie being empty of live
-          // tokens is sufficient to signal that no paths are valid from that state.
-          // The original implementation removed roots if their `live_tokens` set was empty.
+              // Snapshot children to avoid holding lock during recursion
+              let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
+                  let node_guard = node_arc.read().unwrap();
+                  node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+              };
 
-          crate::debug!(2, "Finished pruning dead paths from trie 2. No roots were removed.");
+              for child_wrapper in children_to_check {
+                  if let Some(child_arc) = child_wrapper.upgrade() {
+                      prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
+                  }
+              }
+
+              let mut live_tokens_for_this_node = LLMTokenBV::zeros();
+              {
+                  let mut node_guard = node_arc.write().unwrap();
+                  if node_guard.value.end {
+                      // An end node is a source of liveness. The tokens that can end here are considered live.
+                      live_tokens_for_this_node |= &node_guard.value.live_tokens;
+                  }
+
+                  node_guard.children_mut().retain(|_edge_key, dest_map| {
+                      dest_map.retain(|child_wrapper, edge_value_bv| {
+                          let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
+                          let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
+                              .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+
+                          let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                          if live_tokens_for_this_edge.is_empty() {
+                              false
+                          } else {
+                              *edge_value_bv = live_tokens_for_this_edge;
+                              true
+                          }
+                      });
+                      !dest_map.is_empty()
+                  });
+
+                  for dest_map in node_guard.children().values() {
+                      for edge_bv in dest_map.values() {
+                          live_tokens_for_this_node |= edge_bv;
+                      }
+                  }
+                  node_guard.value.live_tokens = live_tokens_for_this_node.clone();
+              }
+
+              live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
+              live_tokens_for_this_node
+          }
+
+          let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+          for root_arc in roots.values() {
+              prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
+          }
+
+          crate::debug!(2, "Finished pruning dead paths from trie 2.");
+      }
+
+      fn trie2_shape_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          if let Some(&h) = memo.get(&ptr) {
+              return h;
+          }
+
+          let node_guard = arc.read().unwrap();
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+
+          // Hash shape-defining value fields
+          node_guard.value.end.hash(&mut hasher);
+
+          // Hash children structure
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in node_guard.children() {
+              for (np, ev) in dest_map {
+                  if let Some(child) = np.upgrade() {
+                      let child_h = trie2_shape_hash(&child, memo);
+                      let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                      ek.hash(&mut pair_hasher);
+                      ev.hash(&mut pair_hasher);
+                      np.is_strong().hash(&mut pair_hasher);
+                      child_h.hash(&mut pair_hasher);
+                      edge_hashes.push(pair_hasher.finish());
+                  }
+              }
+          }
+
+          edge_hashes.sort_unstable();
+          for h in edge_hashes {
+              h.hash(&mut hasher);
+          }
+
+          let final_hash = hasher.finish();
+          memo.insert(ptr, final_hash);
+          final_hash
+      }
+
+      fn trie2_shape_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) {
+              return true;
+          }
+
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
+              (Arc::as_ptr(a), Arc::as_ptr(b))
+          } else {
+              (Arc::as_ptr(b), Arc::as_ptr(a))
+          };
+
+          if let Some(&res) = cache.get(&(p1, p2)) {
+              return res;
+          }
+
+          cache.insert((p1, p2), true); // Optimistic insertion for cycles
+
+          let guard_a = a.read().unwrap();
+          let guard_b = b.read().unwrap();
+
+          // Compare shape-defining value fields
+          if guard_a.value.end != guard_b.value.end {
+              cache.insert((p1, p2), false);
+              return false;
+          }
+
+          // Compare children
+          if guard_a.children().len() != guard_b.children().len() {
+              cache.insert((p1, p2), false);
+              return false;
+          }
+
+          for (ek, dest_map_a) in guard_a.children() {
+              if let Some(dest_map_b) = guard_b.children().get(ek) {
+                  if dest_map_a.len() != dest_map_b.len() {
+                      cache.insert((p1, p2), false);
+                      return false;
+                  }
+
+                  let mut pairs_b: Vec<_> = dest_map_b.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (np.is_strong(), ev, arc))).collect();
+
+                  for (np_a, ev_a) in dest_map_a.iter() {
+                      if let Some(arc_a) = np_a.upgrade() {
+                          let is_strong_a = np_a.is_strong();
+                          let mut found_match = false;
+                          for i in 0..pairs_b.len() {
+                              let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
+                              if is_strong_a == is_strong_b && ev_a == ev_b {
+                                  if trie2_shape_eq(&arc_a, arc_b, cache) {
+                                      pairs_b.remove(i);
+                                      found_match = true;
+                                      break;
+                                  }
+                              }
+                          }
+                          if !found_match {
+                              cache.insert((p1, p2), false);
+                              return false;
+                          }
+                      }
+                  }
+              } else {
+                  cache.insert((p1, p2), false);
+                  return false;
+              }
+          }
+
+          true
       }
 
       fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
-          // Collect all unique nodes to keep them alive during the merging process.
-          // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(&roots_vec);
 
@@ -13272,23 +13486,39 @@ local_system:
               pb.set_draw_target(ProgressDrawTarget::hidden());
           }
 
-          let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+          let mut canonical_nodes: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+          let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+          let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
 
           let mut new_roots = BTreeMap::new();
           for (sid, root_arc) in roots.iter() {
-              let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited, &pb);
+              let canonical_root = deduplicate_recursive_trie2(
+                  root_arc.clone(),
+                  &mut canonical_nodes,
+                  &mut visited,
+                  &mut shape_hash_memo,
+                  &mut shape_eq_cache,
+                  &pb,
+              );
               new_roots.insert(*sid, canonical_root);
           }
           *roots = new_roots;
+
+          // Recompute depths after structural changes from merging
+          let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+          Trie::recompute_all_max_depths(&final_roots_vec);
+
           pb.finish_with_message("Finished merging Trie 2 nodes");
-          crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
+          crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.values().map(|v| v.len()).sum::<usize>());
       }
 
       fn deduplicate_recursive_trie2(
           node_arc: Arc<RwLock<PrecomputeNode2>>,
-          canonical_nodes: &mut HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>>,
+          canonical_nodes: &mut HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>>,
           visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+          shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+          shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
           pb: &ProgressBar,
       ) -> Arc<RwLock<PrecomputeNode2>> {
           let node_ptr = Arc::as_ptr(&node_arc);
@@ -13298,10 +13528,7 @@ local_system:
 
           pb.inc(1);
 
-          // Pre-emptively insert the current node's arc. This breaks cycles.
-          // If we find a canonical version later, we'll update the entry.
-          visited.insert(node_ptr, node_arc.clone());
-
+          // Post-order: canonicalize children first
           let mut new_children_map = BTreeMap::new();
           let mut children_changed = false;
 
@@ -13311,7 +13538,14 @@ local_system:
                   let mut new_dest_map = OrderedHashMap::new();
                   for (node_ptr_wrapper, edge_val) in dest_map.iter() {
                       if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                          let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited, pb);
+                          let canonical_child_arc = deduplicate_recursive_trie2(
+                              child_arc.clone(),
+                              canonical_nodes,
+                              visited,
+                              shape_hash_memo,
+                              shape_eq_cache,
+                              pb,
+                          );
                           if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
                               children_changed = true;
                           }
@@ -13330,25 +13564,32 @@ local_system:
           }
 
           if children_changed {
-              // println!("Updating children for node {:p}", node_ptr);
-              // println!(" Existing children map: {:?}", node_arc.read().unwrap().children());
-              // println!(" New children map: {:?}", new_children_map);
               let mut node_guard = node_arc.write().unwrap();
               *node_guard.children_mut() = new_children_map;
-              // println!("Recomputing max_depth for node {:p}", node_ptr);
-              node_guard.recompute_max_depth();
-              // println!("Updated children for node {:p}", node_ptr);
+              // max_depth will be recomputed globally at the end
           }
 
-          let canonical_arc = {
-              let node_guard = node_arc.read().unwrap();
-              let node_content = (*node_guard).clone();
-              canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-          };
+          // Now find a canonical representative for the current node
+          let fp = trie2_shape_hash(&node_arc, shape_hash_memo);
+          let bucket = canonical_nodes.entry(fp).or_default();
 
-          // Update the visited map with the final canonical arc.
-          visited.insert(node_ptr, canonical_arc.clone());
-          canonical_arc
+          for candidate_arc in bucket.iter() {
+              if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache) {
+                  // Found a match. Merge live_tokens and return the canonical version.
+                  let node_live_tokens = { node_arc.read().unwrap().value.live_tokens.clone() };
+                  if !node_live_tokens.is_empty() {
+                      let mut candidate_guard = candidate_arc.write().unwrap();
+                      candidate_guard.value.live_tokens |= node_live_tokens;
+                  }
+                  visited.insert(node_ptr, candidate_arc.clone());
+                  return candidate_arc.clone();
+              }
+          }
+
+          // No match found. This node becomes a new canonical representative.
+          bucket.push(node_arc.clone());
+          visited.insert(node_ptr, node_arc.clone());
+          node_arc
       }
 
       fn clone_trie2_graph(
@@ -15367,7 +15608,7 @@ local_system:
               &self.state
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -16561,120 +16802,13 @@ messages:
               total_edges
           }
 
-          /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-          /// (special_map implementation remains unchanged)
-          #[time_it]
-          pub fn special_map<V: Clone>(
-              initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
-              mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
-              mut merge: impl FnMut(&mut V, V),
-              mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
-          ) {
-              // ------------------------------------------------------------------
-              //  Simple depth-driven scheduler.
-              //
-              //  The key observation is:
-              //      parent.max_depth  <  child.max_depth
-              //  for every edge (parent → child).
-              //  Therefore processing nodes strictly in ascending `max_depth`
-              //  guarantees every parent is handled before each of its children.
-              //
-              //  • `values`  – accumulated V for every discovered node
-              //  • `done`    – nodes that have already been processed
-              //  • `todo`    – min-heap keyed by max_depth
-              // ------------------------------------------------------------------
-              let mut values   : HashMap<*const RwLock<Self>, V> = HashMap::new();
-              let mut done     : HashSet <*const RwLock<Self>>   = HashSet ::new();
-              let mut todo     : BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
-
-              let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
-              let total_edges = Self::count_all_edges(&initial_nodes);
-              if PROGRESS_BAR_ENABLED {
-                  println!("Progress bar enabled");
-              } else {
-                  println!("Progress bar disabled")
-              }
-              let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-              // Seed with the user-supplied starting set
-              for (node_arc, v0) in initial_nodes_and_values {
-                  let ptr = Arc::as_ptr(&node_arc);
-                  values
-                      .entry(ptr)
-                      .and_modify(|old| merge(old, v0.clone()))
-                      .or_insert(v0);
-                  let depth = node_arc.read().expect("poison").max_depth;
-                  todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
-              }
-
-              // Main loop ---------------------------------------------------------
-              while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-                  // #[allow(clippy::iter_over_hash_type)]
-                  for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                      let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
-                      if done.contains(&ptr) { continue; }               // already processed
-
-                      // Pull the merged value that all parents contributed
-                      let mut agg_v = match values.remove(&ptr) {
-                          Some(v) => v,
-                          None => continue,                            // can happen if every parent’s `step` returned None
-                      };
-                      let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
-
-                      // ---------- user ‘process’ callback ----------
-                      let proceed = {
-                          let guard = node_arc.read().expect("poison");
-                          process(&guard, &mut agg_v)
-                      };
-                      done.insert(ptr);
-
-                      if !proceed { continue; }                           // user stopped traversal at this node
-
-                      // ---------- propagate to children -------------
-                      // We read children once, outside any long-lived write locks
-                      let edges: Vec<(EK, EV, NodePtr<RwLock<Self>>)> = {
-                          let guard = node_arc.read().expect("poison");
-                          guard.children
-                              .iter()
-                              .flat_map(|(ek, dst_map)| {
-                                  dst_map.iter().filter_map(move |(node_ptr, ev)| {
-                                      if node_ptr.is_strong() {
-                                          Some((ek.clone(), ev.clone(), node_ptr.clone()))
-                                      } else { None }
-                                  })
-                              })
-                              .collect()
-                      };
-
-                      for (ek, ev, child_arc) in edges {
-                          let _ = pb.update(1);
-                          let child_ptr = NodePtr::as_ptr(&child_arc);
-
-                          // user ‘step’ callback
-                          let maybe_v = {
-                              let child_arc = child_arc.upgrade().unwrap();
-                              let child_guard = child_arc.read().expect("poison");
-                              step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
-                          };
-                          if let Some(new_v) = maybe_v {
-                              values
-                                  .entry(child_ptr)
-                                  .and_modify(|old| merge(old, new_v.clone()))
-                                  .or_insert(new_v);
-
-                              // Queue child by its declared depth
-                              let child_arc = child_arc.upgrade().unwrap();
-                              let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(child_arc)));
-                          }
-                      }
-                  }
-              }
-          }
-
           /// Performs a specialized breadth-first traversal, grouping children by edge key.
           /// This is more efficient than `special_map` when many edges share the same key,
           /// as the `step` function is called once per key, not once per edge.
+          ///
+          /// This version correctly traverses both strong and weak edges. It also handles
+          /// cycles by allowing nodes to be re-processed, continuing propagation as long
+          /// as the `process` closure returns `true` for a given node.
           #[time_it]
           pub fn special_map_grouped<V, S, I>(
               initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
@@ -16693,7 +16827,8 @@ messages:
               //  Simple depth-driven scheduler. (Same as special_map)
               // ------------------------------------------------------------------
               let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
-              let mut done: HashSet<*const RwLock<Self>> = HashSet::new();
+              // This set now tracks nodes where `process` returned `false`, stopping propagation.
+              let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
               let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
               let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
@@ -16715,7 +16850,8 @@ messages:
               while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
                   for node_ptr_wrapper in &node_arc_ptr_wrappers {
                       let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
-                      if done.contains(&ptr) { continue; }
+                      // A node that has been stopped should not be processed again.
+                      if stopped_nodes.contains(&ptr) { continue; }
 
                       let mut agg_v = match values.remove(&ptr) {
                           Some(v) => v,
@@ -16724,34 +16860,160 @@ messages:
                       let node_arc = node_ptr_wrapper.as_arc();
 
                       let proceed = {
-                          let mut guard = node_arc.read().expect("poison");
+                          let guard = node_arc.read().expect("poison");
                           process(&guard, &mut agg_v)
                       };
-                      done.insert(ptr);
 
-                      if !proceed { continue; }
+                      if !proceed {
+                          // User stopped traversal at this node. Mark it and do not propagate.
+                          stopped_nodes.insert(ptr);
+                          continue;
+                      }
 
                       // ---------- propagate to children (grouped by edge key) -------------
+                      // This block is now corrected to include BOTH strong and weak edges.
                       let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
                           let guard = node_arc.read().expect("poison");
-                          guard.children.iter().map(|(ek, dst_map)| {
-                              let strong_only_map: OrderedHashMap<_, _> = dst_map.iter()
-                                  .filter(|(k, _)| k.is_strong())
-                                  .map(|(k, v)| (k.clone(), v.clone()))
-                                  .collect();
-                              (ek.clone(), strong_only_map)
-                          }).filter(|(_, dst_map)| !dst_map.is_empty()).collect()
+                          guard.children.iter()
+                              .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                              .collect()
                       };
 
                       for (ek, dest_map) in children_by_ek {
-                          let _ = pb.update(dest_map.len());
+                          // We only count upgradable edges for the progress bar.
+                          let valid_edges_count = dest_map.keys().filter(|k| k.is_upgradable()).count();
+                          if valid_edges_count > 0 {
+                              let _ = pb.update(valid_edges_count);
+                          }
+
                           let new_values_for_children = step(&agg_v, &ek, &dest_map);
+
                           for (child_node_ptr, new_v) in new_values_for_children {
-                              let child_ptr = child_node_ptr.as_ptr_usize() as *const RwLock<Self>;
-                              let child_arc = child_node_ptr.upgrade_wrapper().unwrap();
-                              values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                              let child_depth = child_arc.read().expect("poison").max_depth;
-                              todo.entry(child_depth).or_default().insert(child_arc);
+                              // Gracefully handle weak pointers that may have expired.
+                              if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
+                                  let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+
+                                  // Optimization: Don't bother queueing a child if we know its path is stopped.
+                                  if stopped_nodes.contains(&child_ptr) {
+                                      continue;
+                                  }
+
+                                  values.entry(child_ptr)
+                                      .and_modify(|old| merge(old, new_v.clone()))
+                                      .or_insert(new_v);
+
+                                  let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                                  todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          /// Performs a specialized breadth-first traversal, grouping children by edge key.
+          /// This is more efficient than `special_map` when many edges share the same key,
+          /// as the `step` function is called once per key, not once per edge.
+          ///
+          /// This version correctly traverses both strong and weak edges. It also handles
+          /// cycles by allowing nodes to be re-processed, continuing propagation as long
+          /// as the `process` closure returns `true` for a given node.
+          #[time_it]
+          pub fn special_map_grouped<V, S, I>(
+              initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
+              mut step: S,
+              mut merge: impl FnMut(&mut V, V),
+              mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+          )
+          where
+              V: Clone,
+              S: FnMut(
+                  &V, &EK, &OrderedHashMap<NodePtr<RwLock<Trie<EK, EV, T>>>, EV>
+              ) -> I,
+              I: IntoIterator<Item = (NodePtr<RwLock<Trie<EK, EV, T>>>, V)>,
+          {
+              // ------------------------------------------------------------------
+              //  Simple depth-driven scheduler. (Same as special_map)
+              // ------------------------------------------------------------------
+              let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
+              // This set now tracks nodes where `process` returned `false`, stopping propagation.
+              let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
+              let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
+
+              let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
+              let total_edges = Self::count_all_edges(&initial_nodes);
+              let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
+              // Seed with the user-supplied starting set
+              for (node_arc, v0) in initial_nodes_and_values {
+                  let ptr = Arc::as_ptr(&node_arc);
+                  values
+                      .entry(ptr)
+                      .and_modify(|old| merge(old, v0.clone()))
+                      .or_insert(v0);
+                  let depth = node_arc.read().expect("poison").max_depth;
+                  todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+              }
+
+              // Main loop ---------------------------------------------------------
+              while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+                  for node_ptr_wrapper in &node_arc_ptr_wrappers {
+                      let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+                      // A node that has been stopped should not be processed again.
+                      if stopped_nodes.contains(&ptr) { continue; }
+
+                      let mut agg_v = match values.remove(&ptr) {
+                          Some(v) => v,
+                          None => continue,
+                      };
+                      let node_arc = node_ptr_wrapper.as_arc();
+
+                      let proceed = {
+                          let guard = node_arc.read().expect("poison");
+                          process(&guard, &mut agg_v)
+                      };
+
+                      if !proceed {
+                          // User stopped traversal at this node. Mark it and do not propagate.
+                          stopped_nodes.insert(ptr);
+                          continue;
+                      }
+
+                      // ---------- propagate to children (grouped by edge key) -------------
+                      // This block is now corrected to include BOTH strong and weak edges.
+                      let children_by_ek: Vec<(EK, OrderedHashMap<NodePtr<RwLock<Self>>, EV>)> = {
+                          let guard = node_arc.read().expect("poison");
+                          guard.children.iter()
+                              .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
+                              .collect()
+                      };
+
+                      for (ek, dest_map) in children_by_ek {
+                          // We only count upgradable edges for the progress bar.
+                          let valid_edges_count = dest_map.keys().filter(|k| k.is_upgradable()).count();
+                          if valid_edges_count > 0 {
+                              let _ = pb.update(valid_edges_count);
+                          }
+
+                          let new_values_for_children = step(&agg_v, &ek, &dest_map);
+
+                          for (child_node_ptr, new_v) in new_values_for_children {
+                              // Gracefully handle weak pointers that may have expired.
+                              if let Some(child_arc_wrapper) = child_node_ptr.upgrade_wrapper() {
+                                  let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+
+                                  // Optimization: Don't bother queueing a child if we know its path is stopped.
+                                  if stopped_nodes.contains(&child_ptr) {
+                                      continue;
+                                  }
+
+                                  values.entry(child_ptr)
+                                      .and_modify(|old| merge(old, new_v.clone()))
+                                      .or_insert(new_v);
+
+                                  let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
+                                  todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                              }
                           }
                       }
                   }
@@ -23400,5 +23662,481 @@ messages:
       ``````
 
       Apply these changes. Write a git diff that does it.
+    metadata:
+  - assistant: |-
+      Of course. Dealing with graph optimizations like dead-path pruning and deduplication can be tricky, especially when dynamic properties like `max_depth` and `live_tokens` interfere with structural comparisons. The bloated Trie 2 you're seeing is a classic symptom of these issues.
+
+      Here are the fixes to implement proper pruning and shape-based merging for your Trie 2 precomputation.
+
+      ### `src/constraint.rs`
+
+      I'll implement the plan we discussed:
+      1.  **Real Pruning:** Replace the `prune_dead_paths_trie2` stub with a function that performs a post-order traversal to calculate and propagate "live" tokens, trimming edges and nodes that don't lead to an end state.
+      2.  **Shape-based Merging:** Introduce `trie2_shape_hash` and `trie2_shape_eq` helpers that ignore `max_depth` and `live_tokens`. I'll then update `merge_nodes_trie2` and its recursive helper to use these for canonicalization, ensuring structurally identical subgraphs are merged regardless of their dynamic properties.
+      3.  **Depth Recomputation:** Add calls to `Trie::recompute_all_max_depths` after merging and promotions to ensure the `max_depth` invariant is restored across the entire graph.
+
+      This will result in a much more compact and efficient Trie 2.
+
+      ```diff
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -19,6 +19,7 @@
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use std::collections::BTreeMap as StdMap;
+       use kdam::{tqdm, BarBuilder};
+      +use deterministic_hash::DeterministicHasher;
+       use profiler_macro::{time_it, timeit};
+       use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
+       use crate::datastructures::gss::Acc;
+      @@ -486,6 +487,10 @@
+               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+       
+      +        // Recompute depths again after promotions, as they can change the graph structure.
+      +        let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
+      +        Trie::recompute_all_max_depths(&roots2_final);
+      +
+               precomputed2
+           }
+       
+      @@ -820,88 +825,177 @@
+           }
+       }
+       
+      -fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      +fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+       
+      -    // Collect all unique nodes into a Vec to hold strong references to them.
+      -    // This prevents any node from being dropped while we are modifying the graph structure,
+      -    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
+      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      -    let _all_nodes = Trie::all_nodes(&roots_vec);
+      -
+      -    // We no longer remove roots from the map. A "dead" root (with an empty live_tokens set)
+      -    // is kept. This prevents panics in get_mask2, which expects a complete map from
+      -    // active tokenizer states to precomputed trie roots. The trie being empty of live
+      -    // tokens is sufficient to signal that no paths are valid from that state.
+      -    // The original implementation removed roots if their `live_tokens` set was empty.
+      -
+      -    crate::debug!(2, "Finished pruning dead paths from trie 2. No roots were removed.");
+      -}
+      -
+      -fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      -    crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+      -
+      -    // Collect all unique nodes to keep them alive during the merging process.
+      -    // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
+      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      -    let all_nodes = Trie::all_nodes(&roots_vec);
+      -
+      -    let pb = ProgressBar::new(all_nodes.len() as u64);
+      -    pb.set_style(
+      -        ProgressStyle::default_bar()
+      -            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+      -            .expect("progress-bar"),
+      -    );
+      -    if !PROGRESS_BAR_ENABLED {
+      -        pb.set_draw_target(ProgressDrawTarget::hidden());
+      -    }
+      -
+      -    let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+      -    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+      -
+      -    let mut new_roots = BTreeMap::new();
+      -    for (sid, root_arc) in roots.iter() {
+      -        let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited, &pb);
+      -        new_roots.insert(*sid, canonical_root);
+      -    }
+      -    *roots = new_roots;
+      -    pb.finish_with_message("Finished merging Trie 2 nodes");
+      -    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
+      -}
+      -
+      -fn deduplicate_recursive_trie2(
+      -    node_arc: Arc<RwLock<PrecomputeNode2>>,
+      -    canonical_nodes: &mut HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>>,
+      -    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+      -    pb: &ProgressBar,
+      -) -> Arc<RwLock<PrecomputeNode2>> {
+      -    let node_ptr = Arc::as_ptr(&node_arc);
+      -    if let Some(cached_node) = visited.get(&node_ptr) {
+      -        return cached_node.clone();
+      -    }
+      -
+      -    pb.inc(1);
+      -
+      -    // Pre-emptively insert the current node's arc. This breaks cycles.
+      -    // If we find a canonical version later, we'll update the entry.
+      -    visited.insert(node_ptr, node_arc.clone());
+      -
+      -    let mut new_children_map = BTreeMap::new();
+      -    let mut children_changed = false;
+      -
+      -    {
+      -        let node_guard = node_arc.read().unwrap();
+      -        for (edge_key, dest_map) in node_guard.children() {
+      -            let mut new_dest_map = OrderedHashMap::new();
+      -            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+      -                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+      -                    let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited, pb);
+      -                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+      -                        children_changed = true;
+      -                    }
+      -                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+      -                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+      -                    } else {
+      -                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+      -                    };
+      -                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+      -                }
+      -            }
+      -            if !new_dest_map.is_empty() {
+      -                new_children_map.insert(edge_key.clone(), new_dest_map);
+      -            }
+      -        }
+      -    }
+      -
+      -    if children_changed {
+      -        // println!("Updating children for node {:p}", node_ptr);
+      -        // println!(" Existing children map: {:?}", node_arc.read().unwrap().children());
+      -        // println!(" New children map: {:?}", new_children_map);
+      -        let mut node_guard = node_arc.write().unwrap();
+      -        *node_guard.children_mut() = new_children_map;
+      -        // println!("Recomputing max_depth for node {:p}", node_ptr);
+      -        node_guard.recompute_max_depth();
+      -        // println!("Updated children for node {:p}", node_ptr);
+      -    }
+      -
+      -    let canonical_arc = {
+      -        let node_guard = node_arc.read().unwrap();
+      -        let node_content = (*node_guard).clone();
+      -        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+      -    };
+      -
+      -    // Update the visited map with the final canonical arc.
+      -    visited.insert(node_ptr, canonical_arc.clone());
+      -    canonical_arc
+      +    fn prune_and_get_live_tokens_rec(
+      +        node_arc: &Arc<RwLock<PrecomputeNode2>>,
+      +        live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+      +    ) -> LLMTokenBV {
+      +        let node_ptr = Arc::as_ptr(node_arc);
+      +        if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
+      +            return cached_bv.clone();
+      +        }
+      +        live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
+      +
+      +        // Snapshot children to avoid holding lock during recursion
+      +        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
+      +            let node_guard = node_arc.read().unwrap();
+      +            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+      +        };
+      +
+      +        for child_wrapper in children_to_check {
+      +            if let Some(child_arc) = child_wrapper.upgrade() {
+      +                prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
+      +            }
+      +        }
+      +
+      +        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
+      +        {
+      +            let mut node_guard = node_arc.write().unwrap();
+      +            if node_guard.value.end {
+      +                // An end node is a source of liveness. The tokens that can end here are considered live.
+      +                live_tokens_for_this_node |= &node_guard.value.live_tokens;
+      +            }
+      +
+      +            node_guard.children_mut().retain(|_edge_key, dest_map| {
+      +                dest_map.retain(|child_wrapper, edge_value_bv| {
+      +                    let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
+      +                    let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
+      +                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+      +
+      +                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+      +
+      +                    if live_tokens_for_this_edge.is_empty() {
+      +                        false
+      +                    } else {
+      +                        *edge_value_bv = live_tokens_for_this_edge;
+      +                        true
+      +                    }
+      +                });
+      +                !dest_map.is_empty()
+      +            });
+      +
+      +            for dest_map in node_guard.children().values() {
+      +                for edge_bv in dest_map.values() {
+      +                    live_tokens_for_this_node |= edge_bv;
+      +                }
+      +            }
+      +            node_guard.value.live_tokens = live_tokens_for_this_node.clone();
+      +        }
+      +
+      +        live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
+      +        live_tokens_for_this_node
+      +    }
+      +
+      +    let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+      +
+      +    for root_arc in roots.values() {
+      +        prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
+      +    }
+      +
+      +    crate::debug!(2, "Finished pruning dead paths from trie 2.");
+      +}
+      +
+      +fn trie2_shape_hash(
+      +    arc: &Arc<RwLock<PrecomputeNode2>>,
+      +    memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      +) -> u64 {
+      +    let ptr = Arc::as_ptr(arc);
+      +    if let Some(&h) = memo.get(&ptr) {
+      +        return h;
+      +    }
+      +
+      +    let node_guard = arc.read().unwrap();
+      +    let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+      +
+      +    // Hash shape-defining value fields
+      +    node_guard.value.end.hash(&mut hasher);
+      +
+      +    // Hash children structure
+      +    let mut edge_hashes = Vec::new();
+      +    for (ek, dest_map) in node_guard.children() {
+      +        for (np, ev) in dest_map {
+      +            if let Some(child) = np.upgrade() {
+      +                let child_h = trie2_shape_hash(&child, memo);
+      +                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+      +                ek.hash(&mut pair_hasher);
+      +                ev.hash(&mut pair_hasher);
+      +                np.is_strong().hash(&mut pair_hasher);
+      +                child_h.hash(&mut pair_hasher);
+      +                edge_hashes.push(pair_hasher.finish());
+      +            }
+      +        }
+      +    }
+      +
+      +    edge_hashes.sort_unstable();
+      +    for h in edge_hashes {
+      +        h.hash(&mut hasher);
+      +    }
+      +
+      +    let final_hash = hasher.finish();
+      +    memo.insert(ptr, final_hash);
+      +    final_hash
+      +}
+      +
+      +fn trie2_shape_eq(
+      +    a: &Arc<RwLock<PrecomputeNode2>>,
+      +    b: &Arc<RwLock<PrecomputeNode2>>,
+      +    cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+      +) -> bool {
+      +    if Arc::ptr_eq(a, b) {
+      +        return true;
+      +    }
+      +
+      +    let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
+      +        (Arc::as_ptr(a), Arc::as_ptr(b))
+      +    } else {
+      +        (Arc::as_ptr(b), Arc::as_ptr(a))
+      +    };
+      +
+      +    if let Some(&res) = cache.get(&(p1, p2)) {
+      +        return res;
+      +    }
+      +
+      +    cache.insert((p1, p2), true); // Optimistic insertion for cycles
+      +
+      +    let guard_a = a.read().unwrap();
+      +    let guard_b = b.read().unwrap();
+      +
+      +    // Compare shape-defining value fields
+      +    if guard_a.value.end != guard_b.value.end {
+      +        cache.insert((p1, p2), false);
+      +        return false;
+      +    }
+      +
+      +    // Compare children
+      +    if guard_a.children().len() != guard_b.children().len() {
+      +        cache.insert((p1, p2), false);
+      +        return false;
+      +    }
+      +
+      +    for (ek, dest_map_a) in guard_a.children() {
+      +        if let Some(dest_map_b) = guard_b.children().get(ek) {
+      +            if dest_map_a.len() != dest_map_b.len() {
+      +                cache.insert((p1, p2), false);
+      +                return false;
+      +            }
+      +
+      +            let mut pairs_b: Vec<_> = dest_map_b.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (np.is_strong(), ev, arc))).collect();
+      +
+      +            for (np_a, ev_a) in dest_map_a.iter() {
+      +                if let Some(arc_a) = np_a.upgrade() {
+      +                    let is_strong_a = np_a.is_strong();
+      +                    let mut found_match = false;
+      +                    for i in 0..pairs_b.len() {
+      +                        let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
+      +                        if is_strong_a == is_strong_b && ev_a == ev_b {
+      +                            if trie2_shape_eq(&arc_a, arc_b, cache) {
+      +                                pairs_b.remove(i);
+      +                                found_match = true;
+      +                                break;
+      +                            }
+      +                        }
+      +                    }
+      +                    if !found_match {
+      +                        cache.insert((p1, p2), false);
+      +                        return false;
+      +                    }
+      +                }
+      +            }
+      +        } else {
+      +            cache.insert((p1, p2), false);
+      +            return false;
+      +        }
+      +    }
+      +
+      +    true
+      +}
+      +
+      +fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      +    crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
+      +
+      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      +    let all_nodes = Trie::all_nodes(&roots_vec);
+      +
+      +    let pb = ProgressBar::new(all_nodes.len() as u64);
+      +    pb.set_style(
+      +        ProgressStyle::default_bar()
+      +            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+      +            .expect("progress-bar"),
+      +    );
+      +    if !PROGRESS_BAR_ENABLED {
+      +        pb.set_draw_target(ProgressDrawTarget::hidden());
+      +    }
+      +
+      +    let mut canonical_nodes: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+      +    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+      +    let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+      +    let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
+      +
+      +    let mut new_roots = BTreeMap::new();
+      +    for (sid, root_arc) in roots.iter() {
+      +        let canonical_root = deduplicate_recursive_trie2(
+      +            root_arc.clone(),
+      +            &mut canonical_nodes,
+      +            &mut visited,
+      +            &mut shape_hash_memo,
+      +            &mut shape_eq_cache,
+      +            &pb,
+      +        );
+      +        new_roots.insert(*sid, canonical_root);
+      +    }
+      +    *roots = new_roots;
+      +
+      +    // Recompute depths after structural changes from merging
+      +    let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+      +    Trie::recompute_all_max_depths(&final_roots_vec);
+      +
+      +    pb.finish_with_message("Finished merging Trie 2 nodes");
+      +    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.values().map(|v| v.len()).sum::<usize>());
+      +}
+      +
+      +fn deduplicate_recursive_trie2(
+      +    node_arc: Arc<RwLock<PrecomputeNode2>>,
+      +    canonical_nodes: &mut HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>>,
+      +    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+      +    shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      +    shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+      +    pb: &ProgressBar,
+      +) -> Arc<RwLock<PrecomputeNode2>> {
+      +    let node_ptr = Arc::as_ptr(&node_arc);
+      +    if let Some(cached_node) = visited.get(&node_ptr) {
+      +        return cached_node.clone();
+      +    }
+      +
+      +    pb.inc(1);
+      +
+      +    // Post-order: canonicalize children first
+      +    let mut new_children_map = BTreeMap::new();
+      +    let mut children_changed = false;
+      +
+      +    {
+      +        let node_guard = node_arc.read().unwrap();
+      +        for (edge_key, dest_map) in node_guard.children() {
+      +            let mut new_dest_map = OrderedHashMap::new();
+      +            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+      +                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+      +                    let canonical_child_arc = deduplicate_recursive_trie2(
+      +                        child_arc.clone(),
+      +                        canonical_nodes,
+      +                        visited,
+      +                        shape_hash_memo,
+      +                        shape_eq_cache,
+      +                        pb,
+      +                    );
+      +                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+      +                        children_changed = true;
+      +                    }
+      +                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+      +                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+      +                    } else {
+      +                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+      +                    };
+      +                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+      +                }
+      +            }
+      +            if !new_dest_map.is_empty() {
+      +                new_children_map.insert(edge_key.clone(), new_dest_map);
+      +            }
+      +        }
+      +    }
+      +
+      +    if children_changed {
+      +        let mut node_guard = node_arc.write().unwrap();
+      +        *node_guard.children_mut() = new_children_map;
+      +        // max_depth will be recomputed globally at the end
+      +    }
+      +
+      +    // Now find a canonical representative for the current node
+      +    let fp = trie2_shape_hash(&node_arc, shape_hash_memo);
+      +    let bucket = canonical_nodes.entry(fp).or_default();
+      +
+      +    for candidate_arc in bucket.iter() {
+      +        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache) {
+      +            // Found a match. Merge live_tokens and return the canonical version.
+      +            let node_live_tokens = { node_arc.read().unwrap().value.live_tokens.clone() };
+      +            if !node_live_tokens.is_empty() {
+      +                let mut candidate_guard = candidate_arc.write().unwrap();
+      +                candidate_guard.value.live_tokens |= node_live_tokens;
+      +            }
+      +            visited.insert(node_ptr, candidate_arc.clone());
+      +            return candidate_arc.clone();
+      +        }
+      +    }
+      +
+      +    // No match found. This node becomes a new canonical representative.
+      +    bucket.push(node_arc.clone());
+      +    visited.insert(node_ptr, node_arc.clone());
+      +    node_arc
+       }
+       
+       fn clone_trie2_graph(
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Implement Trie 2 dead-path pruning
+      and shape-based node merging"'
     metadata:
 ...

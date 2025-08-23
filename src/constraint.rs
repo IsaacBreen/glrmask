@@ -34,6 +34,7 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use kdam::{tqdm, BarBuilder};
+use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::datastructures::gss::Acc;
@@ -627,6 +628,10 @@ impl GrammarConstraint {
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
+        // Recompute depths again after promotions, as they can change the graph structure.
+        let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
+        Trie::recompute_all_max_depths(&roots2_final);
+
         precomputed2
     }
 
@@ -743,26 +748,193 @@ impl GrammarConstraint {
 fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
-    // Collect all unique nodes into a Vec to hold strong references to them.
-    // This prevents any node from being dropped while we are modifying the graph structure,
-    // which could otherwise cause a `Weak::upgrade` to fail unexpectedly.
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let _all_nodes = Trie::all_nodes(&roots_vec);
+    fn prune_and_get_live_tokens_rec(
+        node_arc: &Arc<RwLock<PrecomputeNode2>>,
+        live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+    ) -> LLMTokenBV {
+        let node_ptr = Arc::as_ptr(node_arc);
+        if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
+            return cached_bv.clone();
+        }
+        live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
 
-    // We no longer remove roots from the map. A "dead" root (with an empty live_tokens set)
-    // is kept. This prevents panics in get_mask2, which expects a complete map from
-    // active tokenizer states to precomputed trie roots. The trie being empty of live
-    // tokens is sufficient to signal that no paths are valid from that state.
-    // The original implementation removed roots if their `live_tokens` set was empty.
+        // Snapshot children to avoid holding lock during recursion
+        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
+            let node_guard = node_arc.read().unwrap();
+            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+        };
 
-    crate::debug!(2, "Finished pruning dead paths from trie 2. No roots were removed.");
+        for child_wrapper in children_to_check {
+            if let Some(child_arc) = child_wrapper.upgrade() {
+                prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
+            }
+        }
+
+        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
+        {
+            let mut node_guard = node_arc.write().unwrap();
+            if node_guard.value.end {
+                // An end node is a source of liveness. The tokens that can end here are considered live.
+                live_tokens_for_this_node |= &node_guard.value.live_tokens;
+            }
+
+            node_guard.children_mut().retain(|_edge_key, dest_map| {
+                dest_map.retain(|child_wrapper, edge_value_bv| {
+                    let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
+                    let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
+                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+
+                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                    if live_tokens_for_this_edge.is_empty() {
+                        false
+                    } else {
+                        *edge_value_bv = live_tokens_for_this_edge;
+                        true
+                    }
+                });
+                !dest_map.is_empty()
+            });
+
+            for dest_map in node_guard.children().values() {
+                for edge_bv in dest_map.values() {
+                    live_tokens_for_this_node |= edge_bv;
+                }
+            }
+            node_guard.value.live_tokens = live_tokens_for_this_node.clone();
+        }
+
+        live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
+        live_tokens_for_this_node
+    }
+
+    let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+    for root_arc in roots.values() {
+        prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
+    }
+
+    crate::debug!(2, "Finished pruning dead paths from trie 2.");
+}
+
+fn trie2_shape_hash(
+    arc: &Arc<RwLock<PrecomputeNode2>>,
+    memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+) -> u64 {
+    let ptr = Arc::as_ptr(arc);
+    if let Some(&h) = memo.get(&ptr) {
+        return h;
+    }
+
+    let node_guard = arc.read().unwrap();
+    let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+
+    // Hash shape-defining value fields
+    node_guard.value.end.hash(&mut hasher);
+
+    // Hash children structure
+    let mut edge_hashes = Vec::new();
+    for (ek, dest_map) in node_guard.children() {
+        for (np, ev) in dest_map {
+            if let Some(child) = np.upgrade() {
+                let child_h = trie2_shape_hash(&child, memo);
+                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                ek.hash(&mut pair_hasher);
+                ev.hash(&mut pair_hasher);
+                np.is_strong().hash(&mut pair_hasher);
+                child_h.hash(&mut pair_hasher);
+                edge_hashes.push(pair_hasher.finish());
+            }
+        }
+    }
+
+    edge_hashes.sort_unstable();
+    for h in edge_hashes {
+        h.hash(&mut hasher);
+    }
+
+    let final_hash = hasher.finish();
+    memo.insert(ptr, final_hash);
+    final_hash
+}
+
+fn trie2_shape_eq(
+    a: &Arc<RwLock<PrecomputeNode2>>,
+    b: &Arc<RwLock<PrecomputeNode2>>,
+    cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+) -> bool {
+    if Arc::ptr_eq(a, b) {
+        return true;
+    }
+
+    let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
+        (Arc::as_ptr(a), Arc::as_ptr(b))
+    } else {
+        (Arc::as_ptr(b), Arc::as_ptr(a))
+    };
+
+    if let Some(&res) = cache.get(&(p1, p2)) {
+        return res;
+    }
+
+    cache.insert((p1, p2), true); // Optimistic insertion for cycles
+
+    let guard_a = a.read().unwrap();
+    let guard_b = b.read().unwrap();
+
+    // Compare shape-defining value fields
+    if guard_a.value.end != guard_b.value.end {
+        cache.insert((p1, p2), false);
+        return false;
+    }
+
+    // Compare children
+    if guard_a.children().len() != guard_b.children().len() {
+        cache.insert((p1, p2), false);
+        return false;
+    }
+
+    for (ek, dest_map_a) in guard_a.children() {
+        if let Some(dest_map_b) = guard_b.children().get(ek) {
+            if dest_map_a.len() != dest_map_b.len() {
+                cache.insert((p1, p2), false);
+                return false;
+            }
+
+            let mut pairs_b: Vec<_> = dest_map_b.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (np.is_strong(), ev, arc))).collect();
+
+            for (np_a, ev_a) in dest_map_a.iter() {
+                if let Some(arc_a) = np_a.upgrade() {
+                    let is_strong_a = np_a.is_strong();
+                    let mut found_match = false;
+                    for i in 0..pairs_b.len() {
+                        let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
+                        if is_strong_a == is_strong_b && ev_a == ev_b {
+                            if trie2_shape_eq(&arc_a, arc_b, cache) {
+                                pairs_b.remove(i);
+                                found_match = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found_match {
+                        cache.insert((p1, p2), false);
+                        return false;
+                    }
+                }
+            }
+        } else {
+            cache.insert((p1, p2), false);
+            return false;
+        }
+    }
+
+    true
 }
 
 fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
-    // Collect all unique nodes to keep them alive during the merging process.
-    // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(&roots_vec);
 
@@ -776,23 +948,39 @@ fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Precomput
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+    let mut canonical_nodes: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
     let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+    let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+    let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
 
     let mut new_roots = BTreeMap::new();
     for (sid, root_arc) in roots.iter() {
-        let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited, &pb);
+        let canonical_root = deduplicate_recursive_trie2(
+            root_arc.clone(),
+            &mut canonical_nodes,
+            &mut visited,
+            &mut shape_hash_memo,
+            &mut shape_eq_cache,
+            &pb,
+        );
         new_roots.insert(*sid, canonical_root);
     }
     *roots = new_roots;
+
+    // Recompute depths after structural changes from merging
+    let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(&final_roots_vec);
+
     pb.finish_with_message("Finished merging Trie 2 nodes");
-    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
+    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.values().map(|v| v.len()).sum::<usize>());
 }
 
 fn deduplicate_recursive_trie2(
     node_arc: Arc<RwLock<PrecomputeNode2>>,
-    canonical_nodes: &mut HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>>,
+    canonical_nodes: &mut HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>>,
     visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+    shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+    shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
     pb: &ProgressBar,
 ) -> Arc<RwLock<PrecomputeNode2>> {
     let node_ptr = Arc::as_ptr(&node_arc);
@@ -802,10 +990,7 @@ fn deduplicate_recursive_trie2(
 
     pb.inc(1);
 
-    // Pre-emptively insert the current node's arc. This breaks cycles.
-    // If we find a canonical version later, we'll update the entry.
-    visited.insert(node_ptr, node_arc.clone());
-
+    // Post-order: canonicalize children first
     let mut new_children_map = BTreeMap::new();
     let mut children_changed = false;
 
@@ -815,7 +1000,14 @@ fn deduplicate_recursive_trie2(
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
                 if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited, pb);
+                    let canonical_child_arc = deduplicate_recursive_trie2(
+                        child_arc.clone(),
+                        canonical_nodes,
+                        visited,
+                        shape_hash_memo,
+                        shape_eq_cache,
+                        pb,
+                    );
                     if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
                         children_changed = true;
                     }
@@ -834,25 +1026,32 @@ fn deduplicate_recursive_trie2(
     }
 
     if children_changed {
-        // println!("Updating children for node {:p}", node_ptr);
-        // println!(" Existing children map: {:?}", node_arc.read().unwrap().children());
-        // println!(" New children map: {:?}", new_children_map);
         let mut node_guard = node_arc.write().unwrap();
         *node_guard.children_mut() = new_children_map;
-        // println!("Recomputing max_depth for node {:p}", node_ptr);
-        node_guard.recompute_max_depth();
-        // println!("Updated children for node {:p}", node_ptr);
+        // max_depth will be recomputed globally at the end
     }
 
-    let canonical_arc = {
-        let node_guard = node_arc.read().unwrap();
-        let node_content = (*node_guard).clone();
-        canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-    };
+    // Now find a canonical representative for the current node
+    let fp = trie2_shape_hash(&node_arc, shape_hash_memo);
+    let bucket = canonical_nodes.entry(fp).or_default();
 
-    // Update the visited map with the final canonical arc.
-    visited.insert(node_ptr, canonical_arc.clone());
-    canonical_arc
+    for candidate_arc in bucket.iter() {
+        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache) {
+            // Found a match. Merge live_tokens and return the canonical version.
+            let node_live_tokens = { node_arc.read().unwrap().value.live_tokens.clone() };
+            if !node_live_tokens.is_empty() {
+                let mut candidate_guard = candidate_arc.write().unwrap();
+                candidate_guard.value.live_tokens |= node_live_tokens;
+            }
+            visited.insert(node_ptr, candidate_arc.clone());
+            return candidate_arc.clone();
+        }
+    }
+
+    // No match found. This node becomes a new canonical representative.
+    bucket.push(node_arc.clone());
+    visited.insert(node_ptr, node_arc.clone());
+    node_arc
 }
 
 fn clone_trie2_graph(
