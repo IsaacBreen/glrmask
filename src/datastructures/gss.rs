@@ -861,18 +861,18 @@ fn prune_and_transform_recursive(
             // Case 1: Do not recurse; only possibly adjust local acc.
             if !continue_recursion {
                 let acc_changed = *node_arc.acc != new_local_acc;
-                if acc_changed {
+                return if acc_changed {
                     // Mark for push down so children get narrowed later.
                     new_local_acc.needs_push_down = true;
                     let transformed_node =
                         GSSNode::new_with_map(Arc::new(new_local_acc), node_arc.predecessors.clone());
                     let result_arc = Arc::new(transformed_node);
                     memo.insert(node_ptr, Some(result_arc.clone()));
-                    return Some(result_arc);
+                    Some(result_arc)
                 } else {
                     // No changes at all.
                     memo.insert(node_ptr, Some(node_arc.clone()));
-                    return Some(node_arc.clone());
+                    Some(node_arc.clone())
                 }
             }
 
