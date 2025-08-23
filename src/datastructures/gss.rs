@@ -969,7 +969,7 @@ fn prune_and_transform_recursive(
                         }
 
                         // Root acc may change; children structure may also change, but root has no predecessors.
-                        let transformed_node = if acc_changed { GSSNode::new(new_local_acc) } else { (*node_arc).clone() };
+                        let transformed_node = if acc_changed { GSSNode::new(new_local_acc) } else { (**node_arc).clone() };
                         let result_arc = Arc::new(transformed_node);
                         memo.insert(node_ptr, Some(result_arc.clone()));
                         Some(result_arc)
@@ -1085,15 +1085,16 @@ pub(crate) fn prune_disallowed_terminals(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         // If any of the matched terminals is disallowed by the union, prune.
+        let node_acc = node.acc();
         for (state_id, matched_bv) in matched_terminals {
-            let allowed_terminals_union = node.acc().terminals_union.get_l2_bitset(state_id.0).unwrap();
+            let allowed_terminals_union = node_acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
             if !matched_bv.is_subset(allowed_terminals_union) {
                 return None;
             }
         }
         // If any matched terminal is missing from the intersection, recurse (some sub-paths may reject).
         for (state_id, matched_bv) in matched_terminals {
-            let allowed_terminals_intersection = node.acc().terminals_intersection.get_l2_bitset(state_id.0).unwrap();
+            let allowed_terminals_intersection = node_acc.terminals_intersection.get_l2_bitset(state_id.0).unwrap();
             if !matched_bv.is_subset(allowed_terminals_intersection) {
                 return Some(((*node.acc()).clone(), true));
             }
