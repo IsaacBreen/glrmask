@@ -2594,7 +2594,7 @@ impl<'a> GrammarConstraintState<'a> {
                     return Vec::new();
                 }
                 crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
-                glr_s.log_gss("Before popping", TerminalID(0), false, false);
+                // glr_s.log_gss("Before popping", TerminalID(0), false, false);
                 let mut out_gsss = Vec::new();
                 let popped = glr_s.active_state.stack.popn(*k);
                 for popper_item in popped.iter() {
@@ -2623,7 +2623,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
                     crate::debug!(4, "Allowed LLM tokens in out_gss_filtered: {:?}", out_glr_s.active_state.stack.allowed_llm_tokens());
-                    out_glr_s.log_gss("After filtering for edge LLM tokens", TerminalID(0), false, false);
+                    // out_glr_s.log_gss("After filtering for edge LLM tokens", TerminalID(0), false, false);
                     if out_glr_s.is_ok() {
                         out.push((dst_node_wrapper.clone(), out_glr_s));
                     }
@@ -2637,7 +2637,7 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
-                glr_s.log_gss("At process_fn", TerminalID(0), false, false);
+                // glr_s.log_gss("At process_fn", TerminalID(0), false, false);
                 let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !glr_active_tokens.is_empty();
                 if precomputed_node_data.value.end {
