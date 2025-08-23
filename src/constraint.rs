@@ -2608,6 +2608,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
                     let mut out_gss_filtered = out_gss.clone();
+                    crate::debug!(5, "Filtering GSS for edge LLM tokens: {:?}", edge_bv);
                     allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
