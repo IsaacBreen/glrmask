@@ -2594,6 +2594,7 @@ impl<'a> GrammarConstraintState<'a> {
                     return Vec::new();
                 }
                 crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
+                glr_s.log_gss("Before popping", TerminalID(0), false, false);
                 let mut out_gsss = Vec::new();
                 let popped = glr_s.active_state.stack.popn(*k);
                 for popper_item in popped.iter() {
