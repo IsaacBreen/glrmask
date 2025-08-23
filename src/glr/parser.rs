@@ -771,8 +771,8 @@ impl Ord for WorkMapKey {
         // Sorting by depth descending, then by state_id ascending.
         let WorkMapKey(self_depth, self_state_id) = self;
         let WorkMapKey(other_depth, other_state_id) = other;
-        // other_depth.cmp(&self_depth).then_with(|| self_state_id.cmp(&other_state_id))
-        self_depth.cmp(&other_depth).then_with(|| self_state_id.cmp(&other_state_id))
+        other_depth.cmp(&self_depth).then_with(|| self_state_id.cmp(&other_state_id))
+        // self_depth.cmp(&other_depth).then_with(|| self_state_id.cmp(&other_state_id))
         // self_state_id.cmp(&other_state_id).then_with(|| other_depth.cmp(&self_depth))
         // self_state_id.cmp(&other_state_id).then_with(|| self_depth.cmp(&other_depth))
     }
