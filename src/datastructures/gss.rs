@@ -1971,9 +1971,9 @@ mod tests {
     fn test_gss_new_node() {
         let acc = mock_acc(1);
         let node = GSSNode::new(acc.clone());
-        assert_eq!(node.acc.llm_tokens_union, acc.llm_tokens_union);
-        assert!(node.predecessors.is_empty());
-        assert_eq!(node.max_depth, 0);
+        assert_eq!(node.acc().llm_tokens_union, acc.llm_tokens_union);
+        assert!(node.predecessors().is_empty());
+        assert_eq!(node.max_depth(), 0);
     }
 
     #[test]
@@ -1981,10 +1981,10 @@ mod tests {
         let root = Arc::new(GSSNode::new(mock_acc(1))); // Allows all but 1
         let pushed = root.push(mock_edge(10));
 
-        assert_eq!(pushed.max_depth, 1);
+        assert_eq!(pushed.max_depth(), 1);
 
         // The new logic for `push` is to inherit the predecessor's acc, as the local acc is fresh.
-        assert_eq!(*pushed.acc, *root.acc);
+        assert_eq!(*pushed.acc(), *root.acc());
     }
 
     #[test]
@@ -2019,7 +2019,7 @@ mod tests {
         let mut merged = (*n1).clone();
         merged.merge_with_depth(1, &n2);
 
-        assert_eq!(merged.acc.llm_tokens_union, HybridBitset::max_ones());
+        assert_eq!(merged.acc().llm_tokens_union, HybridBitset::max_ones());
 
         assert_eq!(merged.num_predecessors(), 1);
     }
@@ -2113,8 +2113,8 @@ mod tests {
         let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3)));
         let c = Arc::new(c_tmp2.push(mock_edge(4)));
 
-        assert_eq!(b.max_depth, 1);
-        assert_eq!(c.max_depth, 3);
+        assert_eq!(b.max_depth(), 1);
+        assert_eq!(c.max_depth(), 3);
 
         let mut preds_map = NodeMap::new();
         preds_map.entry(mock_edge(100)).or_default().insert(b.dest_key(), vec![b.clone()]);
@@ -2136,7 +2136,7 @@ mod tests {
             .unwrap()[0]
             .clone();
 
-        assert_eq!(fused_pred_arc.acc.llm_tokens_union, HybridBitset::max_ones());
+        assert_eq!(fused_pred_arc.acc().llm_tokens_union, HybridBitset::max_ones());
         assert_eq!(fused_pred_arc.num_predecessors(), 2);
     }
 
@@ -2283,8 +2283,8 @@ mod tests {
         let intermediate1 = Arc::new(leaf1.push(mock_edge(10)));
         let intermediate2 = Arc::new(leaf2.push(mock_edge(10)));
         assert_ne!(*intermediate1, *intermediate2, "Intermediates should be structurally different");
-        assert_eq!(intermediate1.max_depth, 1);
-        assert_eq!(intermediate2.max_depth, 1);
+        assert_eq!(intermediate1.max_depth(), 1);
+        assert_eq!(intermediate2.max_depth(), 1);
 
         // 3. Manually construct a root node that has both intermediates as predecessors
         // under the same edge value and at the same depth. This structure is key to
@@ -2303,7 +2303,7 @@ mod tests {
         let mut memo = HashMap::new();
         let new_root_opt = prune_and_transform_recursive(
             &root,
-            &|node| Some(((*node.acc).clone(), true)), // No-op: keep node, recurse
+            &|node| Some((node.acc().as_ref().clone(), true)), // No-op: keep node, recurse
             &mut memo,
         );
 
@@ -2345,7 +2345,7 @@ mod tests {
         gss1_preds.entry(mock_edge(2)).or_default().insert(l3.dest_key(), vec![l3.clone()]);
 
         let mut gss1 = GSSNode::new_with_map(Arc::new(mock_acc(0)), gss1_preds); // mock_acc(0) restricts token 0
-        Arc::make_mut(&mut gss1.acc).needs_push_down = true; // Simulate state that triggers narrowing
+        // Arc::make_mut(&mut gss1.acc()).needs_push_down = true; // Simulate state that triggers narrowing
 
         // --- GSS 2 Setup ---
         let mut acc_l4 = empty_acc();
@@ -2366,7 +2366,7 @@ mod tests {
 
         while let Some(node) = q.pop_front() {
             if !visited.insert(Arc::as_ptr(&node)) { continue; }
-            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc.trie2_nodes.clone()); }
+            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
             for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
         }
 
@@ -2423,7 +2423,7 @@ mod tests {
         // they have different depths and structures. The incorrect behavior collapses them into one.
         assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
 
-        let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+        let preds_for_edge1 = merged_gss.predecessors().get(&mock_edge(1)).expect("Edge 1 should exist");
         assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
     }
 
@@ -2469,7 +2469,7 @@ mod tests {
         // they have different depths and structures. The incorrect behavior collapses them into one.
         assert_eq!(merged_gss.num_predecessors(), 2, "Merged GSS should have two predecessors");
 
-        let preds_for_edge1 = merged_gss.predecessors.get(&mock_edge(1)).expect("Edge 1 should exist");
+        let preds_for_edge1 = merged_gss.predecessors().get(&mock_edge(1)).expect("Edge 1 should exist");
         assert_eq!(preds_for_edge1.len(), 2, "Edge 1 should have predecessors at two different depths");
     }
 
@@ -2527,7 +2527,7 @@ mod tests {
 
         assert_eq!(leaves.len(), 1, "Merging identical towers should result in a single unified leaf node");
         let leaf = &leaves[0];
-        let trie2_nodes = &leaf.acc.trie2_nodes;
+        let trie2_nodes = &leaf.acc().trie2_nodes;
         assert_eq!(trie2_nodes.len(), 2, "Unified leaf should contain the union of all trie2 nodes from merged towers");
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t1)), "Unified leaf missing trie2 node 1");
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
