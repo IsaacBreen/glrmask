@@ -587,7 +587,7 @@ impl GrammarConstraint {
                     }
                 }
 
-                if false {
+                if true {
                     let mut allowed_terminals = TerminalBV::zeros();
                     for gtid_opt in precomputed_node_data.children().keys() {
                         if let Some(gtid) = gtid_opt {
@@ -2594,7 +2594,7 @@ impl<'a> GrammarConstraintState<'a> {
                 //     return Vec::new();
                 // }
                 crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
-                // glr_s.log_gss("Before popping", TerminalID(0), false, false);
+                glr_s.log_gss("Before popping", TerminalID(0), false, false);
                 let mut out_gsss = Vec::new();
                 let popped = glr_s.active_state.stack.popn(*k);
                 for popper_item in popped.iter() {
