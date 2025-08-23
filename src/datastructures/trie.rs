@@ -1167,30 +1167,25 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     }
 
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-    /// (special_map implementation remains unchanged)
+    ///
+    /// This version correctly traverses both strong and weak edges. It also handles
+    /// cycles by allowing nodes to be re-processed, continuing propagation as long
+    /// as the `process` closure returns `true` for a given node.
     #[time_it]
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
-        //
-        //  The key observation is:
-        //      parent.max_depth  <  child.max_depth
-        //  for every edge (parent → child).
-        //  Therefore processing nodes strictly in ascending `max_depth`
-        //  guarantees every parent is handled before each of its children.
-        //
-        //  • `values`  – accumulated V for every discovered node
-        //  • `done`    – nodes that have already been processed
-        //  • `todo`    – min-heap keyed by max_depth
         // ------------------------------------------------------------------
-        let mut values   : HashMap<*const RwLock<Self>, V> = HashMap::new();
-        let mut done     : HashSet <*const RwLock<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, OrderedHashSet<NodePtr<RwLock<Self>>>> = BTreeMap::new();
+        let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
+        // This set now tracks nodes where `process` returned `false`, stopping propagation.
+        let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
+        // Using ArcPtrWrapper for consistency with special_map_grouped
+        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
@@ -1209,43 +1204,44 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
             let depth = node_arc.read().expect("poison").max_depth;
-            todo.entry(depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(node_arc.clone())));
+            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            // #[allow(clippy::iter_over_hash_type)]
             for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = node_ptr_wrapper.as_ptr_usize() as *const RwLock<Self>;
-                if done.contains(&ptr) { continue; }               // already processed
+                let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+                // A node that has been stopped should not be processed again.
+                if stopped_nodes.contains(&ptr) { continue; }
 
-                // Pull the merged value that all parents contributed
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
-                    None => continue,                            // can happen if every parent’s `step` returned None
+                    None => continue,
                 };
-                let node_arc = node_ptr_wrapper.upgrade().expect("Node in todo list must be valid");
+                let node_arc = node_ptr_wrapper.as_arc();
 
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
                     let guard = node_arc.read().expect("poison");
                     process(&guard, &mut agg_v)
                 };
-                done.insert(ptr);
 
-                if !proceed { continue; }                           // user stopped traversal at this node
+                if !proceed {
+                    // User stopped traversal at this node. Mark it and do not propagate.
+                    stopped_nodes.insert(ptr);
+                    continue;
+                }
 
                 // ---------- propagate to children -------------
-                // We read children once, outside any long-lived write locks
-                let edges: Vec<(EK, EV, NodePtr<RwLock<Self>>)> = {
+                // This block is now corrected to include BOTH strong and weak edges.
+                let edges: Vec<(EK, EV, Arc<RwLock<Self>>)> = {
                     let guard = node_arc.read().expect("poison");
                     guard.children
                         .iter()
                         .flat_map(|(ek, dst_map)| {
                             dst_map.iter().filter_map(move |(node_ptr, ev)| {
-                                if node_ptr.is_strong() {
-                                    Some((ek.clone(), ev.clone(), node_ptr.clone()))
-                                } else { None }
+                                // Use upgrade() to follow both strong and valid weak pointers.
+                                node_ptr.upgrade().map(|child_arc| (ek.clone(), ev.clone(), child_arc))
                             })
                         })
                         .collect()
@@ -1253,13 +1249,17 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                 for (ek, ev, child_arc) in edges {
                     let _ = pb.update(1);
-                    let child_ptr = NodePtr::as_ptr(&child_arc);
+                    let child_ptr = Arc::as_ptr(&child_arc);
+
+                    // Optimization: Don't bother queueing a child if we know its path is stopped.
+                    if stopped_nodes.contains(&child_ptr) {
+                        continue;
+                    }
 
                     // user ‘step’ callback
                     let maybe_v = {
-                        let child_arc = child_arc.upgrade().unwrap();
                         let child_guard = child_arc.read().expect("poison");
-                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
+                        step(&agg_v, &ek, &ev, &child_guard)
                     };
                     if let Some(new_v) = maybe_v {
                         values
@@ -1268,9 +1268,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                             .or_insert(new_v);
 
                         // Queue child by its declared depth
-                        let child_arc = child_arc.upgrade().unwrap();
                         let child_depth = child_arc.read().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(NodePtr::Strong(ArcPtrWrapper::new(child_arc)));
+                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
                     }
                 }
             }
