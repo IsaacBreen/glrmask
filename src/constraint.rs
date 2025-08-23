@@ -2641,6 +2641,7 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
+                crate::debug!(4, "Processing node {:p}", precomputed_node_data);
                 // glr_s.log_gss("At process_fn", TerminalID(0), false, false);
                 let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 // let keep_going = !glr_active_tokens.is_empty();
