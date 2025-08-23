@@ -121,7 +121,7 @@ impl Acc {
     }
 
     /// Creates an accumulator with specific local constraints for a root node.
-    #[allow(dead_code)] fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
+    #[allow(dead_code)] pub(crate) fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
         Self {
             llm_tokens_union: llm_tokens.clone(),
             llm_tokens_intersection: llm_tokens,
@@ -163,7 +163,7 @@ impl Acc {
 
     // --- Accessors for final computed sets ---
     pub(crate) fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens_union.clone() }
-    #[allow(dead_code)] fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals_intersection.clone() }
+    #[allow(dead_code)] pub(crate) fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals_intersection.clone() }
 }
 
 
@@ -287,13 +287,13 @@ impl GSSPopper {
 
 impl<'a> GSSPopperItem<'a> {
     /// Returns the combined `Acc` of the path and the destination node.
-    #[allow(dead_code)] fn resolved_acc(&self) -> Acc {
+    #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
         Acc::narrow(&self.path_acc, &self.node.acc)
     }
 
     /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
     /// resolved against the path's `Acc`.
-    #[allow(dead_code)] fn resolved_node(&self) -> Arc<GSSNode> {
+    #[allow(dead_code)] pub(crate) fn resolved_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
         if *self.node.acc == resolved_acc {
             return self.node.clone();
@@ -302,7 +302,7 @@ impl<'a> GSSPopperItem<'a> {
     }
 
     /// Pushes a new state onto the resolved node from this popper item.
-    #[allow(dead_code)] fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    #[allow(dead_code)] pub(crate) fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.resolved_node().as_ref().push(edge_value)
     }
 
@@ -326,13 +326,13 @@ impl<'a> GSSPopperItemPeek<'a> {
     pub(crate) fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
     /// Returns the combined `Acc` of the path and the predecessor node.
-    #[allow(dead_code)] fn resolved_acc(&self) -> Acc {
+    #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
         Acc::narrow(&Acc::narrow(self.path_acc, &self.parent_arc.acc), &self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the path's `Acc`.
-    #[allow(dead_code)] fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+    #[allow(dead_code)] pub(crate) fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
         if *self.predecessor_node.acc == resolved_acc {
             return self.predecessor_node.clone();
@@ -341,7 +341,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     /// Pushes a new state onto the resolved predecessor.
-    #[allow(dead_code)] fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    #[allow(dead_code)] pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let mut resolved_acc = self.resolved_acc();
         resolved_acc.trie2_nodes.clear();
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
@@ -350,7 +350,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     pub(crate) fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.isolated_parent().as_ref().push(edge_value)
     }
-    #[allow(dead_code)] fn popn(&self, len: usize) -> GSSPopper {
+    #[allow(dead_code)] pub(crate) fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = self.isolated_parent();
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
         popper.popn(len);
@@ -622,7 +622,7 @@ impl GSSNode {
 
     /// Merges another `GSSNode` into this one. This is a union of possibilities.
     // #[time_it]
-    #[allow(dead_code)] fn merge(&mut self, other: &Self) {
+    #[allow(dead_code)] pub(crate) fn merge(&mut self, other: &Self) {
         self._merge(other, 1);
     }
 
@@ -718,12 +718,12 @@ impl GSSNode {
         *node = Arc::new(new_node);
     }
 
-    #[allow(dead_code)] fn merged(mut self, other: Self, merge_depth: usize) -> Self {
+    #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
         self.merge_with_depth(merge_depth, &other);
         self
     }
 
-    #[allow(dead_code)] fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    #[allow(dead_code)] pub(crate) fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let mut acc = (*self.acc).clone();
         acc.trie2_nodes.clear();
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
@@ -747,10 +747,10 @@ impl GSSNode {
 impl<'a> GSSPeek<'a> {
     pub(crate) fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
-    #[allow(dead_code)] fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+    #[allow(dead_code)] pub(crate) fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
     /// Returns the combined `Acc` of the parent and the predecessor.
-    #[allow(dead_code)] fn resolved_acc(&self) -> Acc {
+    #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
         Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)
     }
 
@@ -761,7 +761,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the parent's `Acc`.
-    #[allow(dead_code)] fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+    #[allow(dead_code)] pub(crate) fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
         if *self.predecessor_node.acc == resolved_acc {
             return self.predecessor_node.clone();
@@ -770,7 +770,7 @@ impl<'a> GSSPeek<'a> {
     }
 
     /// Pushes a new state onto the resolved predecessor.
-    #[allow(dead_code)] fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    #[allow(dead_code)] pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let mut resolved_acc = self.resolved_acc();
         resolved_acc.trie2_nodes.clear();
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
@@ -1321,7 +1321,7 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
 }
 
 // --- Analysis and Debugging ---
-#[allow(dead_code)] #[derive(Debug, Clone, Eq, Hash)]
+#[allow(dead_code)] pub(crate) #[derive(Debug, Clone, Eq, Hash)]
 struct RootItem<'a> {
     pub(crate) node: &'a GSSNode,
     path_acc: Arc<Acc>,
@@ -1347,7 +1347,7 @@ impl<'a> Ord for RootItem<'a> {
 }
 
 impl<'a> RootItem<'a> {
-    #[allow(dead_code)] fn resolved_acc(&self) -> Arc<Acc> {
+    #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Arc<Acc> {
         Arc::new(Acc::narrow(&self.path_acc, &self.node.acc))
     }
 }
@@ -1414,7 +1414,7 @@ impl GSSNode {
         *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
     }
 
-    #[allow(dead_code)] fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+    #[allow(dead_code)] pub(crate) fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
         get_roots(std::iter::once(self))
     }
 }
