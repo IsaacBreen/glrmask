@@ -30,6 +30,13 @@ impl<T> NodePtr<T> {
         }
     }
 
+    pub fn is_upgradable(&self) -> bool {
+        match self {
+            NodePtr::Strong(_) => true,
+            NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().is_some(),
+        }
+    }
+
     pub fn as_ptr(&self) -> *const T {
         match self {
             NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()),
