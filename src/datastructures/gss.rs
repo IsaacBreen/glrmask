@@ -2623,4 +2623,35 @@ mod tests {
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t1)), "Unified leaf missing trie2 node 1");
         assert!(trie2_nodes.contains(&ArcPtrWrapper::new(t2)), "Unified leaf missing trie2 node 2");
     }
+
+    #[test]
+    fn test_allow_only_llm_tokens_and_prune_arc_simple_tower() {
+        // This test is based on a real-world bug where filtering did not seem to apply.
+        // Structure: Root -> (edge 2) -> Node 1 -> (edge 0) -> Node 2 (leaf)
+
+        // 1. Build the GSS tower.
+        let leaf = Arc::new(GSSNode::new(empty_acc())); // Node 2
+        let intermediate = Arc::new(leaf.push(mock_edge(0))); // Node 1
+        let mut root_arc = Arc::new(intermediate.push(mock_edge(2))); // Root 0
+
+        // 2. Check initial state.
+        assert_eq!(
+            root_arc.allowed_llm_tokens(),
+            HybridBitset::max_ones(),
+            "Initial allowed tokens should be everything"
+        );
+
+        // 3. Filter to allow only token 0.
+        let mut allowed_tokens = LLMTokenBV::zeros();
+        allowed_tokens.insert(0);
+        let mut memo = HashMap::new();
+        allow_only_llm_tokens_and_prune_arc(&mut root_arc, &allowed_tokens, &mut memo);
+
+        // 4. Assert that the allowed tokens for the whole GSS have been updated.
+        assert_eq!(
+            root_arc.allowed_llm_tokens(),
+            allowed_tokens,
+            "Allowed tokens should be restricted to only token 0 after filtering"
+        );
+    }
 }
