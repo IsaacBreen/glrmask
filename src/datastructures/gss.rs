@@ -23,13 +23,13 @@ use std::ops::{BitAnd, BitOr};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use profiler_macro::{time_it, timeit};
 
-pub type LLMTokenBV = HybridBitset;
-pub type TerminalBV = HybridBitset;
+pub(crate) type LLMTokenBV = HybridBitset;
+pub(crate) type TerminalBV = HybridBitset;
 
 // --- Type Aliases ---
 
-pub type MaxDepth = usize;
-pub type DestKey = MaxDepth;
+pub(crate) type MaxDepth = usize;
+pub(crate) type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
 type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A cache for structurally unique nodes, mapping a predecessor structure to a canonical node.
@@ -37,24 +37,24 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-pub type TerminalInfo = HybridL2Bitset;
+pub(crate) type TerminalInfo = HybridL2Bitset;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNodeContents {
-    pub end: bool,
-    pub live_tokens: LLMTokenBV,
+pub(crate) struct PrecomputedNodeContents {
+    pub(crate) end: bool,
+    pub(crate) live_tokens: LLMTokenBV,
 }
 
 impl PrecomputedNodeContents {
-    pub fn root(internal_max_llm_token_id: usize) -> Self {
+    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
         Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
     }
 
-    pub fn internal() -> Self {
+    pub(crate) fn internal() -> Self {
         Self { end: false, live_tokens: LLMTokenBV::zeros() }
     }
 
-    pub fn leaf() -> Self {
+    pub(crate) fn leaf() -> Self {
         Self { end: true, live_tokens: LLMTokenBV::zeros() }
     }
 }
@@ -84,25 +84,25 @@ impl JSONConvertible for PrecomputedNodeContents {
     }
 }
 
-pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+pub(crate) type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 
 // --- Accumulator (Acc) ---
 
 /// Represents the full set of allowed tokens and terminals for a GSS node.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Acc {
-    pub llm_tokens_union: HybridBitset,
-    pub llm_tokens_intersection: HybridBitset,
-    pub terminals_union: HybridL2Bitset,
-    pub terminals_intersection: HybridL2Bitset,
-    pub needs_push_down: bool,
-    pub trie2_nodes: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
+pub(crate) struct Acc {
+    pub(crate) llm_tokens_union: HybridBitset,
+    pub(crate) llm_tokens_intersection: HybridBitset,
+    pub(crate) terminals_union: HybridL2Bitset,
+    pub(crate) terminals_intersection: HybridL2Bitset,
+    pub(crate) needs_push_down: bool,
+    pub(crate) trie2_nodes: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
 }
 
 impl Acc {
     /// Creates a fresh, unconstrained accumulator (all tokens/terminals allowed).
-    pub fn new_fresh() -> Self {
+    pub(crate) fn new_fresh() -> Self {
         Self {
             llm_tokens_union: HybridBitset::max_ones(),
             llm_tokens_intersection: HybridBitset::max_ones(),
@@ -116,7 +116,7 @@ impl Acc {
     /// Returns true if this Acc acts as a neutral element for merging.
     /// That is, it contributes no constraints and carries no trie2 nodes.
     /// This is used to detect safe early-return cases in GSS merges.
-    pub fn is_merge_neutral(&self) -> bool {
+    pub(crate) fn is_merge_neutral(&self) -> bool {
         self.llm_tokens_union == HybridBitset::max_ones()
             && self.llm_tokens_intersection == HybridBitset::max_ones()
             && self.terminals_union == HybridL2Bitset::all()
@@ -125,7 +125,7 @@ impl Acc {
     }
 
     /// Creates an accumulator with specific local constraints for a root node.
-    pub fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
+    pub(crate) fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
         Self {
             llm_tokens_union: llm_tokens.clone(),
             llm_tokens_intersection: llm_tokens,
@@ -136,7 +136,7 @@ impl Acc {
         }
     }
 
-    pub fn narrow(from: &Self, to: &Self) -> Self {
+    pub(crate) fn narrow(from: &Self, to: &Self) -> Self {
         Acc {
             llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union, // Correct
             llm_tokens_intersection: &from.llm_tokens_intersection & &to.llm_tokens_intersection,
@@ -154,7 +154,7 @@ impl Acc {
         // }
     }
 
-    pub fn merge(lhs: &Self, rhs: &Self) -> Self {
+    pub(crate) fn merge(lhs: &Self, rhs: &Self) -> Self {
         Acc {
             llm_tokens_union: &lhs.llm_tokens_union | &rhs.llm_tokens_union,
             llm_tokens_intersection: &lhs.llm_tokens_intersection & &rhs.llm_tokens_intersection,
@@ -166,8 +166,8 @@ impl Acc {
     }
 
     // --- Accessors for final computed sets ---
-    pub fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens_union.clone() }
-    pub fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals_intersection.clone() }
+    pub(crate) fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens_union.clone() }
+    pub(crate) fn intersection_terminals(&self) -> HybridL2Bitset { self.terminals_intersection.clone() }
 }
 
 
@@ -175,7 +175,7 @@ impl Acc {
 
 /// A node in the Graph-Structured Stack (GSS).
 #[derive(Debug, Clone)]
-pub struct GSSNode {
+pub(crate) struct GSSNode {
     pub(crate) acc: Arc<Acc>,
     pub(crate) predecessors: NodeMap,
     hash_key_cache: u64,
@@ -184,7 +184,7 @@ pub struct GSSNode {
 
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
 #[derive(Clone, Copy)]
-pub struct GSSPeek<'a> {
+pub(crate) struct GSSPeek<'a> {
     parent_arc: &'a Arc<GSSNode>,
     edge_value: &'a ParseStateEdgeContent,
     predecessor_node: &'a Arc<GSSNode>,
@@ -193,7 +193,7 @@ pub struct GSSPeek<'a> {
 /// Represents the result of a `pop` operation, containing a map of resulting nodes
 /// and the accumulated constraints (`Acc`) for each path leading to them.
 #[derive(Debug, Clone, Default)]
-pub struct GSSPopper {
+pub(crate) struct GSSPopper {
     /// A map where the key is a node, and the value is the accumulated `Acc` for all paths leading to it.
     /// and the value is the accumulated `Acc` for that path.
     pub(crate) paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
@@ -206,13 +206,13 @@ pub struct GSSPopper {
 
 /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
 #[derive(Clone, Copy)]
-pub struct GSSPopperItem<'a> {
+pub(crate) struct GSSPopperItem<'a> {
     node: &'a Arc<GSSNode>,
     path_acc: &'a Arc<Acc>,
 }
 
 #[derive(Clone, Copy)]
-pub struct GSSPopperItemPeek<'a> {
+pub(crate) struct GSSPopperItemPeek<'a> {
     path_acc: &'a Arc<Acc>,
     parent_arc: &'a Arc<GSSNode>,
     edge_value: &'a ParseStateEdgeContent,
@@ -220,7 +220,7 @@ pub struct GSSPopperItemPeek<'a> {
 }
 
 impl GSSPopper {
-    pub fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
+    pub(crate) fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
         let mut popper = Self {
             paths: BTreeMap::new(),
             below_bottom: BTreeMap::new(),
@@ -236,18 +236,18 @@ impl GSSPopper {
     }
 
     /// Returns an iterator over the items in the popper.
-    pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem<'_>> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = GSSPopperItem<'_>> {
         self.paths.iter().map(|(node, acc)| GSSPopperItem {
             node,
             path_acc: acc,
         })
     }
 
-    pub fn num_predecessors(&self) -> usize {
+    pub(crate) fn num_predecessors(&self) -> usize {
         self.paths.len()
     }
 
-    pub fn popn(&mut self, n: usize) {
+    pub(crate) fn popn(&mut self, n: usize) {
         for _ in 0..n {
             // Shift existing "below bottom" entries down by 1, since we're popping one more time.
             let mut new_below: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> = BTreeMap::new();
@@ -291,13 +291,13 @@ impl GSSPopper {
 
 impl<'a> GSSPopperItem<'a> {
     /// Returns the combined `Acc` of the path and the destination node.
-    pub fn resolved_acc(&self) -> Acc {
+    pub(crate) fn resolved_acc(&self) -> Acc {
         Acc::narrow(&self.path_acc, &self.node.acc)
     }
 
     /// Returns a new `GSSNode` representing the destination node, but with its `Acc`
     /// resolved against the path's `Acc`.
-    pub fn resolved_node(&self) -> Arc<GSSNode> {
+    pub(crate) fn resolved_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
         if *self.node.acc == resolved_acc {
             return self.node.clone();
@@ -306,11 +306,11 @@ impl<'a> GSSPopperItem<'a> {
     }
 
     /// Pushes a new state onto the resolved node from this popper item.
-    pub fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub(crate) fn push(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.resolved_node().as_ref().push(edge_value)
     }
 
-    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+    pub(crate) fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
         self.node.predecessors.iter().flat_map(move |(edge_val, preds_by_depth)| {
             preds_by_depth.values().flat_map(move |pred_vec| {
                 pred_vec.iter().map(move |pred_arc| {
@@ -327,16 +327,16 @@ impl<'a> GSSPopperItem<'a> {
 }
 
 impl<'a> GSSPopperItemPeek<'a> {
-    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+    pub(crate) fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
     /// Returns the combined `Acc` of the path and the predecessor node.
-    pub fn resolved_acc(&self) -> Acc {
+    pub(crate) fn resolved_acc(&self) -> Acc {
         Acc::narrow(&Acc::narrow(self.path_acc, &self.parent_arc.acc), &self.predecessor_node.acc)
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the path's `Acc`.
-    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+    pub(crate) fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
         if *self.predecessor_node.acc == resolved_acc {
             return self.predecessor_node.clone();
@@ -345,23 +345,23 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     /// Pushes a new state onto the resolved predecessor.
-    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let mut resolved_acc = self.resolved_acc();
         resolved_acc.trie2_nodes.clear();
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub(crate) fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.isolated_parent().as_ref().push(edge_value)
     }
-    pub fn popn(&self, len: usize) -> GSSPopper {
+    pub(crate) fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = self.isolated_parent();
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
         popper.popn(len);
         popper
     }
 
-    pub fn isolated_parent(&self) -> Arc<GSSNode> {
+    pub(crate) fn isolated_parent(&self) -> Arc<GSSNode> {
         let new_acc = Acc::narrow(&Acc::narrow(self.path_acc, &self.parent_arc.acc), &self.predecessor_node.acc);
 
         if self.parent_arc.num_predecessors() == 1 && *self.parent_arc.acc == new_acc {
@@ -509,7 +509,7 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
 // Basic node creation and manipulation
 impl GSSNode {
     /// Creates a new GSS root node with the given local constraints.
-    pub fn new(acc: Acc) -> Self {
+    pub(crate) fn new(acc: Acc) -> Self {
         let predecessors = NodeMap::new();
         let arc_acc = Arc::new(acc);
         let hash_key_cache = compute_hash_key(&predecessors, &arc_acc);
@@ -552,41 +552,41 @@ impl GSSNode {
         Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
-    pub fn new_fresh() -> Self {
+    pub(crate) fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
 
-    pub fn predecessors(&self) -> &NodeMap { &self.predecessors }
+    pub(crate) fn predecessors(&self) -> &NodeMap { &self.predecessors }
 
-    pub fn num_predecessors(&self) -> usize {
+    pub(crate) fn num_predecessors(&self) -> usize {
         self.predecessors
             .values()
             .map(|preds_by_depth| preds_by_depth.values().map(|v| v.len()).sum::<usize>())
             .sum()
     }
-    pub fn max_depth(&self) -> MaxDepth { self.max_depth }
+    pub(crate) fn max_depth(&self) -> MaxDepth { self.max_depth }
     // fn dest_key(&self) -> DestKey { self as *const GSSNode as usize }
     fn dest_key(&self) -> DestKey { self.max_depth() }
 
     /// Returns the set of LLM tokens allowed by *any* path ending at this node.
-    pub fn allowed_llm_tokens(&self) -> LLMTokenBV { self.acc.llm_tokens_union.clone() }
+    pub(crate) fn allowed_llm_tokens(&self) -> LLMTokenBV { self.acc.llm_tokens_union.clone() }
 
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on *every* path to this node.
-    pub fn disallowed_terminals(&self) -> TerminalInfo {
+    pub(crate) fn disallowed_terminals(&self) -> TerminalInfo {
         self.acc.terminals_union.complement()
     }
 
-    pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
+    pub(crate) fn is_empty(&self) -> bool { self.predecessors.is_empty() }
 
     /// A path is alive if it allows at least one LLM token.
-    pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+    pub(crate) fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
 
-    pub fn is_root(&self) -> bool {
+    pub(crate) fn is_root(&self) -> bool {
         self.predecessors.is_empty()
     }
 
-    pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+    pub(crate) fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
         timeit!(format!("GSSNode::merge_many_with_depth({})", merge_depth), {
         let mut iter = nodes.into_iter();
         if let Some(first) = iter.next() {
@@ -605,20 +605,20 @@ impl GSSNode {
 // Core GSS operations
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
-    pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
+    pub(crate) fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
         let mut acc = (*self.acc).clone();
         acc.trie2_nodes.clear();
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
     }
 
-    pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
+    pub(crate) fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
         let mut acc = (*self.acc).clone();
         acc.trie2_nodes.clear();
         Self::new_with_many_predecessors(Arc::new(self.clone()), edge_values, acc)
     }
 
     /// Performs a multi-level pop operation on this node.
-    pub fn popn(&self, n: usize) -> GSSPopper {
+    pub(crate) fn popn(&self, n: usize) -> GSSPopper {
         let mut popper = GSSPopper::new_from_node(Arc::new(self.clone()), Arc::new(Acc::new_fresh()));
         popper.popn(n);
         popper
@@ -631,7 +631,7 @@ impl GSSNode {
     }
 
     // #[time_it]
-    pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
+    pub(crate) fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
         self._merge(other, merge_depth);
     }
 
@@ -722,19 +722,19 @@ impl GSSNode {
         *node = Arc::new(new_node);
     }
 
-    pub fn merged(mut self, other: Self, merge_depth: usize) -> Self {
+    pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
         self.merge_with_depth(merge_depth, &other);
         self
     }
 
-    pub fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub(crate) fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let mut acc = (*self.acc).clone();
         acc.trie2_nodes.clear();
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc)
     }
 
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
-    pub fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+    pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
         parent_arc.predecessors.iter().flat_map(move |(edge_val, preds_by_depth)| {
             preds_by_depth.values().flat_map(move |pred_vec| {
                 pred_vec.iter().map(move |pred_arc| GSSPeek {
@@ -749,23 +749,23 @@ impl GSSNode {
 
 
 impl<'a> GSSPeek<'a> {
-    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+    pub(crate) fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
-    pub fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+    pub(crate) fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
     /// Returns the combined `Acc` of the parent and the predecessor.
-    pub fn resolved_acc(&self) -> Acc {
+    pub(crate) fn resolved_acc(&self) -> Acc {
         Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc)
     }
 
     /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
-    pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+    pub(crate) fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
         &self.parent_arc.acc.llm_tokens_union & &self.predecessor_node.acc.llm_tokens_union
     }
 
     /// Returns a new `GSSNode` representing the predecessor, but with its `Acc`
     /// resolved against the parent's `Acc`.
-    pub fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+    pub(crate) fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
         let resolved_acc = self.resolved_acc();
         if *self.predecessor_node.acc == resolved_acc {
             return self.predecessor_node.clone();
@@ -774,16 +774,16 @@ impl<'a> GSSPeek<'a> {
     }
 
     /// Pushes a new state onto the resolved predecessor.
-    pub fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         let mut resolved_acc = self.resolved_acc();
         resolved_acc.trie2_nodes.clear();
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub(crate) fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.isolated_parent().as_ref().push(edge_value)
     }
-    pub fn popn(&self, len: usize) -> GSSPopper {
+    pub(crate) fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = self.isolated_parent();
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
         popper.popn(len);
@@ -792,7 +792,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     /// The new node has the parent's `Acc` and a single predecessor (the one from this peek).
-    pub fn isolated_parent(&self) -> Arc<GSSNode> {
+    pub(crate) fn isolated_parent(&self) -> Arc<GSSNode> {
         let new_acc = Acc::narrow(&self.parent_arc.acc, &self.predecessor_node.acc);
 
         if self.parent_arc.num_predecessors() == 1 && *self.parent_arc.acc == new_acc {
@@ -844,7 +844,7 @@ impl Ord for GSSNode {
 
 // --- Pruning and Transformation ---
 
-pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+pub(crate) type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
 
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
@@ -946,7 +946,7 @@ fn prune_and_transform_recursive(
     }
 }
 
-pub fn allow_only_llm_tokens_and_prune_arc(
+pub(crate) fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -970,7 +970,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     }
 }
 
-pub fn disallow_llm_tokens_and_prune_arc(
+pub(crate) fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -979,7 +979,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
     allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
 }
 
-pub fn reset_llm_tokens(
+pub(crate) fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
@@ -997,7 +997,7 @@ pub fn reset_llm_tokens(
     }
 }
 
-pub fn reset_terminals(
+pub(crate) fn reset_terminals(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
@@ -1015,7 +1015,7 @@ pub fn reset_terminals(
     }
 }
 
-pub fn disallow_terminals_and_prune_arc(
+pub(crate) fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &HybridL2Bitset,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1033,7 +1033,7 @@ pub fn disallow_terminals_and_prune_arc(
     }
 }
 
-pub fn prune_disallowed_terminals(
+pub(crate) fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1069,7 +1069,7 @@ pub fn prune_disallowed_terminals(
     }
 }
 
-pub fn map_allowed_terminals_tokenizer_states(
+pub(crate) fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1111,7 +1111,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     }
 }
 
-pub fn merge_trie2_nodes_if_needed(
+pub(crate) fn merge_trie2_nodes_if_needed(
     root_arc: &mut Arc<GSSNode>,
     merge_threshold: usize,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1197,7 +1197,7 @@ pub fn merge_trie2_nodes_if_needed(
 impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
     #[time_it]
-    pub fn fuse_predecessors(&mut self, levels: usize) {
+    pub(crate) fn fuse_predecessors(&mut self, levels: usize) {
         if levels == 0 {
             return;
         }
@@ -1208,7 +1208,7 @@ impl GSSNode {
     }
 }
 
-pub fn fuse_predecessors_recursive(
+pub(crate) fn fuse_predecessors_recursive(
     node_arc: &Arc<GSSNode>,
     levels: usize,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
@@ -1267,7 +1267,7 @@ pub fn fuse_predecessors_recursive(
     result_arc
 }
 
-pub fn deep_clone_gss_with_trie2_map(
+pub(crate) fn deep_clone_gss_with_trie2_map(
     root: &Arc<GSSNode>,
     trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
 ) -> Arc<GSSNode> {
@@ -1326,8 +1326,8 @@ pub fn deep_clone_gss_with_trie2_map(
 
 // --- Analysis and Debugging ---
 #[derive(Debug, Clone, Eq, Hash)]
-pub struct RootItem<'a> {
-    pub node: &'a GSSNode,
+pub(crate) struct RootItem<'a> {
+    pub(crate) node: &'a GSSNode,
     path_acc: Arc<Acc>,
 }
 
@@ -1351,13 +1351,13 @@ impl<'a> Ord for RootItem<'a> {
 }
 
 impl<'a> RootItem<'a> {
-    pub fn resolved_acc(&self) -> Arc<Acc> {
+    pub(crate) fn resolved_acc(&self) -> Arc<Acc> {
         Arc::new(Acc::narrow(&self.path_acc, &self.node.acc))
     }
 }
 
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
-pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     // We carry the "last edge" used to reach the next node; when we finally hit a root,
     // that last edge is the key used for the result map.
     let mut queue: BTreeMap<
@@ -1411,38 +1411,38 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
 }
 
 impl GSSNode {
-    pub fn reset_llm_tokens(&mut self) {
+    pub(crate) fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();
         reset_llm_tokens(&mut node_arc, &mut memo);
         *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
     }
 
-    pub fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+    pub(crate) fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
         get_roots(std::iter::once(self))
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct GSSStats {
-    pub num_roots: usize,
-    pub num_root_predecessors: usize,
-    pub num_unique_root_predecessor_keys: usize,
-    pub total_edges: usize,
-    pub unique_nodes: usize,
-    pub structurally_unique_nodes: usize,
-    pub structural_redundancy: f64,
-    pub num_redundant_nodes: usize,
-    pub max_depth: usize,
-    pub average_depth: f64,
-    pub merge_points: usize,
-    pub max_predecessors_with_values: usize,
-    pub average_predecessors_with_values: f64,
+pub(crate) struct GSSStats {
+    pub(crate) num_roots: usize,
+    pub(crate) num_root_predecessors: usize,
+    pub(crate) num_unique_root_predecessor_keys: usize,
+    pub(crate) total_edges: usize,
+    pub(crate) unique_nodes: usize,
+    pub(crate) structurally_unique_nodes: usize,
+    pub(crate) structural_redundancy: f64,
+    pub(crate) num_redundant_nodes: usize,
+    pub(crate) max_depth: usize,
+    pub(crate) average_depth: f64,
+    pub(crate) merge_points: usize,
+    pub(crate) max_predecessors_with_values: usize,
+    pub(crate) average_predecessors_with_values: f64,
 }
 
 /// Gathers statistics about the structure and complexity of a GSS forest.
 #[time_it]
-pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
+pub(crate) fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
 
@@ -1557,7 +1557,7 @@ fn get_structural_id(
 
 /// Finds the longest path from any leaf to the given root node.
 /// Returns `None` if the node has no predecessors.
-pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
     if root_node.predecessors.is_empty() {
         return None;
     }
@@ -1599,7 +1599,7 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
 }
 
 /// Randomly samples a single path from a GSS forest.
-pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+pub(crate) fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
     if roots.is_empty() {
         return None;
     }
@@ -1631,12 +1631,12 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
     Some(path)
 }
 
-pub struct GSSPrintConfig<'a> {
-    pub labels: Option<&'a [String]>,
-    pub max_edges: usize,
-    pub original_internal_bimap: Option<&'a BiBTreeMap<usize, usize>>,
-    pub llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
-    pub verbose: bool,
+pub(crate) struct GSSPrintConfig<'a> {
+    pub(crate) labels: Option<&'a [String]>,
+    pub(crate) max_edges: usize,
+    pub(crate) original_internal_bimap: Option<&'a BiBTreeMap<usize, usize>>,
+    pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    pub(crate) verbose: bool,
 }
 
 impl<'a> Default for GSSPrintConfig<'a> {
@@ -1652,7 +1652,7 @@ impl<'a> Default for GSSPrintConfig<'a> {
 }
 
 /// Pretty-prints a GSS forest for debugging.
-pub fn print_gss_forest(
+pub(crate) fn print_gss_forest(
     roots: &[Arc<GSSNode>],
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     config: &GSSPrintConfig,
@@ -1818,7 +1818,7 @@ pub fn print_gss_forest(
 }
 
 /// Formats an accumulator for concise display in the GSS printout.
-pub fn format_acc(
+pub(crate) fn format_acc(
     node: &GSSNode,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
