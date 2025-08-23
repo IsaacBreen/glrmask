@@ -2589,6 +2589,10 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
             |glr_s, (k, expected_state_id_opt ), dest_map| {
+                if !glr_s.is_ok() {
+                    crate::debug!(4, "GLR state is not alive before popping, skipping.");
+                    return Vec::new();
+                }
                 crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
                 let mut out_gsss = Vec::new();
                 let popped = glr_s.active_state.stack.popn(*k);
