@@ -2797,7 +2797,9 @@ impl<'a> GrammarConstraintState<'a> {
                             disallowed_terminals_for_end_state.insert(match_info.id);
                             disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
                         }
+                        cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+                        cloned_glr_s.log_gss(format!("After disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
 
                         if new_offset == llm_token_bytes.len() {
                             // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
