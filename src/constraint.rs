@@ -2605,6 +2605,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
+                println!("After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
                     let mut out_gss_filtered = out_gss.clone();
