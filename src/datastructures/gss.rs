@@ -1321,8 +1321,8 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
 }
 
 // --- Analysis and Debugging ---
-#[allow(dead_code)] pub(crate) #[derive(Debug, Clone, Eq, Hash)]
-struct RootItem<'a> {
+#[derive(Debug, Clone, Eq, Hash)]
+#[allow(dead_code)] pub(crate) struct RootItem<'a> {
     pub(crate) node: &'a GSSNode,
     path_acc: Arc<Acc>,
 }
