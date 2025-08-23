@@ -1467,12 +1467,14 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
         BTreeMap<(*const GSSNode, Option<ParseStateEdgeContent>), Arc<Acc>>
     > = BTreeMap::new();
 
-    let mut temp_results: BTreeMap<ParseStateEdgeContent, Vec<Arc<Acc>>> = BTreeMap::new();
+    let mut results: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
 
     for node in nodes {
         let node_ptr = node as *const GSSNode;
         let depth = node.max_depth();
-        queue.entry(depth).or_default()
+        queue
+            .entry(depth)
+            .or_default()
             .entry((node_ptr, None))
             .or_insert_with(|| Arc::new(Acc::new_fresh()));
     }
@@ -1484,7 +1486,10 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
             if current_node.is_root() {
                 if let Some(edge) = last_edge_opt {
                     let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc()));
-                    temp_results.entry(edge).or_default().push(final_acc);
+                    results
+                        .entry(edge)
+                        .or_default()
+                        .insert(final_acc);
                 }
             } else {
                 for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
@@ -1492,7 +1497,9 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
                         let per_child_acc = Arc::new(Acc::narrow(&path_acc, &pred_arc.acc()));
                         let pred_ptr = pred_arc.as_ref() as *const GSSNode;
                         let pred_depth = pred_arc.max_depth();
-                        queue.entry(pred_depth).or_default()
+                        queue
+                            .entry(pred_depth)
+                            .or_default()
                             .entry((pred_ptr, Some(edge_val.clone())))
                             .and_modify(|e| *e = Arc::new(Acc::merge(e, &per_child_acc)))
                             .or_insert_with(|| per_child_acc.clone());
@@ -1502,15 +1509,6 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
         }
     }
 
-    let mut results: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
-    for (edge, acc_vec) in temp_results {
-        if acc_vec.is_empty() { continue; }
-        let mut iter = acc_vec.into_iter();
-        let first = iter.next().unwrap();
-        let mut merged_acc = (*first).clone();
-        for next_acc in iter { merged_acc = Acc::merge(&merged_acc, &next_acc); }
-        results.entry(edge).or_default().insert(Arc::new(merged_acc));
-    }
     results
 }
 
