@@ -764,17 +764,28 @@ fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Precomput
     // Collect all unique nodes to keep them alive during the merging process.
     // This prevents weak pointers from dangling if a node's strong count temporarily drops to zero.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let _all_nodes = Trie::all_nodes(&roots_vec);
+    let all_nodes = Trie::all_nodes(&roots_vec);
+
+    let pb = ProgressBar::new(all_nodes.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+            .expect("progress-bar"),
+    );
+    if !PROGRESS_BAR_ENABLED {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
 
     let mut canonical_nodes: HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
     let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
 
     let mut new_roots = BTreeMap::new();
     for (sid, root_arc) in roots.iter() {
-        let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited);
+        let canonical_root = deduplicate_recursive_trie2(root_arc.clone(), &mut canonical_nodes, &mut visited, &pb);
         new_roots.insert(*sid, canonical_root);
     }
     *roots = new_roots;
+    pb.finish_with_message("Finished merging Trie 2 nodes");
     crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.len());
 }
 
@@ -782,11 +793,14 @@ fn deduplicate_recursive_trie2(
     node_arc: Arc<RwLock<PrecomputeNode2>>,
     canonical_nodes: &mut HashMap<PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>>,
     visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+    pb: &ProgressBar,
 ) -> Arc<RwLock<PrecomputeNode2>> {
     let node_ptr = Arc::as_ptr(&node_arc);
     if let Some(cached_node) = visited.get(&node_ptr) {
         return cached_node.clone();
     }
+
+    pb.inc(1);
 
     // Pre-emptively insert the current node's arc. This breaks cycles.
     // If we find a canonical version later, we'll update the entry.
@@ -801,7 +815,7 @@ fn deduplicate_recursive_trie2(
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
                 if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited);
+                    let canonical_child_arc = deduplicate_recursive_trie2(child_arc.clone(), canonical_nodes, visited, pb);
                     if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
                         children_changed = true;
                     }
