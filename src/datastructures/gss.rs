@@ -2149,6 +2149,7 @@ mod tests {
         let root = b.push(mock_edge(10));
 
         let path1 = sample_path(&[&root], 0).unwrap();
+        let path2 = sample_path(&[&root], 1).unwrap();
 
         assert_eq!(path1.len(), 3);
         assert_eq!(path1[0], mock_edge(10));
