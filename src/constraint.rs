@@ -2610,7 +2610,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
-                println!("After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
+                crate::debug!(4, "After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
                 if !out_gss.is_alive() {
                     crate::debug!(4, "GLR state is not alive after popping, skipping.");
                     return Vec::new();
@@ -2622,6 +2622,7 @@ impl<'a> GrammarConstraintState<'a> {
                     allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
+                    out_glr_s.log_gss("After filtering for edge LLM tokens", TerminalID(0), false, false);
                     if out_glr_s.is_ok() {
                         out.push((dst_node_wrapper.clone(), out_glr_s));
                     }
@@ -2635,10 +2636,7 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
-                if !glr_s.is_ok() {
-                    crate::debug!(4, "GLR state is not alive in process_fn, skipping.");
-                    return false;
-                }
+                glr_s.log_gss("At process_fn", TerminalID(0), false, false);
                 let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !glr_active_tokens.is_empty();
                 if precomputed_node_data.value.end {
