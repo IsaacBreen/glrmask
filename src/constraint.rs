@@ -2710,10 +2710,10 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
-        for (state_id, state) in &self.state {
-            crate::debug!(3, "State {} before commit:", state_id.0);
-            state.log_gss("Before commit", TerminalID(0), false, false);
-        }
+        // for (state_id, state) in &self.state {
+        //     crate::debug!(3, "State {} before commit:", state_id.0);
+        //     state.log_gss("Before commit", TerminalID(0), false, false);
+        // }
 
         let mut gss_transformation_memo = HashMap::new();
 
@@ -2797,9 +2797,9 @@ impl<'a> GrammarConstraintState<'a> {
                             disallowed_terminals_for_end_state.insert(match_info.id);
                             disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
                         }
-                        cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
+                        // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
-                        cloned_glr_s.log_gss(format!("After disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
+                        // cloned_glr_s.log_gss(format!("After disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
 
                         if new_offset == llm_token_bytes.len() {
                             // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
@@ -2852,7 +2852,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         for (tokenizer_id, glr_state) in &self.state {
             if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
-                glr_state.log_gss("After commit", TerminalID(0), false, false);
+                // glr_state.log_gss("After commit", TerminalID(0), false, false);
             }
         }
     }
