@@ -964,7 +964,7 @@ fn prune_and_transform_recursive(
         }
         Some((mut new_local_acc, continue_recursion)) => {
             // Case 1: Do not recurse; only possibly adjust local acc.
-            if !continue_recursion {
+            if !continue_recursion || node_arc.is_root() {
                 match node_arc.as_ref() {
                     GSSNode::Root(root) => {
                         let acc_changed = *root.acc != new_local_acc;
