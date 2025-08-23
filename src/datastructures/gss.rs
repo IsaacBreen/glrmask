@@ -980,23 +980,23 @@ fn prune_and_transform_recursive(
                             let transformed_node = GSSNode::new(new_local_acc);
                             let result_arc = Arc::new(transformed_node);
                             memo.insert(node_ptr, Some(result_arc.clone()));
-                            println!("Transformed root node due to acc change: {:?}", result_arc);
+                            // println!("Transformed root node due to acc change: {:?}", result_arc);
                             Some(result_arc)
                         } else {
                             memo.insert(node_ptr, Some(node_arc.clone()));
-                            println!("Did not transform root node; acc unchanged.");
+                            // println!("Did not transform root node; acc unchanged.");
                             Some(node_arc.clone())
                         }
                     }
                     GSSNode::Internal(_) => {
                         // Internal nodes don't carry local Acc; no structural change if we do not recurse.
-                        println!("Did not transform internal node; no recursion.");
+                        // println!("Did not transform internal node; no recursion.");
                         memo.insert(node_ptr, Some(node_arc.clone()));
                         Some(node_arc.clone())
                     }
                 }
             } else {
-                println!("Recursing into children of internal node.");
+                // println!("Recursing into children of internal node.");
                 // Recurse into children. Preserve the original predecessor structure.
                 let mut any_child_changed = false;
                 let mut had_any_pred = false;
@@ -1041,11 +1041,11 @@ fn prune_and_transform_recursive(
 
                 match node_arc.as_ref() {
                     GSSNode::Root(root) => {
-                        println!("Error: Reached root node during recursion, which should not happen.");
+                        // println!("Error: Reached root node during recursion, which should not happen.");
                         unreachable!();
                     }
                     GSSNode::Internal(_) => {
-                        println!("Reconstructed internal node after recursion.");
+                        // println!("Reconstructed internal node after recursion.");
                         if !any_child_changed {
                             memo.insert(node_ptr, Some(node_arc.clone()));
                             return Some(node_arc.clone());
