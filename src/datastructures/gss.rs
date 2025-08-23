@@ -973,19 +973,23 @@ fn prune_and_transform_recursive(
                             let transformed_node = GSSNode::new(new_local_acc);
                             let result_arc = Arc::new(transformed_node);
                             memo.insert(node_ptr, Some(result_arc.clone()));
+                            println!("Transformed root node due to acc change: {:?}", result_arc);
                             Some(result_arc)
                         } else {
                             memo.insert(node_ptr, Some(node_arc.clone()));
+                            println!("Did not transform root node; acc unchanged.");
                             Some(node_arc.clone())
                         }
                     }
                     GSSNode::Internal(_) => {
                         // Internal nodes don't carry local Acc; no structural change if we do not recurse.
+                        println!("Did not transform internal node; no recursion.");
                         memo.insert(node_ptr, Some(node_arc.clone()));
                         Some(node_arc.clone())
                     }
                 }
             } else {
+                println!("Recursing into children of internal node.");
                 // Recurse into children. Preserve the original predecessor structure.
                 let mut any_child_changed = false;
                 let mut had_any_pred = false;
@@ -1030,19 +1034,11 @@ fn prune_and_transform_recursive(
 
                 match node_arc.as_ref() {
                     GSSNode::Root(root) => {
-                        let acc_changed = *root.acc != new_local_acc;
-                        if !acc_changed && !any_child_changed {
-                            memo.insert(node_ptr, Some(node_arc.clone()));
-                            return Some(node_arc.clone());
-                        }
-
-                        // Root acc may change; children structure may also change, but root has no predecessors.
-                        let transformed_node = if acc_changed { GSSNode::new(new_local_acc) } else { (**node_arc).clone() };
-                        let result_arc = Arc::new(transformed_node);
-                        memo.insert(node_ptr, Some(result_arc.clone()));
-                        Some(result_arc)
+                        println!("Error: Reached root node during recursion, which should not happen.");
+                        unreachable!();
                     }
                     GSSNode::Internal(_) => {
+                        println!("Reconstructed internal node after recursion.");
                         if !any_child_changed {
                             memo.insert(node_ptr, Some(node_arc.clone()));
                             return Some(node_arc.clone());
@@ -1066,8 +1062,10 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_acc = (*node.acc()).clone();
+        println!("Before pruning: {:?}", new_acc.llm_tokens_union);
         new_acc.llm_tokens_union &= allowed_tokens;
         new_acc.llm_tokens_intersection &= allowed_tokens;
+        println!("After pruning: {:?}", new_acc.llm_tokens_union);
 
         // Prune if the union of possibilities is empty.
         if new_acc.llm_tokens_union.is_empty() {
