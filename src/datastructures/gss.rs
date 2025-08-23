@@ -1407,7 +1407,7 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
 }
 
 impl GSSNode {
-    pub(crate) fn reset_llm_tokens(&mut self) {
+    #[allow(dead_code)] pub(crate) fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();
         reset_llm_tokens(&mut node_arc, &mut memo);
@@ -1595,13 +1595,13 @@ pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseSt
 }
 
 /// Randomly samples a single path from a GSS forest.
-pub(crate) fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+#[allow(dead_code)] pub(crate) fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
     if roots.is_empty() {
         return None;
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let root_index = rng.gen_range(0..roots.len());
+    let root_index = rng.random_range(0..roots.len());
     let mut current_node_arc = Arc::new(roots[root_index].clone());
 
     let mut path = Vec::new();
@@ -1616,7 +1616,7 @@ pub(crate) fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStat
             break;
         }
 
-        let chosen_index = rng.gen_range(0..predecessors.len());
+        let chosen_index = rng.random_range(0..predecessors.len());
         let chosen_peek = &predecessors[chosen_index];
 
         path.push(chosen_peek.edge_value().clone());
@@ -2149,7 +2149,7 @@ mod tests {
         let root = b.push(mock_edge(10));
 
         let path1 = sample_path(&[&root], 0).unwrap();
-        let path2 = sample_path(&[&root], 1).unwrap();
+        // let path2 = sample_path(&[&root], 1).unwrap();
 
         assert_eq!(path1.len(), 3);
         assert_eq!(path1[0], mock_edge(10));
