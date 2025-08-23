@@ -2622,6 +2622,7 @@ impl<'a> GrammarConstraintState<'a> {
                     allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
+                    crate::debug!(4, "Allowed LLM tokens in out_gss_filtered: {:?}", out_glr_s.active_state.stack.allowed_llm_tokens());
                     out_glr_s.log_gss("After filtering for edge LLM tokens", TerminalID(0), false, false);
                     if out_glr_s.is_ok() {
                         out.push((dst_node_wrapper.clone(), out_glr_s));
