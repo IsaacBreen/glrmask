@@ -2635,6 +2635,10 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
+                if !glr_s.is_ok() {
+                    crate::debug!(4, "GLR state is not alive in process_fn, skipping.");
+                    return false;
+                }
                 let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let keep_going = !glr_active_tokens.is_empty();
                 if precomputed_node_data.value.end {
