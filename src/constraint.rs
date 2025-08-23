@@ -2609,6 +2609,10 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
+                if out_gsss.is_empty() {
+                    crate::debug!(4, "No valid GSS nodes after popping, skipping.");
+                    return Vec::new();
+                }
                 let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
                 crate::debug!(4, "After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
                 // if !out_gss.is_alive() {
@@ -2626,8 +2630,8 @@ impl<'a> GrammarConstraintState<'a> {
                     // out_glr_s.log_gss("After filtering for edge LLM tokens", TerminalID(0), false, false);
                     // if out_glr_s.is_ok() {
                         out.push((dst_node_wrapper.clone(), out_glr_s));
-                    // }
-                }
+                    }
+                // }
                 out
             },
             // merge_fn
@@ -2639,7 +2643,8 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, glr_s| {
                 // glr_s.log_gss("At process_fn", TerminalID(0), false, false);
                 let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                let keep_going = !glr_active_tokens.is_empty();
+                // let keep_going = !glr_active_tokens.is_empty();
+                let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     crate::debug!(4, "Precomputed node data is an end node, adding active tokens {:?} to final mask", glr_active_tokens);
                     *final_mask_internal.borrow_mut() |= glr_active_tokens;
