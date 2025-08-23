@@ -2589,10 +2589,10 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
             |glr_s, (k, expected_state_id_opt ), dest_map| {
-                if !glr_s.is_ok() {
-                    crate::debug!(4, "GLR state is not alive before popping, skipping.");
-                    return Vec::new();
-                }
+                // if !glr_s.is_ok() {
+                //     crate::debug!(4, "GLR state is not alive before popping, skipping.");
+                //     return Vec::new();
+                // }
                 crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
                 // glr_s.log_gss("Before popping", TerminalID(0), false, false);
                 let mut out_gsss = Vec::new();
@@ -2611,10 +2611,10 @@ impl<'a> GrammarConstraintState<'a> {
                 }
                 let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
                 crate::debug!(4, "After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
-                if !out_gss.is_alive() {
-                    crate::debug!(4, "GLR state is not alive after popping, skipping.");
-                    return Vec::new();
-                }
+                // if !out_gss.is_alive() {
+                //     crate::debug!(4, "GLR state is not alive after popping, skipping.");
+                //     return Vec::new();
+                // }
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
                     let mut out_gss_filtered = out_gss.clone();
