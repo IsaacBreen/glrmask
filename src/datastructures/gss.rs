@@ -704,7 +704,7 @@ impl GSSNode {
 
     pub(crate) fn is_empty(&self) -> bool { self.predecessors().is_empty() }
 
-    pub(crate) fn is_alive(&self) -> bool { !self.is_root() && !self.allowed_llm_tokens().is_empty() }
+    pub(crate) fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
 
     pub(crate) fn is_root(&self) -> bool {
         matches!(self, GSSNode::Root(_))
