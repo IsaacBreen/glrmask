@@ -1353,7 +1353,7 @@ impl<'a> RootItem<'a> {
 }
 
 /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
-#[allow(dead_code)] fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     // We carry the "last edge" used to reach the next node; when we finally hit a root,
     // that last edge is the key used for the result map.
     let mut queue: BTreeMap<
@@ -1407,7 +1407,7 @@ impl<'a> RootItem<'a> {
 }
 
 impl GSSNode {
-    #[allow(dead_code)] fn reset_llm_tokens(&mut self) {
+    pub(crate) fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();
         reset_llm_tokens(&mut node_arc, &mut memo);
@@ -1595,7 +1595,7 @@ pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseSt
 }
 
 /// Randomly samples a single path from a GSS forest.
-#[allow(dead_code)] fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+pub(crate) fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
     if roots.is_empty() {
         return None;
     }
