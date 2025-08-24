@@ -82,12 +82,13 @@ fn emit_timeit_for_expr(name_code: TokenStream2, expr: Expr) -> TokenStream2 {
     match expr {
         Expr::Block(expr_block) => {
             let (stmts, trailing_expr) = split_block_stmts(&expr_block.block);
+            let trailing_stmt = trailing_expr.map(|expr| quote! { #expr; });
 
             quote! {
                 let __profiler_name = #name_code;
                 let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                 #(#stmts)*
-                #( #trailing_expr ; )*
+                #trailing_stmt
                 ::core::mem::drop(__timeit_guard);
             }
         }
@@ -111,7 +112,7 @@ fn split_block_stmts(block: &Block) -> (Vec<Stmt>, Option<Expr>) {
     // If the last statement is a bare expression (without semicolon), we want to
     // re-emit it with a semicolon so it becomes a statement in the outer scope.
     let trailing_expr = match stmts.last() {
-        Some(Stmt::Expr(expr)) => Some(expr.clone()),
+        Some(Stmt::Expr(expr, None)) => Some(expr.clone()),
         _ => None,
     };
     if trailing_expr.is_some() {
@@ -158,12 +159,13 @@ pub fn timeitblock(input: TokenStream) -> TokenStream {
     let tokens: TokenStream2 = match try_named_block {
         Ok((name_expr, block)) => {
             let (stmts, trailing_expr) = split_block_stmts(&block);
+            let trailing_stmt = trailing_expr.map(|expr| quote! { #expr; });
             let name_code = quote! { (#name_expr).into() };
             quote! {
                 let __profiler_name = #name_code;
                 let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                 #(#stmts)*
-                #( #trailing_expr ; )*
+                #trailing_stmt
                 ::core::mem::drop(__timeit_guard);
             }
         }
@@ -186,7 +188,7 @@ pub fn timeitblock(input: TokenStream) -> TokenStream {
 
             // If the last statement is a bare expression (no ';'), re-emit with ';'.
             let (stmts_no_tail, trailing_expr) = match stmts.last() {
-                Some(Stmt::Expr(expr)) => {
+                Some(Stmt::Expr(expr, None)) => {
                     let mut v = stmts.clone();
                     v.pop();
                     (v, Some(expr.clone()))
@@ -194,6 +196,7 @@ pub fn timeitblock(input: TokenStream) -> TokenStream {
                 _ => (stmts.clone(), None),
             };
 
+            let trailing_stmt = trailing_expr.map(|expr| quote! { #expr; });
             // Reasonable default name for unnamed block: module path + line number.
             // Using line!() ensures multiple calls have distinct names.
             let default_name = quote! { format!("{}:{}", module_path!(), line!()) };
@@ -202,7 +205,7 @@ pub fn timeitblock(input: TokenStream) -> TokenStream {
                 let __profiler_name = #default_name;
                 let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                 #(#stmts_no_tail)*
-                #( #trailing_expr ; )*
+                #trailing_stmt
                 ::core::mem::drop(__timeit_guard);
             }
         }
