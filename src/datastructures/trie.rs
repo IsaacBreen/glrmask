@@ -1753,13 +1753,13 @@ where
             }
 
             // Hash weak children
-            let weak_upgraded: Vec<_> = weak_children.into_iter()
-                .filter_map(|(node_ptr, ev)| node_ptr.upgrade().map(|arc| (arc, ev)))
+            let weak_upgraded: Vec<_> = weak_children.iter()
+                .filter_map(|(node_ptr, ev)| node_ptr.upgrade().map(|arc| (arc, *ev)))
                 .collect();
 
             weak_upgraded.len().hash(state);
             let mut weak_pair_hashes = Vec::with_capacity(weak_upgraded.len());
-            for (child_arc, ev) in weak_upgraded { // ev is now &EV, consistent with strong children
+            for (child_arc, ev) in weak_upgraded {
                 if let Ok(child_guard) = child_arc.read() {
                     // hash pair (ev, child)
                     let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
