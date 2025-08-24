@@ -1622,12 +1622,12 @@ where
                     // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
                     let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_strong
                         .iter()
-                        .map(|(np, ev)| (np.upgrade().expect("Strong pointer failed to upgrade"), *ev))
+                        .filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, *ev)))
                         .collect();
 
                     let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_strong
                         .iter()
-                        .map(|(np, ev)| (np.upgrade().expect("Strong pointer failed to upgrade"), (*ev).clone()))
+                        .filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (*ev).clone())))
                         .collect();
 
 
@@ -1648,8 +1648,12 @@ where
                     }
 
                     // Now compare weak children
-                    let self_weak_pairs: Vec<_> = self_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in `self` during equality check"), (*ev).clone())).collect();
-                    let mut other_weak_pairs: Vec<_> = other_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in `other` during equality check"), (*ev).clone())).collect();
+                    let self_weak_pairs: Vec<_> = self_weak.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (*ev).clone()))).collect();
+                    let mut other_weak_pairs: Vec<_> = other_weak.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (*ev).clone()))).collect();
+
+                    if self_weak_pairs.len() != other_weak_pairs.len() {
+                        return false;
+                    }
 
                     'self_weak_loop: for (s_arc, s_ev) in &self_weak_pairs {
                         for i in 0..other_weak_pairs.len() {
@@ -1736,10 +1740,12 @@ where
             for (node_ptr, ev) in strong_children {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
-                let child_arc = node_ptr.upgrade().expect("Strong pointer failed to upgrade during hash");
-                let child_guard = child_arc.read().expect("RwLock poisoned during Hash");
-                Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
-                strong_pair_hashes.push(pair_hasher.finish());
+                if let Some(child_arc) = node_ptr.upgrade() {
+                    if let Ok(child_guard) = child_arc.read() {
+                        Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
+                        strong_pair_hashes.push(pair_hasher.finish());
+                    }
+                }
             }
             strong_pair_hashes.sort_unstable();
             for h in strong_pair_hashes {
@@ -1747,7 +1753,9 @@ where
             }
 
             // Hash weak children
-            let weak_upgraded: Vec<_> = weak_children.iter().map(|(node_ptr, ev)| (node_ptr.upgrade().expect("Dangling weak pointer during hash"), *ev)).collect();
+            let weak_upgraded: Vec<_> = weak_children.iter()
+                .filter_map(|(node_ptr, ev)| node_ptr.upgrade().map(|arc| (arc, *ev)))
+                .collect();
 
             weak_upgraded.len().hash(state);
             let mut weak_pair_hashes = Vec::with_capacity(weak_upgraded.len());
@@ -2936,7 +2944,9 @@ mod tests {
         let final_values = computed_values.read().unwrap();
 
         // Expected processed nodes: 0, 1. Node 2 is skipped because step for root->child2 returns None. Node 3 is not reached as its parent (node 2) is not processed.
-        assert_eq!(final_processed.clone(), vec![0, 1].into_iter().collect());
+        assert_eq!(final_processed.len(), 2);
+        assert!(final_processed.contains(&0));
+        assert!(final_processed.contains(&1));
 
         // Check computed values
         assert_eq!(final_values.get(&0), Some(&100));

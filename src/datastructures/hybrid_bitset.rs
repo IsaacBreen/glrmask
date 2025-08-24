@@ -1144,9 +1144,9 @@ mod tests {
 
         // Test edge case for usize::MAX
         // This test might be very slow or OOM with RangeSetBlaze if it tries to create a huge range.
-        // let set_ones_max = HybridBitset::ones(usize::MAX);
-        // assert!(!set_ones_max.is_empty());
-        // assert_eq!(set_ones_max.len(), usize::MAX);
+        // let set_ones_max = HybridBitset::ones(usize::MAX); // This would be 0..=usize::MAX-1
+        // assert!(!set_ones_max.is_empty()); //
+        // assert_eq!(set_ones_max.len(), usize::MAX); // This is correct
 
         let set_ones_one = HybridBitset::ones(1); // Should contain only 0
         assert_eq!(set_ones_one.len(), 1);
