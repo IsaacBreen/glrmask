@@ -265,21 +265,24 @@ impl GSSPopper {
                 for (edge_val, preds_by_depth) in parent.predecessors().iter() {
                     for pred_vec in preds_by_depth.values() {
                         for child in pred_vec {
-                            let combined = Arc::new(Acc::narrow(&path_acc, &child.acc()));
-                            if child.is_root() {
-                                // Reached the bottom on this pop.
-                                let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
-                                if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
-                                    let merged = Arc::new(Acc::merge(existing, &combined));
-                                    *existing = merged;
-                                } else {
-                                    by_edge.insert(edge_val.clone(), combined);
+                            match child.as_ref() {
+                                GSSNode::Root(r) => {
+                                    let combined = Arc::new(Acc::narrow(&path_acc, &r.acc));
+                                    // Reached the bottom on this pop.
+                                    let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
+                                    if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
+                                        let merged = Arc::new(Acc::merge(existing, &combined));
+                                        *existing = merged;
+                                    } else {
+                                        by_edge.insert(edge_val.clone(), combined);
+                                    }
                                 }
-                            } else {
-                                if let Some(existing_acc) = new_paths.get_mut(child) {
-                                    *existing_acc = Arc::new(Acc::merge(existing_acc, &combined));
-                                } else {
-                                    new_paths.insert(child.clone(), combined);
+                                GSSNode::Internal(_) => {
+                                    if let Some(existing_acc) = new_paths.get_mut(child) {
+                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &path_acc));
+                                    } else {
+                                        new_paths.insert(child.clone(), path_acc.clone());
+                                    }
                                 }
                             }
                         }
@@ -1454,7 +1457,8 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
             } else {
                 for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
                     for pred_arc in preds_by_depth.values().flatten() {
-                        let per_child_acc = Arc::new(Acc::narrow(&path_acc, &pred_arc.acc()));
+                        // Internal nodes do not contribute to the path acc. It is passed down unmodified.
+                        let per_child_acc = path_acc.clone();
                         let pred_ptr = pred_arc.as_ref() as *const GSSNode;
                         let pred_depth = pred_arc.max_depth();
                         queue
