@@ -160,11 +160,6 @@ impl ParseState {
             accepted_state: Arc::new(GSSNode::new_fresh()),
         }
     }
-    fn merge(&mut self, other: ParseState) {
-        self.stack.merge_with_depth(usize::MAX, &other.stack);
-        self.accepted_state
-            .merge_with_depth(usize::MAX, &other.accepted_state);
-    }
 }
 
 // ----------------------------- Enums & Config -----------------------------
