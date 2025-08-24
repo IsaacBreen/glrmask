@@ -82,14 +82,28 @@ fn emit_timeit_for_expr(name_code: TokenStream2, expr: Expr) -> TokenStream2 {
     match expr {
         Expr::Block(expr_block) => {
             let (stmts, trailing_expr) = split_block_stmts(&expr_block.block);
-            let trailing_stmt = trailing_expr.map(|expr| quote! { #expr; });
 
-            quote! {
-                let __profiler_name = #name_code;
-                let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
-                #(#stmts)*
-                #trailing_stmt
-                ::core::mem::drop(__timeit_guard);
+            if let Some(trailing_expr) = trailing_expr {
+                // Block has a return value, so expand to an expression.
+                quote! {{
+                    let __profiler_name = #name_code;
+                    let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+                    let __timeit_value = {
+                        #(#stmts)*
+                        #trailing_expr
+                    };
+                    ::core::mem::drop(__timeit_guard);
+                    __timeit_value
+                }}
+            } else {
+                // Block has no return value, so expand to statements.
+                // The statements inside the user's block are injected directly.
+                quote! {
+                    let __profiler_name = #name_code;
+                    let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+                    #(#stmts)*
+                    ::core::mem::drop(__timeit_guard);
+                }
             }
         }
         other_expr => {
