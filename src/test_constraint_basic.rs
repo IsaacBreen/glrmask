@@ -1497,6 +1497,71 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
+fn test_constraint_indirect_recursion_simplified() {
+    // Grammar: S' -> S EOF; S -> a E | b; E -> S
+    // This is equivalent to S -> a* b, so valid strings are "b", "ab", "aab", etc.
+    // LLM token vocabulary: a, b, $
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
+
+    // Tokenizer regex for grammar tokens 'a', 'b', '$'
+    let expr = groups![
+        eat_u8(b'a'),
+        eat_u8(b'b'),
+        eat_u8(b'$'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("EOF")]),
+        prod("S", vec![t("A"), nt("E")]),
+        prod("S", vec![t("B")]),
+        prod("E", vec![nt("S")]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("B"), TerminalID(1));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        2, // max_original_llm_token_id
+    );
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // Expect 'a' or 'b'
+    assert_eq!(mask, HybridBitset::from_iter(vec![0, 1]));
+
+    // Commit "a"
+    state.commit(LLMTokenID(0));
+    let mask = state.get_mask();
+    // After 'a', we expect E, which is S, so we expect 'a' or 'b' again.
+    assert_eq!(mask, HybridBitset::from_iter(vec![0, 1]));
+
+    // Commit "b"
+    state.commit(LLMTokenID(1));
+    let mask = state.get_mask();
+    // After "ab", we have a complete S. Now we expect EOF.
+    assert_eq!(mask, HybridBitset::from_iter(vec![2]));
+}
+
+#[test]
 fn test_constraint_repetition_a() {
     // Grammar: S' -> S, S -> S A | [], which is equivalent to S -> A*
     // LLM token vocabulary: a
