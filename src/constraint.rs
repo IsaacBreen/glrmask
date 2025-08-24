@@ -477,6 +477,14 @@ impl GrammarConstraint {
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
                 crate::debug!(3, "Trie2: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
                 let mut glr_s = current_glr_state.clone();
+
+                let mut edge_bv = LLMTokenBV::zeros();
+                for bv in destinations_map.values() {
+                    edge_bv |= bv;
+                }
+                // Restrict the GLR state to the LLM tokens allowed on this edge.
+                allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new());
+
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                         print_summary_flat();
