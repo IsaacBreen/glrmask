@@ -956,110 +956,73 @@ pub(crate) type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<
 
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
-    closure: &impl Fn(&GSSNode) -> Option<(Acc, bool)>,
+    closure: &impl Fn(&Acc) -> Option<Acc>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) -> Option<Arc<GSSNode>> {
     let node_ptr = Arc::as_ptr(node_arc);
     if let Some(cached_result) = memo.get(&node_ptr) {
         return cached_result.clone();
     }
-
-    match closure(node_arc.as_ref()) {
-        None => { // Prune this node
-            memo.insert(node_ptr, None);
-            None
-        }
-        Some((mut new_local_acc, continue_recursion)) => {
-            // Case 1: Do not recurse; only possibly adjust local acc.
-            if !continue_recursion || node_arc.is_root() {
-                match node_arc.as_ref() {
-                    GSSNode::Root(root) => {
-                        let acc_changed = *root.acc != new_local_acc;
-                        if acc_changed {
-                            new_local_acc.needs_push_down = false;
-                            let transformed_node = GSSNode::new(new_local_acc);
-                            let result_arc = Arc::new(transformed_node);
-                            memo.insert(node_ptr, Some(result_arc.clone()));
-                            // println!("Transformed root node due to acc change: {:?}", result_arc);
-                            Some(result_arc)
-                        } else {
-                            memo.insert(node_ptr, Some(node_arc.clone()));
-                            // println!("Did not transform root node; acc unchanged.");
-                            Some(node_arc.clone())
-                        }
-                    }
-                    GSSNode::Internal(_) => {
-                        // Internal nodes don't carry local Acc; no structural change if we do not recurse.
-                        // println!("Did not transform internal node; no recursion.");
-                        memo.insert(node_ptr, Some(node_arc.clone()));
-                        Some(node_arc.clone())
-                    }
-                }
-            } else {
-                // println!("Recursing into children of internal node.");
-                // Recurse into children. Preserve the original predecessor structure.
-                let mut any_child_changed = false;
-                let mut had_any_pred = false;
-
-                let mut new_predecessors_map: NodeMap = BTreeMap::new();
-
-                for (edge_val, preds_by_depth) in node_arc.predecessors() {
-                    let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
-                    for (dest_key, pred_vec) in preds_by_depth {
-                        let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
-                        for pred_arc in pred_vec {
-                            had_any_pred = true;
-                            match prune_and_transform_recursive(pred_arc, closure, memo) {
-                                Some(new_pred_arc) => {
-                                    if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
-                                        any_child_changed = true;
-                                    }
-                                    new_vec.push(new_pred_arc);
-                                }
-                                None => {
-                                    // Child was pruned.
-                                    any_child_changed = true;
-                                }
-                            }
-                        }
-                        if !new_vec.is_empty() {
-                            new_preds_by_depth.insert(*dest_key, new_vec);
-                        }
-                    }
-                    if !new_preds_by_depth.is_empty() {
-                        new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
-                    }
-                }
-
-                let new_has_any_pred = new_predecessors_map
-                    .values()
-                    .any(|by_depth| by_depth.values().any(|v| !v.is_empty()));
-                if !new_has_any_pred && had_any_pred {
-                    memo.insert(node_ptr, None);
-                    return None;
-                }
-
-                match node_arc.as_ref() {
-                    GSSNode::Root(root) => {
-                        // println!("Error: Reached root node during recursion, which should not happen.");
-                        unreachable!();
-                    }
-                    GSSNode::Internal(_) => {
-                        // println!("Reconstructed internal node after recursion.");
-                        if !any_child_changed {
-                            memo.insert(node_ptr, Some(node_arc.clone()));
-                            return Some(node_arc.clone());
-                        }
-
-                        let transformed_node = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_predecessors_map);
-                        let result_arc = Arc::new(transformed_node);
-                        memo.insert(node_ptr, Some(result_arc.clone()));
-                        Some(result_arc)
+    let result = match node_arc.as_ref() {
+        GSSNode::Root(root) => {
+            match closure(&root.acc) {
+                None => None, // Prune this root
+                Some(mut new_acc) => {
+                    if *root.acc != new_acc {
+                        new_acc.needs_push_down = false;
+                        Some(Arc::new(GSSNode::new(new_acc))) // New root with transformed Acc
+                    } else {
+                        Some(node_arc.clone()) // No change
                     }
                 }
             }
         }
-    }
+        GSSNode::Internal(internal) => {
+            let mut any_child_changed = false;
+            let mut new_predecessors_map: NodeMap = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in &internal.predecessors {
+                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                for (dest_key, pred_vec) in preds_by_depth {
+                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
+                    for pred_arc in pred_vec {
+                        match prune_and_transform_recursive(pred_arc, closure, memo) {
+                            Some(new_pred_arc) => {
+                                if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                    any_child_changed = true;
+                                }
+                                new_vec.push(new_pred_arc);
+                            }
+                            None => {
+                                // Child was pruned.
+                                any_child_changed = true;
+                            }
+                        }
+                    }
+                    if !new_vec.is_empty() {
+                        new_preds_by_depth.insert(*dest_key, new_vec);
+                    }
+                }
+                if !new_preds_by_depth.is_empty() {
+                    new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
+                }
+            }
+
+            let new_has_any_pred = new_predecessors_map
+                .values()
+                .any(|by_depth| by_depth.values().any(|v| !v.is_empty()));
+            if !new_has_any_pred && !internal.predecessors.is_empty() {
+                None
+            } else if !any_child_changed {
+                Some(node_arc.clone())
+            } else {
+                let transformed_node = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_predecessors_map);
+                Some(Arc::new(transformed_node))
+            }
+        }
+    };
+    memo.insert(node_ptr, result.clone());
+    result
 }
 
 pub(crate) fn allow_only_llm_tokens_and_prune_arc(
@@ -1067,18 +1030,16 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
     allowed_tokens: &LLMTokenBV,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_acc = (*node.acc()).clone();
-        // println!("Before pruning: {:?}", new_acc.llm_tokens_union);
+    let closure = |acc: &Acc| -> Option<Acc> {
+        let mut new_acc = acc.clone();
         new_acc.llm_tokens_union &= allowed_tokens;
         new_acc.llm_tokens_intersection &= allowed_tokens;
-        // println!("After pruning: {:?}", new_acc.llm_tokens_union);
 
         // Prune if the union of possibilities is empty.
         if new_acc.llm_tokens_union.is_empty() {
             None
         } else {
-            Some((new_acc, true))
+            Some(new_acc)
         }
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -1101,12 +1062,11 @@ pub(crate) fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_acc = (*node.acc()).clone();
-        let continue_recursion = new_acc.llm_tokens_intersection != HybridBitset::max_ones();
+    let closure = |acc: &Acc| -> Option<Acc> {
+        let mut new_acc = acc.clone();
         new_acc.llm_tokens_union = HybridBitset::max_ones();
         new_acc.llm_tokens_intersection = HybridBitset::max_ones();
-        Some((new_acc, continue_recursion))
+        Some(new_acc)
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -1119,12 +1079,11 @@ pub(crate) fn reset_terminals(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_acc = (*node.acc()).clone();
-        let continue_recursion = new_acc.terminals_intersection != HybridL2Bitset::all();
+    let closure = |acc: &Acc| -> Option<Acc> {
+        let mut new_acc = acc.clone();
         new_acc.terminals_union = HybridL2Bitset::all();
         new_acc.terminals_intersection = HybridL2Bitset::all();
-        Some((new_acc, continue_recursion))
+        Some(new_acc)
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -1138,11 +1097,11 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     disallowed_terminals: &HybridL2Bitset,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_acc = (*node.acc()).clone();
+    let closure = |acc: &Acc| -> Option<Acc> {
+        let mut new_acc = acc.clone();
         new_acc.terminals_union -= disallowed_terminals;
         new_acc.terminals_intersection -= disallowed_terminals;
-        Some((new_acc, true))
+        Some(new_acc)
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -1156,23 +1115,16 @@ pub(crate) fn prune_disallowed_terminals(
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
+    let closure = |acc: &Acc| -> Option<Acc> {
         // If any of the matched terminals is disallowed by the union, prune.
-        let node_acc = node.acc();
         for (state_id, matched_bv) in matched_terminals {
-            let allowed_terminals_union = node_acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
+            let allowed_terminals_union = acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
             if !matched_bv.is_subset(allowed_terminals_union) {
                 return None;
             }
         }
-        // If any matched terminal is missing from the intersection, recurse (some sub-paths may reject).
-        for (state_id, matched_bv) in matched_terminals {
-            let allowed_terminals_intersection = node_acc.terminals_intersection.get_l2_bitset(state_id.0).unwrap();
-            if !matched_bv.is_subset(allowed_terminals_intersection) {
-                return Some(((*node.acc()).clone(), true));
-            }
-        }
-        Some(((*node.acc()).clone(), false))
+        // The Acc is not modified, just checked for pruning.
+        Some(acc.clone())
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -1187,8 +1139,8 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_acc = (*node.acc()).clone();
+    let closure = |acc: &Acc| -> Option<Acc> {
+        let mut new_acc = acc.clone();
 
         let map_one = |terminals: &HybridL2Bitset| -> (HybridL2Bitset, bool) {
             let mut new_terminals_btreemap = BTreeMap::new();
@@ -1209,13 +1161,13 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
             (new_terminals_l2_bitset, changed)
         };
 
-        let (new_terminals_union, changed_union) = map_one(&new_acc.terminals_union);
-        let (new_terminals_intersection, changed_intersection) = map_one(&new_acc.terminals_intersection);
+        let (new_terminals_union, _) = map_one(&new_acc.terminals_union);
+        let (new_terminals_intersection, _) = map_one(&new_acc.terminals_intersection);
 
         new_acc.terminals_union = new_terminals_union;
         new_acc.terminals_intersection = new_terminals_intersection;
 
-        Some((new_acc, changed_union || changed_intersection))
+        Some(new_acc)
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -1229,8 +1181,8 @@ pub(crate) fn merge_trie2_nodes_if_needed(
     merge_threshold: usize,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_acc = (*node.acc()).clone();
+    let closure = |acc: &Acc| -> Option<Acc> {
+        let mut new_acc = acc.clone();
         if new_acc.trie2_nodes.len() > merge_threshold {
             let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
             let edge_key = (0, None);
@@ -1290,7 +1242,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
 
             new_acc.trie2_nodes = dest_agg.keys().cloned().collect();
         }
-        Some((new_acc, true))
+        Some(new_acc)
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
@@ -2399,7 +2351,7 @@ mod tests {
         let mut memo = HashMap::new();
         let new_root_opt = prune_and_transform_recursive(
             &root,
-            &|node| Some((node.acc().as_ref().clone(), true)), // No-op: keep node, recurse
+            &|acc: &Acc| Some(acc.clone()), // No-op closure
             &mut memo,
         );
 
