@@ -329,13 +329,6 @@ impl GrammarConstraint {
             &llm_vocab.llm_token_map,
         );
 
-
-        // Promote weak edges in the second precomputed trie, which may have been
-        // created by the GLR parser logic to break cycles.
-        let roots2: Vec<_> = precomputed2.values().cloned().collect();
-        let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
-        crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
-
         let mut gc = Self {
             tokenizer,
             parser,
@@ -561,6 +554,11 @@ impl GrammarConstraint {
                                     crate::debug!(4, "Trie2: No tokens to push from this source node");
                                     continue;
                                 }
+                                {
+                                    // Mark the source node as live for these tokens so the backward pass can see them.
+                                    let mut src_w = src_arc.write().expect("poison");
+                                    src_w.value.live_tokens |= tokens_to_push.clone();
+                                }
                                 crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
  
                                 let edge_key = (0, Some(last_edge.state_id));
@@ -784,14 +782,8 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
                     let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
                         .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
 
-                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                    if live_tokens_for_this_edge.is_empty() {
-                        false
-                    } else {
-                        *edge_value_bv = live_tokens_for_this_edge;
-                        true
-                    }
+                    let overlaps = !(&*edge_value_bv & live_tokens_from_child).is_empty();
+                    overlaps
                 });
                 !dest_map.is_empty()
             });
