@@ -1111,7 +1111,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     } else {
                         // No further state to go to. This path terminates here.
-                        timeit!(format!("Exloring path. Reason: No goto state found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id), {});
+                        // timeit!(format!("Exloring path. Reason: No goto state found for NT '{}' in state {:?}", self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id), {});
                         break; // Exit the fast loop for this path
                     }
                 }
