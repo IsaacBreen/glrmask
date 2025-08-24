@@ -831,6 +831,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
     where
         F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
+        assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
+        for (state, per_state_fuel) in work_map.values() {
+            assert!(per_state_fuel.is_none(), "Per-state fuel is not supported in process_action_queue yet");
+        }
         while let Some(entry) = work_map.pop_first() {
             let (key, (state, per_state_fuel)) = entry;
             if let Some(f) = fuel {
