@@ -831,6 +831,9 @@ fn trie2_shape_hash(
         return h;
     }
 
+    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+    memo.insert(ptr, 0);
+
     let node_guard = arc.read().unwrap();
     let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
 
@@ -859,6 +862,7 @@ fn trie2_shape_hash(
     }
 
     let final_hash = hasher.finish();
+    // Update the memo with the real hash.
     memo.insert(ptr, final_hash);
     final_hash
 }

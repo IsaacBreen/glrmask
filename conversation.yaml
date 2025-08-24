@@ -1,6 +1,7 @@
 local_system:
   attached_files:
     - src/constraint.rs
+    - src/datastructures/arc_wrapper.rs
     - src/datastructures/trie.rs
   conversation_file:
   compile_command:
@@ -1001,6 +1002,10 @@ local_system:
               return cached_node.clone();
           }
 
+          // Pre-emptively insert to break cycles.
+          // We will update this later if we find a different canonical node.
+          visited.insert(node_ptr, node_arc.clone());
+
           pb.inc(1);
 
           // Post-order: canonicalize children first
@@ -1056,6 +1061,7 @@ local_system:
                       let mut candidate_guard = candidate_arc.write().unwrap();
                       candidate_guard.value.live_tokens |= node_live_tokens;
                   }
+                  // Update visited map with the true canonical node.
                   visited.insert(node_ptr, candidate_arc.clone());
                   return candidate_arc.clone();
               }
@@ -1063,7 +1069,7 @@ local_system:
 
           // No match found. This node becomes a new canonical representative.
           bucket.push(node_arc.clone());
-          visited.insert(node_ptr, node_arc.clone());
+          // The visited map already contains (node_ptr, node_arc), which is correct in this case.
           node_arc
       }
 
@@ -3081,6 +3087,253 @@ local_system:
 
           pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
               &self.state
+          }
+      }
+    src/datastructures/arc_wrapper.rs: |
+      use std::sync::{Arc, Weak};
+      use std::ops::Deref;
+      use std::fmt;
+      use std::hash::{Hash, Hasher};
+      use std::cmp::Ordering;
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+
+      /// An enum to hold either a strong (`Arc`) or weak (`Weak`) pointer to a node,
+      /// wrapped in a struct that allows pointer-based comparison and hashing.
+      #[derive(Debug)]
+      pub enum NodePtr<T> {
+          Strong(ArcPtrWrapper<T>),
+          Weak(WeakPtrWrapper<T>),
+      }
+
+      impl<T> NodePtr<T> {
+          /// Attempts to upgrade the pointer to an `Arc`, returning `None` if it's a `Weak`
+          /// pointer that can no longer be upgraded.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.as_arc().clone()),
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade(),
+              }
+          }
+
+          pub fn upgrade_wrapper(&self) -> Option<ArcPtrWrapper<T>> {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.clone()),
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().map(ArcPtrWrapper::new),
+              }
+          }
+
+          pub fn is_upgradable(&self) -> bool {
+              match self {
+                  NodePtr::Strong(_) => true,
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().is_some(),
+              }
+          }
+
+          pub fn as_ptr(&self) -> *const T {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()),
+                  NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()),
+              }
+          }
+
+          /// Returns the raw pointer as a `usize` for comparison and hashing.
+          pub fn as_ptr_usize(&self) -> usize {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()) as usize,
+                  NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()) as usize,
+              }
+          }
+
+          /// Returns `true` if the pointer is `Strong`.
+          pub fn is_strong(&self) -> bool {
+              matches!(self, NodePtr::Strong(_))
+          }
+      }
+
+      impl<T> Clone for NodePtr<T> {
+          fn clone(&self) -> Self {
+              match self {
+                  NodePtr::Strong(s) => NodePtr::Strong(s.clone()),
+                  NodePtr::Weak(w) => NodePtr::Weak(w.clone()),
+              }
+          }
+      }
+
+      impl<T> PartialEq for NodePtr<T> {
+          fn eq(&self, other: &Self) -> bool {
+              self.as_ptr_usize() == other.as_ptr_usize()
+          }
+      }
+
+      impl<T> Eq for NodePtr<T> {}
+
+      impl<T> Hash for NodePtr<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.as_ptr_usize().hash(state);
+          }
+      }
+
+      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Arc`.
+      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
+      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
+      /// It also dereferences to the underlying `Arc<T>`.
+      pub struct ArcPtrWrapper<T>(Arc<T>);
+
+      // ArcPtrWrapper serialization:
+      // Serializing based on pointer identity is not meaningful for JSON.
+      // We will serialize the *content* of the Arc.
+      // Deserialization will create a new Arc, so pointer identity will not be preserved.
+      // This is a fundamental limitation when serializing pointer-based identity wrappers.
+      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+          fn to_json(&self) -> JSONNode {
+              self.0.as_ref().to_json() // Serialize the content
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+          }
+      }
+
+      impl<T> Clone for ArcPtrWrapper<T> {
+          fn clone(&self) -> Self {
+              ArcPtrWrapper(self.0.clone())
+          }
+      }
+
+      /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Weak`.
+      /// This allows `Weak<T>` instances to be used as map/set keys where identity is
+      /// determined by the allocation pointer, not its content.
+      ///
+      /// Note:
+      /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
+      ///   to skip dangling weak references.
+      pub struct WeakPtrWrapper<T>(Weak<T>);
+
+      impl<T> WeakPtrWrapper<T> {
+          /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
+          pub fn new(weak: Weak<T>) -> Self {
+              WeakPtrWrapper(weak)
+          }
+
+          /// Returns a reference to the inner `Weak<T>`.
+          pub fn as_weak(&self) -> &Weak<T> {
+              &self.0
+          }
+
+          /// Attempts to upgrade the weak reference to an `Arc<T>`.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              self.0.upgrade()
+          }
+
+          /// Consumes the wrapper and returns the inner `Weak<T>`.
+          pub fn into_weak(self) -> Weak<T> {
+              self.0
+          }
+      }
+
+      impl<T> Clone for WeakPtrWrapper<T> {
+          fn clone(&self) -> Self {
+              WeakPtrWrapper(self.0.clone())
+          }
+      }
+
+      impl<T> Deref for WeakPtrWrapper<T> {
+          type Target = Weak<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for WeakPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+          }
+      }
+
+      impl<T> Eq for WeakPtrWrapper<T> {}
+
+      impl<T> Hash for WeakPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Weak::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for WeakPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("WeakPtrWrapper")
+               .field(&(Weak::as_ptr(&self.0) as *const ()))
+               .finish()
+          }
+      }
+
+      impl<T> ArcPtrWrapper<T> {
+          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
+          pub fn new(arc: Arc<T>) -> Self {
+              ArcPtrWrapper(arc)
+          }
+
+          /// Returns a reference to the inner `Arc<T>`.
+          pub fn as_arc(&self) -> &Arc<T> {
+              &self.0
+          }
+
+          /// Consumes the wrapper and returns the inner `Arc<T>`.
+          pub fn into_arc(self) -> Arc<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for ArcPtrWrapper<T> {
+          type Target = Arc<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for ArcPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.0, &other.0)
+          }
+      }
+
+      impl<T> Eq for ArcPtrWrapper<T> {}
+
+      impl<T> Hash for ArcPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Arc::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for ArcPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("ArcPtrWrapper")
+               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
+               .finish()
+          }
+      }
+
+      impl <T> PartialOrd for ArcPtrWrapper<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for ArcPtrWrapper<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
+          }
+      }
+
+      impl<T> PartialOrd for NodePtr<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for NodePtr<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.as_ptr_usize().cmp(&other.as_ptr_usize())
           }
       }
     src/datastructures/trie.rs: |+
@@ -7514,6 +7767,9 @@ local_system:
               return h;
           }
 
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert(ptr, 0);
+
           let node_guard = arc.read().unwrap();
           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
 
@@ -7542,6 +7798,7 @@ local_system:
           }
 
           let final_hash = hasher.finish();
+          // Update the memo with the real hash.
           memo.insert(ptr, final_hash);
           final_hash
       }
@@ -9761,6 +10018,253 @@ local_system:
 
           pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
               &self.state
+          }
+      }
+    src/datastructures/arc_wrapper.rs: |
+      use std::sync::{Arc, Weak};
+      use std::ops::Deref;
+      use std::fmt;
+      use std::hash::{Hash, Hasher};
+      use std::cmp::Ordering;
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+
+      /// An enum to hold either a strong (`Arc`) or weak (`Weak`) pointer to a node,
+      /// wrapped in a struct that allows pointer-based comparison and hashing.
+      #[derive(Debug)]
+      pub enum NodePtr<T> {
+          Strong(ArcPtrWrapper<T>),
+          Weak(WeakPtrWrapper<T>),
+      }
+
+      impl<T> NodePtr<T> {
+          /// Attempts to upgrade the pointer to an `Arc`, returning `None` if it's a `Weak`
+          /// pointer that can no longer be upgraded.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.as_arc().clone()),
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade(),
+              }
+          }
+
+          pub fn upgrade_wrapper(&self) -> Option<ArcPtrWrapper<T>> {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.clone()),
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().map(ArcPtrWrapper::new),
+              }
+          }
+
+          pub fn is_upgradable(&self) -> bool {
+              match self {
+                  NodePtr::Strong(_) => true,
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().is_some(),
+              }
+          }
+
+          pub fn as_ptr(&self) -> *const T {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()),
+                  NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()),
+              }
+          }
+
+          /// Returns the raw pointer as a `usize` for comparison and hashing.
+          pub fn as_ptr_usize(&self) -> usize {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()) as usize,
+                  NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()) as usize,
+              }
+          }
+
+          /// Returns `true` if the pointer is `Strong`.
+          pub fn is_strong(&self) -> bool {
+              matches!(self, NodePtr::Strong(_))
+          }
+      }
+
+      impl<T> Clone for NodePtr<T> {
+          fn clone(&self) -> Self {
+              match self {
+                  NodePtr::Strong(s) => NodePtr::Strong(s.clone()),
+                  NodePtr::Weak(w) => NodePtr::Weak(w.clone()),
+              }
+          }
+      }
+
+      impl<T> PartialEq for NodePtr<T> {
+          fn eq(&self, other: &Self) -> bool {
+              self.as_ptr_usize() == other.as_ptr_usize()
+          }
+      }
+
+      impl<T> Eq for NodePtr<T> {}
+
+      impl<T> Hash for NodePtr<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.as_ptr_usize().hash(state);
+          }
+      }
+
+      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Arc`.
+      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
+      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
+      /// It also dereferences to the underlying `Arc<T>`.
+      pub struct ArcPtrWrapper<T>(Arc<T>);
+
+      // ArcPtrWrapper serialization:
+      // Serializing based on pointer identity is not meaningful for JSON.
+      // We will serialize the *content* of the Arc.
+      // Deserialization will create a new Arc, so pointer identity will not be preserved.
+      // This is a fundamental limitation when serializing pointer-based identity wrappers.
+      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+          fn to_json(&self) -> JSONNode {
+              self.0.as_ref().to_json() // Serialize the content
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+          }
+      }
+
+      impl<T> Clone for ArcPtrWrapper<T> {
+          fn clone(&self) -> Self {
+              ArcPtrWrapper(self.0.clone())
+          }
+      }
+
+      /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Weak`.
+      /// This allows `Weak<T>` instances to be used as map/set keys where identity is
+      /// determined by the allocation pointer, not its content.
+      ///
+      /// Note:
+      /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
+      ///   to skip dangling weak references.
+      pub struct WeakPtrWrapper<T>(Weak<T>);
+
+      impl<T> WeakPtrWrapper<T> {
+          /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
+          pub fn new(weak: Weak<T>) -> Self {
+              WeakPtrWrapper(weak)
+          }
+
+          /// Returns a reference to the inner `Weak<T>`.
+          pub fn as_weak(&self) -> &Weak<T> {
+              &self.0
+          }
+
+          /// Attempts to upgrade the weak reference to an `Arc<T>`.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              self.0.upgrade()
+          }
+
+          /// Consumes the wrapper and returns the inner `Weak<T>`.
+          pub fn into_weak(self) -> Weak<T> {
+              self.0
+          }
+      }
+
+      impl<T> Clone for WeakPtrWrapper<T> {
+          fn clone(&self) -> Self {
+              WeakPtrWrapper(self.0.clone())
+          }
+      }
+
+      impl<T> Deref for WeakPtrWrapper<T> {
+          type Target = Weak<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for WeakPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+          }
+      }
+
+      impl<T> Eq for WeakPtrWrapper<T> {}
+
+      impl<T> Hash for WeakPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Weak::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for WeakPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("WeakPtrWrapper")
+               .field(&(Weak::as_ptr(&self.0) as *const ()))
+               .finish()
+          }
+      }
+
+      impl<T> ArcPtrWrapper<T> {
+          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
+          pub fn new(arc: Arc<T>) -> Self {
+              ArcPtrWrapper(arc)
+          }
+
+          /// Returns a reference to the inner `Arc<T>`.
+          pub fn as_arc(&self) -> &Arc<T> {
+              &self.0
+          }
+
+          /// Consumes the wrapper and returns the inner `Arc<T>`.
+          pub fn into_arc(self) -> Arc<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for ArcPtrWrapper<T> {
+          type Target = Arc<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for ArcPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.0, &other.0)
+          }
+      }
+
+      impl<T> Eq for ArcPtrWrapper<T> {}
+
+      impl<T> Hash for ArcPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Arc::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for ArcPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("ArcPtrWrapper")
+               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
+               .finish()
+          }
+      }
+
+      impl <T> PartialOrd for ArcPtrWrapper<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for ArcPtrWrapper<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
+          }
+      }
+
+      impl<T> PartialOrd for NodePtr<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for NodePtr<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.as_ptr_usize().cmp(&other.as_ptr_usize())
           }
       }
     src/datastructures/trie.rs: |+
@@ -14380,6 +14884,10 @@ messages:
               return cached_node.clone();
           }
 
+          // Pre-emptively insert to break cycles.
+          // We will update this later if we find a different canonical node.
+          visited.insert(node_ptr, node_arc.clone());
+
           pb.inc(1);
 
           // Post-order: canonicalize children first
@@ -14435,6 +14943,7 @@ messages:
                       let mut candidate_guard = candidate_arc.write().unwrap();
                       candidate_guard.value.live_tokens |= node_live_tokens;
                   }
+                  // Update visited map with the true canonical node.
                   visited.insert(node_ptr, candidate_arc.clone());
                   return candidate_arc.clone();
               }
@@ -14442,7 +14951,7 @@ messages:
 
           // No match found. This node becomes a new canonical representative.
           bucket.push(node_arc.clone());
-          visited.insert(node_ptr, node_arc.clone());
+          // The visited map already contains (node_ptr, node_arc), which is correct in this case.
           node_arc
       }
 
@@ -16466,6 +16975,258 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
+  - user: |-
+      ```rust 'src/datastructures/arc_wrapper.rs'
+      use std::sync::{Arc, Weak};
+      use std::ops::Deref;
+      use std::fmt;
+      use std::hash::{Hash, Hasher};
+      use std::cmp::Ordering;
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+
+      /// An enum to hold either a strong (`Arc`) or weak (`Weak`) pointer to a node,
+      /// wrapped in a struct that allows pointer-based comparison and hashing.
+      #[derive(Debug)]
+      pub enum NodePtr<T> {
+          Strong(ArcPtrWrapper<T>),
+          Weak(WeakPtrWrapper<T>),
+      }
+
+      impl<T> NodePtr<T> {
+          /// Attempts to upgrade the pointer to an `Arc`, returning `None` if it's a `Weak`
+          /// pointer that can no longer be upgraded.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.as_arc().clone()),
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade(),
+              }
+          }
+
+          pub fn upgrade_wrapper(&self) -> Option<ArcPtrWrapper<T>> {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Some(arc_wrapper.clone()),
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().map(ArcPtrWrapper::new),
+              }
+          }
+
+          pub fn is_upgradable(&self) -> bool {
+              match self {
+                  NodePtr::Strong(_) => true,
+                  NodePtr::Weak(weak_wrapper) => weak_wrapper.upgrade().is_some(),
+              }
+          }
+
+          pub fn as_ptr(&self) -> *const T {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()),
+                  NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()),
+              }
+          }
+
+          /// Returns the raw pointer as a `usize` for comparison and hashing.
+          pub fn as_ptr_usize(&self) -> usize {
+              match self {
+                  NodePtr::Strong(arc_wrapper) => Arc::as_ptr(arc_wrapper.as_arc()) as usize,
+                  NodePtr::Weak(weak_wrapper) => Weak::as_ptr(weak_wrapper.as_weak()) as usize,
+              }
+          }
+
+          /// Returns `true` if the pointer is `Strong`.
+          pub fn is_strong(&self) -> bool {
+              matches!(self, NodePtr::Strong(_))
+          }
+      }
+
+      impl<T> Clone for NodePtr<T> {
+          fn clone(&self) -> Self {
+              match self {
+                  NodePtr::Strong(s) => NodePtr::Strong(s.clone()),
+                  NodePtr::Weak(w) => NodePtr::Weak(w.clone()),
+              }
+          }
+      }
+
+      impl<T> PartialEq for NodePtr<T> {
+          fn eq(&self, other: &Self) -> bool {
+              self.as_ptr_usize() == other.as_ptr_usize()
+          }
+      }
+
+      impl<T> Eq for NodePtr<T> {}
+
+      impl<T> Hash for NodePtr<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.as_ptr_usize().hash(state);
+          }
+      }
+
+      /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Arc`.
+      /// This allows `Arc<T>` instances to be used in collections like `BTreeSet` or
+      /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
+      /// It also dereferences to the underlying `Arc<T>`.
+      pub struct ArcPtrWrapper<T>(Arc<T>);
+
+      // ArcPtrWrapper serialization:
+      // Serializing based on pointer identity is not meaningful for JSON.
+      // We will serialize the *content* of the Arc.
+      // Deserialization will create a new Arc, so pointer identity will not be preserved.
+      // This is a fundamental limitation when serializing pointer-based identity wrappers.
+      impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+          fn to_json(&self) -> JSONNode {
+              self.0.as_ref().to_json() // Serialize the content
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+          }
+      }
+
+      impl<T> Clone for ArcPtrWrapper<T> {
+          fn clone(&self) -> Self {
+              ArcPtrWrapper(self.0.clone())
+          }
+      }
+
+      /// A wrapper around `Weak<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
+      /// and `Hash` based on the pointer value of the `Weak`.
+      /// This allows `Weak<T>` instances to be used as map/set keys where identity is
+      /// determined by the allocation pointer, not its content.
+      ///
+      /// Note:
+      /// - `Weak<T>` may fail to upgrade; code using this wrapper should be prepared
+      ///   to skip dangling weak references.
+      pub struct WeakPtrWrapper<T>(Weak<T>);
+
+      impl<T> WeakPtrWrapper<T> {
+          /// Creates a new `WeakPtrWrapper` from a `Weak<T>`.
+          pub fn new(weak: Weak<T>) -> Self {
+              WeakPtrWrapper(weak)
+          }
+
+          /// Returns a reference to the inner `Weak<T>`.
+          pub fn as_weak(&self) -> &Weak<T> {
+              &self.0
+          }
+
+          /// Attempts to upgrade the weak reference to an `Arc<T>`.
+          pub fn upgrade(&self) -> Option<Arc<T>> {
+              self.0.upgrade()
+          }
+
+          /// Consumes the wrapper and returns the inner `Weak<T>`.
+          pub fn into_weak(self) -> Weak<T> {
+              self.0
+          }
+      }
+
+      impl<T> Clone for WeakPtrWrapper<T> {
+          fn clone(&self) -> Self {
+              WeakPtrWrapper(self.0.clone())
+          }
+      }
+
+      impl<T> Deref for WeakPtrWrapper<T> {
+          type Target = Weak<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for WeakPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Weak::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+          }
+      }
+
+      impl<T> Eq for WeakPtrWrapper<T> {}
+
+      impl<T> Hash for WeakPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Weak::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for WeakPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("WeakPtrWrapper")
+               .field(&(Weak::as_ptr(&self.0) as *const ()))
+               .finish()
+          }
+      }
+
+      impl<T> ArcPtrWrapper<T> {
+          /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
+          pub fn new(arc: Arc<T>) -> Self {
+              ArcPtrWrapper(arc)
+          }
+
+          /// Returns a reference to the inner `Arc<T>`.
+          pub fn as_arc(&self) -> &Arc<T> {
+              &self.0
+          }
+
+          /// Consumes the wrapper and returns the inner `Arc<T>`.
+          pub fn into_arc(self) -> Arc<T> {
+              self.0
+          }
+      }
+
+      impl<T> Deref for ArcPtrWrapper<T> {
+          type Target = Arc<T>;
+          fn deref(&self) -> &Self::Target {
+              &self.0
+          }
+      }
+
+      impl<T> PartialEq for ArcPtrWrapper<T> {
+          fn eq(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.0, &other.0)
+          }
+      }
+
+      impl<T> Eq for ArcPtrWrapper<T> {}
+
+      impl<T> Hash for ArcPtrWrapper<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              (Arc::as_ptr(&self.0) as usize).hash(state);
+          }
+      }
+
+      impl<T> fmt::Debug for ArcPtrWrapper<T> {
+          fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+              f.debug_tuple("ArcPtrWrapper")
+               .field(&(Arc::as_ptr(&self.0) as *const ())) // Print the pointer
+               .finish()
+          }
+      }
+
+      impl <T> PartialOrd for ArcPtrWrapper<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for ArcPtrWrapper<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
+          }
+      }
+
+      impl<T> PartialOrd for NodePtr<T> {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              Some(self.cmp(other))
+          }
+      }
+
+      impl<T> Ord for NodePtr<T> {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.as_ptr_usize().cmp(&other.as_ptr_usize())
+          }
+      }
+
+      ```
+    metadata:
+      filename: src/datastructures/arc_wrapper.rs
   - user: |-
       ```rust 'src/datastructures/trie.rs'
       // #![deny(clippy::iter_over_hash_type)]
@@ -20071,47 +20832,41 @@ messages:
       `merge_nodes_trie2` doesn't seem to handle recursion correctly.
       Strong-ref recursion shouldn't be possible. But recursion involving a weak node certainly *is*.
       Fix it.
+
+      It seems `trie2_shape_hash` doesn't seem to handle recursion correctly.
+      In particular, it's possible to recursively call `trie2_shape_hash` on **upgraded** nodes (ie including weak nodes) *without* modifying the memo.
+      Strong-ref recursion shouldn't be possible. But recursion involving a weak node certainly *is*.
+      Fix it.
     metadata:
   - assistant: |-
-      Of course! Dealing with cycles in graph algorithms can be tricky. A missing pre-emptive insertion in a recursive traversal is a classic cause of stack overflows when cycles are present. Here are the patches to fix the issue in `deduplicate_recursive_trie2`.
+      Hello! As a helpful assistant, I've analyzed the code you provided. You've correctly identified an issue with potential infinite recursion in `trie2_shape_hash` when dealing with graph structures that have cycles (especially via weak pointers). This can cause `merge_nodes_trie2` to hang.
 
-      ### `src/constraint.rs`
+      The fix is to pre-emptively insert a placeholder value into the memoization map before making recursive calls. This breaks the cycle by providing a consistent hash value for nodes currently in the recursion stack.
 
-      I've identified an issue in `deduplicate_recursive_trie2` where it doesn't pre-emptively mark nodes as visited before recursing on their children. This leads to infinite recursion when a cycle (even one involving weak pointers) is encountered.
-
-      The fix is to add the node to the `visited` map at the beginning of the function to break cycles, similar to how it's handled in the equivalent function for the first precomputation trie. The `visited` map entry is then updated later if a different canonical node is found.
+      Here is the git diff patch for the fix. I've only modified `src/constraint.rs` as the other files appeared to be correct and were likely provided for context.
 
       ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1218,6 +1218,10 @@
-               return cached_node.clone();
+      @@ -1000,6 +1000,9 @@
+               return h;
            }
        
-      +    // Pre-emptively insert to break cycles.
-      +    // We will update this later if we find a different canonical node.
-      +    visited.insert(node_ptr, node_arc.clone());
+      +    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+      +    memo.insert(ptr, 0);
       +
-           pb.inc(1);
+           let node_guard = arc.read().unwrap();
+           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
        
-           // Post-order: canonicalize children first
-      @@ -1272,14 +1276,14 @@
-                       let mut candidate_guard = candidate_arc.write().unwrap();
-                       candidate_guard.value.live_tokens |= node_live_tokens;
-                   }
-      +            // Update visited map with the true canonical node.
-                   visited.insert(node_ptr, candidate_arc.clone());
-                   return candidate_arc.clone();
-               }
+      @@ -1028,6 +1031,7 @@
            }
        
-           // No match found. This node becomes a new canonical representative.
-           bucket.push(node_arc.clone());
-      -    visited.insert(node_ptr, node_arc.clone());
-      +    // The visited map already contains (node_ptr, node_arc), which is correct in this case.
-           node_arc
+           let final_hash = hasher.finish();
+      +    // Update the memo with the real hash.
+           memo.insert(ptr, final_hash);
+           final_hash
        }
-       
 
       ```
     metadata:
@@ -20124,7 +20879,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Add cycle detection pre-emption to
-      trie2 deduplication"'
+  - user: 'Changes committed with message: "Fix: Handle cycles in trie2_shape_hash
+      memoization"'
     metadata:
 ...
