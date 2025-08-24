@@ -784,11 +784,18 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
             node_guard.children_mut().retain(|_edge_key, dest_map| {
                 dest_map.retain(|child_wrapper, edge_value_bv| {
                     let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-                    let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
+                    let live_tokens_from_child = live_tokens_cache
+                        .get(&child_ptr)
                         .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
 
-                    let overlaps = !(&*edge_value_bv & live_tokens_from_child).is_empty();
-                    overlaps
+                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                    if live_tokens_for_this_edge.is_empty() {
+                        false // Prune this destination
+                    } else {
+                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
+                        true // Keep this destination
+                    }
                 });
                 !dest_map.is_empty()
             });
