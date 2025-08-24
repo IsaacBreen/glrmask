@@ -3855,7 +3855,7 @@ local_system:
       use std::cmp::Ordering;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::hash::{Hash, Hasher};
-      use std::ops::BitOr;
+      use std::ops::{BitOr, BitOrAssign};
       use std::fmt::{self, Display, Formatter};
       use std::sync::{Arc};
       use std::cell::RefCell;
@@ -4466,6 +4466,7 @@ local_system:
                   }
               }
               prune_dead_paths_trie2(&mut precomputed2);
+              merge_consecutive_edges_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -4667,6 +4668,144 @@ local_system:
               guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
           }
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
+      }
+
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let mut changed_in_pass = true;
+          let mut pass_num = 0;
+          while changed_in_pass {
+              pass_num += 1;
+              crate::debug!(3, "Running merge pass #{}", pass_num);
+              changed_in_pass = false;
+
+              let roots_vec: Vec<_> = roots.values().cloned().collect();
+              if roots_vec.is_empty() {
+                  break;
+              }
+              let all_nodes = Trie::all_nodes(&roots_vec);
+              let root_ptrs: HashSet<_> = roots_vec.iter().map(Arc::as_ptr).collect();
+
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, (usize, Option<StateID>), LLMTokenBV, NodePtr<RwLock<PrecomputeNode2>>)>> = HashMap::new();
+              let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+
+              for node_arc in &all_nodes {
+                  arc_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
+                  let node_ptr = Arc::as_ptr(node_arc);
+                  let guard = node_arc.read().unwrap();
+                  for (edge_key, dest_map) in guard.children() {
+                      for (child_wrapper, edge_bv) in dest_map {
+                          if let Some(child_arc) = child_wrapper.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone(), edge_bv.clone(), child_wrapper.clone()));
+                          }
+                      }
+                  }
+              }
+
+              // Find a candidate node to merge away.
+              let mut candidate_to_merge = None;
+
+              for b_arc in &all_nodes {
+                  let b_ptr = Arc::as_ptr(b_arc);
+                  let b_guard = b_arc.read().unwrap();
+
+                  // Condition 1: Not a root and not an end node.
+                  if root_ptrs.contains(&b_ptr) || b_guard.value.end {
+                      continue;
+                  }
+
+                  // Condition 2: Exactly one outgoing edge to a single child C.
+                  let mut outgoing_edge_info = None;
+                  if b_guard.children().len() == 1 {
+                      if let Some((ek_b, dest_map_b)) = b_guard.children().iter().next() {
+                          if dest_map_b.len() == 1 {
+                              if let Some((c_wrapper, bv_b)) = dest_map_b.iter().next() {
+                                  if let Some(c_arc) = c_wrapper.upgrade() {
+                                      outgoing_edge_info = Some((ek_b.clone(), c_arc, bv_b.clone(), c_wrapper.is_strong()));
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  if outgoing_edge_info.is_none() {
+                      continue;
+                  }
+                  let (ek_b, _c_arc, _bv_b, _is_strong_bc) = outgoing_edge_info.as_ref().unwrap();
+                  let (_k_b, s_b_opt) = ek_b;
+
+                  // Condition 3: Has at least one predecessor.
+                  let preds = if let Some(p) = predecessors.get(&b_ptr) {
+                      if p.is_empty() { continue; }
+                      p
+                  } else {
+                      continue;
+                  };
+
+                  // Condition 4: All incoming edges are mergeable.
+                  let all_preds_mergeable = preds.iter().all(|(_, ek_a, _, _)| {
+                      let (_k_a, s_a_opt) = ek_a;
+                      s_a_opt.is_none() || s_b_opt.is_none()
+                  });
+
+                  if all_preds_mergeable {
+                      candidate_to_merge = Some((b_arc.clone(), outgoing_edge_info.unwrap()));
+                      break; // Found one, let's process it and restart the pass.
+                  }
+              }
+
+              if let Some((b_arc, (ek_b, c_arc, bv_b, is_strong_bc))) = candidate_to_merge {
+                  changed_in_pass = true;
+                  let b_ptr = Arc::as_ptr(&b_arc);
+                  let preds = predecessors.remove(&b_ptr).unwrap_or_default();
+                  let (k_b, s_b_opt) = ek_b;
+
+                  for (a_ptr, ek_a, bv_a, b_node_ptr_from_a) in preds {
+                      let a_arc = arc_map.get(&a_ptr).unwrap();
+                      let mut a_guard = a_arc.write().unwrap();
+
+                      // 1. Remove edge A -> B
+                      if let Some(dest_map_a) = a_guard.children_mut().get_mut(&ek_a) {
+                          dest_map_a.remove(&b_node_ptr_from_a);
+                          if dest_map_a.is_empty() {
+                              a_guard.children_mut().remove(&ek_a);
+                          }
+                      }
+
+                      // 2. Add/merge edge A -> C
+                      let (k_a, s_a_opt) = ek_a;
+                      let k_new = k_a + k_b;
+                      let s_new_opt = s_a_opt.or(s_b_opt);
+                      let ek_new = (k_new, s_new_opt);
+                      let bv_new = bv_a & &bv_b;
+
+                      if !bv_new.is_empty() {
+                          let dest_map_new = a_guard.children_mut().entry(ek_new).or_default();
+                          let is_strong_ab = b_node_ptr_from_a.is_strong();
+                          let is_strong_ac = is_strong_ab && is_strong_bc;
+
+                          let c_key = if is_strong_ac {
+                              NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                          } else {
+                              NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                          };
+                          
+                          if let Some(existing_bv) = dest_map_new.get_mut(&c_key) {
+                              *existing_bv |= &bv_new;
+                          } else {
+                              dest_map_new.insert(c_key, bv_new);
+                          }
+                      }
+                  }
+              }
+          }
+          if pass_num > 1 {
+              crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
+          } else {
+              crate::debug!(2, "No consecutive edges to merge.");
+          }
       }
 
       fn trie2_shape_hash(
@@ -11288,8 +11427,7 @@ local_system:
                           1,
                           &mut HashMap::new(),
                       );
-                      let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                      let keep_going = !active_llm_tokens.is_empty();
+                      let keep_going = glr_s.is_ok();
                       if precomputed_node_data.value.end {
                           crate::debug!(3, "Trie2: Found end state for GLR state");
                           glr_s.log_gss(
@@ -11711,12 +11849,18 @@ local_system:
                               NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
                           };
                           
-                          *dest_map_new.entry(c_key).or_insert_with(LLMTokenBV::zeros) |= &bv_new;
+                          if let Some(existing_bv) = dest_map_new.get_mut(&c_key) {
+                              *existing_bv |= &bv_new;
+                          } else {
+                              dest_map_new.insert(c_key, bv_new);
+                          }
                       }
                   }
               }
           }
           if pass_num > 1 {
+              // If we made changes, prune any nodes that might have become unreachable.
+              prune_dead_paths_trie2(roots);
               crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
           } else {
               crate::debug!(2, "No consecutive edges to merge.");
@@ -17862,7 +18006,7 @@ messages:
       use std::cmp::Ordering;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::hash::{Hash, Hasher};
-      use std::ops::BitOr;
+      use std::ops::{BitOr, BitOrAssign};
       use std::fmt::{self, Display, Formatter};
       use std::sync::{Arc};
       use std::cell::RefCell;
@@ -18473,6 +18617,7 @@ messages:
                   }
               }
               prune_dead_paths_trie2(&mut precomputed2);
+              merge_consecutive_edges_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -18674,6 +18819,144 @@ messages:
               guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
           }
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
+      }
+
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let mut changed_in_pass = true;
+          let mut pass_num = 0;
+          while changed_in_pass {
+              pass_num += 1;
+              crate::debug!(3, "Running merge pass #{}", pass_num);
+              changed_in_pass = false;
+
+              let roots_vec: Vec<_> = roots.values().cloned().collect();
+              if roots_vec.is_empty() {
+                  break;
+              }
+              let all_nodes = Trie::all_nodes(&roots_vec);
+              let root_ptrs: HashSet<_> = roots_vec.iter().map(Arc::as_ptr).collect();
+
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, (usize, Option<StateID>), LLMTokenBV, NodePtr<RwLock<PrecomputeNode2>>)>> = HashMap::new();
+              let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+
+              for node_arc in &all_nodes {
+                  arc_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
+                  let node_ptr = Arc::as_ptr(node_arc);
+                  let guard = node_arc.read().unwrap();
+                  for (edge_key, dest_map) in guard.children() {
+                      for (child_wrapper, edge_bv) in dest_map {
+                          if let Some(child_arc) = child_wrapper.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone(), edge_bv.clone(), child_wrapper.clone()));
+                          }
+                      }
+                  }
+              }
+
+              // Find a candidate node to merge away.
+              let mut candidate_to_merge = None;
+
+              for b_arc in &all_nodes {
+                  let b_ptr = Arc::as_ptr(b_arc);
+                  let b_guard = b_arc.read().unwrap();
+
+                  // Condition 1: Not a root and not an end node.
+                  if root_ptrs.contains(&b_ptr) || b_guard.value.end {
+                      continue;
+                  }
+
+                  // Condition 2: Exactly one outgoing edge to a single child C.
+                  let mut outgoing_edge_info = None;
+                  if b_guard.children().len() == 1 {
+                      if let Some((ek_b, dest_map_b)) = b_guard.children().iter().next() {
+                          if dest_map_b.len() == 1 {
+                              if let Some((c_wrapper, bv_b)) = dest_map_b.iter().next() {
+                                  if let Some(c_arc) = c_wrapper.upgrade() {
+                                      outgoing_edge_info = Some((ek_b.clone(), c_arc, bv_b.clone(), c_wrapper.is_strong()));
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  if outgoing_edge_info.is_none() {
+                      continue;
+                  }
+                  let (ek_b, _c_arc, _bv_b, _is_strong_bc) = outgoing_edge_info.as_ref().unwrap();
+                  let (_k_b, s_b_opt) = ek_b;
+
+                  // Condition 3: Has at least one predecessor.
+                  let preds = if let Some(p) = predecessors.get(&b_ptr) {
+                      if p.is_empty() { continue; }
+                      p
+                  } else {
+                      continue;
+                  };
+
+                  // Condition 4: All incoming edges are mergeable.
+                  let all_preds_mergeable = preds.iter().all(|(_, ek_a, _, _)| {
+                      let (_k_a, s_a_opt) = ek_a;
+                      s_a_opt.is_none() || s_b_opt.is_none()
+                  });
+
+                  if all_preds_mergeable {
+                      candidate_to_merge = Some((b_arc.clone(), outgoing_edge_info.unwrap()));
+                      break; // Found one, let's process it and restart the pass.
+                  }
+              }
+
+              if let Some((b_arc, (ek_b, c_arc, bv_b, is_strong_bc))) = candidate_to_merge {
+                  changed_in_pass = true;
+                  let b_ptr = Arc::as_ptr(&b_arc);
+                  let preds = predecessors.remove(&b_ptr).unwrap_or_default();
+                  let (k_b, s_b_opt) = ek_b;
+
+                  for (a_ptr, ek_a, bv_a, b_node_ptr_from_a) in preds {
+                      let a_arc = arc_map.get(&a_ptr).unwrap();
+                      let mut a_guard = a_arc.write().unwrap();
+
+                      // 1. Remove edge A -> B
+                      if let Some(dest_map_a) = a_guard.children_mut().get_mut(&ek_a) {
+                          dest_map_a.remove(&b_node_ptr_from_a);
+                          if dest_map_a.is_empty() {
+                              a_guard.children_mut().remove(&ek_a);
+                          }
+                      }
+
+                      // 2. Add/merge edge A -> C
+                      let (k_a, s_a_opt) = ek_a;
+                      let k_new = k_a + k_b;
+                      let s_new_opt = s_a_opt.or(s_b_opt);
+                      let ek_new = (k_new, s_new_opt);
+                      let bv_new = bv_a & &bv_b;
+
+                      if !bv_new.is_empty() {
+                          let dest_map_new = a_guard.children_mut().entry(ek_new).or_default();
+                          let is_strong_ab = b_node_ptr_from_a.is_strong();
+                          let is_strong_ac = is_strong_ab && is_strong_bc;
+
+                          let c_key = if is_strong_ac {
+                              NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                          } else {
+                              NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                          };
+                          
+                          if let Some(existing_bv) = dest_map_new.get_mut(&c_key) {
+                              *existing_bv |= &bv_new;
+                          } else {
+                              dest_map_new.insert(c_key, bv_new);
+                          }
+                      }
+                  }
+              }
+          }
+          if pass_num > 1 {
+              crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
+          } else {
+              crate::debug!(2, "No consecutive edges to merge.");
+          }
       }
 
       fn trie2_shape_hash(
@@ -20935,185 +21218,756 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: Add an optimisation pass for the precompute2 tree that merges consecutive
-      edges, where possible. Generally, we can merge as long as not both of the edges
-      have state IDs. If one of them has a state ID, the merged edge inherits that.
-      And if neither do, it stays None. The pop value k on the edge just gets added.
+  - user: |-
+      `````ad-attachment
+      collapse: closed
+
+      ```rust
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let mut changed_in_pass = true;
+          let mut pass_num = 0;
+          while changed_in_pass {
+              pass_num += 1;
+              crate::debug!(3, "Running merge pass #{}", pass_num);
+              changed_in_pass = false;
+
+              let roots_vec: Vec<_> = roots.values().cloned().collect();
+              if roots_vec.is_empty() {
+                  break;
+              }
+              let all_nodes = Trie::all_nodes(&roots_vec);
+              let root_ptrs: HashSet<_> = roots_vec.iter().map(Arc::as_ptr).collect();
+
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, (usize, Option<StateID>), LLMTokenBV, NodePtr<RwLock<PrecomputeNode2>>)>> = HashMap::new();
+              let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+
+              for node_arc in &all_nodes {
+                  arc_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
+                  let node_ptr = Arc::as_ptr(node_arc);
+                  let guard = node_arc.read().unwrap();
+                  for (edge_key, dest_map) in guard.children() {
+                      for (child_wrapper, edge_bv) in dest_map {
+                          if let Some(child_arc) = child_wrapper.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone(), edge_bv.clone(), child_wrapper.clone()));
+                          }
+                      }
+                  }
+              }
+
+              // Find a candidate node to merge away.
+              let mut candidate_to_merge = None;
+
+              for b_arc in &all_nodes {
+                  let b_ptr = Arc::as_ptr(b_arc);
+                  let b_guard = b_arc.read().unwrap();
+
+                  // Condition 1: Not a root and not an end node.
+                  if root_ptrs.contains(&b_ptr) || b_guard.value.end {
+                      continue;
+                  }
+
+                  // Condition 2: Exactly one outgoing edge to a single child C.
+                  let mut outgoing_edge_info = None;
+                  if b_guard.children().len() == 1 {
+                      if let Some((ek_b, dest_map_b)) = b_guard.children().iter().next() {
+                          if dest_map_b.len() == 1 {
+                              if let Some((c_wrapper, bv_b)) = dest_map_b.iter().next() {
+                                  if let Some(c_arc) = c_wrapper.upgrade() {
+                                      outgoing_edge_info = Some((ek_b.clone(), c_arc, bv_b.clone(), c_wrapper.is_strong()));
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  if outgoing_edge_info.is_none() {
+                      continue;
+                  }
+                  let (ek_b, _c_arc, _bv_b, _is_strong_bc) = outgoing_edge_info.as_ref().unwrap();
+                  let (_k_b, s_b_opt) = ek_b;
+
+                  // Condition 3: Has at least one predecessor.
+                  let preds = if let Some(p) = predecessors.get(&b_ptr) {
+                      if p.is_empty() { continue; }
+                      p
+                  } else {
+                      continue;
+                  };
+
+                  // Condition 4: All incoming edges are mergeable.
+                  let all_preds_mergeable = preds.iter().all(|(_, ek_a, _, _)| {
+                      let (_k_a, s_a_opt) = ek_a;
+                      s_a_opt.is_none() || s_b_opt.is_none()
+                  });
+
+                  if all_preds_mergeable {
+                      candidate_to_merge = Some((b_arc.clone(), outgoing_edge_info.unwrap()));
+                      break; // Found one, let's process it and restart the pass.
+                  }
+              }
+
+              if let Some((b_arc, (ek_b, c_arc, bv_b, is_strong_bc))) = candidate_to_merge {
+                  changed_in_pass = true;
+                  let b_ptr = Arc::as_ptr(&b_arc);
+                  let preds = predecessors.remove(&b_ptr).unwrap_or_default();
+                  let (k_b, s_b_opt) = ek_b;
+
+                  for (a_ptr, ek_a, bv_a, b_node_ptr_from_a) in preds {
+                      let a_arc = arc_map.get(&a_ptr).unwrap();
+                      let mut a_guard = a_arc.write().unwrap();
+
+                      // 1. Remove edge A -> B
+                      if let Some(dest_map_a) = a_guard.children_mut().get_mut(&ek_a) {
+                          dest_map_a.remove(&b_node_ptr_from_a);
+                          if dest_map_a.is_empty() {
+                              a_guard.children_mut().remove(&ek_a);
+                          }
+                      }
+
+                      // 2. Add/merge edge A -> C
+                      let (k_a, s_a_opt) = ek_a;
+                      let k_new = k_a + k_b;
+                      let s_new_opt = s_a_opt.or(s_b_opt);
+                      let ek_new = (k_new, s_new_opt);
+                      let bv_new = bv_a & &bv_b;
+
+                      if !bv_new.is_empty() {
+                          let dest_map_new = a_guard.children_mut().entry(ek_new).or_default();
+                          let is_strong_ab = b_node_ptr_from_a.is_strong();
+                          let is_strong_ac = is_strong_ab && is_strong_bc;
+
+                          let c_key = if is_strong_ac {
+                              NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                          } else {
+                              NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                          };
+                          
+                          if let Some(existing_bv) = dest_map_new.get_mut(&c_key) {
+                              *existing_bv |= &bv_new;
+                          } else {
+                              dest_map_new.insert(c_key, bv_new);
+                          }
+                      }
+                  }
+              }
+          }
+          if pass_num > 1 {
+              crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
+          } else {
+              crate::debug!(2, "No consecutive edges to merge.");
+          }
+      }
+      ```
+
+      ```rust
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
+
+          let mut changed = true;
+          let mut iterations = 0;
+          while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+              iterations += 1;
+              changed = false;
+
+              let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+              for node_arc in &all_nodes_current {
+                  let guard = node_arc.read().unwrap();
+                  for dest_map in guard.children().values() {
+                      for child_wrap in dest_map.keys() {
+                          if let Some(child_arc) = child_wrap.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push(node_arc.clone());
+                          }
+                      }
+                  }
+              }
+
+              for i_arc in &all_nodes_current {
+                  let i_ptr = Arc::as_ptr(i_arc);
+
+                  if root_ptrs.contains(&i_ptr) { continue; }
+                  if i_arc.read().unwrap().value.end { continue; }
+
+                  let outgoing_edges: Vec<_> = {
+                      let i_guard = i_arc.read().unwrap();
+                      i_guard.children().iter().flat_map(|(ek, dest_map)| {
+                          dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+                      }).collect()
+                  };
+                  if outgoing_edges.len() != 1 { continue; }
+
+                  let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+                  let (k_ic, s_ic_opt) = edge_key_ic;
+                  let c_arc = match c_wrapper.upgrade() {
+                      Some(arc) => arc,
+                      None => continue, // Dangling weak pointer, will be pruned later
+                  };
+
+                  let parents = match predecessors.get(&i_ptr) {
+                      Some(preds) if !preds.is_empty() => preds.clone(),
+                      _ => continue,
+                  };
+
+                  for p_arc in parents {
+                      let mut p_guard = p_arc.write().unwrap();
+
+                      let mut modifications = Vec::new();
+
+                      for (ek_pi, dest_map) in p_guard.children() {
+                          for (wrapper_pi, bv_pi) in dest_map {
+                              if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+                                  let (k_pi, s_pi_opt) = ek_pi;
+
+                                  if s_pi_opt.is_some() && s_ic_opt.is_some() {
+                                      continue;
+                                  }
+
+                                  let k_new = k_pi + k_ic;
+                                  let s_new_opt = s_pi_opt.or(s_ic_opt);
+                                  let ek_new = (k_new, s_new_opt);
+                                  let bv_new = bv_pi & &bv_ic;
+
+                                  if !bv_new.is_empty() {
+                                      let c_wrapper_new = if wrapper_pi.is_strong() {
+                                          NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                                      } else {
+                                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                                      };
+                                      modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+                                  } else {
+                                      modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+                                  }
+                              }
+                          }
+                      }
+
+                      if !modifications.is_empty() {
+                          changed = true;
+                          for (to_add, to_remove) in modifications {
+                              if let Some((ek, wrapper)) = to_remove {
+                                  if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+                                      dest_map.remove(&wrapper);
+                                      if dest_map.is_empty() {
+                                          p_guard.children_mut().remove(&ek);
+                                      }
+                                  }
+                              }
+                              if let Some((ek, wrapper, bv)) = to_add {
+                                  p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          if iterations > 0 {
+              prune_dead_paths_trie2(roots);
+          }
+          crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
+      }
+      ```
+
+      `````
+
+      Which implementation is better?
+
+      Gemini: 1
+      GPT-5: 1
+      Opus 4.1: 1
+
+      Reversed:
+
+      ---
+
+      `````ad-attachment
+      collapse: closed
+
+      ```rust
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
+
+          let mut changed = true;
+          let mut iterations = 0;
+          while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+              iterations += 1;
+              changed = false;
+
+              let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+              for node_arc in &all_nodes_current {
+                  let guard = node_arc.read().unwrap();
+                  for dest_map in guard.children().values() {
+                      for child_wrap in dest_map.keys() {
+                          if let Some(child_arc) = child_wrap.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push(node_arc.clone());
+                          }
+                      }
+                  }
+              }
+
+              for i_arc in &all_nodes_current {
+                  let i_ptr = Arc::as_ptr(i_arc);
+
+                  if root_ptrs.contains(&i_ptr) { continue; }
+                  if i_arc.read().unwrap().value.end { continue; }
+
+                  let outgoing_edges: Vec<_> = {
+                      let i_guard = i_arc.read().unwrap();
+                      i_guard.children().iter().flat_map(|(ek, dest_map)| {
+                          dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+                      }).collect()
+                  };
+                  if outgoing_edges.len() != 1 { continue; }
+
+                  let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+                  let (k_ic, s_ic_opt) = edge_key_ic;
+                  let c_arc = match c_wrapper.upgrade() {
+                      Some(arc) => arc,
+                      None => continue, // Dangling weak pointer, will be pruned later
+                  };
+
+                  let parents = match predecessors.get(&i_ptr) {
+                      Some(preds) if !preds.is_empty() => preds.clone(),
+                      _ => continue,
+                  };
+
+                  for p_arc in parents {
+                      let mut p_guard = p_arc.write().unwrap();
+
+                      let mut modifications = Vec::new();
+
+                      for (ek_pi, dest_map) in p_guard.children() {
+                          for (wrapper_pi, bv_pi) in dest_map {
+                              if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+                                  let (k_pi, s_pi_opt) = ek_pi;
+
+                                  if s_pi_opt.is_some() && s_ic_opt.is_some() {
+                                      continue;
+                                  }
+
+                                  let k_new = k_pi + k_ic;
+                                  let s_new_opt = s_pi_opt.or(s_ic_opt);
+                                  let ek_new = (k_new, s_new_opt);
+                                  let bv_new = bv_pi & &bv_ic;
+
+                                  if !bv_new.is_empty() {
+                                      let c_wrapper_new = if wrapper_pi.is_strong() {
+                                          NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                                      } else {
+                                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                                      };
+                                      modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+                                  } else {
+                                      modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+                                  }
+                              }
+                          }
+                      }
+
+                      if !modifications.is_empty() {
+                          changed = true;
+                          for (to_add, to_remove) in modifications {
+                              if let Some((ek, wrapper)) = to_remove {
+                                  if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+                                      dest_map.remove(&wrapper);
+                                      if dest_map.is_empty() {
+                                          p_guard.children_mut().remove(&ek);
+                                      }
+                                  }
+                              }
+                              if let Some((ek, wrapper, bv)) = to_add {
+                                  p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          if iterations > 0 {
+              prune_dead_paths_trie2(roots);
+          }
+          crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
+      }
+      ```
+
+      ```rust
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let mut changed_in_pass = true;
+          let mut pass_num = 0;
+          while changed_in_pass {
+              pass_num += 1;
+              crate::debug!(3, "Running merge pass #{}", pass_num);
+              changed_in_pass = false;
+
+              let roots_vec: Vec<_> = roots.values().cloned().collect();
+              if roots_vec.is_empty() {
+                  break;
+              }
+              let all_nodes = Trie::all_nodes(&roots_vec);
+              let root_ptrs: HashSet<_> = roots_vec.iter().map(Arc::as_ptr).collect();
+
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, (usize, Option<StateID>), LLMTokenBV, NodePtr<RwLock<PrecomputeNode2>>)>> = HashMap::new();
+              let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+
+              for node_arc in &all_nodes {
+                  arc_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
+                  let node_ptr = Arc::as_ptr(node_arc);
+                  let guard = node_arc.read().unwrap();
+                  for (edge_key, dest_map) in guard.children() {
+                      for (child_wrapper, edge_bv) in dest_map {
+                          if let Some(child_arc) = child_wrapper.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone(), edge_bv.clone(), child_wrapper.clone()));
+                          }
+                      }
+                  }
+              }
+
+              // Find a candidate node to merge away.
+              let mut candidate_to_merge = None;
+
+              for b_arc in &all_nodes {
+                  let b_ptr = Arc::as_ptr(b_arc);
+                  let b_guard = b_arc.read().unwrap();
+
+                  // Condition 1: Not a root and not an end node.
+                  if root_ptrs.contains(&b_ptr) || b_guard.value.end {
+                      continue;
+                  }
+
+                  // Condition 2: Exactly one outgoing edge to a single child C.
+                  let mut outgoing_edge_info = None;
+                  if b_guard.children().len() == 1 {
+                      if let Some((ek_b, dest_map_b)) = b_guard.children().iter().next() {
+                          if dest_map_b.len() == 1 {
+                              if let Some((c_wrapper, bv_b)) = dest_map_b.iter().next() {
+                                  if let Some(c_arc) = c_wrapper.upgrade() {
+                                      outgoing_edge_info = Some((ek_b.clone(), c_arc, bv_b.clone(), c_wrapper.is_strong()));
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  if outgoing_edge_info.is_none() {
+                      continue;
+                  }
+                  let (ek_b, _c_arc, _bv_b, _is_strong_bc) = outgoing_edge_info.as_ref().unwrap();
+                  let (_k_b, s_b_opt) = ek_b;
+
+                  // Condition 3: Has at least one predecessor.
+                  let preds = if let Some(p) = predecessors.get(&b_ptr) {
+                      if p.is_empty() { continue; }
+                      p
+                  } else {
+                      continue;
+                  };
+
+                  // Condition 4: All incoming edges are mergeable.
+                  let all_preds_mergeable = preds.iter().all(|(_, ek_a, _, _)| {
+                      let (_k_a, s_a_opt) = ek_a;
+                      s_a_opt.is_none() || s_b_opt.is_none()
+                  });
+
+                  if all_preds_mergeable {
+                      candidate_to_merge = Some((b_arc.clone(), outgoing_edge_info.unwrap()));
+                      break; // Found one, let's process it and restart the pass.
+                  }
+              }
+
+              if let Some((b_arc, (ek_b, c_arc, bv_b, is_strong_bc))) = candidate_to_merge {
+                  changed_in_pass = true;
+                  let b_ptr = Arc::as_ptr(&b_arc);
+                  let preds = predecessors.remove(&b_ptr).unwrap_or_default();
+                  let (k_b, s_b_opt) = ek_b;
+
+                  for (a_ptr, ek_a, bv_a, b_node_ptr_from_a) in preds {
+                      let a_arc = arc_map.get(&a_ptr).unwrap();
+                      let mut a_guard = a_arc.write().unwrap();
+
+                      // 1. Remove edge A -> B
+                      if let Some(dest_map_a) = a_guard.children_mut().get_mut(&ek_a) {
+                          dest_map_a.remove(&b_node_ptr_from_a);
+                          if dest_map_a.is_empty() {
+                              a_guard.children_mut().remove(&ek_a);
+                          }
+                      }
+
+                      // 2. Add/merge edge A -> C
+                      let (k_a, s_a_opt) = ek_a;
+                      let k_new = k_a + k_b;
+                      let s_new_opt = s_a_opt.or(s_b_opt);
+                      let ek_new = (k_new, s_new_opt);
+                      let bv_new = bv_a & &bv_b;
+
+                      if !bv_new.is_empty() {
+                          let dest_map_new = a_guard.children_mut().entry(ek_new).or_default();
+                          let is_strong_ab = b_node_ptr_from_a.is_strong();
+                          let is_strong_ac = is_strong_ab && is_strong_bc;
+
+                          let c_key = if is_strong_ac {
+                              NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                          } else {
+                              NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                          };
+                          
+                          if let Some(existing_bv) = dest_map_new.get_mut(&c_key) {
+                              *existing_bv |= &bv_new;
+                          } else {
+                              dest_map_new.insert(c_key, bv_new);
+                          }
+                      }
+                  }
+              }
+          }
+          if pass_num > 1 {
+              crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
+          } else {
+              crate::debug!(2, "No consecutive edges to merge.");
+          }
+      }
+      ```
+
+      `````
+
+      Which implementation is better?
+
+      Gemini: 2
+      GPT-5: 
+      Opus 4.1: 2
+
+      ---
+
+      ``````ad-assistant_message
+      collapse: closed
+      title: opus 4.1
+
+      Looking at both implementations, **the first implementation is significantly better** for several critical reasons:
+
+      ## Correctness and Safety
+
+      **First implementation:**
+      - Processes one merge candidate at a time and restarts the pass
+      - Ensures complete consistency before moving to the next merge
+      - Maintains detailed tracking of edge relationships and dependencies
+
+      **Second implementation:**
+      - Attempts to process multiple merges simultaneously within a single pass
+      - Modifies the trie structure while iterating over it, risking inconsistent state
+      - Could miss merge opportunities that become available after earlier merges in the same pass
+
+      ## Key Issues with the Second Implementation
+
+      1. **Concurrent Modification Problem**: The second version modifies the trie while iterating over `all_nodes_current`, which can lead to:
+         - Missed merge opportunities
+         - Inconsistent intermediate states
+         - Potential data races or corruption
+
+      2. **Incomplete Merge Detection**: By not restarting after each merge, it may miss cascading merge opportunities where one merge enables another.
+
+      3. **Pointer Handling**: Uses `as_ptr_usize()` comparisons which are more error-prone than the first implementation's systematic approach.
+
+      ## Algorithm Design
+
+      The first implementation follows a **conservative, methodical approach**:
+      ```rust
+      // Find ONE candidate, merge it, restart
+      for candidate in candidates {
+          if is_mergeable(candidate) {
+              perform_merge(candidate);
+              break; // Restart the pass
+          }
+      }
+      ```
+
+      The second implementation uses a **batch processing approach** that's riskier:
+      ```rust
+      // Try to process ALL merges in one pass
+      for node in all_nodes {
+          for parent in parents_of_node {
+              // Modify while iterating - dangerous!
+              perform_merge_if_possible(parent, node);
+          }
+      }
+      ```
+
+      ## Recommendation
+
+      Use the **first implementation**. While it may require more passes and could be slower, it's:
+      - More likely to be correct
+      - Easier to debug and maintain
+      - Safer from data corruption
+      - More thorough in finding all possible merges
+
+      For trie preprocessing algorithms, correctness is paramount over performance optimization. The extra passes in the first implementation are a worthwhile trade-off for reliability.
+
+      ``````
+
+      ``````ad-assistant_message
+      collapse: closed
+      title: gpt-5
+
+      Short answer: the first implementation is better.
+
+      Why the first is preferable
+      - Correct semantics for existing A→C edges: it merges bitvectors by OR-ing into an existing entry (dest_map_new.get_mut(...); |=). The second blindly overwrites, which can lose information.
+      - Correct pointer-strength propagation: it computes is_strong_ac = is_strong_ab && is_strong_bc. The second ignores B→C strength and makes A→C strong whenever A→B was strong, which can pin nodes unintentionally and change GC/lifetime behavior.
+      - Safer key removal: it removes A→B using the exact NodePtr key it captured, not by comparing raw pointers cast to usize. The pointer-as-usize approach in the second is brittle.
+      - Cohesive merge precondition: it only merges B away when all incoming edges are mergeable, preserving invariants and avoiding half-collapsed structures.
+      - No arbitrary iteration cap: it runs to a fixed point rather than stopping after 10 iterations, which can leave work undone on larger tries.
+
+      Pros of the second (but not enough to outweigh the cons)
+      - Simpler control flow.
+      - Opportunistic partial merges can reduce passes.
+      - Calls prune_dead_paths_trie2 at the end.
+
+      If you keep the second, fix these to approach parity
+      - OR bitvectors when an A→C entry already exists instead of overwriting.
+      - Compute pointer strength as strong_ab && strong_bc.
+      - Avoid pointer-as-usize equality; remove using the exact NodePtr key you found while iterating.
+      - Consider removing the fixed iteration limit or making it adaptive with a safety guard and logging.
+      - Be aware that partial merges change invariants; ensure downstream code tolerates nodes that remain partially collapsed.
+
+      Nice-to-have for the first
+      - Optionally call prune_dead_paths_trie2 at the end to clean up unreachable nodes.
+      - If performance is an issue, batch multiple safe candidates per pass instead of one-at-a-time.
+
+      ``````
+
+      ---
+
+      ``````ad-assistant_message
+      collapse: closed
+      title: opus 4.1
+
+      Looking at these two implementations, I can see they take fundamentally different approaches to merging consecutive edges. Let me analyze the key differences:
+
+      ## Key Differences
+
+      **First Implementation:**
+      - Processes multiple merge candidates in a single pass
+      - Has a hard iteration limit (10) to prevent infinite loops
+      - Simpler data structures
+      - Calls `prune_dead_paths_trie2` at the end
+
+      **Second Implementation:**
+      - Processes only one merge candidate per pass
+      - No artificial iteration limit
+      - More detailed predecessor tracking with edge information
+      - Missing the pruning step
+
+      ## Analysis
+
+      ### Correctness
+      The **second implementation** is more correct because:
+      1. **Atomic operations**: By processing one merge at a time and rebuilding the graph metadata after each merge, it avoids potential race conditions or ordering issues
+      2. **Edge strength handling**: More explicit about strong/weak reference propagation (strong AND strong = strong)
+      3. **No artificial limits**: Won't stop prematurely due to an iteration cap
+
+      ### Performance
+      The **first implementation** is more efficient:
+      - Processes multiple merges per pass (fewer graph traversals)
+      - Less memory overhead (no `arc_map`)
+      - Fewer passes overall
+
+      ### Issues
+
+      **First implementation issues:**
+      - The iteration limit of 10 could prevent complete merging in complex graphs
+      - Concurrent modifications in the same pass could lead to incorrect results if nodes interact
+
+      **Second implementation issues:**
+      - **Missing pruning**: No call to `prune_dead_paths_trie2` could leave dead nodes
+      - **Performance**: Many more passes required (one per merge)
+      - **Redundant work**: Rebuilds all metadata after each single merge
+
+      ## Recommendation
+
+      **Neither implementation is ideal as-is.** The best approach would be a hybrid:
+
+      ```rust
+      // Combine the best of both:
+      // - Process one merge at a time for correctness (from second)
+      // - But batch multiple non-interfering merges when possible
+      // - Include pruning at the end (from first)
+      // - No artificial iteration limit
+      ```
+
+      If I had to choose between these two as-is, I'd pick the **second implementation** but add the missing pruning call:
+
+      ```rust
+      if pass_num > 1 {
+          prune_dead_paths_trie2(roots);
+          crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
+      }
+      ```
+
+      The correctness guarantees of the second implementation outweigh the performance benefits of the first, especially since graph merging is typically not a hot path operation.
+
+      ``````
+
+      ``````ad-assistant_message
+      collapse: closed
+      title: gpt-5
+
+      Short answer: the second one.
+
+      Why version 2 is better
+      - No arbitrary iteration cap: It runs to a fixed point instead of stopping after 10 iterations, so it won’t leave merge opportunities unperformed.
+      - Correct handling of duplicate edges: It ORs the bitvector if an A->C edge with the same key already exists; the first version overwrites, losing bits.
+      - Correct strong/weak propagation: It sets A->C strong only if both A->B and B->C are strong (logical AND). The first version uses only the A->B strength and ignores B->C, which is incorrect.
+      - Precise, safer edits: It records the exact edge key and NodePtr used by each predecessor, removes that specific edge, and adds/merges the new one. The first version re-finds edges by scanning and pointer-matching, which is slower and more fragile.
+      - Rebuilds analysis per pass: Recomputes predecessors and roots each pass, avoiding staleness issues after in-place mutations.
+
+      What to carry over or adjust
+      - Consider calling prune_dead_paths_trie2(roots) at the end (as the first version does). Not strictly necessary for correctness because unreachable nodes won’t be revisited by Trie::all_nodes, but pruning cleans dangling weaks and frees memory earlier.
+      - Potential performance tradeoff: Version 2 merges one node per pass, which can mean more passes. If needed, you can batch multiple independent candidates per pass, but keep the “precise edge info” approach to avoid staleness.
+      - Ensure NodePtr equality/hash treat strong vs weak to the same target as equal if you expect de-dup across strength variants. If not, you may still get parallel entries for the same target differing only in strength. Version 2 already minimizes this by canonicalizing strength to is_strong_ab && is_strong_bc, but de-dup semantics depend on your Eq/Hash for NodePtr.
+
+      Net: Version 2 is more correct and easier to reason about. Add a final prune call and, if needed, optimize by merging more than one candidate per pass once correctness is locked in.
+
+      ``````
+
+      ---
+
+      I'll use implementation 1.
+      However, there are some useful insights we can carry over from implementation 2.
+      Do it.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your Rust code. Adding an optimization pass to merge consecutive edges in your `precompute2` trie sounds like a great way to improve performance. Here are the necessary changes to implement this feature.
+      Of course! Based on the analysis, the first implementation is indeed more robust. The key insight from the second implementation is to perform a cleanup pass by pruning dead paths after the merging is complete.
 
-      I'll provide a git diff for `src/constraint.rs` which includes the new optimization function and integrates it into your precomputation pipeline.
-
-      ### `src/constraint.rs`
-
-      I've added the `merge_consecutive_edges_trie2` function and placed its call after `prune_dead_paths_trie2` and before `merge_nodes_trie2`. This ordering helps simplify the graph before the more expensive node-merging pass. I also added a necessary `use` statement for `BitOrAssign`.
+      Here are the changes to incorporate that insight into `src/constraint.rs`.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -10,7 +10,7 @@
-       use std::cmp::Ordering;
-       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-       use std::hash::{Hash, Hasher};
-      -use std::ops::BitOr;
-      +use std::ops::{BitOr, BitOrAssign};
-       use std::fmt::{self, Display, Formatter};
-       use std::sync::{Arc};
-       use std::cell::RefCell;
-      @@ -487,6 +487,7 @@
-                   }
+      @@ -1000,7 +1000,9 @@
                }
-               prune_dead_paths_trie2(&mut precomputed2);
-      +        merge_consecutive_edges_trie2(&mut precomputed2);
-               merge_nodes_trie2(&mut precomputed2);
-               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
-               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
-      @@ -628,6 +629,114 @@
-           crate::debug!(2, "Finished pruning dead paths from trie 2.");
-       }
-       
-      +fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-      +    crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
-      +
-      +    let mut changed_in_pass = true;
-      +    let mut pass_num = 0;
-      +    while changed_in_pass {
-      +        pass_num += 1;
-      +        crate::debug!(3, "Running merge pass #{}", pass_num);
-      +        changed_in_pass = false;
-      +
-      +        let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +        if roots_vec.is_empty() {
-      +            break;
-      +        }
-      +        let all_nodes = Trie::all_nodes(&roots_vec);
-      +        let root_ptrs: HashSet<_> = roots_vec.iter().map(Arc::as_ptr).collect();
-      +
-      +        let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, (usize, Option<StateID>), LLMTokenBV, NodePtr<RwLock<PrecomputeNode2>>)>> = HashMap::new();
-      +        let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-      +
-      +        for node_arc in &all_nodes {
-      +            arc_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
-      +            let node_ptr = Arc::as_ptr(node_arc);
-      +            let guard = node_arc.read().unwrap();
-      +            for (edge_key, dest_map) in guard.children() {
-      +                for (child_wrapper, edge_bv) in dest_map {
-      +                    if let Some(child_arc) = child_wrapper.upgrade() {
-      +                        let child_ptr = Arc::as_ptr(&child_arc);
-      +                        predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone(), edge_bv.clone(), child_wrapper.clone()));
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        // Find a candidate node to merge away.
-      +        let mut candidate_to_merge = None;
-      +
-      +        for b_arc in &all_nodes {
-      +            let b_ptr = Arc::as_ptr(b_arc);
-      +            let b_guard = b_arc.read().unwrap();
-      +
-      +            // Condition 1: Not a root and not an end node.
-      +            if root_ptrs.contains(&b_ptr) || b_guard.value.end {
-      +                continue;
-      +            }
-      +
-      +            // Condition 2: Exactly one outgoing edge to a single child C.
-      +            let mut outgoing_edge_info = None;
-      +            if b_guard.children().len() == 1 {
-      +                if let Some((ek_b, dest_map_b)) = b_guard.children().iter().next() {
-      +                    if dest_map_b.len() == 1 {
-      +                        if let Some((c_wrapper, bv_b)) = dest_map_b.iter().next() {
-      +                            if let Some(c_arc) = c_wrapper.upgrade() {
-      +                                outgoing_edge_info = Some((ek_b.clone(), c_arc, bv_b.clone(), c_wrapper.is_strong()));
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            if outgoing_edge_info.is_none() {
-      +                continue;
-      +            }
-      +            let (ek_b, _c_arc, _bv_b, _is_strong_bc) = outgoing_edge_info.as_ref().unwrap();
-      +            let (_k_b, s_b_opt) = ek_b;
-      +
-      +            // Condition 3: Has at least one predecessor.
-      +            let preds = if let Some(p) = predecessors.get(&b_ptr) {
-      +                if p.is_empty() { continue; }
-      +                p
-      +            } else {
-      +                continue;
-      +            };
-      +
-      +            // Condition 4: All incoming edges are mergeable.
-      +            let all_preds_mergeable = preds.iter().all(|(_, ek_a, _, _)| {
-      +                let (_k_a, s_a_opt) = ek_a;
-      +                s_a_opt.is_none() || s_b_opt.is_none()
-      +            });
-      +
-      +            if all_preds_mergeable {
-      +                candidate_to_merge = Some((b_arc.clone(), outgoing_edge_info.unwrap()));
-      +                break; // Found one, let's process it and restart the pass.
-      +            }
-      +        }
-      +
-      +        if let Some((b_arc, (ek_b, c_arc, bv_b, is_strong_bc))) = candidate_to_merge {
-      +            changed_in_pass = true;
-      +            let b_ptr = Arc::as_ptr(&b_arc);
-      +            let preds = predecessors.remove(&b_ptr).unwrap_or_default();
-      +            let (k_b, s_b_opt) = ek_b;
-      +
-      +            for (a_ptr, ek_a, bv_a, b_node_ptr_from_a) in preds {
-      +                let a_arc = arc_map.get(&a_ptr).unwrap();
-      +                let mut a_guard = a_arc.write().unwrap();
-      +
-      +                // 1. Remove edge A -> B
-      +                if let Some(dest_map_a) = a_guard.children_mut().get_mut(&ek_a) {
-      +                    dest_map_a.remove(&b_node_ptr_from_a);
-      +                    if dest_map_a.is_empty() {
-      +                        a_guard.children_mut().remove(&ek_a);
-      +                    }
-      +                }
-      +
-      +                // 2. Add/merge edge A -> C
-      +                let (k_a, s_a_opt) = ek_a;
-      +                let k_new = k_a + k_b;
-      +                let s_new_opt = s_a_opt.or(s_b_opt);
-      +                let ek_new = (k_new, s_new_opt);
-      +                let bv_new = bv_a & &bv_b;
-      +
-      +                if !bv_new.is_empty() {
-      +                    let dest_map_new = a_guard.children_mut().entry(ek_new).or_default();
-      +                    let is_strong_ab = b_node_ptr_from_a.is_strong();
-      +                    let is_strong_ac = is_strong_ab && is_strong_bc;
-      +
-      +                    let c_key = if is_strong_ac {
-      +                        NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
-      +                    } else {
-      +                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
-      +                    };
-      +                    
-      +                    *dest_map_new.entry(c_key).or_insert_with(LLMTokenBV::zeros) |= &bv_new;
-      +                }
-      +            }
-      +        }
-      +    }
-      +    if pass_num > 1 {
+           }
+           if pass_num > 1 {
+      -        crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
+      +        // If we made changes, prune any nodes that might have become unreachable.
+      +        prune_dead_paths_trie2(roots);
       +        crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
-      +    } else {
-      +        crate::debug!(2, "No consecutive edges to merge.");
-      +    }
-      +}
-      +
-       fn trie2_shape_hash(
-           arc: &Arc<RwLock<PrecomputeNode2>>,
-           memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+           } else {
+               crate::debug!(2, "No consecutive edges to merge.");
+           }
 
       ```
-
-      These changes should correctly implement the desired optimization. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -21124,7 +21978,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Add merge_consecutive_edges_trie2
-      optimization pass"'
+  - user: 'Changes committed with message: "Refactor get_mask logic and add post-merge
+      pruning for Trie2"'
     metadata:
 ...

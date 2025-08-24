@@ -957,6 +957,8 @@ fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLo
         }
     }
     if pass_num > 1 {
+        // If we made changes, prune any nodes that might have become unreachable.
+        prune_dead_paths_trie2(roots);
         crate::debug!(2, "Finished merging consecutive edges after {} passes.", pass_num - 1);
     } else {
         crate::debug!(2, "No consecutive edges to merge.");
