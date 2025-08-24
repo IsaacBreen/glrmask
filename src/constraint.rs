@@ -626,7 +626,8 @@ impl GrammarConstraint {
         //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
         //     &llm_vocab.as_ref().unwrap().llm_token_map,
         // );
-        prune_dead_paths_trie2(&mut precomputed2);
+        let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+        // prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -992,6 +993,10 @@ fn deduplicate_recursive_trie2(
         return cached_node.clone();
     }
 
+    // Pre-emptively insert to break cycles.
+    // We will update this later if we find a different canonical node.
+    visited.insert(node_ptr, node_arc.clone());
+
     pb.inc(1);
 
     // Post-order: canonicalize children first
@@ -1047,6 +1052,7 @@ fn deduplicate_recursive_trie2(
                 let mut candidate_guard = candidate_arc.write().unwrap();
                 candidate_guard.value.live_tokens |= node_live_tokens;
             }
+            // Update visited map with the true canonical node.
             visited.insert(node_ptr, candidate_arc.clone());
             return candidate_arc.clone();
         }
@@ -1054,7 +1060,7 @@ fn deduplicate_recursive_trie2(
 
     // No match found. This node becomes a new canonical representative.
     bucket.push(node_arc.clone());
-    visited.insert(node_ptr, node_arc.clone());
+    // The visited map already contains (node_ptr, node_arc), which is correct in this case.
     node_arc
 }
 

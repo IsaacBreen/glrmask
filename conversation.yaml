@@ -634,7 +634,8 @@ local_system:
               //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
               //     &llm_vocab.as_ref().unwrap().llm_token_map,
               // );
-              prune_dead_paths_trie2(&mut precomputed2);
+              let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+              // prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -792,11 +793,18 @@ local_system:
                   node_guard.children_mut().retain(|_edge_key, dest_map| {
                       dest_map.retain(|child_wrapper, edge_value_bv| {
                           let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-                          let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
+                          let live_tokens_from_child = live_tokens_cache
+                              .get(&child_ptr)
                               .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
 
-                          let overlaps = !(&*edge_value_bv & live_tokens_from_child).is_empty();
-                          overlaps
+                          let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                          if live_tokens_for_this_edge.is_empty() {
+                              false // Prune this destination
+                          } else {
+                              *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
+                              true // Keep this destination
+                          }
                       });
                       !dest_map.is_empty()
                   });
@@ -7301,7 +7309,8 @@ local_system:
               //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
               //     &llm_vocab.as_ref().unwrap().llm_token_map,
               // );
-              prune_dead_paths_trie2(&mut precomputed2);
+              let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+              // prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -7667,6 +7676,10 @@ local_system:
               return cached_node.clone();
           }
 
+          // Pre-emptively insert to break cycles.
+          // We will update this later if we find a different canonical node.
+          visited.insert(node_ptr, node_arc.clone());
+
           pb.inc(1);
 
           // Post-order: canonicalize children first
@@ -7722,6 +7735,7 @@ local_system:
                       let mut candidate_guard = candidate_arc.write().unwrap();
                       candidate_guard.value.live_tokens |= node_live_tokens;
                   }
+                  // Update visited map with the true canonical node.
                   visited.insert(node_ptr, candidate_arc.clone());
                   return candidate_arc.clone();
               }
@@ -7729,7 +7743,7 @@ local_system:
 
           // No match found. This node becomes a new canonical representative.
           bucket.push(node_arc.clone());
-          visited.insert(node_ptr, node_arc.clone());
+          // The visited map already contains (node_ptr, node_arc), which is correct in this case.
           node_arc
       }
 
@@ -13999,7 +14013,8 @@ messages:
               //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
               //     &llm_vocab.as_ref().unwrap().llm_token_map,
               // );
-              prune_dead_paths_trie2(&mut precomputed2);
+              let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+              // prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -14157,11 +14172,18 @@ messages:
                   node_guard.children_mut().retain(|_edge_key, dest_map| {
                       dest_map.retain(|child_wrapper, edge_value_bv| {
                           let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-                          let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
+                          let live_tokens_from_child = live_tokens_cache
+                              .get(&child_ptr)
                               .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
 
-                          let overlaps = !(&*edge_value_bv & live_tokens_from_child).is_empty();
-                          overlaps
+                          let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+
+                          if live_tokens_for_this_edge.is_empty() {
+                              false // Prune this destination
+                          } else {
+                              *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
+                              true // Keep this destination
+                          }
                       });
                       !dest_map.is_empty()
                   });
@@ -20046,163 +20068,52 @@ messages:
     metadata:
       filename: src/datastructures/trie.rs
   - user: |-
-      Trie2 pruning isn't working properly right now. For example, it's possible to go from this, before `prune_dead_paths_trie2`
-
-      ```
-      --- Tokenizer State ID: 0 ---
-      Root Node 0x600003ad58d0 (MaxDepth: 6) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac1910 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad1fa0 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 2, state: 6): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac0650 (MaxDepth: 5) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad8c90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac1910 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad6860 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  │  └── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  └── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae4380 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │        ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac1910 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │        └── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae4420 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │           └── Edge (pop: 0, state: 6): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003acd000 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac2130 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 2, state: 6): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad6360 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 2, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 1): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac1000 (MaxDepth: 0) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad8c90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 2): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003adc9c0 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 3): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 4): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad6360 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 5): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad6360 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 5): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 6): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 7): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      └── Edge (pop: 0, state: 8): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac2130 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ```
-
-      to this out of `precompute2`
-
-      ```
-      --- Tokenizer State ID: 0 ---
-      Root Node 0x600001a210b0 (MaxDepth: 0) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a224a0 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Node 0x600001a35a50 (MaxDepth: 2) [Live: [0] (e.g., ["$"])]
-      │  │  └── Edge (pop: 0, state: 3): [0] (e.g., ["$"]) -> Node 0x600001a33a80 (MaxDepth: 3) [Live: [0] (e.g., ["$"])]
-      │  │     ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  │     │  ├── Edge (pop: 0, state: None): [0] (e.g., ["$"]) -> Node 0x600001a38d30 (MaxDepth: 5) [Live: [0] (e.g., ["$"])]
-      │  │     │  │  └── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  └── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a38ab0 (MaxDepth: 5) [Live: [0] (e.g., ["$"])]
-      │  │     │     └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      │  │     │        └── Edge (pop: 0, state: None): [0] (e.g., ["$"]) -> Node 0x600001a39d20 (MaxDepth: 7) [Live: [0] (e.g., ["$"])]
-      │  │     │           └── Edge (pop: 0, state: 6): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a36ea0 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a33300 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 2, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 2, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 1): [0] (e.g., ["$"]) -> Node 0x600001a24920 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a35a50 (MaxDepth: 2) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 2): [0] (e.g., ["$"]) -> Ref to Node 0x600001a33a80 (MaxDepth: 3) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 3): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 4): [0] (e.g., ["$"]) -> Ref to Node 0x600001a33300 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 5): [0] (e.g., ["$"]) -> Ref to Node 0x600001a33300 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 5): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 6): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      └── Edge (pop: 0, state: 7): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ```
-
-      Consider the case where we have a stack like 2 -> 3 -> 6 (ie 2 is on top of the stack).
-      There's a path for this in the former but not in the latter.
-      For example, in the former we can go
-      - 0x600003adc9c0
-      - 0x600003ad9b90
-      - 0x600003ac0a10
-      - 0x600003ae0010
-      - 0x600003ae4420
-      - 0x600003ad9a00
-      Or the full edges:
-      ```
-      ├── Edge (pop: 0, state: 2): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003adc9c0 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │        └── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae4420 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │           └── Edge (pop: 0, state: 6): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ```
-
-      However, there isn't an equivalent path through the latter tree.
-      Why?
-      Obviously something is wrong about the way it's simplified, likely in `prune_dead_paths_trie2`, but idk merge_nodes_trie2 or promote_weak_edges_to_strong could be broken too afaik (less likely).
-
-      Identify the issue and fix it.
+      `merge_nodes_trie2` doesn't seem to handle recursion correctly.
+      Strong-ref recursion shouldn't be possible. But recursion involving a weak node certainly *is*.
+      Fix it.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the issue you're facing with the Trie2 pruning logic. It seems there's an issue in `prune_dead_paths_trie2` where liveness information for tokens was being overestimated during the backward pass. This happened because edge bit-vectors were not being narrowed based on the live tokens of their destination nodes.
+      Of course! Dealing with cycles in graph algorithms can be tricky. A missing pre-emptive insertion in a recursive traversal is a classic cause of stack overflows when cycles are present. Here are the patches to fix the issue in `deduplicate_recursive_trie2`.
 
-      This could lead to incorrect pruning behavior. I've corrected the logic to properly narrow the edge bit-vectors and recalculate node liveness from these narrowed vectors, which should make the pruning process more accurate.
+      ### `src/constraint.rs`
 
-      Here are the patches for the affected file:
+      I've identified an issue in `deduplicate_recursive_trie2` where it doesn't pre-emptively mark nodes as visited before recursing on their children. This leads to infinite recursion when a cycle (even one involving weak pointers) is encountered.
+
+      The fix is to add the node to the `visited` map at the beginning of the function to break cycles, similar to how it's handled in the equivalent function for the first precomputation trie. The `visited` map entry is then updated later if a different canonical node is found.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -949,12 +949,16 @@
-                   node_guard.children_mut().retain(|_edge_key, dest_map| {
-                       dest_map.retain(|child_wrapper, edge_value_bv| {
-                           let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-      -                    let live_tokens_from_child = live_tokens_cache.get(&child_ptr)
-      +                    let live_tokens_from_child = live_tokens_cache
-      +                        .get(&child_ptr)
-                               .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
+      @@ -1218,6 +1218,10 @@
+               return cached_node.clone();
+           }
        
-      -                    let overlaps = !(&*edge_value_bv & live_tokens_from_child).is_empty();
-      -                    overlaps
-      +                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
+      +    // Pre-emptively insert to break cycles.
+      +    // We will update this later if we find a different canonical node.
+      +    visited.insert(node_ptr, node_arc.clone());
       +
-      +                    if live_tokens_for_this_edge.is_empty() {
-      +                        false // Prune this destination
-      +                    } else {
-      +                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
-      +                        true // Keep this destination
-      +                    }
-                       });
-                       !dest_map.is_empty()
-                   });
+           pb.inc(1);
+       
+           // Post-order: canonicalize children first
+      @@ -1272,14 +1276,14 @@
+                       let mut candidate_guard = candidate_arc.write().unwrap();
+                       candidate_guard.value.live_tokens |= node_live_tokens;
+                   }
+      +            // Update visited map with the true canonical node.
+                   visited.insert(node_ptr, candidate_arc.clone());
+                   return candidate_arc.clone();
+               }
+           }
+       
+           // No match found. This node becomes a new canonical representative.
+           bucket.push(node_arc.clone());
+      -    visited.insert(node_ptr, node_arc.clone());
+      +    // The visited map already contains (node_ptr, node_arc), which is correct in this case.
+           node_arc
+       }
+       
 
       ```
-
-      I've focused on fixing the logical error in the pruning function. This should resolve the issue of valid paths being incorrectly removed. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -20213,7 +20124,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly prune Trie2 dead paths
-      by narrowing edge bit-vectors"'
+  - user: 'Changes committed with message: "Fix: Add cycle detection pre-emption to
+      trie2 deduplication"'
     metadata:
 ...
