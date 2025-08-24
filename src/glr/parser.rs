@@ -1045,12 +1045,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
     // ----------------------------------------------------------------------
 
     #[inline]
-    fn substring_gotos_for(
+    fn substring_gotos_for<'b>(
         &self,
         nt: NonTerminalID,
         config: &ProcessTokenAdvancedConfig,
-        storage: &mut SubstringGoto,
-    ) -> &SubstringGoto {
+        storage: &'b mut SubstringGoto,
+    ) -> &'b SubstringGoto where 'a: 'b {
         match config.below_bottom_mode {
             BelowBottomReductionMode::ContinueFromAll => {
                 self.parser.substring_gotos.get(&nt).unwrap_or(storage)
