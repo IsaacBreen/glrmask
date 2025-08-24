@@ -739,6 +739,7 @@ pub struct GLRParserState<'a> { // No longer generic
 struct BelowBottomCacheKey {
     nonterminal_id: NonTerminalID,
     source_state_id: StateID,
+    goto_state_id: StateID,
     k: usize,
     // Important: this Acc must have trie2_nodes cleared before being placed here.
     // acc: Acc,
@@ -1317,8 +1318,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     // nonterminal_id: nt,
                                     nonterminal_id: NonTerminalID(0),
                                     source_state_id: *source_state_id,
-                                    // source_state_id: *goto_state_id,
                                     // source_state_id: StateID(0),
+                                    goto_state_id: *goto_state_id,
+                                    // goto_state_id: StateID(0),
                                     k: 0,
                                     // k,
                                     // acc: acc.clone(),
