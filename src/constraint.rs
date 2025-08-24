@@ -627,7 +627,7 @@ impl GrammarConstraint {
         //     &llm_vocab.as_ref().unwrap().llm_token_map,
         // );
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
-        // prune_dead_paths_trie2(&mut precomputed2);
+        prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -769,9 +769,8 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
         };
 
         for child_wrapper in children_to_check {
-            if let Some(child_arc) = child_wrapper.upgrade() {
-                prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
-            }
+            let child_arc = child_wrapper.upgrade().expect("Dangling weak pointer in prune_dead_paths_trie2");
+            prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
         }
 
         let mut live_tokens_for_this_node = LLMTokenBV::zeros();
@@ -844,15 +843,14 @@ fn trie2_shape_hash(
     let mut edge_hashes = Vec::new();
     for (ek, dest_map) in node_guard.children() {
         for (np, ev) in dest_map {
-            if let Some(child) = np.upgrade() {
-                let child_h = trie2_shape_hash(&child, memo);
-                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-                ek.hash(&mut pair_hasher);
-                ev.hash(&mut pair_hasher);
-                np.is_strong().hash(&mut pair_hasher);
-                child_h.hash(&mut pair_hasher);
-                edge_hashes.push(pair_hasher.finish());
-            }
+            let child = np.upgrade().expect("Dangling weak pointer in trie2_shape_hash");
+            let child_h = trie2_shape_hash(&child, memo);
+            let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+            ek.hash(&mut pair_hasher);
+            ev.hash(&mut pair_hasher);
+            np.is_strong().hash(&mut pair_hasher);
+            child_h.hash(&mut pair_hasher);
+            edge_hashes.push(pair_hasher.finish());
         }
     }
 
@@ -910,26 +908,25 @@ fn trie2_shape_eq(
                 return false;
             }
 
-            let mut pairs_b: Vec<_> = dest_map_b.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (np.is_strong(), ev, arc))).collect();
+            let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (np.is_strong(), ev, np.upgrade().expect("Dangling weak pointer in trie2_shape_eq (b)"))).collect();
 
             for (np_a, ev_a) in dest_map_a.iter() {
-                if let Some(arc_a) = np_a.upgrade() {
-                    let is_strong_a = np_a.is_strong();
-                    let mut found_match = false;
-                    for i in 0..pairs_b.len() {
-                        let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
-                        if is_strong_a == is_strong_b && ev_a == ev_b {
-                            if trie2_shape_eq(&arc_a, arc_b, cache) {
-                                pairs_b.remove(i);
-                                found_match = true;
-                                break;
-                            }
+                let arc_a = np_a.upgrade().expect("Dangling weak pointer in trie2_shape_eq (a)");
+                let is_strong_a = np_a.is_strong();
+                let mut found_match = false;
+                for i in 0..pairs_b.len() {
+                    let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
+                    if is_strong_a == is_strong_b && ev_a == ev_b {
+                        if trie2_shape_eq(&arc_a, arc_b, cache) {
+                            pairs_b.remove(i);
+                            found_match = true;
+                            break;
                         }
                     }
-                    if !found_match {
-                        cache.insert((p1, p2), false);
-                        return false;
-                    }
+                }
+                if !found_match {
+                    cache.insert((p1, p2), false);
+                    return false;
                 }
             }
         } else {
@@ -1012,25 +1009,24 @@ fn deduplicate_recursive_trie2(
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = deduplicate_recursive_trie2(
-                        child_arc.clone(),
-                        canonical_nodes,
-                        visited,
-                        shape_hash_memo,
-                        shape_eq_cache,
-                        pb,
-                    );
-                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                    };
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive_trie2");
+                let canonical_child_arc = deduplicate_recursive_trie2(
+                    child_arc.clone(),
+                    canonical_nodes,
+                    visited,
+                    shape_hash_memo,
+                    shape_eq_cache,
+                    pb,
+                );
+                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                    children_changed = true;
                 }
+                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                    NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                } else {
+                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                };
+                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
                 new_children_map.insert(edge_key.clone(), new_dest_map);
@@ -1096,8 +1092,9 @@ fn clone_trie2_graph(
                 .map(|(ek, dest_map)| {
                     let entries = dest_map
                         .iter()
-                        .filter_map(|(node_ptr, ev)| {
-                            node_ptr.upgrade().map(|child_arc| (node_ptr.clone(), ev.clone()))
+                        .map(|(node_ptr, ev)| {
+                            let _ = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (snapshot)");
+                            (node_ptr.clone(), ev.clone())
                         })
                         .collect::<Vec<_>>();
                     (ek.clone(), entries)
@@ -1108,7 +1105,7 @@ fn clone_trie2_graph(
         // For each child, ensure it exists in map (create a blank new node with same value).
         for (_ek, entries) in &children_snapshot {
             for (node_ptr, _ev) in entries {
-                let child_arc_old = node_ptr.upgrade().expect("child must exist");
+                let child_arc_old = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (map population)");
                 let child_ptr_old = Arc::as_ptr(&child_arc_old);
                 if !map.contains_key(&child_ptr_old) {
                     let child_value = { child_arc_old.read().expect("poison").value.clone() };
@@ -1125,7 +1122,7 @@ fn clone_trie2_graph(
             for (ek, entries) in children_snapshot {
                 let dest_map = new_g.children_mut().entry(ek).or_default();
                 for (old_node_ptr, ev) in entries {
-                    let child_arc_old = old_node_ptr.upgrade().expect("child must exist");
+                    let child_arc_old = old_node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (wiring)");
                     let child_ptr_old = Arc::as_ptr(&child_arc_old);
                     let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
                     // Preserve strong/weak kind of the original key
@@ -1386,30 +1383,29 @@ impl<'r> Precomputer<'r> {
             let mut trimmed: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>> = BTreeMap::new();
 
             for (ek, edges) in &children_snapshot {
-                let mut new_map = OrderedHashMap::new();
-                for (child_ptr, edge_bv) in edges {
-                    if let Some(child_arc) = child_ptr.upgrade() {
-                        // Recurse
-                        let child_reach = backward_prune_dfs(child_arc.clone(), forward_mark, memo, all_llm_tokens);
-                        // Child's forward mark (GLR constraint at child)
-                        let child_ptr_data = {
-                            let guard = child_arc.read().expect("poison");
-                            &*guard as *const _
-                        };
-                        let child_forward = forward_mark.get(&child_ptr_data).cloned().unwrap_or_else(LLMTokenBV::zeros);
+            let mut new_map = OrderedHashMap::new();
+            for (child_ptr, edge_bv) in edges {
+                let child_arc = child_ptr.upgrade().expect("Dangling weak pointer in prune_with_substring_everything_state");
+                // Recurse
+                let child_reach = backward_prune_dfs(child_arc.clone(), forward_mark, memo, all_llm_tokens);
+                // Child's forward mark (GLR constraint at child)
+                let child_ptr_data = {
+                    let guard = child_arc.read().expect("poison");
+                    &*guard as *const _
+                };
+                let child_forward = forward_mark.get(&child_ptr_data).cloned().unwrap_or_else(LLMTokenBV::zeros);
 
-                        // Tokens to keep on this edge
-                        let mut keep = edge_bv.clone();
-                        keep &= &child_forward;
-                        keep &= &child_reach;
+                // Tokens to keep on this edge
+                let mut keep = edge_bv.clone();
+                keep &= &child_forward;
+                keep &= &child_reach;
 
-                        if !keep.is_empty() {
-                            reachable |= &keep;
-                            new_map.insert(child_ptr.clone(), keep);
-                        }
-                    }
+                if !keep.is_empty() {
+                    reachable |= &keep;
+                    new_map.insert(child_ptr.clone(), keep);
                 }
-                if !new_map.is_empty() {
+            }
+            if !new_map.is_empty() {
                     trimmed.insert(ek.clone(), new_map);
                 }
             }
@@ -2025,24 +2021,23 @@ impl<'r> Precomputer<'r> {
 
         {
             let node_guard = node_arc.read().unwrap();
-            for (edge_key, dest_map) in node_guard.children() {
-                let mut new_dest_map = OrderedHashMap::new();
-                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                    if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                        let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
-                        if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                            children_changed = true;
-                        }
-                        let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                            NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                        } else {
-                            NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                        };
-                        new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-                    }
+        for (edge_key, dest_map) in node_guard.children() {
+            let mut new_dest_map = OrderedHashMap::new();
+            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive");
+                let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                    children_changed = true;
                 }
-                if !new_dest_map.is_empty() {
-                    new_children_map.insert(edge_key.clone(), new_dest_map);
+                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                    NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                } else {
+                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                };
+                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+            }
+            if !new_dest_map.is_empty() {
+                new_children_map.insert(edge_key.clone(), new_dest_map);
                 }
             }
         }
@@ -2166,13 +2161,10 @@ impl<'r> Precomputer<'r> {
                             if true {
                                 let children_of_src: Vec<_> = src_node_wrapper.upgrade().unwrap().read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                                 // let tags = self.tags.borrow(); // Removed
-                                let eligible_children = children_of_src.iter().filter_map(|child_node_ptr| {
-                                    if let Some(child_arc) = child_node_ptr.upgrade() {
-                                        // if tags.get(child_node_ptr).map_or(true, |tag| (tag & &edge_bv).is_empty()) { // Removed
-                                        if (child_arc.read().unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read().unwrap().value.end {
-                                            Some(child_arc)
-                                        } else { None }
-                                    } else { None }
+                                let eligible_children = children_of_src.iter().map(|child_node_ptr| {
+                                    child_node_ptr.upgrade().expect("Dangling weak pointer in Precomputer::dfs")
+                                }).filter(|child_arc| {
+                                    (child_arc.read().unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read().unwrap().value.end
                                 });
                                 inserter = inserter.try_destinations_iter(eligible_children);
                                 // drop(tags); // Removed

@@ -92,27 +92,26 @@ where
             let mut weak_dests_json = Vec::new();
 
             for (node_ptr, edge_val) in destinations_map {
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
-                        Some(idx) => *idx,
-                        None => {
-                            let new_idx = nodes_json_list.len();
-                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                            bfs_q.push_back(child_arc);
-                            nodes_json_list.push(JSONNode::Null);
-                            new_idx
-                        }
-                    };
-                    let dest_entry = JSONNode::Array(vec![
-                        child_idx.to_json(),
-                        edge_val.to_json(),
-                    ]);
-                    if node_ptr.is_strong() {
-                        strong_dests_json.push(dest_entry);
-                    } else {
-                        weak_dests_json.push(dest_entry);
+                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer during Trie serialization");
+                let child_arc_ptr = Arc::as_ptr(&child_arc);
+                let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                    Some(idx) => *idx,
+                    None => {
+                        let new_idx = nodes_json_list.len();
+                        arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                        bfs_q.push_back(child_arc);
+                        nodes_json_list.push(JSONNode::Null);
+                        new_idx
                     }
+                };
+                let dest_entry = JSONNode::Array(vec![
+                    child_idx.to_json(),
+                    edge_val.to_json(),
+                ]);
+                if node_ptr.is_strong() {
+                    strong_dests_json.push(dest_entry);
+                } else {
+                    weak_dests_json.push(dest_entry);
                 }
             }
             if !strong_dests_json.is_empty() {
@@ -149,27 +148,26 @@ where
                 let mut weak_dests_json_bfs = Vec::new();
 
                 for (node_ptr, edge_val) in destinations_map {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        let child_arc_ptr = Arc::as_ptr(&child_arc);
-                        let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
-                            Some(idx) => *idx,
-                            None => {
-                                let new_idx = nodes_json_list.len();
-                                arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                                bfs_q.push_back(child_arc);
-                                nodes_json_list.push(JSONNode::Null);
-                                new_idx
-                            }
-                        };
-                        let dest_entry = JSONNode::Array(vec![
-                            child_idx.to_json(),
-                            edge_val.to_json(),
-                        ]);
-                        if node_ptr.is_strong() {
-                            strong_dests_json_bfs.push(dest_entry);
-                        } else {
-                            weak_dests_json_bfs.push(dest_entry);
+                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer during Trie serialization");
+                    let child_arc_ptr = Arc::as_ptr(&child_arc);
+                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                        Some(idx) => *idx,
+                        None => {
+                            let new_idx = nodes_json_list.len();
+                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                            bfs_q.push_back(child_arc);
+                            nodes_json_list.push(JSONNode::Null);
+                            new_idx
                         }
+                    };
+                    let dest_entry = JSONNode::Array(vec![
+                        child_idx.to_json(),
+                        edge_val.to_json(),
+                    ]);
+                    if node_ptr.is_strong() {
+                        strong_dests_json_bfs.push(dest_entry);
+                    } else {
+                        weak_dests_json_bfs.push(dest_entry);
                     }
                 }
                 if !strong_dests_json_bfs.is_empty() {
@@ -771,11 +769,10 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             let node_guard = node_arc.read().expect("RwLock poisoned during BFS"); // Renamed node to node_guard
             for children_map in node_guard.children.values() { // Use node_guard
                 for node_ptr in children_map.keys() {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        let child_arc_ptr = Arc::as_ptr(&child_arc);
-                        if visited_arcs.insert(child_arc_ptr) {
-                            queue.push_back(child_arc.clone());
-                        }
+                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::all_nodes");
+                    let child_arc_ptr = Arc::as_ptr(&child_arc);
+                    if visited_arcs.insert(child_arc_ptr) {
+                        queue.push_back(child_arc.clone());
                     }
                 }
             }
@@ -1442,13 +1439,12 @@ where
                 let mut weak = Vec::new();
                 for (ek, dest_map) in &src_guard.children {
                     for (node_ptr, _ev) in dest_map {
-                        if let Some(child_arc) = node_ptr.upgrade() {
-                            // Traverse both strong and weak edges
-                            neigh.push(child_arc.clone());
-                            // Record weak edges for possible promotion
-                            if !node_ptr.is_strong() {
-                                weak.push((ek.clone(), child_arc));
-                            }
+                        let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::promote_weak_edges_to_strong");
+                        // Traverse both strong and weak edges
+                        neigh.push(child_arc.clone());
+                        // Record weak edges for possible promotion
+                        if !node_ptr.is_strong() {
+                            weak.push((ek.clone(), child_arc));
                         }
                     }
                 }
@@ -1648,8 +1644,8 @@ where
                     }
 
                     // Now compare weak children
-                    let self_weak_pairs: Vec<_> = self_weak.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (*ev).clone()))).collect();
-                    let mut other_weak_pairs: Vec<_> = other_weak.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (arc, (*ev).clone()))).collect();
+                    let self_weak_pairs: Vec<_> = self_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in Trie::eq (self)"), (*ev).clone())).collect();
+                    let mut other_weak_pairs: Vec<_> = other_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in Trie::eq (other)"), (*ev).clone())).collect();
 
                     if self_weak_pairs.len() != other_weak_pairs.len() {
                         return false;
@@ -1740,12 +1736,11 @@ where
             for (node_ptr, ev) in strong_children {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    if let Ok(child_guard) = child_arc.read() {
-                        Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
-                        strong_pair_hashes.push(pair_hasher.finish());
-                    }
-                }
+                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::hash");
+                if let Ok(child_guard) = child_arc.read() {
+                    Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
+                    strong_pair_hashes.push(pair_hasher.finish());
+                };
             }
             strong_pair_hashes.sort_unstable();
             for h in strong_pair_hashes {
@@ -1753,20 +1748,17 @@ where
             }
 
             // Hash weak children
-            let weak_upgraded: Vec<_> = weak_children.iter()
-                .filter_map(|(node_ptr, ev)| node_ptr.upgrade().map(|arc| (arc, *ev)))
-                .collect();
-
-            weak_upgraded.len().hash(state);
-            let mut weak_pair_hashes = Vec::with_capacity(weak_upgraded.len());
-            for (child_arc, ev) in weak_upgraded {
+            weak_children.len().hash(state);
+            let mut weak_pair_hashes = Vec::with_capacity(weak_children.len());
+            for (node_ptr, ev) in weak_children {
+                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::hash");
                 if let Ok(child_guard) = child_arc.read() {
                     // hash pair (ev, child)
                     let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                     ev.hash(&mut pair_hasher);
                     Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
                     weak_pair_hashes.push(pair_hasher.finish());
-                }
+                };
             }
 
             weak_pair_hashes.sort_unstable();
