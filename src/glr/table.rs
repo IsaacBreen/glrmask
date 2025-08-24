@@ -15,6 +15,9 @@ use crate::interface::display_productions;
 // Added for derive macro pattern
 
 
+const EVERYTHING: bool = false;
+
+
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
 type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
@@ -369,23 +372,6 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
-    // --- Create the 'everything' item set ---
-    let mut everything_item_set = BTreeSet::new();
-    for prod in productions {
-        if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
-            for dot_position in 0..=prod.rhs.len() {
-                for lookahead in lookaheads {
-                    let item = Item {
-                        production: Arc::new(prod.clone()),
-                        dot_position,
-                        lookahead: lookahead.clone(),
-                    };
-                    everything_item_set.insert(item);
-                }
-            }
-        }
-    }
-
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
     for p in productions {
@@ -396,9 +382,27 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let mut transitions: Stage1Table = BTreeMap::new();
     let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
 
-    // Add the everything set to the worklist if it's not already there
-    if visited_kernels.insert(everything_item_set.clone()) {
-        worklist.push_back(everything_item_set);
+    // --- Create the 'everything' item set ---
+    if EVERYTHING {
+        let mut everything_item_set = BTreeSet::new();
+        for prod in productions {
+            if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+                for dot_position in 0..=prod.rhs.len() {
+                    for lookahead in lookaheads {
+                        let item = Item {
+                            production: Arc::new(prod.clone()),
+                            dot_position,
+                            lookahead: lookahead.clone(),
+                        };
+                        everything_item_set.insert(item);
+                    }
+                }
+            }
+        }
+        // Add the everything set to the worklist if it's not already there
+        if visited_kernels.insert(everything_item_set.clone()) {
+            worklist.push_back(everything_item_set);
+        }
     }
 
     crate::debug!(1, "Starting stage 1");
@@ -695,23 +699,28 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
-    let mut everything_item_set = BTreeSet::new();
-    for prod in productions {
-        if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
-            for dot_position in 0..=prod.rhs.len() {
-                for lookahead in lookaheads {
-                    let item = Item {
-                        production: Arc::new(prod.clone()),
-                        dot_position,
-                        lookahead: lookahead.clone(),
-                    };
-                    everything_item_set.insert(item);
+    let everything_state_id;
+    if EVERYTHING {
+        let mut everything_item_set = BTreeSet::new();
+        for prod in productions {
+            if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+                for dot_position in 0..=prod.rhs.len() {
+                    for lookahead in lookaheads {
+                        let item = Item {
+                            production: Arc::new(prod.clone()),
+                            dot_position,
+                            lookahead: lookahead.clone(),
+                        };
+                        everything_item_set.insert(item);
+                    }
                 }
             }
         }
+        everything_state_id = *item_set_map.get_by_left(&everything_item_set).expect("Everything item set not found in state map");
+        stage_7_table.get_mut(&everything_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+    } else {
+        everything_state_id = start_state_id; // Dummy value, won't be used
     }
-    let everything_state_id = *item_set_map.get_by_left(&everything_item_set).expect("Everything item set not found in state map");
-    stage_7_table.get_mut(&everything_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
     (stage_7_table, item_set_map, start_state_id, everything_state_id)
 }
