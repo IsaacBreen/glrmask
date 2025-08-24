@@ -68,11 +68,34 @@ pub fn timeit(input: TokenStream) -> TokenStream {
         }
     };
 
-    let result = quote! {{
+    let body = if let Expr::Block(expr_block) = expr {
+        let stmts = &expr_block.block.stmts;
+        if let Some((last_stmt, other_stmts)) = stmts.split_last() {
+            if let syn::Stmt::Expr(e, None) = last_stmt {
+                // This is a block with a final expression, which is the block's value.
+                // We assign it to `_` to avoid "unused value" warnings, as the
+                // macro is now statement-only.
+                quote! {
+                    #(#other_stmts)*
+                    let _ = #e;
+                }
+            } else {
+                // Block with no final expression, or last stmt has semicolon.
+                quote! { #(#stmts)* }
+            }
+        } else {
+            // Empty block.
+            quote! {}
+        }
+    } else {
+        quote! { let _ = #expr; }
+    };
+
+    let result = quote! {
         let __profiler_name = #name_code;
         let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
-        #expr
-    }};
+        #body
+    };
 
     result.into()
 }
