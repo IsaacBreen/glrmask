@@ -525,8 +525,7 @@ impl GrammarConstraint {
                     1,
                     &mut HashMap::new(),
                 );
-                let active_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                let keep_going = !active_llm_tokens.is_empty();
+                let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     crate::debug!(3, "Trie2: Found end state for GLR state");
                     glr_s.log_gss(
