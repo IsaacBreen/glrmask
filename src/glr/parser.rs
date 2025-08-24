@@ -1361,6 +1361,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             let temp = &guard.value.live_tokens - &cached_tokens;
                                             if (&temp & &tokens_to_push).is_empty() && !guard.value.end {
                                                 // crate::debug!(6, "Using cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
+                                                timeit!("GLRParserState::reduce_and_goto::BLOCK_1::BLOCK_1.3::Using cached destination", {});
                                                 Some(dest_arc.clone())
                                             } else {
                                                 // crate::debug!(6, "Skipping cached destination in below-bottom reduction for NT '{}' and len {}: {:?}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len, wrapper);
