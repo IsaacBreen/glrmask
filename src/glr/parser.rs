@@ -930,15 +930,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if per_state_fuel != Some(0) {
                                     let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
                                     let mut constrained_state = state.clone();
-
-                                    // Check if any allowed terminals are possible from the current GSS state.
-                                    let mut can_proceed = false;
-                                    for (_, l2_bitset) in constrained_state.stack.acc().terminals_union.range_values() {
-                                        if !(&*l2_bitset & allowed_terminals).is_empty() {
-                                            can_proceed = true;
-                                            break;
-                                        }
-                                    }
+                                    let can_proceed = constrained_state.stack.is_alive();
 
                                     if can_proceed {
                                         let disallowed_terminals_bv = allowed_terminals.inverted();
