@@ -1492,8 +1492,65 @@ fn test_constraint_expression_cycle() {
     state.commit(LLMTokenID(1));
     assert!(state.is_active_or_accepted());
     let mask = state.get_mask();
-    // After "i$", the parse is complete.
+    // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
+}
+
+#[test]
+fn test_constraint_repetition_a() {
+    // Grammar: S' -> S, S -> S A | [], which is equivalent to S -> A*
+    // LLM token vocabulary: a
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+
+    // Tokenizer regex for grammar tokens 'a', '$'
+    let expr = groups![
+        eat_u8(b'a'),
+        eat_u8(b'$'),
+    ];
+    let tokenizer = expr.build();
+
+    // Grammar productions
+    let productions = vec![
+        prod("S'", vec![nt("S")]),
+        prod("S", vec![nt("S"), t("A")]),
+        prod("S", vec![]),
+    ];
+    // Map grammar terminals to IDs matching regex order
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("EOF"), TerminalID(1));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
+
+    let mut token_name_map = BiBTreeMap::new();
+     for (term, id) in &grammar_token_map {
+        token_name_map.insert(term.clone(), id.0);
+    }
+
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
+        token_name_map,
+        0, // max_original_llm_token_id
+    );
+    // constraint.dump_precomputed();
+    // constraint.dump_precomputed2();
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    // The grammar can accept 'a' or EOF. Since EOF is not in the LLM vocab,
+    // we only expect "a" (0).
+    assert_eq!(mask, HybridBitset::from_iter(vec![0]));
+
+    // Commit "a"
+    state.commit(LLMTokenID(0));
+    let mask = state.get_mask();
+    // After 'a', we can have another 'a' or end with EOF. Again, only 'a' is in vocab.
+    assert_eq!(mask, HybridBitset::from_iter(vec![0]));
 }
 
 #[test]
