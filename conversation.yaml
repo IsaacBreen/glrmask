@@ -1,8 +1,8 @@
 local_system:
   attached_files:
+    - src/constraint.rs
     - src/datastructures/arc_wrapper.rs
     - src/datastructures/trie.rs
-    - src/constraint.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -4465,12 +4465,6 @@ local_system:
                       }
                   }
               }
-              // Self::_dump_precomputed2(
-              //     &precomputed2,
-              //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
-              //     &llm_vocab.as_ref().unwrap().llm_token_map,
-              // );
-              let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
@@ -4596,72 +4590,82 @@ local_system:
       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
-          fn prune_and_get_live_tokens_rec(
-              node_arc: &Arc<RwLock<PrecomputeNode2>>,
-              live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
-          ) -> LLMTokenBV {
+          // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
+          // This correctly handles cycles, iterating until a fixed point is reached.
+          let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+          let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
+          let mut worklist = VecDeque::new();
+          let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+          // 1. Initialize live sets and build predecessor map.
+          for node_arc in &all_nodes {
               let node_ptr = Arc::as_ptr(node_arc);
-              if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
-                  return cached_bv.clone();
-              }
-              live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
+              live.insert(node_ptr, LLMTokenBV::zeros());
 
-              // Snapshot children to avoid holding lock during recursion
-              let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
-                  let node_guard = node_arc.read().unwrap();
-                  node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-              };
-
-              for child_wrapper in children_to_check {
-                  let child_arc = child_wrapper.upgrade().expect("Dangling weak pointer in prune_dead_paths_trie2");
-                  prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
-              }
-
-              let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-              {
-                  let mut node_guard = node_arc.write().unwrap();
-                  if node_guard.value.end {
-                      // An end node is a source of liveness. The tokens that can end here are considered live.
-                      live_tokens_for_this_node |= &node_guard.value.live_tokens;
+              let guard = node_arc.read().unwrap();
+              if guard.value.end {
+                  let initial_live = guard.value.live_tokens.clone();
+                  if !initial_live.is_empty() {
+                      live.insert(node_ptr, initial_live);
+                      worklist.push_back(node_ptr);
                   }
+              }
 
-                  node_guard.children_mut().retain(|_edge_key, dest_map| {
-                      dest_map.retain(|child_wrapper, edge_value_bv| {
-                          let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-                          let live_tokens_from_child = live_tokens_cache
-                              .get(&child_ptr)
-                              .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                          let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                          if live_tokens_for_this_edge.is_empty() {
-                              false // Prune this destination
-                          } else {
-                              *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
-                              true // Keep this destination
-                          }
-                      });
-                      !dest_map.is_empty()
-                  });
-
-                  for dest_map in node_guard.children().values() {
-                      for edge_bv in dest_map.values() {
-                          live_tokens_for_this_node |= edge_bv;
+              for dest_map in guard.children().values() {
+                  for (child_wrap, edge_bv) in dest_map {
+                      if let Some(child_arc) = child_wrap.upgrade() {
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
                       }
                   }
-                  node_guard.value.live_tokens = live_tokens_for_this_node.clone();
               }
-
-              live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
-              live_tokens_for_this_node
           }
 
-          let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+          // 2. Propagate liveness until a fixed point is reached.
+          while let Some(node_ptr) = worklist.pop_front() {
+              let live_at_node = live.get(&node_ptr).unwrap().clone();
+              if let Some(preds) = predecessors.get(&node_ptr) {
+                  for (pred_ptr, edge_bv) in preds {
+                      let live_from_edge = &live_at_node & edge_bv;
+                      if live_from_edge.is_empty() {
+                          continue;
+                      }
 
-          for root_arc in roots.values() {
-              prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
+                      let pred_live = live.get_mut(pred_ptr).unwrap();
+                      let old_len = pred_live.len();
+                      *pred_live |= &live_from_edge;
+                      if pred_live.len() > old_len {
+                          worklist.push_back(*pred_ptr);
+                      }
+                  }
+              }
           }
 
+          // 3. Prune the graph based on the computed live sets.
+          for node_arc in &all_nodes {
+              let mut guard = node_arc.write().unwrap();
+              guard.children_mut().retain(|_edge_key, dest_map| {
+                  dest_map.retain(|child_wrapper, edge_value_bv| {
+                      if let Some(child_arc) = child_wrapper.upgrade() {
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          let live_from_child = live.get(&child_ptr).unwrap();
+                          let live_on_edge = &*edge_value_bv & live_from_child;
+                          if live_on_edge.is_empty() {
+                              false
+                          } else {
+                              *edge_value_bv = live_on_edge;
+                              true
+                          }
+                      } else {
+                          false // Dangling weak pointer, prune it.
+                      }
+                  });
+                  !dest_map.is_empty()
+              });
+              // Update the node's own live_tokens field with the final computed value.
+              let node_ptr = Arc::as_ptr(node_arc);
+              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
+          }
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
       }
 
@@ -10756,7 +10760,7 @@ local_system:
           }
       }
 
-    src/constraint.rs: |
+    src/constraint.rs: |+
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
@@ -11380,14 +11384,9 @@ local_system:
                       }
                   }
               }
-              // Self::_dump_precomputed2(
-              //     &precomputed2,
-              //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
-              //     &llm_vocab.as_ref().unwrap().llm_token_map,
-              // );
-              let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
+              merge_consecutive_edges_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
@@ -11513,7 +11512,7 @@ local_system:
 
           // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
           // This correctly handles cycles, iterating until a fixed point is reached.
-          let all_nodes = Trie::all_nodes(&roots.values().cloned().collect());
+          let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
           let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
           let mut worklist = VecDeque::new();
           let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
@@ -11588,6 +11587,116 @@ local_system:
               guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
           }
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
+      }
+
+      fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+          let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
+
+          let mut changed = true;
+          let mut iterations = 0;
+          while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+              iterations += 1;
+              changed = false;
+
+              let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+              let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+              for node_arc in &all_nodes_current {
+                  let guard = node_arc.read().unwrap();
+                  for dest_map in guard.children().values() {
+                      for child_wrap in dest_map.keys() {
+                          if let Some(child_arc) = child_wrap.upgrade() {
+                              let child_ptr = Arc::as_ptr(&child_arc);
+                              predecessors.entry(child_ptr).or_default().push(node_arc.clone());
+                          }
+                      }
+                  }
+              }
+
+              for i_arc in &all_nodes_current {
+                  let i_ptr = Arc::as_ptr(i_arc);
+
+                  if root_ptrs.contains(&i_ptr) { continue; }
+                  if i_arc.read().unwrap().value.end { continue; }
+
+                  let outgoing_edges: Vec<_> = {
+                      let i_guard = i_arc.read().unwrap();
+                      i_guard.children().iter().flat_map(|(ek, dest_map)| {
+                          dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+                      }).collect()
+                  };
+                  if outgoing_edges.len() != 1 { continue; }
+
+                  let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+                  let (k_ic, s_ic_opt) = edge_key_ic;
+                  let c_arc = match c_wrapper.upgrade() {
+                      Some(arc) => arc,
+                      None => continue, // Dangling weak pointer, will be pruned later
+                  };
+
+                  let parents = match predecessors.get(&i_ptr) {
+                      Some(preds) if !preds.is_empty() => preds.clone(),
+                      _ => continue,
+                  };
+
+                  for p_arc in parents {
+                      let mut p_guard = p_arc.write().unwrap();
+
+                      let mut modifications = Vec::new();
+
+                      for (ek_pi, dest_map) in p_guard.children() {
+                          for (wrapper_pi, bv_pi) in dest_map {
+                              if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+                                  let (k_pi, s_pi_opt) = ek_pi;
+
+                                  if s_pi_opt.is_some() && s_ic_opt.is_some() {
+                                      continue;
+                                  }
+
+                                  let k_new = k_pi + k_ic;
+                                  let s_new_opt = s_pi_opt.or(s_ic_opt);
+                                  let ek_new = (k_new, s_new_opt);
+                                  let bv_new = bv_pi & &bv_ic;
+
+                                  if !bv_new.is_empty() {
+                                      let c_wrapper_new = if wrapper_pi.is_strong() {
+                                          NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                                      } else {
+                                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                                      };
+                                      modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+                                  } else {
+                                      modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+                                  }
+                              }
+                          }
+                      }
+
+                      if !modifications.is_empty() {
+                          changed = true;
+                          for (to_add, to_remove) in modifications {
+                              if let Some((ek, wrapper)) = to_remove {
+                                  if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+                                      dest_map.remove(&wrapper);
+                                      if dest_map.is_empty() {
+                                          p_guard.children_mut().remove(&ek);
+                                      }
+                                  }
+                              }
+                              if let Some((ek, wrapper, bv)) = to_add {
+                                  p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          if iterations > 0 {
+              prune_dead_paths_trie2(roots);
+          }
+          crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
       }
 
       fn trie2_shape_hash(
@@ -13845,6 +13954,7 @@ local_system:
               &self.state
           }
       }
+
   diffs_applied_this_send: true
 system:
   message: |2
@@ -18339,12 +18449,6 @@ messages:
                       }
                   }
               }
-              // Self::_dump_precomputed2(
-              //     &precomputed2,
-              //     &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap,
-              //     &llm_vocab.as_ref().unwrap().llm_token_map,
-              // );
-              let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
@@ -18470,72 +18574,82 @@ messages:
       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
-          fn prune_and_get_live_tokens_rec(
-              node_arc: &Arc<RwLock<PrecomputeNode2>>,
-              live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
-          ) -> LLMTokenBV {
+          // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
+          // This correctly handles cycles, iterating until a fixed point is reached.
+          let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+          let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
+          let mut worklist = VecDeque::new();
+          let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+          // 1. Initialize live sets and build predecessor map.
+          for node_arc in &all_nodes {
               let node_ptr = Arc::as_ptr(node_arc);
-              if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
-                  return cached_bv.clone();
-              }
-              live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
+              live.insert(node_ptr, LLMTokenBV::zeros());
 
-              // Snapshot children to avoid holding lock during recursion
-              let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
-                  let node_guard = node_arc.read().unwrap();
-                  node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-              };
-
-              for child_wrapper in children_to_check {
-                  let child_arc = child_wrapper.upgrade().expect("Dangling weak pointer in prune_dead_paths_trie2");
-                  prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
-              }
-
-              let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-              {
-                  let mut node_guard = node_arc.write().unwrap();
-                  if node_guard.value.end {
-                      // An end node is a source of liveness. The tokens that can end here are considered live.
-                      live_tokens_for_this_node |= &node_guard.value.live_tokens;
+              let guard = node_arc.read().unwrap();
+              if guard.value.end {
+                  let initial_live = guard.value.live_tokens.clone();
+                  if !initial_live.is_empty() {
+                      live.insert(node_ptr, initial_live);
+                      worklist.push_back(node_ptr);
                   }
+              }
 
-                  node_guard.children_mut().retain(|_edge_key, dest_map| {
-                      dest_map.retain(|child_wrapper, edge_value_bv| {
-                          let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-                          let live_tokens_from_child = live_tokens_cache
-                              .get(&child_ptr)
-                              .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                          let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                          if live_tokens_for_this_edge.is_empty() {
-                              false // Prune this destination
-                          } else {
-                              *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
-                              true // Keep this destination
-                          }
-                      });
-                      !dest_map.is_empty()
-                  });
-
-                  for dest_map in node_guard.children().values() {
-                      for edge_bv in dest_map.values() {
-                          live_tokens_for_this_node |= edge_bv;
+              for dest_map in guard.children().values() {
+                  for (child_wrap, edge_bv) in dest_map {
+                      if let Some(child_arc) = child_wrap.upgrade() {
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
                       }
                   }
-                  node_guard.value.live_tokens = live_tokens_for_this_node.clone();
               }
-
-              live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
-              live_tokens_for_this_node
           }
 
-          let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+          // 2. Propagate liveness until a fixed point is reached.
+          while let Some(node_ptr) = worklist.pop_front() {
+              let live_at_node = live.get(&node_ptr).unwrap().clone();
+              if let Some(preds) = predecessors.get(&node_ptr) {
+                  for (pred_ptr, edge_bv) in preds {
+                      let live_from_edge = &live_at_node & edge_bv;
+                      if live_from_edge.is_empty() {
+                          continue;
+                      }
 
-          for root_arc in roots.values() {
-              prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
+                      let pred_live = live.get_mut(pred_ptr).unwrap();
+                      let old_len = pred_live.len();
+                      *pred_live |= &live_from_edge;
+                      if pred_live.len() > old_len {
+                          worklist.push_back(*pred_ptr);
+                      }
+                  }
+              }
           }
 
+          // 3. Prune the graph based on the computed live sets.
+          for node_arc in &all_nodes {
+              let mut guard = node_arc.write().unwrap();
+              guard.children_mut().retain(|_edge_key, dest_map| {
+                  dest_map.retain(|child_wrapper, edge_value_bv| {
+                      if let Some(child_arc) = child_wrapper.upgrade() {
+                          let child_ptr = Arc::as_ptr(&child_arc);
+                          let live_from_child = live.get(&child_ptr).unwrap();
+                          let live_on_edge = &*edge_value_bv & live_from_child;
+                          if live_on_edge.is_empty() {
+                              false
+                          } else {
+                              *edge_value_bv = live_on_edge;
+                              true
+                          }
+                      } else {
+                          false // Dangling weak pointer, prune it.
+                      }
+                  });
+                  !dest_map.is_empty()
+              });
+              // Update the node's own live_tokens field with the final computed value.
+              let node_ptr = Arc::as_ptr(node_arc);
+              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
+          }
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
       }
 
@@ -20798,302 +20912,522 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: |-
-      Trie2 pruning isn't working properly right now. For example, it's possible to go from this, before `prune_dead_paths_trie2`
-
-      ```
-      --- Tokenizer State ID: 0 ---
-      Root Node 0x600003ad58d0 (MaxDepth: 6) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac1910 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad1fa0 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 2, state: 6): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac0650 (MaxDepth: 5) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad8c90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac1910 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad6860 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  │  └── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  └── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae4380 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │        ├── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac1910 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │        └── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae4420 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │           └── Edge (pop: 0, state: 6): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003acd000 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac2130 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 2, state: 6): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003add640 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad6360 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 2, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 2, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 1): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ac1000 (MaxDepth: 0) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad8c90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 2): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003adc9c0 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad0ec0 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 3): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 4): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad6360 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 5): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad6360 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 5): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 6): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 7): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      └── Edge (pop: 0, state: 8): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac2130 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ```
-
-      to this out of `precompute2`
-
-      ```
-      --- Tokenizer State ID: 0 ---
-      Root Node 0x600001a210b0 (MaxDepth: 0) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a224a0 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Node 0x600001a35a50 (MaxDepth: 2) [Live: [0] (e.g., ["$"])]
-      │  │  └── Edge (pop: 0, state: 3): [0] (e.g., ["$"]) -> Node 0x600001a33a80 (MaxDepth: 3) [Live: [0] (e.g., ["$"])]
-      │  │     ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  │     │  ├── Edge (pop: 0, state: None): [0] (e.g., ["$"]) -> Node 0x600001a38d30 (MaxDepth: 5) [Live: [0] (e.g., ["$"])]
-      │  │     │  │  └── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │  └── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a38ab0 (MaxDepth: 5) [Live: [0] (e.g., ["$"])]
-      │  │     │     └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      │  │     │        └── Edge (pop: 0, state: None): [0] (e.g., ["$"]) -> Node 0x600001a39d20 (MaxDepth: 7) [Live: [0] (e.g., ["$"])]
-      │  │     │           └── Edge (pop: 0, state: 6): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a36ea0 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 0): [0] (e.g., ["$"]) -> Node 0x600001a33300 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 2, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 2, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 0): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 1): [0] (e.g., ["$"]) -> Node 0x600001a24920 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a35a50 (MaxDepth: 2) [Live: [0] (e.g., ["$"])]
-      │  ├── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a21a50 (MaxDepth: 4) [Live: [0] (e.g., ["$"])]
-      │  └── Edge (pop: 1, state: None): [0] (e.g., ["$"]) -> Ref to Node 0x600001a390f0 (MaxDepth: 6) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 2): [0] (e.g., ["$"]) -> Ref to Node 0x600001a33a80 (MaxDepth: 3) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 3): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 4): [0] (e.g., ["$"]) -> Ref to Node 0x600001a33300 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 5): [0] (e.g., ["$"]) -> Ref to Node 0x600001a33300 (MaxDepth: 1) [Live: [0] (e.g., ["$"])]
-      ├── Edge (pop: 0, state: 5): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ├── Edge (pop: 0, state: 6): [1..=3] (e.g., ["(", "(i", "i"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      └── Edge (pop: 0, state: 7): [0] (e.g., ["$"]) -> Node 0x600001a18600 (MaxDepth: 8) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ```
-
-      Consider the case where we have a stack like 2 -> 3 -> 6 (ie 2 is on top of the stack).
-      There's a path for this in the former but not in the latter.
-      For example, in the former we can go
-      - 0x600003adc9c0
-      - 0x600003ad9b90
-      - 0x600003ac0a10
-      - 0x600003ae0010
-      - 0x600003ae4420
-      - 0x600003ad9a00
-      Or the full edges:
-      ```
-      ├── Edge (pop: 0, state: 2): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003adc9c0 (MaxDepth: 1) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  ├── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ad9b90 (MaxDepth: 2) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │     │  └── Edge (pop: 0, state: 3): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ac0a10 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     └── Edge (pop: 1, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Ref to Node 0x600003ae0010 (MaxDepth: 4) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │        └── Edge (pop: 0, state: None): [0..=3] (e.g., ["$", "(", "(i", "i"]) -> Node 0x600003ae4420 (MaxDepth: 3) [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      │  │     │           └── Edge (pop: 0, state: 6): [0] (e.g., ["$"]) -> Node 0x600003ad9a00 (MaxDepth: 4) [END] [Live: [0..=3] (e.g., ["$", "(", "(i", "i"])]
-      ```
-
-      However, there isn't an equivalent path through the latter tree.
-      Why?
-      Obviously something is wrong about the way it's simplified, likely in `prune_dead_paths_trie2`, but idk merge_nodes_trie2 or promote_weak_edges_to_strong could be broken too afaik (less likely).
-
-      Identify the issue and fix it.
+  - user: Add an optimisation pass for the precompute2 tree that merges consecutive
+      edges, where possible. Generally, we can merge as long as not both of the edges
+      have state IDs. If one of them has a state ID, the merged edge inherits that.
+      And if neither do, it stays None. The pop value k on the edge just gets added.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the issue you're facing with `prune_dead_paths_trie2`. The problem lies in the single-pass DFS approach used for pruning, which doesn't correctly handle cycles in the graph. This can lead to premature pruning of valid paths that are part of a cycle.
+      Hello! As a helpful assistant, I'm here to help you with your code. Based on your request, I've added an optimization pass for the `precompute2` trie that merges consecutive edges. Here are the changes:
 
-      I've replaced the faulty DFS implementation with a more robust worklist-based algorithm. This new approach correctly computes the "liveness" of all nodes by propagating information backward from the end nodes until a fixed point is reached, ensuring that cycles are handled correctly. After computing the final liveness for every node, it performs a single pass to prune the dead edges.
+      I've introduced a new function `merge_consecutive_edges_trie2` which identifies nodes that can be bypassed and merges the incoming and outgoing edges. This function is now called within `precompute2` after other structural optimizations like node merging.
 
-      Here are the required changes for `src/constraint.rs`:
+      No changes were needed in `src/datastructures/arc_wrapper.rs` or `src/datastructures/trie.rs`.
+
+      Here is the git diff for the modified file:
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -500,78 +500,81 @@
+      @@ -401,6 +401,7 @@
+               }
+               prune_dead_paths_trie2(&mut precomputed2);
+               merge_nodes_trie2(&mut precomputed2);
+      +        merge_consecutive_edges_trie2(&mut precomputed2);
+               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+       
+      @@ -530,6 +531,100 @@
+           }
        }
        
-       fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
-       
-      -    fn prune_and_get_live_tokens_rec(
-      -        node_arc: &Arc<RwLock<PrecomputeNode2>>,
-      -        live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
-      -    ) -> LLMTokenBV {
-      -        let node_ptr = Arc::as_ptr(node_arc);
-      -        if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
-      -            return cached_bv.clone();
-      -        }
-      -        live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
-      -
-      -        // Snapshot children to avoid holding lock during recursion
-      -        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
-      -            let node_guard = node_arc.read().unwrap();
-      -            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-      -        };
-      -
-      -        for child_wrapper in children_to_check {
-      -            let child_arc = child_wrapper.upgrade().expect("Dangling weak pointer in prune_dead_paths_trie2");
-      -            prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
-      -        }
-      -
-      -        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-      -        {
-      -            let mut node_guard = node_arc.write().unwrap();
-      -            if node_guard.value.end {
-      -                // An end node is a source of liveness. The tokens that can end here are considered live.
-      -                live_tokens_for_this_node |= &node_guard.value.live_tokens;
-      -            }
-      -
-      -            node_guard.children_mut().retain(|_edge_key, dest_map| {
-      -                dest_map.retain(|child_wrapper, edge_value_bv| {
-      -                    let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-      -                    let live_tokens_from_child = live_tokens_cache
-      -                        .get(&child_ptr)
-      -                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-      -
-      -                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-      -
-      -                    if live_tokens_for_this_edge.is_empty() {
-      -                        false // Prune this destination
-      -                    } else {
-      -                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
-      -                        true // Keep this destination
-      -                    }
-      -                });
-      -                !dest_map.is_empty()
-      -            });
-      -
-      -            for dest_map in node_guard.children().values() {
-      -                for edge_bv in dest_map.values() {
-      -                    live_tokens_for_this_node |= edge_bv;
-      -                }
-      -            }
-      -            node_guard.value.live_tokens = live_tokens_for_this_node.clone();
-      -        }
-      -
-      -        live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
-      -        live_tokens_for_this_node
-      -    }
-      -
-      -    let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
-      -
-      -    for root_arc in roots.values() {
-      -        prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
-      -    }
-      -
-      +    // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
-      +    // This correctly handles cycles, iterating until a fixed point is reached.
-      +    let all_nodes = Trie::all_nodes(&roots.values().cloned().collect());
-      +    let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
-      +    let mut worklist = VecDeque::new();
-      +    let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+      +fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      +    crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
       +
-      +    // 1. Initialize live sets and build predecessor map.
-      +    for node_arc in &all_nodes {
-      +        let node_ptr = Arc::as_ptr(node_arc);
-      +        live.insert(node_ptr, LLMTokenBV::zeros());
+      +    let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
       +
-      +        let guard = node_arc.read().unwrap();
-      +        if guard.value.end {
-      +            let initial_live = guard.value.live_tokens.clone();
-      +            if !initial_live.is_empty() {
-      +                live.insert(node_ptr, initial_live);
-      +                worklist.push_back(node_ptr);
-      +            }
-      +        }
+      +    let mut changed = true;
+      +    let mut iterations = 0;
+      +    while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+      +        iterations += 1;
+      +        changed = false;
       +
-      +        for dest_map in guard.children().values() {
-      +            for (child_wrap, edge_bv) in dest_map {
-      +                if let Some(child_arc) = child_wrap.upgrade() {
-      +                    let child_ptr = Arc::as_ptr(&child_arc);
-      +                    predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
-      +                }
-      +            }
-      +        }
-      +    }
-      +
-      +    // 2. Propagate liveness until a fixed point is reached.
-      +    while let Some(node_ptr) = worklist.pop_front() {
-      +        let live_at_node = live.get(&node_ptr).unwrap().clone();
-      +        if let Some(preds) = predecessors.get(&node_ptr) {
-      +            for (pred_ptr, edge_bv) in preds {
-      +                let live_from_edge = &live_at_node & edge_bv;
-      +                if live_from_edge.is_empty() {
-      +                    continue;
-      +                }
-      +
-      +                let pred_live = live.get_mut(pred_ptr).unwrap();
-      +                let old_len = pred_live.len();
-      +                *pred_live |= &live_from_edge;
-      +                if pred_live.len() > old_len {
-      +                    worklist.push_back(*pred_ptr);
-      +                }
-      +            }
-      +        }
-      +    }
-      +
-      +    // 3. Prune the graph based on the computed live sets.
-      +    for node_arc in &all_nodes {
-      +        let mut guard = node_arc.write().unwrap();
-      +        guard.children_mut().retain(|_edge_key, dest_map| {
-      +            dest_map.retain(|child_wrapper, edge_value_bv| {
-      +                if let Some(child_arc) = child_wrapper.upgrade() {
-      +                    let child_ptr = Arc::as_ptr(&child_arc);
-      +                    let live_from_child = live.get(&child_ptr).unwrap();
-      +                    let live_on_edge = &*edge_value_bv & live_from_child;
-      +                    if live_on_edge.is_empty() {
-      +                        false
-      +                    } else {
-      +                        *edge_value_bv = live_on_edge;
-      +                        true
+      +        let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+      +        let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+      +        for node_arc in &all_nodes_current {
+      +            let guard = node_arc.read().unwrap();
+      +            for dest_map in guard.children().values() {
+      +                for child_wrap in dest_map.keys() {
+      +                    if let Some(child_arc) = child_wrap.upgrade() {
+      +                        let child_ptr = Arc::as_ptr(&child_arc);
+      +                        predecessors.entry(child_ptr).or_default().push(node_arc.clone());
       +                    }
-      +                } else {
-      +                    false // Dangling weak pointer, prune it.
       +                }
-      +            });
-      +            !dest_map.is_empty()
-      +        });
-      +        // Update the node's own live_tokens field with the final computed value.
-      +        let node_ptr = Arc::as_ptr(node_arc);
-      +        guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
+      +            }
+      +        }
+      +
+      +        for i_arc in &all_nodes_current {
+      +            let i_ptr = Arc::as_ptr(i_arc);
+      +
+      +            if root_ptrs.contains(&i_ptr) { continue; }
+      +            if i_arc.read().unwrap().value.end { continue; }
+      +
+      +            let outgoing_edges: Vec<_> = {
+      +                let i_guard = i_arc.read().unwrap();
+      +                i_guard.children().iter().flat_map(|(ek, dest_map)| {
+      +                    dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+      +                }).collect()
+      +            };
+      +            if outgoing_edges.len() != 1 { continue; }
+      +
+      +            let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+      +            let (k_ic, s_ic_opt) = edge_key_ic;
+      +            let c_arc = match c_wrapper.upgrade() {
+      +                Some(arc) => arc,
+      +                None => continue, // Dangling weak pointer, will be pruned later
+      +            };
+      +
+      +            let parents = match predecessors.get(&i_ptr) {
+      +                Some(preds) if !preds.is_empty() => preds.clone(),
+      +                _ => continue,
+      +            };
+      +
+      +            for p_arc in parents {
+      +                let mut p_guard = p_arc.write().unwrap();
+      +
+      +                let mut modifications = Vec::new();
+      +
+      +                for (ek_pi, dest_map) in p_guard.children() {
+      +                    for (wrapper_pi, bv_pi) in dest_map {
+      +                        if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+      +                            let (k_pi, s_pi_opt) = ek_pi;
+      +
+      +                            if s_pi_opt.is_some() && s_ic_opt.is_some() {
+      +                                continue;
+      +                            }
+      +
+      +                            let k_new = k_pi + k_ic;
+      +                            let s_new_opt = s_pi_opt.or(s_ic_opt);
+      +                            let ek_new = (k_new, s_new_opt);
+      +                            let bv_new = bv_pi & &bv_ic;
+      +
+      +                            if !bv_new.is_empty() {
+      +                                let c_wrapper_new = if wrapper_pi.is_strong() {
+      +                                    NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+      +                                } else {
+      +                                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+      +                                };
+      +                                modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+      +                            } else {
+      +                                modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                if !modifications.is_empty() {
+      +                    changed = true;
+      +                    for (to_add, to_remove) in modifications {
+      +                        if let Some((ek, wrapper)) = to_remove {
+      +                            if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+      +                                dest_map.remove(&wrapper);
+      +                                if dest_map.is_empty() {
+      +                                    p_guard.children_mut().remove(&ek);
+      +                                }
+      +                            }
+      +                        }
+      +                        if let Some((ek, wrapper, bv)) = to_add {
+      +                            p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
       +    }
-           crate::debug!(2, "Finished pruning dead paths from trie 2.");
-       }
-       
+      +
+      +    if iterations > 0 {
+      +        prune_dead_paths_trie2(roots);
+      +    }
+      +    crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
+      +}
+      +
+       fn trie2_shape_hash(
+           arc: &Arc<RwLock<PrecomputeNode2>>,
+           memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 
       ```
+
+      Let me know if you have any other questions or need further assistance
     metadata:
-  - user: |
-      Apply result (git-llm mode):
+  - user: |-
+      Git apply attempt failed (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Error applying patch to src/constraint.rs:
+      Hunk #2 (header: @@ -530,6 +531,100 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          }
+      }
+
+      fn trie2_shape_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      --- Expected Context (from patch, after normalization): ---
+      }
+      }
+
+      fn trie2_shape_hash(
+      arc: &Arc<RwLock<PrecomputeNode2>>,
+      memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 825 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        }
+      + crate::debug!(2, "Finished pruning dead paths from trie 2.");
+        }
+        
+        fn trie2_shape_hash(
+        arc: &Arc<RwLock<PrecomputeNode2>>,
+      - memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      Problematic diff content:
+      ---
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -401,6 +401,7 @@
+               }
+               prune_dead_paths_trie2(&mut precomputed2);
+               merge_nodes_trie2(&mut precomputed2);
+      +        merge_consecutive_edges_trie2(&mut precomputed2);
+               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+       
+      @@ -530,6 +531,100 @@
+           }
+       }
+       
+      +fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      +    crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+      +
+      +    let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
+      +
+      +    let mut changed = true;
+      +    let mut iterations = 0;
+      +    while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+      +        iterations += 1;
+      +        changed = false;
+      +
+      +        let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+      +        let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+      +        for node_arc in &all_nodes_current {
+      +            let guard = node_arc.read().unwrap();
+      +            for dest_map in guard.children().values() {
+      +                for child_wrap in dest_map.keys() {
+      +                    if let Some(child_arc) = child_wrap.upgrade() {
+      +                        let child_ptr = Arc::as_ptr(&child_arc);
+      +                        predecessors.entry(child_ptr).or_default().push(node_arc.clone());
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        for i_arc in &all_nodes_current {
+      +            let i_ptr = Arc::as_ptr(i_arc);
+      +
+      +            if root_ptrs.contains(&i_ptr) { continue; }
+      +            if i_arc.read().unwrap().value.end { continue; }
+      +
+      +            let outgoing_edges: Vec<_> = {
+      +                let i_guard = i_arc.read().unwrap();
+      +                i_guard.children().iter().flat_map(|(ek, dest_map)| {
+      +                    dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+      +                }).collect()
+      +            };
+      +            if outgoing_edges.len() != 1 { continue; }
+      +
+      +            let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+      +            let (k_ic, s_ic_opt) = edge_key_ic;
+      +            let c_arc = match c_wrapper.upgrade() {
+      +                Some(arc) => arc,
+      +                None => continue, // Dangling weak pointer, will be pruned later
+      +            };
+      +
+      +            let parents = match predecessors.get(&i_ptr) {
+      +                Some(preds) if !preds.is_empty() => preds.clone(),
+      +                _ => continue,
+      +            };
+      +
+      +            for p_arc in parents {
+      +                let mut p_guard = p_arc.write().unwrap();
+      +
+      +                let mut modifications = Vec::new();
+      +
+      +                for (ek_pi, dest_map) in p_guard.children() {
+      +                    for (wrapper_pi, bv_pi) in dest_map {
+      +                        if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+      +                            let (k_pi, s_pi_opt) = ek_pi;
+      +
+      +                            if s_pi_opt.is_some() && s_ic_opt.is_some() {
+      +                                continue;
+      +                            }
+      +
+      +                            let k_new = k_pi + k_ic;
+      +                            let s_new_opt = s_pi_opt.or(s_ic_opt);
+      +                            let ek_new = (k_new, s_new_opt);
+      +                            let bv_new = bv_pi & &bv_ic;
+      +
+      +                            if !bv_new.is_empty() {
+      +                                let c_wrapper_new = if wrapper_pi.is_strong() {
+      +                                    NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+      +                                } else {
+      +                                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+      +                                };
+      +                                modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+      +                            } else {
+      +                                modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                if !modifications.is_empty() {
+      +                    changed = true;
+      +                    for (to_add, to_remove) in modifications {
+      +                        if let Some((ek, wrapper)) = to_remove {
+      +                            if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+      +                                dest_map.remove(&wrapper);
+      +                                if dest_map.is_empty() {
+      +                                    p_guard.children_mut().remove(&ek);
+      +                                }
+      +                            }
+      +                        }
+      +                        if let Some((ek, wrapper, bv)) = to_add {
+      +                            p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    if iterations > 0 {
+      +        prune_dead_paths_trie2(roots);
+      +    }
+      +    crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
+      +}
+      +
+       fn trie2_shape_hash(
+           arc: &Arc<RwLock<PrecomputeNode2>>,
+           memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
-  - user: 'Changes committed with message: "Fix: Improve Trie2 pruning with worklist
-      algorithm to handle cycles"'
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Error applying patch to src/constraint.rs:
+      Hunk #2 (header: @@ -530,6 +531,100 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          }
+      }
+
+      fn trie2_shape_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      --- Expected Context (from patch, after normalization): ---
+      }
+      }
+
+      fn trie2_shape_hash(
+      arc: &Arc<RwLock<PrecomputeNode2>>,
+      memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 825 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        }
+      + crate::debug!(2, "Finished pruning dead paths from trie 2.");
+        }
+        
+        fn trie2_shape_hash(
+        arc: &Arc<RwLock<PrecomputeNode2>>,
+      - memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      Problematic diff content:
+      ---
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -401,6 +401,7 @@
+               }
+               prune_dead_paths_trie2(&mut precomputed2);
+               merge_nodes_trie2(&mut precomputed2);
+      +        merge_consecutive_edges_trie2(&mut precomputed2);
+               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
+       
+      @@ -530,6 +531,100 @@
+           }
+       }
+       
+      +fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      +    crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+      +
+      +    let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
+      +
+      +    let mut changed = true;
+      +    let mut iterations = 0;
+      +    while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+      +        iterations += 1;
+      +        changed = false;
+      +
+      +        let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+      +        let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+      +        for node_arc in &all_nodes_current {
+      +            let guard = node_arc.read().unwrap();
+      +            for dest_map in guard.children().values() {
+      +                for child_wrap in dest_map.keys() {
+      +                    if let Some(child_arc) = child_wrap.upgrade() {
+      +                        let child_ptr = Arc::as_ptr(&child_arc);
+      +                        predecessors.entry(child_ptr).or_default().push(node_arc.clone());
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        for i_arc in &all_nodes_current {
+      +            let i_ptr = Arc::as_ptr(i_arc);
+      +
+      +            if root_ptrs.contains(&i_ptr) { continue; }
+      +            if i_arc.read().unwrap().value.end { continue; }
+      +
+      +            let outgoing_edges: Vec<_> = {
+      +                let i_guard = i_arc.read().unwrap();
+      +                i_guard.children().iter().flat_map(|(ek, dest_map)| {
+      +                    dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+      +                }).collect()
+      +            };
+      +            if outgoing_edges.len() != 1 { continue; }
+      +
+      +            let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+      +            let (k_ic, s_ic_opt) = edge_key_ic;
+      +            let c_arc = match c_wrapper.upgrade() {
+      +                Some(arc) => arc,
+      +                None => continue, // Dangling weak pointer, will be pruned later
+      +            };
+      +
+      +            let parents = match predecessors.get(&i_ptr) {
+      +                Some(preds) if !preds.is_empty() => preds.clone(),
+      +                _ => continue,
+      +            };
+      +
+      +            for p_arc in parents {
+      +                let mut p_guard = p_arc.write().unwrap();
+      +
+      +                let mut modifications = Vec::new();
+      +
+      +                for (ek_pi, dest_map) in p_guard.children() {
+      +                    for (wrapper_pi, bv_pi) in dest_map {
+      +                        if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+      +                            let (k_pi, s_pi_opt) = ek_pi;
+      +
+      +                            if s_pi_opt.is_some() && s_ic_opt.is_some() {
+      +                                continue;
+      +                            }
+      +
+      +                            let k_new = k_pi + k_ic;
+      +                            let s_new_opt = s_pi_opt.or(s_ic_opt);
+      +                            let ek_new = (k_new, s_new_opt);
+      +                            let bv_new = bv_pi & &bv_ic;
+      +
+      +                            if !bv_new.is_empty() {
+      +                                let c_wrapper_new = if wrapper_pi.is_strong() {
+      +                                    NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+      +                                } else {
+      +                                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+      +                                };
+      +                                modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+      +                            } else {
+      +                                modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                if !modifications.is_empty() {
+      +                    changed = true;
+      +                    for (to_add, to_remove) in modifications {
+      +                        if let Some((ek, wrapper)) = to_remove {
+      +                            if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+      +                                dest_map.remove(&wrapper);
+      +                                if dest_map.is_empty() {
+      +                                    p_guard.children_mut().remove(&ek);
+      +                                }
+      +                            }
+      +                        }
+      +                        if let Some((ek, wrapper, bv)) = to_add {
+      +                            p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    if iterations > 0 {
+      +        prune_dead_paths_trie2(roots);
+      +    }
+      +    crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
+      +}
+      +
+       fn trie2_shape_hash(
+           arc: &Arc<RwLock<PrecomputeNode2>>,
+           memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint.rs
+    metadata:
+  - user: 'Changes committed with message: "feat: Optimize precompute2 trie by merging
+      consecutive edges"'
     metadata:
 ...

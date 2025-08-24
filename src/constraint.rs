@@ -623,6 +623,7 @@ impl GrammarConstraint {
         }
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
+        merge_consecutive_edges_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
@@ -823,6 +824,116 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
         guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
     }
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
+}
+
+fn merge_consecutive_edges_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+    crate::debug!(2, "Merging consecutive edges in precomputed trie 2.");
+
+    let root_ptrs: HashSet<_> = roots.values().map(Arc::as_ptr).collect();
+
+    let mut changed = true;
+    let mut iterations = 0;
+    while changed && iterations < 10 { // Add iteration limit to prevent infinite loops in case of bugs
+        iterations += 1;
+        changed = false;
+
+        let all_nodes_current = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+        let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+        for node_arc in &all_nodes_current {
+            let guard = node_arc.read().unwrap();
+            for dest_map in guard.children().values() {
+                for child_wrap in dest_map.keys() {
+                    if let Some(child_arc) = child_wrap.upgrade() {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        predecessors.entry(child_ptr).or_default().push(node_arc.clone());
+                    }
+                }
+            }
+        }
+
+        for i_arc in &all_nodes_current {
+            let i_ptr = Arc::as_ptr(i_arc);
+
+            if root_ptrs.contains(&i_ptr) { continue; }
+            if i_arc.read().unwrap().value.end { continue; }
+
+            let outgoing_edges: Vec<_> = {
+                let i_guard = i_arc.read().unwrap();
+                i_guard.children().iter().flat_map(|(ek, dest_map)| {
+                    dest_map.iter().map(move |(np, ev)| (ek.clone(), np.clone(), ev.clone()))
+                }).collect()
+            };
+            if outgoing_edges.len() != 1 { continue; }
+
+            let (edge_key_ic, c_wrapper, bv_ic) = outgoing_edges.into_iter().next().unwrap();
+            let (k_ic, s_ic_opt) = edge_key_ic;
+            let c_arc = match c_wrapper.upgrade() {
+                Some(arc) => arc,
+                None => continue, // Dangling weak pointer, will be pruned later
+            };
+
+            let parents = match predecessors.get(&i_ptr) {
+                Some(preds) if !preds.is_empty() => preds.clone(),
+                _ => continue,
+            };
+
+            for p_arc in parents {
+                let mut p_guard = p_arc.write().unwrap();
+
+                let mut modifications = Vec::new();
+
+                for (ek_pi, dest_map) in p_guard.children() {
+                    for (wrapper_pi, bv_pi) in dest_map {
+                        if wrapper_pi.as_ptr_usize() == i_ptr as usize {
+                            let (k_pi, s_pi_opt) = ek_pi;
+
+                            if s_pi_opt.is_some() && s_ic_opt.is_some() {
+                                continue;
+                            }
+
+                            let k_new = k_pi + k_ic;
+                            let s_new_opt = s_pi_opt.or(s_ic_opt);
+                            let ek_new = (k_new, s_new_opt);
+                            let bv_new = bv_pi & &bv_ic;
+
+                            if !bv_new.is_empty() {
+                                let c_wrapper_new = if wrapper_pi.is_strong() {
+                                    NodePtr::Strong(ArcPtrWrapper::new(c_arc.clone()))
+                                } else {
+                                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc)))
+                                };
+                                modifications.push((Some((ek_new, c_wrapper_new, bv_new)), Some((ek_pi.clone(), wrapper_pi.clone()))));
+                            } else {
+                                modifications.push((None, Some((ek_pi.clone(), wrapper_pi.clone()))));
+                            }
+                        }
+                    }
+                }
+
+                if !modifications.is_empty() {
+                    changed = true;
+                    for (to_add, to_remove) in modifications {
+                        if let Some((ek, wrapper)) = to_remove {
+                            if let Some(dest_map) = p_guard.children_mut().get_mut(&ek) {
+                                dest_map.remove(&wrapper);
+                                if dest_map.is_empty() {
+                                    p_guard.children_mut().remove(&ek);
+                                }
+                            }
+                        }
+                        if let Some((ek, wrapper, bv)) = to_add {
+                            p_guard.children_mut().entry(ek).or_default().insert(wrapper, bv);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if iterations > 0 {
+        prune_dead_paths_trie2(roots);
+    }
+    crate::debug!(2, "Finished merging consecutive edges after {} iterations.", iterations);
 }
 
 fn trie2_shape_hash(
@@ -3080,3 +3191,4 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
+
