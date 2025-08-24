@@ -97,13 +97,12 @@ fn emit_timeit_for_expr(name_code: TokenStream2, expr: Expr) -> TokenStream2 {
                 }}
             } else {
                 // Block has no return value, so expand to statements.
-                // The statements inside the user's block are injected directly.
-                quote! {
+                // The statements inside the user's block are injected into a new block expression.
+                quote! {{
                     let __profiler_name = #name_code;
                     let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                     #(#stmts)*
-                    ::core::mem::drop(__timeit_guard);
-                }
+                }}
             }
         }
         other_expr => {

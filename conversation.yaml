@@ -209,13 +209,12 @@ local_system:
                       }}
                   } else {
                       // Block has no return value, so expand to statements.
-                      // The statements inside the user's block are injected directly.
-                      quote! {
+                      // The statements inside the user's block are injected into a new block expression.
+                      quote! {{
                           let __profiler_name = #name_code;
                           let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                           #(#stmts)*
-                          ::core::mem::drop(__timeit_guard);
-                      }
+                      }}
                   }
               }
               other_expr => {
@@ -1055,6 +1054,112 @@ messages:
       +                    #(#stmts)*
       +                    ::core::mem::drop(__timeit_guard);
       +                }
+                   }
+               }
+               other_expr => {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: profiler_macro/src/lib.rs
+      Applying patch to 'profiler_macro/src/lib.rs' using custom patcher...
+      Successfully applied patch and wrote to profiler_macro/src/lib.rs.
+    metadata:
+  - user: 'Changes committed with message: "fix: Restore expression semantics for
+      timeit! macro with blocks"'
+    metadata:
+  - user: |-
+      Diff of profiler_macro/Cargo.toml since previous turn:
+      ```diff
+      --- original version of profiler_macro/Cargo.toml+++ current version of profiler_macro/Cargo.toml@@ -9,3 +9,4 @@ [dependencies]
+       syn = { version = "2.0", features = ["full"] }
+       quote = "1.0"
+      +proc-macro2 = "1.0.95"
+
+      ```
+    metadata:
+  - user: |-
+      Diff of profiler_macro/src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Ok that error's fixed. But we're getting a similar one in another piece of external code:
+      ```rust
+                      timeit!("get_mask merge_fn", {
+                          crate::debug!(4, "Active LLM tokens in glr_s1 before merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+                          crate::debug!(4, "Active LLM tokens in glr_s2 before merge: {:?}", glr_s2.active_state.stack.allowed_llm_tokens());
+                          glr_s1.merge_with(glr_s2);
+                          crate::debug!(4, "Active LLM tokens in glr_s1 after merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+                      })
+      ```
+      ```
+      error: expected expression, found `let` statement
+          --> src/constraint.rs:2705:17
+           |
+      2705 | /                 timeit!("get_mask merge_fn", {
+      2706 | |                     crate::debug!(4, "Active LLM tokens in glr_s1 before merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+      2707 | |                     crate::debug!(4, "Active LLM tokens in glr_s2 before merge: {:?}", glr_s2.active_state.stack.allowed_llm_tokens());
+      2708 | |                     glr_s1.merge_with(glr_s2);
+      2709 | |                     crate::debug!(4, "Active LLM tokens in glr_s1 after merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+      2710 | |                 })
+           | |__________________^
+           |
+           = note: only supported directly in conditions of `if` and `while` expressions
+           = note: this error originates in the macro `timeit` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+
+      error: macro expansion ignores `;` and any tokens following
+          --> src/constraint.rs:2705:17
+           |
+      2705 | /                 timeit!("get_mask merge_fn", {
+      2706 | |                     crate::debug!(4, "Active LLM tokens in glr_s1 before merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+      2707 | |                     crate::debug!(4, "Active LLM tokens in glr_s2 before merge: {:?}", glr_s2.active_state.stack.allowed_llm_tokens());
+      2708 | |                     glr_s1.merge_with(glr_s2);
+      2709 | |                     crate::debug!(4, "Active LLM tokens in glr_s1 after merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+      2710 | |                 })
+           | |__________________^ caused by the macro expansion here
+           |
+           = note: the usage of `timeit!` is likely invalid in expression context
+      help: you might be missing a semicolon here
+           |
+      2710 |                 });
+           |                   +
+      ```
+    metadata:
+  - assistant: |-
+      You've correctly identified the core issue. The `timeit!` macro was trying to serve two incompatible purposes: sometimes acting as an expression, and sometimes injecting statements into the current scope. This ambiguity is the source of the compilation errors.
+
+      The fix is to make `timeit!` *always* expand to an expression.
+      *   If the block you pass to it has a return value, `timeit!` will return that value.
+      *   If the block contains only statements (like in your failing example), `timeit!` will expand to an expression of type `()` (unit type).
+
+      This makes its behavior consistent and predictable for the compiler. The other behavior you wanted—injecting statements into the current scope so variables are accessible afterwards—is exactly what the `timeitblock!` macro is for.
+
+      Here is the patch to make `timeit!` always expand to an expression, which will fix the error:
+
+      ```diff
+      --- a/profiler_macro/src/lib.rs
+      +++ b/profiler_macro/src/lib.rs
+      @@ -100,13 +100,11 @@
+                       }}
+                   } else {
+                       // Block has no return value, so expand to statements.
+      -                // The statements inside the user's block are injected directly.
+      -                quote! {
+      +                // The statements inside the user's block are injected into a new block expression.
+      +                quote! {{
+                           let __profiler_name = #name_code;
+                           let __timeit_guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+                           #(#stmts)*
+      -                    ::core::mem::drop(__timeit_guard);
+      -                }
+      +                }}
                    }
                }
                other_expr => {
