@@ -1294,9 +1294,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for source_state_id in source_state_ids {
                     // Very coarse cache key (as in original code).
                     let cache_key = BelowBottomCacheKey {
-                        nonterminal_id: nt,
-                        source_state_id: StateID(0),
-                        goto_state_id: StateID(0),
+                        // nonterminal_id: nt,
+                        nonterminal_id: NonTerminalID(0),
+                        source_state_id: *source_state_id,
+                        goto_state_id: *goto_state_id,
                         k: 0,
                     };
 
