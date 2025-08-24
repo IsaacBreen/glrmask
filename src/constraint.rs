@@ -634,7 +634,7 @@ impl GrammarConstraint {
         }
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
-        merge_consecutive_edges_trie2(&mut precomputed2);
+        // merge_consecutive_edges_trie2(&mut precomputed2);
         // merge_nodes_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
