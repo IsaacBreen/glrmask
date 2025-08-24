@@ -1314,7 +1314,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for source_state_id in source_state_ids {
                                 // Key that ignores trie2_nodes (they are already cleared from 'acc' by std::mem::take above)
                                 let cache_key = BelowBottomCacheKey {
-                                    nonterminal_id: nt,
+                                    // nonterminal_id: nt,
+                                    nonterminal_id: NonTerminalID(0),
                                     source_state_id: *source_state_id,
                                     // source_state_id: *goto_state_id,
                                     // source_state_id: StateID(0),
