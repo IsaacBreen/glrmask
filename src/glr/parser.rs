@@ -1122,7 +1122,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     1 << (32 - (i as u32 - 1).leading_zeros())
                 };
  
-                timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
+                // timeit!(format!("GLRParserState::step::phase2::goto::number of loops (rounded to nearest pow of 2): {}", i_rounded_to_nearest_pow), {});
             }
         }
  
@@ -1447,9 +1447,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     }
                     let merged = timeit!("GLRParserState::reduce_and_goto: Merging below-zero nodes", {
-                        timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
+                        // timeit!(format!("GLRParserState::reduce_and_goto: Merging {} below-zero nodes", below_zero.len()), {
                         GSSNode::merge_many_with_depth(usize::MAX, below_zero)
-                    })
+                    // })
                     });
                     out.push(merged);});
                 }
@@ -1457,9 +1457,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             });
 
         timeit!("GLRParserState::reduce_and_goto", {
-        timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
+        // timeit!(format!("GLRParserState::reduce_and_goto: Merging {} nodes", out.len()), {
             (GSSNode::merge_many_with_depth(usize::MAX, out), GSSNode::merge_many_with_depth(usize::MAX, accepted_out))
-        })
+        // })
         })
     }
 
