@@ -752,72 +752,82 @@ impl GrammarConstraint {
 fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
-    fn prune_and_get_live_tokens_rec(
-        node_arc: &Arc<RwLock<PrecomputeNode2>>,
-        live_tokens_cache: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
-    ) -> LLMTokenBV {
+    // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
+    // This correctly handles cycles, iterating until a fixed point is reached.
+    let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+    let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
+    let mut worklist = VecDeque::new();
+    let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+    // 1. Initialize live sets and build predecessor map.
+    for node_arc in &all_nodes {
         let node_ptr = Arc::as_ptr(node_arc);
-        if let Some(cached_bv) = live_tokens_cache.get(&node_ptr) {
-            return cached_bv.clone();
-        }
-        live_tokens_cache.insert(node_ptr, LLMTokenBV::zeros()); // Cycle breaking
+        live.insert(node_ptr, LLMTokenBV::zeros());
 
-        // Snapshot children to avoid holding lock during recursion
-        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode2>>> = {
-            let node_guard = node_arc.read().unwrap();
-            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-        };
-
-        for child_wrapper in children_to_check {
-            let child_arc = child_wrapper.upgrade().expect("Dangling weak pointer in prune_dead_paths_trie2");
-            prune_and_get_live_tokens_rec(&child_arc, live_tokens_cache);
-        }
-
-        let mut live_tokens_for_this_node = LLMTokenBV::zeros();
-        {
-            let mut node_guard = node_arc.write().unwrap();
-            if node_guard.value.end {
-                // An end node is a source of liveness. The tokens that can end here are considered live.
-                live_tokens_for_this_node |= &node_guard.value.live_tokens;
+        let guard = node_arc.read().unwrap();
+        if guard.value.end {
+            let initial_live = guard.value.live_tokens.clone();
+            if !initial_live.is_empty() {
+                live.insert(node_ptr, initial_live);
+                worklist.push_back(node_ptr);
             }
+        }
 
-            node_guard.children_mut().retain(|_edge_key, dest_map| {
-                dest_map.retain(|child_wrapper, edge_value_bv| {
-                    let child_ptr = child_wrapper.as_ptr_usize() as *const RwLock<PrecomputeNode2>;
-                    let live_tokens_from_child = live_tokens_cache
-                        .get(&child_ptr)
-                        .expect("Child not found in live_tokens_cache. Logic error in post-order traversal.");
-
-                    let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-
-                    if live_tokens_for_this_edge.is_empty() {
-                        false // Prune this destination
-                    } else {
-                        *edge_value_bv = live_tokens_for_this_edge; // Narrow the edge's BV
-                        true // Keep this destination
-                    }
-                });
-                !dest_map.is_empty()
-            });
-
-            for dest_map in node_guard.children().values() {
-                for edge_bv in dest_map.values() {
-                    live_tokens_for_this_node |= edge_bv;
+        for dest_map in guard.children().values() {
+            for (child_wrap, edge_bv) in dest_map {
+                if let Some(child_arc) = child_wrap.upgrade() {
+                    let child_ptr = Arc::as_ptr(&child_arc);
+                    predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
                 }
             }
-            node_guard.value.live_tokens = live_tokens_for_this_node.clone();
         }
-
-        live_tokens_cache.insert(node_ptr, live_tokens_for_this_node.clone());
-        live_tokens_for_this_node
     }
 
-    let mut live_tokens_cache: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+    // 2. Propagate liveness until a fixed point is reached.
+    while let Some(node_ptr) = worklist.pop_front() {
+        let live_at_node = live.get(&node_ptr).unwrap().clone();
+        if let Some(preds) = predecessors.get(&node_ptr) {
+            for (pred_ptr, edge_bv) in preds {
+                let live_from_edge = &live_at_node & edge_bv;
+                if live_from_edge.is_empty() {
+                    continue;
+                }
 
-    for root_arc in roots.values() {
-        prune_and_get_live_tokens_rec(root_arc, &mut live_tokens_cache);
+                let pred_live = live.get_mut(pred_ptr).unwrap();
+                let old_len = pred_live.len();
+                *pred_live |= &live_from_edge;
+                if pred_live.len() > old_len {
+                    worklist.push_back(*pred_ptr);
+                }
+            }
+        }
     }
 
+    // 3. Prune the graph based on the computed live sets.
+    for node_arc in &all_nodes {
+        let mut guard = node_arc.write().unwrap();
+        guard.children_mut().retain(|_edge_key, dest_map| {
+            dest_map.retain(|child_wrapper, edge_value_bv| {
+                if let Some(child_arc) = child_wrapper.upgrade() {
+                    let child_ptr = Arc::as_ptr(&child_arc);
+                    let live_from_child = live.get(&child_ptr).unwrap();
+                    let live_on_edge = &*edge_value_bv & live_from_child;
+                    if live_on_edge.is_empty() {
+                        false
+                    } else {
+                        *edge_value_bv = live_on_edge;
+                        true
+                    }
+                } else {
+                    false // Dangling weak pointer, prune it.
+                }
+            });
+            !dest_map.is_empty()
+        });
+        // Update the node's own live_tokens field with the final computed value.
+        let node_ptr = Arc::as_ptr(node_arc);
+        guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
+    }
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
 }
 
