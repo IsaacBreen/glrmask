@@ -537,6 +537,36 @@ impl GrammarConstraint {
                     1,
                     &mut HashMap::new(),
                 );
+                // Create dummy trie2 edges when a root's trie2 node live_tokens != its Acc's llm_tokens_union.
+                // This preserves the association between Acc tokens and trie2 nodes without traversing subtrees.
+                {
+                    use crate::datastructures::gss::get_roots;
+                    let roots_map = get_roots([glr_s.active_state.stack.as_ref()]);
+                    for (_last_edge, accs) in roots_map {
+                        for acc in accs {
+                            let active_tokens = acc.union_llm_tokens();
+                            for src_wr in acc.trie2_nodes.iter() {
+                                let src_arc = src_wr.as_arc().clone();
+                                let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
+                                if src_live != active_tokens {
+                                    // Push a dummy edge with the Acc's active tokens into a fresh internal node
+                                    let edge_key = (0, None);
+                                    let mut inserter = EdgeInserter::new(
+                                        src_arc.clone(),
+                                        edge_key,
+                                        active_tokens.clone(),
+                                        |e, n| *e |= n,
+                                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                        |ev, t| *ev &= &t.live_tokens,
+                                    );
+                                    // Always use a new dummy node (strong edge)
+                                    let dummy = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                    inserter.try_destination(dummy.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     crate::debug!(3, "Trie2: Found end state for GLR state");
@@ -1013,7 +1043,7 @@ fn trie2_shape_hash(
 
     edge_hashes.sort_unstable();
     for h in edge_hashes {
-        h.hash(&mut hasher);
+        h.hash(state);
     }
 
     let final_hash = hasher.finish();
@@ -1631,8 +1661,8 @@ impl<'r> Precomputer<'r> {
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
+            for token_match in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token_match.id);
                 let applicable_tokens = child_vocab_node.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
@@ -1641,7 +1671,9 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(child_vocab_node, TokenizerStateID(final_state_val));
+                    let next_results = Self::compute_possible_matches_for_vocab_node(
+                        tokenizer,
+                        child_vocab_node, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
@@ -3233,3 +3265,4 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
+
