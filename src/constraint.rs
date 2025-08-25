@@ -534,7 +534,6 @@ impl GrammarConstraint {
 
                 crate::datastructures::gss::merge_trie2_nodes_if_needed(
                     &mut glr_s.active_state.stack,
-                    1,
                     &mut HashMap::new(),
                 );
                 let keep_going = glr_s.is_ok();

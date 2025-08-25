@@ -1225,9 +1225,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
             k: 0,
         };
 
-        // Decide/create a cached destination node for this nonterminal
-        // let cache_entry = self.below_bottom_cache.entry(cache_key);
-
         let mut merged_acc = {
             let mut below_it = below.iter();
             let first = below_it.next().unwrap().1.clone();
