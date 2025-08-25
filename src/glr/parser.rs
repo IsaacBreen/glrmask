@@ -1228,15 +1228,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Decide/create a cached destination node for this nonterminal
         let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
         let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
-        let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
-            arc
-        } else {
-            // Create a new cached destination node for this nonterminal
-            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-            cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
-            new_trie2_node
-        };
-        let dst_arc = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         for (k, acc) in below {
             let trie2_nodes = &acc.trie2_nodes;
@@ -1255,11 +1246,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     |ev, t| {},
                 );
 
-                if cached_dst_arc_opt.is_some() {
+                if let Some(arc) = cached_dst_arc_opt.clone() {
+                    let dst_arc = arc;
                     inserter.to_destination_weakly(dst_arc.clone());
                 } else {
+                    // Create a new cached destination node for this nonterminal
+                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+                    let dst_arc = new_trie2_node;
                     inserter.try_destination(dst_arc.clone());
-                }
+                };
             }
         }
 
