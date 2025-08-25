@@ -732,7 +732,17 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: HashMap<NonTerminalID, ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, HashMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BelowBottomCacheKey {
+    nonterminal_id: NonTerminalID,
+    source_state_id: StateID,
+    goto_state_id: StateID,
+    k: usize,
+    // Important: this Acc must have trie2_nodes cleared before being placed here.
+    // acc: Acc,
 }
 
 impl Display for GLRParserState<'_> {
@@ -1073,10 +1083,59 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
+    fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
+        let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
+        for (k, accs_by_edge) in popper.below_bottom() {
+            for (last_edge_content, acc_arc) in accs_by_edge {
+                let acc = acc_arc.as_ref();
+
+                let edge_key = (0, Some(last_edge_content.state_id));
+
+                // Always use max-ones for the edge bitset when popping below bottom
+                let edge_bv = LLMTokenBV::max_ones();
+
+                // For each existing trie2 node: just create the edge directly to a fresh destination
+                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                let mut used = BTreeSet::new();
+
+                for existing in &acc.trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
+
+                    let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    let inserter = EdgeInserter::new(
+                        source_arc.clone(),
+                        edge_key,
+                        edge_bv.clone(),
+                        |e, n| *e |= n,
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |ev, t| *ev &= &t.live_tokens,
+                    ).try_destination(fallback_dest.clone()); // direct, strong insert
+
+                    let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
+                    let final_wr = ArcPtrWrapper::new(final_dst_arc.clone());
+                    dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
+                    used.insert(final_wr);
+                }
+
+                // Update destination live tokens
+                for (dst_wr, added) in &dest_agg {
+                    let mut g = dst_wr.as_arc().write().expect("poison");
+                    g.value.live_tokens |= added.clone();
+                }
+
+                // Update new_acc.trie2_nodes as before
+                let mut new_acc = acc.clone();
+                new_acc.trie2_nodes = used;
+                result.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &new_acc)).or_insert(new_acc);
+            }
+        }
+        result
+    }
+
     fn handle_below_bottom_accepts(
         &mut self,
         nt: NonTerminalID,
-        below: &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
+        below: &BTreeMap<usize, Acc>,
         gotos: &SubstringGoto,
     ) -> Option<Arc<GSSNode>> {
         if gotos.accepting_sources.is_empty() {
@@ -1085,51 +1144,58 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut accepted_stacks: Vec<Arc<GSSNode>> = Vec::new();
 
-        for (k, accs_by_edge) in below {
-            for (_last_edge_content, acc_arc) in accs_by_edge {
-                let acc = acc_arc.as_ref();
-                let mut acc_clone = acc.clone();
-                let trie2_nodes = std::mem::take(&mut acc_clone.trie2_nodes);
+        for (k, acc) in below {
+            let mut acc = acc.clone();
+            let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
 
-                for source_state_id in &gotos.accepting_sources {
-                    let cache_key = nt;
-                    let cached_dst_wrapper_opt = self.below_bottom_cache.get(&cache_key).cloned();
+            for source_state_id in &gotos.accepting_sources {
+                let cache_key = BelowBottomCacheKey {
+                    nonterminal_id: nt,
+                    source_state_id: StateID(0),
+                    goto_state_id: StateID(0),
+                    k: 0,
+                };
+                // Decide/create a cached destination node for this nonterminal
+                let cache_entry = self.below_bottom_cache.entry(cache_key.clone()).or_default();
+                let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
+                let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
+                    arc
+                } else {
+                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+                    new_trie2_node
+                };
 
-                    let dst_arc = if let Some(wrapper) = cached_dst_wrapper_opt.as_ref() {
-                        wrapper.as_arc().clone()
+                // Always use max-ones for the edge bitset
+                let edge_bv = LLMTokenBV::max_ones();
+
+                // Edge key for below-bottom accepts: (k, Some(source_state_id)) as before
+                let edge_key = (*k, Some(*source_state_id));
+
+                // For each existing trie2 source node, add an edge to the cached destination
+                for existing in &trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
+                    let inserter = EdgeInserter::new(
+                        source_arc.clone(),
+                        edge_key,
+                        edge_bv.clone(),
+                        |e, n| *e |= n,
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |ev, t| *ev &= &t.live_tokens,
+                    );
+
+                    if cached_dst_arc_opt.is_some() {
+                        inserter.to_destination_weakly(dst_arc.clone());
                     } else {
-                        let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                        self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
-                        new_trie2_node
-                    };
-
-                    let edge_bv = LLMTokenBV::max_ones();
-                    let edge_key = (*k, Some(*source_state_id));
-
-                    for existing in &trie2_nodes {
-                        let source_arc = existing.as_arc().clone();
-                        let inserter = EdgeInserter::new(
-                            source_arc.clone(),
-                            edge_key,
-                            edge_bv.clone(),
-                            |e, n| *e |= n,
-                            |node_value, edge_value| node_value.live_tokens |= edge_value,
-                            |_, _| {},
-                        );
-
-                        if cached_dst_wrapper_opt.is_some() {
-                            inserter.to_destination_weakly(dst_arc.clone());
-                        } else {
-                            inserter.try_destination(dst_arc.clone()).expect("Cycle detected in below-bottom accept; impossible.");
-                        }
+                        inserter.try_destination(dst_arc.clone());
                     }
-
-                    let mut acc2 = acc.clone();
-                    acc2.trie2_nodes.clear();
-                    let gss0 = GSSNode::new(acc2);
-                    let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                    accepted_stacks.push(Arc::new(gss1));
                 }
+
+                let mut acc2 = acc.clone();
+                acc2.trie2_nodes.clear();
+                let gss0 = GSSNode::new(acc2);
+                let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                accepted_stacks.push(Arc::new(gss1));
             }
         }
 
@@ -1143,46 +1209,54 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn handle_below_bottom_gotos(
         &mut self,
         nt: NonTerminalID,
-        below: &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
+        below: BTreeMap<usize, Acc>,
         gotos: &SubstringGoto,
     ) -> Arc<GSSNode> {
         if gotos.gotos.is_empty() {
             return Arc::new(GSSNode::new_fresh());
         }
 
-        for (goto_state_id, source_ids) in &gotos.gotos {
-            for (k, accs_by_edge) in below {
-                for (last_edge_content, acc_arc) in accs_by_edge {
-                    if !source_ids.contains(&last_edge_content.state_id) {
-                        continue;
-                    }
+        let cache_key = BelowBottomCacheKey {
+            nonterminal_id: nt,
+            source_state_id: StateID(0),
+            goto_state_id: StateID(0),
+            k: 0,
+        };
 
-                    let acc = acc_arc.as_ref();
-                    let trie2_nodes = &acc.trie2_nodes;
+        // Decide/create a cached destination node for this nonterminal
+        let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+        let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
+        let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
+            arc
+        } else {
+            // Create a new cached destination node for this nonterminal
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+            new_trie2_node
+        };
+        let dst_arc = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
-                    let cache_key = nt;
-                    let cached_dst_wrapper_opt = self.below_bottom_cache.get(&cache_key).cloned();
+        for (k, acc) in below {
+            let trie2_nodes = &acc.trie2_nodes;
+            let edge_key = (k, None);
+            // Always use max-ones for the edge bitset
+            let edge_bv = LLMTokenBV::max_ones();
 
-                    let dst_arc = if let Some(wrapper) = cached_dst_wrapper_opt.as_ref() {
-                        wrapper.as_arc().clone()
-                    } else {
-                        let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                        self.below_bottom_cache.insert(cache_key, ArcPtrWrapper::new(new_trie2_node.clone()));
-                        new_trie2_node
-                    };
+            for existing in trie2_nodes {
+                let source_arc = existing.as_arc().clone();
+                let inserter = EdgeInserter::new(
+                    source_arc.clone(),
+                    edge_key,
+                    edge_bv.clone(),
+                    |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |ev, t| {},
+                );
 
-                    let edge_bv = LLMTokenBV::max_ones();
-                    let edge_key = (*k, Some(*goto_state_id));
-
-                    for existing in trie2_nodes {
-                        let source_arc = existing.as_arc().clone();
-                        let inserter = EdgeInserter::new(source_arc, edge_key, edge_bv.clone(), |e, n| *e |= n, |node_value, edge_value| node_value.live_tokens |= edge_value, |_, _| {});
-                        if cached_dst_wrapper_opt.is_some() {
-                            inserter.to_destination_weakly(dst_arc.clone());
-                        } else {
-                            inserter.try_destination(dst_arc.clone()).expect("Cycle detected in below-bottom goto; impossible.");
-                        }
-                    }
+                if cached_dst_arc_opt.is_some() {
+                    inserter.to_destination_weakly(dst_arc.clone());
+                } else {
+                    inserter.try_destination(dst_arc.clone());
                 }
             }
         }
@@ -1303,19 +1377,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
                 _ => {
                     // Build Accs aggregated by k, then continue from either all states or the everything state.
+                    let below_accs = self.build_below_bottom_accs(&popper);
+
                     let mut storage = SubstringGoto::default();
                     let gotos_for_nt =
                         self.substring_gotos_for(nt, config, &mut storage);
 
                     // Accepting sources (if any)
                     if let Some(accepted_merged) =
-                        self.handle_below_bottom_accepts(nt, popper.below_bottom(), gotos_for_nt)
+                        self.handle_below_bottom_accepts(nt, &below_accs, gotos_for_nt)
                     {
                         accepted_out.push(accepted_merged);
                     }
 
                     // Non-accepting gotos
-                    let merged_below = self.handle_below_bottom_gotos(nt, popper.below_bottom(), gotos_for_nt);
+                    let merged_below = self.handle_below_bottom_gotos(nt, below_accs, gotos_for_nt);
                     out.push(merged_below);
                 }
             }
