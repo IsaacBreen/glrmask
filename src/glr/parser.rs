@@ -1216,24 +1216,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return Arc::new(GSSNode::new_fresh());
         }
 
-        // let cache_key = BelowBottomCacheKey {
-        //     nonterminal_id: nt,
-        //     source_state_id: StateID(0),
-        //     goto_state_id: StateID(0),
-        //     k: 0,
-        // };
+        let cache_key = BelowBottomCacheKey {
+            nonterminal_id: nt,
+            source_state_id: StateID(0),
+            goto_state_id: StateID(0),
+            k: 0,
+        };
 
         // Decide/create a cached destination node for this nonterminal
-        // let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
-        // let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
-        // let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
-        //     arc
-        // } else {
-        //     // Create a new cached destination node for this nonterminal
-        //     let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-        //     cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
-        //     new_trie2_node
-        // };
+        let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+        let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
+        let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
+            arc
+        } else {
+            // Create a new cached destination node for this nonterminal
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+            new_trie2_node
+        };
         let dst_arc = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         for (k, acc) in below {
@@ -1253,11 +1253,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     |ev, t| {},
                 );
 
-                // if cached_dst_arc_opt.is_some() {
-                //     inserter.to_destination_weakly(dst_arc.clone());
-                // } else {
+                if cached_dst_arc_opt.is_some() {
+                    inserter.to_destination_weakly(dst_arc.clone());
+                } else {
                     inserter.try_destination(dst_arc.clone());
-                // }
+                }
             }
         }
 
