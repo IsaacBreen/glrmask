@@ -1246,16 +1246,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     |ev, t| {},
                 );
 
-                if let Some(arc) = cached_dst_arc_opt.clone() {
-                    let dst_arc = arc;
-                    inserter.to_destination_weakly(dst_arc.clone());
-                } else {
+                // if let Some(arc) = cached_dst_arc_opt.clone() {
+                //     let dst_arc = arc;
+                //     inserter.to_destination_weakly(dst_arc.clone());
+                // } else {
                     // Create a new cached destination node for this nonterminal
                     let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
                     let dst_arc = new_trie2_node;
                     inserter.try_destination(dst_arc.clone());
-                };
+                // }
             }
         }
 
