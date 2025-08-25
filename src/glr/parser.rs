@@ -1249,7 +1249,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     edge_bv.clone(),
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
-                    |ev, t| *ev &= &t.live_tokens,
+                    |ev, t| {},
                 );
 
                 if cached_dst_arc_opt.is_some() {
