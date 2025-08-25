@@ -1158,7 +1158,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // Decide/create a cached destination node for this nonterminal
                 let cache_entry = self.below_bottom_cache.entry(cache_key.clone()).or_default();
                 let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
-                let dst_arc = if let Some(arc) = cached_dst_arc_opt {
+                let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
                     arc
                 } else {
                     let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
@@ -1226,7 +1226,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Decide/create a cached destination node for this nonterminal
         let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
         let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
-        let dst_arc = if let Some(arc) = cached_dst_arc_opt {
+        let dst_arc = if let Some(arc) = cached_dst_arc_opt.clone() {
             arc
         } else {
             // Create a new cached destination node for this nonterminal
