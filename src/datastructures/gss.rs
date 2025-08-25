@@ -1269,45 +1269,31 @@ pub(crate) fn merge_trie2_nodes_if_needed(
     let root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         let mut new_acc = (*root.acc).clone();
         if new_acc.trie2_nodes.len() > merge_threshold {
-            let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+            // Create a single new destination for this merge operation.
+            let new_destination = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
             let edge_key = (0, None);
+            let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
-            // Shared fallback destination (for sources without any eligible existing child).
-            let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            for source_wrapper in &new_acc.trie2_nodes {
+                let source_arc = source_wrapper.as_arc().clone();
 
-            for existing_trie2_node in &new_acc.trie2_nodes {
-                let source_arc = existing_trie2_node.as_arc().clone();
-                let tokens_to_push = {
-                    let g = source_arc.read().expect("poison");
-                    g.value.live_tokens.clone()
-                };
-                if tokens_to_push.is_empty() {
-                    continue;
-                }
-
-                let mut inserter = EdgeInserter::new(
-                    source_arc.clone(),
+                let inserter = EdgeInserter::new(
+                    source_arc,
                     edge_key,
-                    tokens_to_push.clone(),
+                    tokens_for_edge.clone(),
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
-                    |ev, t| *ev &= &t.live_tokens,
+                    |_, _| {}, // Unconditional insertion
                 );
-
-                inserter = inserter.try_destination_auto(fallback_dest.clone());
-
-                let final_dest_arc = inserter.clone_into_option().expect("merge_trie2_nodes_if_needed: insert failed");
-                let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-
-                dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
+                // Insert a strong edge to the new shared destination.
+                inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
             }
 
-            for (dst_wr, added) in &dest_agg {
-                let mut dg = dst_wr.as_arc().write().expect("poison");
-                dg.value.live_tokens |= added.clone();
-            }
+            // Update the live tokens on the new destination node.
+            new_destination.write().expect("poison").value.live_tokens |= &tokens_for_edge;
 
-            new_acc.trie2_nodes = dest_agg.keys().cloned().collect();
+            // The acc now points only to this new merged destination.
+            new_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_destination)]);
         }
         Some(Arc::new(new_acc))
     };
