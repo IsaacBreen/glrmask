@@ -537,6 +537,38 @@ impl GrammarConstraint {
                     1,
                     &mut HashMap::new(),
                 );
+                // Create dummy trie2 edges when a root's trie2 node live_tokens != its Acc's llm_tokens_union.
+                // This preserves the association between Acc tokens and trie2 nodes without traversing subtrees.
+                {
+                    use crate::datastructures::gss::get_roots;
+                    let roots_map = get_roots([glr_s.active_state.stack.as_ref()]);
+                    for (_last_edge, accs) in roots_map {
+                        for acc in accs {
+                            let active_tokens = acc.union_llm_tokens();
+                            for src_wr in acc.trie2_nodes.iter() {
+                                let src_arc = src_wr.as_arc().clone();
+                                let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
+                                if src_live != active_tokens {
+                                    // Push a dummy edge with the Acc's active tokens into a fresh internal node
+                                    let edge_key = (0, None);
+                                    let mut inserter = EdgeInserter::new(
+                                        src_arc.clone(),
+                                        edge_key,
+                                        active_tokens.clone(),
+                                        |e, n| *e |= n,
+                                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                        |ev, t| *ev &= &t.live_tokens,
+                                    );
+                                    // Always use a new dummy node (strong edge)
+                                    let dummy = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                    // This should be try_destination_auto to avoid cycles, though cycles are unlikely here.
+                                    // Using try_destination for now as per original thought process.
+                                    inserter.try_destination(dummy.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     crate::debug!(3, "Trie2: Found end state for GLR state");

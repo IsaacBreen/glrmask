@@ -631,7 +631,12 @@ fn format_actions<W: std::fmt::Write>(
             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
                 format!("Shift {}", next_state_id.0)
             }
-            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+            Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                nonterminal_id,
+                len,
+                production_ids,
+                ..
+            } => {
                 let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
                 let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
                 format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
@@ -940,15 +945,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if can_proceed {
                                         let disallowed_terminals_bv = allowed_terminals.inverted();
                                         if !disallowed_terminals_bv.is_empty() {
-                                            let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
-                                                std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                                            // Push a dummy edge with the Acc's active tokens into a fresh internal node
+                                            let edge_key = (0, None);
+                                            let mut inserter = EdgeInserter::new(
+                                                constrained_state.stack.clone(),
+                                                edge_key,
+                                                disallowed_terminals_bv.clone(),
+                                                |e, n| *e |= n,
+                                                |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                                |ev, t| *ev &= &t.live_tokens,
                                             );
-
-                                            crate::datastructures::gss::disallow_terminals_and_prune_arc(
-                                                &mut constrained_state.stack,
-                                                &disallowed_l2,
-                                                &mut HashMap::new(),
-                                            );
+                                            let dummy_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                                            inserter.try_destination(dummy_node);
                                         }
 
                                         if !constrained_state.stack.is_empty() {
@@ -1058,19 +1066,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
             BelowBottomReductionMode::ContinueFromEverything => {
                 // Build a compact SubstringGoto from the synthetic "everything" state.
                 let everything = self.parser.everything_state_id;
-                if let Some(goto) = self
-                    .parser
-                    .table
-                    .get(&everything)
-                    .and_then(|row| row.gotos.get(&nt))
-                {
+                if let Some(goto) = self.parser.table.get(&everything).and_then(|row| row.gotos.get(&nt)) {
                     storage.accepting_sources.clear();
                     storage.gotos.clear();
                     if goto.accept {
                         storage.accepting_sources.insert(everything);
                     }
-                    if let Some(goto_state_id) = goto.state_id {
-                        storage.gotos.insert(goto_state_id, BTreeSet::from([everything]));
+                    if let Some(state_id_val) = goto.state_id {
+                        storage.gotos.insert(state_id_val, BTreeSet::from([everything]));
                     }
                 }
                 storage
@@ -1086,85 +1089,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
         for (k, accs_by_edge) in popper.below_bottom() {
-            for (last_edge_content, acc_arc) in accs_by_edge {
+            for acc_arc in accs_by_edge.values() {
                 let acc = acc_arc.as_ref();
-
-                // Push tokens from existing trie2 sources via edge (0, Some(last_state_id))
-                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> =
-                    BTreeMap::new();
-                let state_id_edge_key = (0, Some(last_edge_content.state_id));
-                let mut new_acc = acc.clone();
-
-                let mut used = BTreeSet::new();
-                for existing in &acc.trie2_nodes {
-                    let source_arc = existing.as_arc().clone();
-                    let source_live = { source_arc.read().expect("poison").value.live_tokens.clone() };
-                    let tokens_to_push = &source_live & &acc.llm_tokens_union;
-                    if tokens_to_push.is_empty() {
-                        continue;
-                    }
-
-                    let mut inserter = EdgeInserter::new(
-                        source_arc.clone(),
-                        state_id_edge_key,
-                        tokens_to_push.clone(),
-                        |e, n| *e |= n,
-                        |_, _| {},
-                        |ev, t| *ev &= &t.live_tokens,
-                    );
-
-                    // Try any eligible strong children first
-                    let eligible_iter = || {
-                        let g = source_arc.read().expect("poison");
-                        let mut v = Vec::new();
-                        if let Some(dest_map) = g.children().get(&state_id_edge_key) {
-                            for (node_ptr, _ev) in dest_map.iter() {
-                                if !node_ptr.is_strong() {
-                                    continue;
-                                }
-                                if let Some(dest_arc) = node_ptr.upgrade() {
-                                    let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                    if (&dl & &tokens_to_push).is_empty()
-                                        && !dest_arc.read().expect("poison").value.end
-                                    {
-                                        v.push(dest_arc.clone());
-                                    }
-                                }
-                            }
-                        }
-                        v.into_iter()
-                    };
-
-                    // Ensure we have a fallback when there's no good destination
-                    let fallback = Arc::new(RwLock::new(PrecomputeNode2::new(
-                        PrecomputedNodeContents::internal(),
-                    )));
-                    inserter = inserter
-                        .try_destinations_iter_with(eligible_iter)
-                        .try_destination_auto(fallback);
-
-                    let final_dest_arc = inserter
-                        .clone_into_option()
-                        .expect("below-bottom Acc construction failed");
-                    let final_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                    dest_agg
-                        .entry(final_wr.clone())
-                        .and_modify(|bv| *bv |= &tokens_to_push)
-                        .or_insert(tokens_to_push.clone());
-                    used.insert(final_wr);
-                }
-
-                // Materialize aggregated tokens on destinations
-                for (dst_wr, added) in &dest_agg {
-                    let mut guard = dst_wr.as_arc().write().expect("poison");
-                    guard.value.live_tokens |= added.clone();
-                }
-
-                new_acc.trie2_nodes = used;
                 result
                     .entry(*k)
-                    .and_modify(|existing| *existing = Acc::merge(existing, &new_acc))
-                    .or_insert(new_acc);
+                    .and_modify(|existing| *existing = Acc::merge(existing, acc))
+                    .or_insert_with(|| acc.clone());
             }
         }
         result
@@ -1185,80 +1115,44 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (k, acc) in below {
             let mut acc = acc.clone();
             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-            let active_tokens = acc.union_llm_tokens();
+            // let active_tokens = acc.union_llm_tokens();
 
             for source_state_id in &gotos.accepting_sources {
+                let cache_key = BelowBottomCacheKey {
+                    nonterminal_id: nt,
+                    source_state_id: StateID(0),
+                    goto_state_id: StateID(0),
+                    k: 0,
+                };
+                let cache_entry = self.below_bottom_cache.entry(cache_key.clone()).or_default();
+                let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
+                let dst_arc = if let Some(arc) = cached_dst_arc_opt {
+                    arc
+                } else {
+                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+                    new_trie2_node
+                };
+                let edge_bv = LLMTokenBV::max_ones();
                 let edge_key = (*k, Some(*source_state_id));
-                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> =
-                    BTreeMap::new();
-                let mut used = BTreeSet::new();
-
-                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::internal(),
-                )));
-
                 for existing in &trie2_nodes {
                     let source_arc = existing.as_arc().clone();
-                    let source_live =
-                        { source_arc.read().expect("poison").value.live_tokens.clone() };
-                    let tokens_to_push = &source_live & &active_tokens;
-                    if tokens_to_push.is_empty() {
-                        continue;
-                    }
-
-                    let mut inserter = EdgeInserter::new(
+                    let inserter = EdgeInserter::new(
                         source_arc.clone(),
                         edge_key,
-                        tokens_to_push.clone(),
+                        edge_bv.clone(),
                         |e, n| *e |= n,
-                        |_, _| {},
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
                         |ev, t| *ev &= &t.live_tokens,
                     );
-
-                    // Try eligible strong children first
-                    let eligible_iter = || {
-                        let g = source_arc.read().expect("poison");
-                        let mut v = Vec::new();
-                        if let Some(dest_map) = g.children().get(&edge_key) {
-                            for (node_ptr, _ev) in dest_map.iter() {
-                                if !node_ptr.is_strong() {
-                                    continue;
-                                }
-                                if let Some(dest_arc) = node_ptr.upgrade() {
-                                    let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                    if (&dl & &tokens_to_push).is_empty()
-                                        && !dest_arc.read().expect("poison").value.end
-                                    {
-                                        v.push(dest_arc.clone());
-                                    }
-                                }
-                            }
-                        }
-                        v.into_iter()
-                    };
-
-                    inserter = inserter
-                        .try_destinations_iter_with(eligible_iter)
-                        .try_destination_auto(new_trie2_node.clone());
-
-                    let final_dest_arc = inserter.clone_into_option().expect(
-                        "below-bottom accepting: EdgeInserter returned no destination",
-                    );
-                    let final_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                    dest_agg
-                        .entry(final_wr.clone())
-                        .and_modify(|bv| *bv |= &tokens_to_push)
-                        .or_insert(tokens_to_push.clone());
-                    used.insert(final_wr);
+                    if cached_dst_arc_opt.is_some() {
+                        inserter.to_destination_weakly(dst_arc.clone());
+                    } else {
+                        inserter.try_destination(dst_arc.clone());
+                    }
                 }
-
-                for (dst_wr, added) in &dest_agg {
-                    let mut dg = dst_wr.as_arc().write().expect("poison");
-                    dg.value.live_tokens |= added.clone();
-                }
-
                 let mut acc2 = acc.clone();
-                acc2.trie2_nodes = used;
+                acc2.trie2_nodes.insert(ArcPtrWrapper::new(dst_arc.clone()));
                 let gss0 = GSSNode::new(acc2);
                 let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                 accepted_stacks.push(Arc::new(gss1));
@@ -1281,149 +1175,44 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if gotos.gotos.is_empty() {
             return Arc::new(GSSNode::new_fresh());
         }
-
-        let mut below_zero: Vec<Arc<GSSNode>> = Vec::new();
-        let mut trie2_dst_nodes: HashMap<StateID, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-
         for (k, acc) in below {
             let mut acc = acc.clone();
             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
+            let cache_key = BelowBottomCacheKey {
+                nonterminal_id: nt,
+                source_state_id: StateID(0),
+                goto_state_id: StateID(0),
+                k: 0,
+            };
+            let cache_entry = self.below_bottom_cache.entry(cache_key.clone()).or_default();
+            let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
+            let dst_arc = if let Some(arc) = cached_dst_arc_opt {
+                arc
+            } else {
+                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+                new_trie2_node
+            };
+            let edge_bv = LLMTokenBV::max_ones();
             let edge_key = (k, None);
-
-            for (goto_state_id, source_state_ids) in &gotos.gotos {
-                for source_state_id in source_state_ids {
-                    // Very coarse cache key (as in original code).
-                    let cache_key = BelowBottomCacheKey {
-                        // nonterminal_id: nt,
-                        nonterminal_id: NonTerminalID(0),
-                        source_state_id: *source_state_id,
-                        goto_state_id: *goto_state_id,
-                        k: 0,
-                    };
-
-                    let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> =
-                        BTreeMap::new();
-                    let mut used_dests: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>> =
-                        BTreeSet::new();
-
-                    // One destination pool per source_state_id
-                    let new_trie2_node = trie2_dst_nodes
-                        .entry(*source_state_id)
-                        .or_insert_with(|| {
-                            Arc::new(RwLock::new(PrecomputeNode2::new(
-                                PrecomputedNodeContents::internal(),
-                            )))
-                        })
-                        .clone();
-
-                    for existing in &trie2_nodes {
-                        let source_arc = existing.as_arc().clone();
-                        let source_live =
-                            { source_arc.read().expect("poison").value.live_tokens.clone() };
-                        let tokens_to_push = &source_live & &acc.llm_tokens_union;
-                        if tokens_to_push.is_empty() {
-                            continue;
-                        }
-
-                        let mut inserter = EdgeInserter::new(
-                            source_arc.clone(),
-                            edge_key,
-                            tokens_to_push.clone(),
-                            |e, n| *e |= n,
-                            |_, _| {},
-                            |ev, t| *ev &= &t.live_tokens,
-                        );
-
-                        // Try cached destinations first (weak edges) if compatible
-                        if let Some(cached_entries) = self.below_bottom_cache.get(&cache_key) {
-                            let eligible_cached_iter = cached_entries.iter().filter_map(
-                                |(wrapper, cached_tokens)| {
-                                    let dest_arc = wrapper.as_arc();
-                                    let guard =
-                                        dest_arc.read().expect("poison");
-                                    let temp = &guard.value.live_tokens - &cached_tokens;
-                                    if (&temp & &tokens_to_push).is_empty()
-                                        && !guard.value.end
-                                    {
-                                        Some(dest_arc.clone())
-                                    } else {
-                                        None
-                                    }
-                                },
-                            );
-                            inserter = inserter.to_destinations_weakly_iter(eligible_cached_iter);
-                        }
-
-                        // Try existing strong children
-                        let eligible_iter = || {
-                            let g = source_arc.read().expect("poison");
-                            let mut v = Vec::new();
-                            if let Some(dest_map) = g.children().get(&edge_key) {
-                                for (node_ptr, _ev) in dest_map.iter() {
-                                    if !node_ptr.is_strong() {
-                                        continue;
-                                    }
-                                    if let Some(dest_arc) = node_ptr.upgrade() {
-                                        let guard = dest_arc.read().expect("poison");
-                                        if (&guard.value.live_tokens & &tokens_to_push).is_empty()
-                                            && !guard.value.end
-                                        {
-                                            v.push(dest_arc.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            v.into_iter()
-                        };
-
-                        inserter = inserter
-                            .try_destinations_iter_with(eligible_iter)
-                            .try_destination_auto(new_trie2_node.clone());
-
-                        let final_dest_arc = inserter
-                            .clone_into_option()
-                            .expect("below-bottom goto: EdgeInserter failed");
-                        let final_wr = ArcPtrWrapper::new(final_dest_arc.clone());
-                        dest_agg
-                            .entry(final_wr.clone())
-                            .and_modify(|bv| *bv |= &tokens_to_push)
-                            .or_insert(tokens_to_push.clone());
-                    }
-
-                    // Update cache and destinations live-tokens
-                    let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
-                    for (dest_wrapper, new_tokens) in &dest_agg {
-                        if let Some(existing) = cache_entry.get(dest_wrapper) {
-                            if !new_tokens.is_subset(existing) {
-                                used_dests.insert(dest_wrapper.clone());
-                            }
-                        } else {
-                            used_dests.insert(dest_wrapper.clone());
-                        }
-                        cache_entry
-                            .entry(dest_wrapper.clone())
-                            .and_modify(|bv| *bv |= new_tokens.clone())
-                            .or_insert(new_tokens.clone());
-                    }
-
-                    for (dst_wr, added) in &dest_agg {
-                        let mut guard = dst_wr.as_arc().write().expect("poison");
-                        guard.value.live_tokens |= added.clone();
-                    }
-
-                    if !used_dests.is_empty() {
-                        let mut acc2 = acc.clone();
-                        acc2.trie2_nodes = used_dests;
-                        let g0 = GSSNode::new(acc2);
-                        let g1 = g0.push(ParseStateEdgeContent { state_id: *source_state_id });
-                        let g2 = g1.push(ParseStateEdgeContent { state_id: *goto_state_id });
-                        below_zero.push(Arc::new(g2));
-                    }
+            for existing in &trie2_nodes {
+                let source_arc = existing.as_arc().clone();
+                let inserter = EdgeInserter::new(
+                    source_arc.clone(),
+                    edge_key,
+                    edge_bv.clone(),
+                    |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |ev, t| *ev &= &t.live_tokens,
+                );
+                if cached_dst_arc_opt.is_some() {
+                    inserter.to_destination_weakly(dst_arc.clone());
+                } else {
+                    inserter.try_destination(dst_arc.clone());
                 }
             }
         }
-
-        GSSNode::merge_many_with_depth(usize::MAX, below_zero)
+        Arc::new(GSSNode::new_fresh())
     }
 
     /// Reduce by non-terminal `nt` of length `len`, and perform the corresponding gotos.
@@ -1995,8 +1784,7 @@ impl GLRParser {
         dot
     }
 
-    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
-    /// This visualizes the portion of the state machine explored by the parser.
+    /// Generates a Graphviz DOT representation of the GSS.
     pub fn gss_to_dot(&self, root: &GSSNode, original_internal_bimap: Option<&BiBTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
     }
