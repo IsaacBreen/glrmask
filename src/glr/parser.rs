@@ -1230,6 +1230,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
         let cached_dst_arc_opt: Option<Arc<RwLock<PrecomputeNode2>>> = cached_dst_arc_opt;
 
+        let mut merged_acc = {
+            let mut below_it = below.iter();
+            let first = below_it.next().unwrap().1.clone();
+            below_it.fold(first, |acc, (_k, acc2)| Acc::merge(&acc, acc2))
+        };
+
         if let Some(arc) = cached_dst_arc_opt.clone() {
             let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
             cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
@@ -1254,28 +1260,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     // Create a new cached destination node for this nonterminal
                     inserter.try_destination(new_trie2_node.clone());
                 }
-                // TODO: shouldn't need out and out2. Should be able to do this all outside the loop after merging all accs in below.
-                let mut out2 = Vec::new();
-                for (goto_state_id, source_state_ids) in &gotos.gotos {
-                    let mut edge_contents = Vec::new();
-                    for source_state_id in source_state_ids {
-                        edge_contents.push(ParseStateEdgeContent { state_id: *source_state_id });
-                    }
-                    let mut acc2 = acc.clone();
-                    acc2.trie2_nodes.clear();
-                    acc2.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
-                    let gss0 = GSSNode::new(acc2);
-                    let gss1 = gss0.push_many(edge_contents);
-                    let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
-                    out2.push(Arc::new(gss2));
+            }
+            merged_acc.trie2_nodes.clear();
+            merged_acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+            for (goto_state_id, source_state_ids) in &gotos.gotos {
+                let mut edge_contents = Vec::new();
+                for source_state_id in source_state_ids {
+                    edge_contents.push(ParseStateEdgeContent { state_id: *source_state_id });
                 }
-                out.push(GSSNode::merge_many_with_depth(usize::MAX, out2))
+                let gss0 = GSSNode::new(merged_acc.clone());
+                let gss1 = gss0.push_many(edge_contents);
+                let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
+                out.push(Arc::new(gss2));
             }
             GSSNode::merge_many_with_depth(usize::MAX, out)
         } else {
-            for (k, _acc) {
-
-            }
+            // for (k, _acc) {
+            //
+            // }
         }
     }
 
