@@ -1230,38 +1230,53 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
         let cached_dst_arc_opt: Option<Arc<RwLock<PrecomputeNode2>>> = cached_dst_arc_opt;
 
-        for (k, acc) in below {
-            let trie2_nodes = &acc.trie2_nodes;
-            let edge_key = (k, None);
-            // Always use max-ones for the edge bitset
-            let edge_bv = LLMTokenBV::max_ones();
+        if let Some(arc) = cached_dst_arc_opt.clone() {
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+            let mut out = Vec::new();
+            for (k, mut acc) in below {
+                let trie2_nodes = &acc.trie2_nodes;
+                let edge_key = (k, None);
+                // Always use max-ones for the edge bitset
+                let edge_bv = LLMTokenBV::max_ones();
 
-            for existing in trie2_nodes {
-                let source_arc = existing.as_arc().clone();
-                let inserter = EdgeInserter::new(
-                    source_arc.clone(),
-                    edge_key,
-                    edge_bv.clone(),
-                    |e, n| *e |= n,
-                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                    |ev, t| {},
-                );
+                for existing in trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
+                    let inserter = EdgeInserter::new(
+                        source_arc.clone(),
+                        edge_key,
+                        edge_bv.clone(),
+                        |e, n| *e |= n,
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |ev, t| {},
+                    );
 
-                // if let Some(arc) = cached_dst_arc_opt.clone() {
-                //     let dst_arc = arc;
-                //     inserter.to_destination_weakly(dst_arc.clone());
-                // } else {
                     // Create a new cached destination node for this nonterminal
-                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
-                    let dst_arc = new_trie2_node;
-                    inserter.try_destination(dst_arc.clone());
-                // }
+                    inserter.try_destination(new_trie2_node.clone());
+                }
+                // TODO: shouldn't need out and out2. Should be able to do this all outside the loop after merging all accs in below.
+                let mut out2 = Vec::new();
+                for (goto_state_id, source_state_ids) in &gotos.gotos {
+                    let mut edge_contents = Vec::new();
+                    for source_state_id in source_state_ids {
+                        edge_contents.push(ParseStateEdgeContent { state_id: *source_state_id });
+                    }
+                    let mut acc2 = acc.clone();
+                    acc2.trie2_nodes.clear();
+                    acc2.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+                    let gss0 = GSSNode::new(acc2);
+                    let gss1 = gss0.push_many(edge_contents);
+                    let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
+                    out2.push(Arc::new(gss2));
+                }
+                out.push(GSSNode::merge_many_with_depth(usize::MAX, out2))
+            }
+            GSSNode::merge_many_with_depth(usize::MAX, out)
+        } else {
+            for (k, _acc) {
+
             }
         }
-
-        // No re-queueing of GSS work for below-bottom gotos: just return an empty GSS
-        Arc::new(GSSNode::new_fresh())
     }
 
     /// Reduce by non-terminal `nt` of length `len`, and perform the corresponding gotos.
