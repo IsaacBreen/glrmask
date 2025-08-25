@@ -631,12 +631,7 @@ fn format_actions<W: std::fmt::Write>(
             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
                 format!("Shift {}", next_state_id.0)
             }
-            Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                nonterminal_id,
-                len,
-                production_ids,
-                ..
-            } => {
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                 let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
                 let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
                 format!("Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))
@@ -945,18 +940,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if can_proceed {
                                         let disallowed_terminals_bv = allowed_terminals.inverted();
                                         if !disallowed_terminals_bv.is_empty() {
-                                            // Push a dummy edge with the Acc's active tokens into a fresh internal node
-                                            let edge_key = (0, None);
-                                            let mut inserter = EdgeInserter::new(
-                                                constrained_state.stack.clone(),
-                                                edge_key,
-                                                disallowed_terminals_bv.clone(),
-                                                |e, n| *e |= n,
-                                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                                |ev, t| *ev &= &t.live_tokens,
+                                            let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                                                std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
                                             );
-                                            let dummy_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                                            inserter.try_destination(dummy_node);
+
+                                            crate::datastructures::gss::disallow_terminals_and_prune_arc(
+                                                &mut constrained_state.stack,
+                                                &disallowed_l2,
+                                                &mut HashMap::new(),
+                                            );
                                         }
 
                                         if !constrained_state.stack.is_empty() {
@@ -1066,14 +1058,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
             BelowBottomReductionMode::ContinueFromEverything => {
                 // Build a compact SubstringGoto from the synthetic "everything" state.
                 let everything = self.parser.everything_state_id;
-                if let Some(goto) = self.parser.table.get(&everything).and_then(|row| row.gotos.get(&nt)) {
+                if let Some(goto) = self
+                    .parser
+                    .table
+                    .get(&everything)
+                    .and_then(|row| row.gotos.get(&nt))
+                {
                     storage.accepting_sources.clear();
                     storage.gotos.clear();
                     if goto.accept {
                         storage.accepting_sources.insert(everything);
                     }
-                    if let Some(state_id_val) = goto.state_id {
-                        storage.gotos.insert(state_id_val, BTreeSet::from([everything]));
+                    if let Some(goto_state_id) = goto.state_id {
+                        storage.gotos.insert(goto_state_id, BTreeSet::from([everything]));
                     }
                 }
                 storage
@@ -1089,19 +1086,54 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
         for (k, accs_by_edge) in popper.below_bottom() {
-            for acc_arc in accs_by_edge.values() {
+            for (last_edge_content, acc_arc) in accs_by_edge {
                 let acc = acc_arc.as_ref();
-                result
-                    .entry(*k)
-                    .and_modify(|existing| *existing = Acc::merge(existing, acc))
-                    .or_insert_with(|| acc.clone());
+
+                let edge_key = (0, Some(last_edge_content.state_id));
+
+                // Always use max-ones for the edge bitset when popping below bottom
+                let edge_bv = LLMTokenBV::max_ones();
+
+                // For each existing trie2 node: just create the edge directly to a fresh destination
+                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                let mut used = BTreeSet::new();
+
+                for existing in &acc.trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
+
+                    let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    let inserter = EdgeInserter::new(
+                        source_arc.clone(),
+                        edge_key,
+                        edge_bv.clone(),
+                        |e, n| *e |= n,
+                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |ev, t| *ev &= &t.live_tokens,
+                    ).try_destination(fallback_dest.clone()); // direct, strong insert
+
+                    let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
+                    let final_wr = ArcPtrWrapper::new(final_dst_arc.clone());
+                    dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
+                    used.insert(final_wr);
+                }
+
+                // Update destination live tokens
+                for (dst_wr, added) in &dest_agg {
+                    let mut g = dst_wr.as_arc().write().expect("poison");
+                    g.value.live_tokens |= added.clone();
+                }
+
+                // Update new_acc.trie2_nodes as before
+                let mut new_acc = acc.clone();
+                new_acc.trie2_nodes = used;
+                result.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &new_acc)).or_insert(new_acc);
             }
         }
         result
     }
 
     fn handle_below_bottom_accepts(
-        &self,
+        &mut self,
         nt: NonTerminalID,
         below: &BTreeMap<usize, Acc>,
         gotos: &SubstringGoto,
@@ -1115,7 +1147,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (k, acc) in below {
             let mut acc = acc.clone();
             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-            // let active_tokens = acc.union_llm_tokens();
 
             for source_state_id in &gotos.accepting_sources {
                 let cache_key = BelowBottomCacheKey {
@@ -1124,6 +1155,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     goto_state_id: StateID(0),
                     k: 0,
                 };
+                // Decide/create a cached destination node for this nonterminal
                 let cache_entry = self.below_bottom_cache.entry(cache_key.clone()).or_default();
                 let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
                 let dst_arc = if let Some(arc) = cached_dst_arc_opt {
@@ -1133,8 +1165,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
                     new_trie2_node
                 };
+
+                // Always use max-ones for the edge bitset
                 let edge_bv = LLMTokenBV::max_ones();
+
+                // Edge key for below-bottom accepts: (k, Some(source_state_id)) as before
                 let edge_key = (*k, Some(*source_state_id));
+
+                // For each existing trie2 source node, add an edge to the cached destination
                 for existing in &trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
@@ -1145,14 +1183,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                         |ev, t| *ev &= &t.live_tokens,
                     );
+
                     if cached_dst_arc_opt.is_some() {
                         inserter.to_destination_weakly(dst_arc.clone());
                     } else {
                         inserter.try_destination(dst_arc.clone());
                     }
                 }
+
                 let mut acc2 = acc.clone();
-                acc2.trie2_nodes.insert(ArcPtrWrapper::new(dst_arc.clone()));
+                acc2.trie2_nodes.clear();
                 let gss0 = GSSNode::new(acc2);
                 let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                 accepted_stacks.push(Arc::new(gss1));
@@ -1175,27 +1215,33 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if gotos.gotos.is_empty() {
             return Arc::new(GSSNode::new_fresh());
         }
+
+        let cache_key = BelowBottomCacheKey {
+            nonterminal_id: nt,
+            source_state_id: StateID(0),
+            goto_state_id: StateID(0),
+            k: 0,
+        };
+
+        // Decide/create a cached destination node for this nonterminal
+        let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
+        let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
+        let dst_arc = if let Some(arc) = cached_dst_arc_opt {
+            arc
+        } else {
+            // Create a new cached destination node for this nonterminal
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
+            new_trie2_node
+        };
+
         for (k, acc) in below {
-            let mut acc = acc.clone();
-            let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
-            let cache_key = BelowBottomCacheKey {
-                nonterminal_id: nt,
-                source_state_id: StateID(0),
-                goto_state_id: StateID(0),
-                k: 0,
-            };
-            let cache_entry = self.below_bottom_cache.entry(cache_key.clone()).or_default();
-            let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
-            let dst_arc = if let Some(arc) = cached_dst_arc_opt {
-                arc
-            } else {
-                let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                cache_entry.insert(ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones());
-                new_trie2_node
-            };
-            let edge_bv = LLMTokenBV::max_ones();
+            let trie2_nodes = &acc.trie2_nodes;
             let edge_key = (k, None);
-            for existing in &trie2_nodes {
+            // Always use max-ones for the edge bitset
+            let edge_bv = LLMTokenBV::max_ones();
+
+            for existing in trie2_nodes {
                 let source_arc = existing.as_arc().clone();
                 let inserter = EdgeInserter::new(
                     source_arc.clone(),
@@ -1205,6 +1251,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                     |ev, t| *ev &= &t.live_tokens,
                 );
+
                 if cached_dst_arc_opt.is_some() {
                     inserter.to_destination_weakly(dst_arc.clone());
                 } else {
@@ -1212,6 +1259,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
+
+        // No re-queueing of GSS work for below-bottom gotos: just return an empty GSS
         Arc::new(GSSNode::new_fresh())
     }
 
@@ -1707,7 +1756,7 @@ impl GLRParser {
             if visited_nodes.contains(&node_ptr) {
                 continue;
             }
-            
+
             let parent_id = *node_ids.entry(node_ptr).or_insert_with(|| {
                 let id = next_id_counter;
                 next_id_counter += 1;
@@ -1738,11 +1787,11 @@ impl GLRParser {
             for (edge_val, preds_by_depth) in node_arc.predecessors() {
                 let state_id = edge_val.state_id;
                 let edge_key = (node_ptr, edge_val.clone());
-                
+
                 let edge_node_id = *edge_node_ids.entry(edge_key).or_insert_with(|| {
                     let id = next_id_counter;
                     next_id_counter += 1;
-                    
+
                     // Define the edge node
                     let mut explanation = String::new();
                     self.format_state_details(&mut explanation, state_id, "").unwrap();
@@ -1755,7 +1804,7 @@ impl GLRParser {
                         .replace('<', "\\<")
                         .replace('>', "\\>")
                         .replace('\'', "\\'"); // Escape single quotes for DOT
-                    
+
                     writeln!(&mut dot, "  E{} [label=\"State {}\\l{}\", shape=plaintext, fontname=\"Courier New\"];", id, state_id.0, escaped_explanation).unwrap();
                     id
                 });
@@ -1771,7 +1820,7 @@ impl GLRParser {
                             next_id_counter += 1;
                             id
                         });
-                        
+
                         // Connect edge node to predecessor
                         writeln!(&mut dot, "  E{} -> N{} [arrowhead=none];", edge_node_id, pred_id).unwrap();
                         queue.push_back(pred_arc.clone());
@@ -1784,7 +1833,8 @@ impl GLRParser {
         dot
     }
 
-    /// Generates a Graphviz DOT representation of the GSS.
+    /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
+    /// This visualizes the portion of the state machine explored by the parser.
     pub fn gss_to_dot(&self, root: &GSSNode, original_internal_bimap: Option<&BiBTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
     }
@@ -1812,7 +1862,7 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
- 
+
 // Helper for default reductions' fast unit-reduction chain
 fn default_reduce_chain(
     parser: &GLRParser,
