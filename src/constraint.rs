@@ -580,7 +580,7 @@ impl GrammarConstraint {
                                     tokens_to_push.clone(),
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                    |_, _| {},
+                                    |ev, t| *ev &= &t.live_tokens,
                                 );
 
                                 inserter = inserter.try_destination(trie2_end.clone());

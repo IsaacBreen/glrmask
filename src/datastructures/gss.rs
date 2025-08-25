@@ -1262,49 +1262,53 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
 
 pub(crate) fn merge_trie2_nodes_if_needed(
     root_arc: &mut Arc<GSSNode>,
-    _merge_threshold: usize,
+    merge_threshold: usize,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let internal_closure = |_internal: &GSSInternal| -> bool { false };
     let root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         let mut new_acc = (*root.acc).clone();
-        let acc_live_tokens = &new_acc.llm_tokens_union;
+        if new_acc.trie2_nodes.len() > merge_threshold {
+            let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+            let edge_key = (0, None);
 
-        let mut needs_remapping = false;
-        for trie2_node_wrapper in &new_acc.trie2_nodes {
-            let trie2_node_arc = trie2_node_wrapper.as_arc();
-            let trie2_live_tokens = &trie2_node_arc.read().unwrap().value.live_tokens;
-            if trie2_live_tokens != acc_live_tokens {
-                needs_remapping = true;
-                break;
+            // Shared fallback destination (for sources without any eligible existing child).
+            let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+
+            for existing_trie2_node in &new_acc.trie2_nodes {
+                let source_arc = existing_trie2_node.as_arc().clone();
+                let tokens_to_push = {
+                    let g = source_arc.read().expect("poison");
+                    g.value.live_tokens.clone()
+                };
+                if tokens_to_push.is_empty() {
+                    continue;
+                }
+
+                let mut inserter = EdgeInserter::new(
+                    source_arc.clone(),
+                    edge_key,
+                    tokens_to_push.clone(),
+                    |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |ev, t| *ev &= &t.live_tokens,
+                );
+
+                inserter = inserter.try_destination_auto(fallback_dest.clone());
+
+                let final_dest_arc = inserter.clone_into_option().expect("merge_trie2_nodes_if_needed: insert failed");
+                let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+
+                dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
             }
+
+            for (dst_wr, added) in &dest_agg {
+                let mut dg = dst_wr.as_arc().write().expect("poison");
+                dg.value.live_tokens |= added.clone();
+            }
+
+            new_acc.trie2_nodes = dest_agg.keys().cloned().collect();
         }
-
-        if !needs_remapping {
-            return Some(root.acc.clone()); // No changes needed
-        }
-
-        // Create one new dummy node to be the merge target.
-        let dummy_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-        let dummy_dest_wrapper = ArcPtrWrapper::new(dummy_dest.clone());
-
-        for trie2_node_wrapper in &new_acc.trie2_nodes {
-            let source_arc = trie2_node_wrapper.as_arc();
-            let edge_key = (0, None); // A generic edge key
-            let edge_bv = acc_live_tokens.clone(); // The edge carries the constraint from the Acc
-
-            let inserter = EdgeInserter::new(
-                source_arc.clone(), edge_key, edge_bv,
-                |e, n| *e |= n,
-                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                |_, _| {}, // Unconditional
-            );
-            inserter.try_destination_auto(dummy_dest.clone());
-        }
-
-        new_acc.trie2_nodes = BTreeSet::from([dummy_dest_wrapper]);
-        dummy_dest.write().unwrap().value.live_tokens |= acc_live_tokens;
-
         Some(Arc::new(new_acc))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &internal_closure, &root_closure, memo) {
