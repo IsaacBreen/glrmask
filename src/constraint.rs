@@ -1043,7 +1043,7 @@ fn trie2_shape_hash(
 
     edge_hashes.sort_unstable();
     for h in edge_hashes {
-        h.hash(state);
+        h.hash(&mut hasher);
     }
 
     let final_hash = hasher.finish();
@@ -2673,7 +2673,7 @@ impl<'a> GrammarConstraintState<'a> {
                                         crate::debug!(4, "Final mask after adding tokens: {:?}", final_mask_internal.borrow());
                                         return Vec::new();
                                     });
-                                },
+                                 },
                                 None => {
                                     timeit!(format!("get_mask step_fn - has_action_for - inconclusive"), {
                                         // Inconclusive
@@ -3265,4 +3265,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-
