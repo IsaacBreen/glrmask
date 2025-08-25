@@ -1227,7 +1227,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Decide/create a cached destination node for this nonterminal
         let cache_entry = self.below_bottom_cache.entry(cache_key).or_default();
-        let cached_dst_arc_opt = cache_entry.keys().next().map(|wr| wr.as_arc().clone());
 
         for (k, acc) in below {
             let trie2_nodes = &acc.trie2_nodes;
