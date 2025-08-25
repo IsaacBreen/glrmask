@@ -1138,6 +1138,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         below: &BTreeMap<usize, Acc>,
         gotos: &SubstringGoto,
     ) -> Option<Arc<GSSNode>> {
+        return None;
+        // TODO: check this function
         if gotos.accepting_sources.is_empty() {
             return None;
         }
