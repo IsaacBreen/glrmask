@@ -1285,24 +1285,6 @@ pub(crate) fn merge_trie2_nodes_if_needed(
                     continue;
                 }
 
-                // Build an iterator of all eligible strong children under edge_key
-                let eligible_iter_builder = || {
-                    let g = source_arc.read().expect("poison");
-                    let mut v = Vec::new();
-                    if let Some(dest_map) = g.children().get(&edge_key) {
-                        for (node_ptr, _ev) in dest_map.iter() {
-                            if !node_ptr.is_strong() { continue; }
-                            if let Some(dest_arc) = node_ptr.upgrade() {
-                                let dl = dest_arc.read().expect("poison").value.live_tokens.clone();
-                                if (&dl & &tokens_to_push).is_empty() && !dest_arc.read().unwrap().value.end {
-                                    v.push(dest_arc.clone());
-                                }
-                            }
-                        }
-                    }
-                    v.into_iter()
-                };
-
                 let mut inserter = EdgeInserter::new(
                     source_arc.clone(),
                     edge_key,
@@ -1310,7 +1292,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                     |ev, t| *ev &= &t.live_tokens,
-                ).try_destinations_iter_with(eligible_iter_builder);
+                );
 
                 inserter = inserter.try_destination_auto(fallback_dest.clone());
 
