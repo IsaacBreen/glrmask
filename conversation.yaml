@@ -646,7 +646,7 @@ local_system:
               merge_nodes_trie2(&mut precomputed2);
               // simplify_trie2_merge_edges(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
-              context_aware_merge_trie2(&mut precomputed2);
+              // context_aware_merge_trie2(&mut precomputed2);
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
@@ -655,10 +655,6 @@ local_system:
               // Recompute depths again after promotions, as they can change the graph structure.
               let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
               Trie::recompute_all_max_depths(&roots2_final);
-
-              // Final safety sweep: ensure no dangling weak edges remain (all weak edges must upgrade()).
-              let purged = Trie::purge_dangling_weak_edges(&roots2_final);
-              crate::debug!(2, "Purged {} dangling weak edges in precomputed trie 2.", purged);
 
               precomputed2
           }
@@ -5318,72 +5314,6 @@ local_system:
               }
 
               promotions
-          }
-
-          /// Sweep pass: remove any dangling weak edges whose upgrade() returns None.
-          /// Only nodes reachable via strong edges from the provided roots are visited.
-          /// Returns the number of removed edges.
-          pub fn purge_dangling_weak_edges(root_nodes: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> usize {
-              let mut removed = 0usize;
-              let mut visited: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
-              let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
-
-              for root in root_nodes {
-                  let ptr = Arc::as_ptr(root);
-                  if visited.insert(ptr) {
-                      queue.push_back(root.clone());
-                  }
-              }
-
-              while let Some(node_arc) = queue.pop_front() {
-                  // Clean dangling weak edges on this node.
-                  let strong_children_after_cleanup: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
-                      let mut guard = node_arc.write().expect("RwLock poisoned during purge_dangling_weak_edges");
-                      // Retain only edges where strong OR weak can still be upgraded.
-                      let mut empty_keys: Vec<EK> = Vec::new();
-                      for (ek, dest_map) in guard.children_mut().iter_mut() {
-                          let before_len = dest_map.len();
-                          dest_map.retain(|np, _| {
-                              if np.is_strong() {
-                                  true
-                              } else {
-                                  np.upgrade().is_some()
-                              }
-                          });
-                          let after_len = dest_map.len();
-                          if after_len == 0 {
-                              empty_keys.push(ek.clone());
-                          }
-                          removed += before_len.saturating_sub(after_len);
-                      }
-                      // Remove empty edge-key maps
-                      for ek in empty_keys {
-                          guard.children_mut().remove(&ek);
-                      }
-
-                      // Collect strong children to continue BFS
-                      guard.children().values()
-                          .flat_map(|m| m.keys())
-                          .filter_map(|np| {
-                              if let NodePtr::Strong(apw) = np {
-                                  Some(apw.as_arc().clone())
-                              } else {
-                                  None
-                              }
-                          })
-                          .collect()
-                  };
-
-                  // Enqueue strong children
-                  for child_arc in strong_children_after_cleanup {
-                      let ptr = Arc::as_ptr(&child_arc);
-                      if visited.insert(ptr) {
-                          queue.push_back(child_arc);
-                      }
-                  }
-              }
-
-              removed
           }
       }
 
@@ -7409,7 +7339,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::hash::{Hash, Hasher};
       use std::ops::{BitOr, BitOrAssign};
-      use std::fmt::{self, Display, Formatter};
+      use std::fmt::{self, Debug, Display, Formatter};
       use std::sync::{Arc};
       use std::cell::RefCell;
 
@@ -7438,6 +7368,7 @@ local_system:
       use crate::glr::table::StateID;
       use crate::glr::analyze::compute_terminal_follow_sets;
       use crate::glr::grammar::Terminal;
+      use std::ops::{BitAnd, Sub};
       use crate::glr::items::{Item, LRMode, LR_MODE};
       use crate::interface::CompiledGrammar;
       use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
@@ -7550,6 +7481,95 @@ local_system:
                   _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
               }
           }
+      }
+
+      type NormalizedPath = Vec<(usize, StateID)>;
+      type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
+
+      /// Normalizes a path by merging consecutive `(k, None)` segments.
+      fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
+          let mut result = Vec::new();
+          let mut current_k = 0;
+          for (k, sid_opt) in path {
+              current_k += *k;
+              if let Some(sid) = sid_opt {
+                  result.push((current_k, *sid));
+                  current_k = 0;
+              }
+          }
+          result
+      }
+
+      /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
+      /// Each path is associated with the intersection of LLM token bitvectors along its edges.
+      fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+          let mut all_paths = PathMap::new();
+          let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
+
+          let initial_bv = root.read().unwrap().value.live_tokens.clone();
+          q.push_back((root.clone(), vec![], initial_bv));
+
+          let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
+          visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
+
+          while let Some((node_arc, path, bv)) = q.pop_front() {
+              let node_guard = node_arc.read().unwrap();
+
+              if node_guard.value.end {
+                  let normalized = normalize_path(&path);
+                  all_paths.entry(normalized)
+                      .and_modify(|e| *e |= &bv)
+                      .or_insert(bv.clone());
+              }
+
+              for (ek, dest_map) in node_guard.children() {
+                  for (child_ptr, edge_bv) in dest_map {
+                      let new_bv = &bv & edge_bv;
+                      if new_bv.is_empty() { continue; }
+
+                      if let Some(child_arc) = child_ptr.upgrade() {
+                          let mut new_path = path.clone();
+                          new_path.push(ek.clone());
+
+                          let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
+
+                          if let Some(existing_bv) = visited.get_mut(&visited_key) {
+                              let new_tokens = &new_bv - &*existing_bv;
+                              if new_tokens.is_empty() {
+                                  continue;
+                              }
+                              *existing_bv |= &new_tokens;
+                              q.push_back((child_arc, new_path, new_tokens));
+                          } else {
+                              visited.insert(visited_key, new_bv.clone());
+                              q.push_back((child_arc, new_path, new_bv));
+                          }
+                      }
+                  }
+              }
+          }
+
+          all_paths
+      }
+
+      /// Checks for semantic equivalence between two `precompute2` trees.
+      ///
+      /// Two trees are considered equivalent if they generate the same set of "normalized paths",
+      /// where each path is associated with a bitvector of applicable LLM tokens.
+      /// A normalized path collapses consecutive edge keys of the form `(k, None)`.
+      ///
+      /// # Arguments
+      /// * `a`: An `Arc` to the first trie's root node.
+      /// * `b`: An `Arc` to the second trie's root node.
+      ///
+      /// # Returns
+      /// `true` if the tries are semantically equivalent, `false` otherwise.
+      #[allow(dead_code)]
+      pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let paths_a = get_normalized_paths_from_root(a);
+          let paths_b = get_normalized_paths_from_root(b);
+          paths_a == paths_b
       }
 
 
@@ -8035,7 +8055,7 @@ local_system:
               merge_nodes_trie2(&mut precomputed2);
               // simplify_trie2_merge_edges(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
-              context_aware_merge_trie2(&mut precomputed2);
+              // context_aware_merge_trie2(&mut precomputed2);
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
@@ -8044,10 +8064,6 @@ local_system:
               // Recompute depths again after promotions, as they can change the graph structure.
               let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
               Trie::recompute_all_max_depths(&roots2_final);
-
-              // Final safety sweep: ensure no dangling weak edges remain (all weak edges must upgrade()).
-              let purged = Trie::purge_dangling_weak_edges(&roots2_final);
-              crate::debug!(2, "Purged {} dangling weak edges in precomputed trie 2.", purged);
 
               precomputed2
           }
@@ -12707,73 +12723,6 @@ local_system:
               }
 
               promotions
-          }
-
-          /// Sweep pass: remove any dangling weak edges whose upgrade() returns None.
-          /// Only nodes reachable via strong edges from the provided roots are visited.
-          /// Returns the number of removed edges.
-          pub fn purge_dangling_weak_edges(root_nodes: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> usize {
-              let mut removed = 0usize;
-              let mut visited: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
-              let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
-
-              for root in root_nodes {
-                  let ptr = Arc::as_ptr(root);
-                  if visited.insert(ptr) {
-                      queue.push_back(root.clone());
-                  }
-              }
-
-              while let Some(node_arc) = queue.pop_front() {
-                  // Clean dangling weak edges on this node.
-                  let strong_children_after_cleanup: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
-                      let mut guard = node_arc.write().expect("RwLock poisoned during purge_dangling_weak_edges");
-                      // Retain only edges where strong OR weak can still be upgraded.
-                      let mut empty_keys: Vec<EK> = Vec::new();
-                      for (ek, dest_map) in guard.children_mut().iter_mut() {
-                          let before_len = dest_map.len();
-                          let keys_to_remove: Vec<_> = dest_map
-                              .keys()
-                              .filter(|np| !np.is_strong() && np.upgrade().is_none())
-                              .cloned()
-                              .collect();
-                          for k in keys_to_remove {
-                              dest_map.remove(&k);
-                          }
-                          let after_len = dest_map.len();
-                          if after_len == 0 {
-                              empty_keys.push(ek.clone());
-                          }
-                          removed += before_len.saturating_sub(after_len);
-                      }
-                      // Remove empty edge-key maps
-                      for ek in empty_keys {
-                          guard.children_mut().remove(&ek);
-                      }
-
-                      // Collect strong children to continue BFS
-                      guard.children().values()
-                          .flat_map(|m| m.keys())
-                          .filter_map(|np| {
-                              if let NodePtr::Strong(apw) = np {
-                                  Some(apw.as_arc().clone())
-                              } else {
-                                  None
-                              }
-                          })
-                          .collect()
-                  };
-
-                  // Enqueue strong children
-                  for child_arc in strong_children_after_cleanup {
-                      let ptr = Arc::as_ptr(&child_arc);
-                      if visited.insert(ptr) {
-                          queue.push_back(child_arc);
-                      }
-                  }
-              }
-
-              removed
           }
       }
 
@@ -15460,7 +15409,7 @@ messages:
               merge_nodes_trie2(&mut precomputed2);
               // simplify_trie2_merge_edges(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
-              context_aware_merge_trie2(&mut precomputed2);
+              // context_aware_merge_trie2(&mut precomputed2);
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
@@ -15469,10 +15418,6 @@ messages:
               // Recompute depths again after promotions, as they can change the graph structure.
               let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
               Trie::recompute_all_max_depths(&roots2_final);
-
-              // Final safety sweep: ensure no dangling weak edges remain (all weak edges must upgrade()).
-              let purged = Trie::purge_dangling_weak_edges(&roots2_final);
-              crate::debug!(2, "Purged {} dangling weak edges in precomputed trie 2.", purged);
 
               precomputed2
           }
@@ -20138,72 +20083,6 @@ messages:
 
               promotions
           }
-
-          /// Sweep pass: remove any dangling weak edges whose upgrade() returns None.
-          /// Only nodes reachable via strong edges from the provided roots are visited.
-          /// Returns the number of removed edges.
-          pub fn purge_dangling_weak_edges(root_nodes: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> usize {
-              let mut removed = 0usize;
-              let mut visited: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
-              let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
-
-              for root in root_nodes {
-                  let ptr = Arc::as_ptr(root);
-                  if visited.insert(ptr) {
-                      queue.push_back(root.clone());
-                  }
-              }
-
-              while let Some(node_arc) = queue.pop_front() {
-                  // Clean dangling weak edges on this node.
-                  let strong_children_after_cleanup: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
-                      let mut guard = node_arc.write().expect("RwLock poisoned during purge_dangling_weak_edges");
-                      // Retain only edges where strong OR weak can still be upgraded.
-                      let mut empty_keys: Vec<EK> = Vec::new();
-                      for (ek, dest_map) in guard.children_mut().iter_mut() {
-                          let before_len = dest_map.len();
-                          dest_map.retain(|np, _| {
-                              if np.is_strong() {
-                                  true
-                              } else {
-                                  np.upgrade().is_some()
-                              }
-                          });
-                          let after_len = dest_map.len();
-                          if after_len == 0 {
-                              empty_keys.push(ek.clone());
-                          }
-                          removed += before_len.saturating_sub(after_len);
-                      }
-                      // Remove empty edge-key maps
-                      for ek in empty_keys {
-                          guard.children_mut().remove(&ek);
-                      }
-
-                      // Collect strong children to continue BFS
-                      guard.children().values()
-                          .flat_map(|m| m.keys())
-                          .filter_map(|np| {
-                              if let NodePtr::Strong(apw) = np {
-                                  Some(apw.as_arc().clone())
-                              } else {
-                                  None
-                              }
-                          })
-                          .collect()
-                  };
-
-                  // Enqueue strong children
-                  for child_arc in strong_children_after_cleanup {
-                      let ptr = Arc::as_ptr(&child_arc);
-                      if visited.insert(ptr) {
-                          queue.push_back(child_arc);
-                      }
-                  }
-              }
-
-              removed
-          }
       }
 
       // Implement PartialEq for Trie
@@ -22217,21 +22096,19 @@ messages:
     metadata:
       filename: src/datastructures/trie.rs
   - user: |-
-      ```
-      error[E0599]: no method named `retain` found for mutable reference `&mut OrderedHashMap<arc_wrapper::NodePtr<std::sync::RwLock<trie::Trie<EK, EV, T>>>, EV>` in the current scope
-          --> src/datastructures/trie.rs:1605:30
-           |
-      1605 |                     dest_map.retain(|np, _| {
-           |                     ---------^^^^^^ method not found in `&mut OrderedHashMap<arc_wrapper::NodePtr<std::sync::RwLock<trie::Trie<EK, EV, T>>>, EV>`
-           |
-           = help: items from traits can only be used if the trait is implemented and in scope
-      note: `Retain` defines an item `retain`, perhaps you need to implement it
-          --> src/datastructures/ordered_hash_map.rs:4:1
-           |
-         4 | pub trait Retain<K, V> {
-           | ^^^^^^^^^^^^^^^^^^^^^^
-      ```
-      OrderedHashMap doesn't implement `retain`. Use a more basic approach for this snippet instead.
+      On equivalence between precompute2 trees:
+
+      A precompute2 tree can be seen as *generating paths* consisting of a sequence of pops (integers) and checks (state IDs), and qualified by a LLM token bitvec.
+      Specifically, a path is a vector `Vec<(usize, StateID)>` together with a bitset that tells us which LLM token IDs it applies to.
+      A more naive path might have type `Vec<(usize, Option<StateID>)>`, but note that any item with a `None` value as its `Option<StateID>` can be merged into either of its neighbours by adding its `usize` value into its neighbour's.
+      We can imagine generating a path by walking, starting from a precompute2 root with a path vector `[0, None]` and a bitvec full of ones. Each edge has a `(usize, Option<StateID>)` and a LLM token mask. For the bitvec, we simply take the intersection as we go. For the edges, if the top item in the current path vector has a None in it, we add this edge's `usize` to the top item's and replace the top item's state ID with this edge's.
+      And that's it.
+
+      Now equivalence.
+      Two precompute2 trees are equivalent if and only if for all paths in one, that path also exists in the other.
+
+      What's an efficient way to test for equivalence between two precompute2 trees?
+      Implement it.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -22248,33 +22125,123 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The `retain` method is not available on `ordered_hash_map::OrderedHashMap`. As you suggested, I'll replace it with a more basic approach that achieves the same result. Here is the patch:
+      Answering your request, here are the git diff patches to implement an equivalence check for `precompute2` trees based on normalized path generation.
+
+      I've added the necessary logic to `src/constraint.rs`, as the definition of equivalence is specific to the structure of `PrecomputeNode2` which is defined in that file. The new public function `are_precompute2_trees_equivalent` determines if two trees are semantically identical by generating and comparing all their valid, normalized paths and the associated LLM token bitvectors.
 
       ```diff
-      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      --- a/src/datastructures/trie.rs
-      +++ b/src/datastructures/trie.rs
-      @@ -1604,13 +1604,14 @@
-                       for (ek, dest_map) in guard.children_mut().iter_mut() {
-                           let before_len = dest_map.len();
-      -                    dest_map.retain(|np, _| {
-      -                        if np.is_strong() {
-      -                            true
-      -                        } else {
-      -                            np.upgrade().is_some()
-      -                        }
-      -                    });
-      +                    let keys_to_remove: Vec<_> = dest_map
-      +                        .keys()
-      +                        .filter(|np| !np.is_strong() && np.upgrade().is_none())
-      +                        .cloned()
-      +                        .collect();
-      +                    for k in keys_to_remove {
-      +                        dest_map.remove(&k);
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -10,7 +10,7 @@
+       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+       use std::hash::{Hash, Hasher};
+       use std::ops::{BitOr, BitOrAssign};
+      -use std::fmt::{self, Display, Formatter};
+      +use std::fmt::{self, Debug, Display, Formatter};
+       use std::sync::{Arc};
+       use std::cell::RefCell;
+       
+      @@ -28,6 +28,7 @@
+       use crate::glr::table::StateID;
+       use crate::glr::analyze::compute_terminal_follow_sets;
+       use crate::glr::grammar::Terminal;
+      +use std::ops::{BitAnd, Sub};
+       use crate::glr::items::{Item, LRMode, LR_MODE};
+       use crate::interface::CompiledGrammar;
+       use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
+      @@ -1621,3 +1622,90 @@
+               }
+           }
+       }
+      +
+      +type NormalizedPath = Vec<(usize, StateID)>;
+      +type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
+      +
+      +/// Normalizes a path by merging consecutive `(k, None)` segments.
+      +fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
+      +    let mut result = Vec::new();
+      +    let mut current_k = 0;
+      +    for (k, sid_opt) in path {
+      +        current_k += *k;
+      +        if let Some(sid) = sid_opt {
+      +            result.push((current_k, *sid));
+      +            current_k = 0;
+      +        }
+      +    }
+      +    result
+      +}
+      +
+      +/// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
+      +/// Each path is associated with the intersection of LLM token bitvectors along its edges.
+      +fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+      +    let mut all_paths = PathMap::new();
+      +    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
+      +
+      +    let initial_bv = root.read().unwrap().value.live_tokens.clone();
+      +    q.push_back((root.clone(), vec![], initial_bv));
+      +
+      +    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
+      +    visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
+      +
+      +    while let Some((node_arc, path, bv)) = q.pop_front() {
+      +        let node_guard = node_arc.read().unwrap();
+      +
+      +        if node_guard.value.end {
+      +            let normalized = normalize_path(&path);
+      +            all_paths.entry(normalized)
+      +                .and_modify(|e| *e |= &bv)
+      +                .or_insert(bv.clone());
+      +        }
+      +
+      +        for (ek, dest_map) in node_guard.children() {
+      +            for (child_ptr, edge_bv) in dest_map {
+      +                let new_bv = &bv & edge_bv;
+      +                if new_bv.is_empty() { continue; }
+      +
+      +                if let Some(child_arc) = child_ptr.upgrade() {
+      +                    let mut new_path = path.clone();
+      +                    new_path.push(ek.clone());
+      +
+      +                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
+      +
+      +                    if let Some(existing_bv) = visited.get_mut(&visited_key) {
+      +                        let new_tokens = &new_bv - &*existing_bv;
+      +                        if new_tokens.is_empty() {
+      +                            continue;
+      +                        }
+      +                        *existing_bv |= &new_tokens;
+      +                        q.push_back((child_arc, new_path, new_tokens));
+      +                    } else {
+      +                        visited.insert(visited_key, new_bv.clone());
+      +                        q.push_back((child_arc, new_path, new_bv));
       +                    }
-                           let after_len = dest_map.len();
-                           if after_len == 0 {
-                               empty_keys.push(ek.clone());
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    all_paths
+      +}
+      +
+      +/// Checks for semantic equivalence between two `precompute2` trees.
+      +///
+      +/// Two trees are considered equivalent if they generate the same set of "normalized paths",
+      +/// where each path is associated with a bitvector of applicable LLM tokens.
+      +/// A normalized path collapses consecutive edge keys of the form `(k, None)`.
+      +///
+      +/// # Arguments
+      +/// * `a`: An `Arc` to the first trie's root node.
+      +/// * `b`: An `Arc` to the second trie's root node.
+      +///
+      +/// # Returns
+      +/// `true` if the tries are semantically equivalent, `false` otherwise.
+      +#[allow(dead_code)]
+      +pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
+      +    if Arc::ptr_eq(a, b) { return true; }
+      +    let paths_a = get_normalized_paths_from_root(a);
+      +    let paths_b = get_normalized_paths_from_root(b);
+      +    paths_a == paths_b
+      +}
 
       ```
     metadata:
@@ -22283,11 +22250,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/trie.rs
-      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/trie.rs.
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Implement manual pruning of dangling
-      weak edges in Trie"'
+  - user: 'Changes committed with message: "feat: Add semantic equivalence check for
+      precompute2 trees"'
     metadata:
 ...

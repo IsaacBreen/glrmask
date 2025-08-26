@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::{BitOr, BitOrAssign};
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::{Arc};
 use std::cell::RefCell;
 
@@ -41,6 +41,7 @@ use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
+use std::ops::{BitAnd, Sub};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
@@ -153,6 +154,95 @@ impl JSONConvertible for GrammarConstraint {
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
         }
     }
+}
+
+type NormalizedPath = Vec<(usize, StateID)>;
+type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
+
+/// Normalizes a path by merging consecutive `(k, None)` segments.
+fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
+    let mut result = Vec::new();
+    let mut current_k = 0;
+    for (k, sid_opt) in path {
+        current_k += *k;
+        if let Some(sid) = sid_opt {
+            result.push((current_k, *sid));
+            current_k = 0;
+        }
+    }
+    result
+}
+
+/// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
+/// Each path is associated with the intersection of LLM token bitvectors along its edges.
+fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+    let mut all_paths = PathMap::new();
+    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
+
+    let initial_bv = root.read().unwrap().value.live_tokens.clone();
+    q.push_back((root.clone(), vec![], initial_bv));
+
+    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
+    visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
+
+    while let Some((node_arc, path, bv)) = q.pop_front() {
+        let node_guard = node_arc.read().unwrap();
+
+        if node_guard.value.end {
+            let normalized = normalize_path(&path);
+            all_paths.entry(normalized)
+                .and_modify(|e| *e |= &bv)
+                .or_insert(bv.clone());
+        }
+
+        for (ek, dest_map) in node_guard.children() {
+            for (child_ptr, edge_bv) in dest_map {
+                let new_bv = &bv & edge_bv;
+                if new_bv.is_empty() { continue; }
+
+                if let Some(child_arc) = child_ptr.upgrade() {
+                    let mut new_path = path.clone();
+                    new_path.push(ek.clone());
+
+                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
+
+                    if let Some(existing_bv) = visited.get_mut(&visited_key) {
+                        let new_tokens = &new_bv - &*existing_bv;
+                        if new_tokens.is_empty() {
+                            continue;
+                        }
+                        *existing_bv |= &new_tokens;
+                        q.push_back((child_arc, new_path, new_tokens));
+                    } else {
+                        visited.insert(visited_key, new_bv.clone());
+                        q.push_back((child_arc, new_path, new_bv));
+                    }
+                }
+            }
+        }
+    }
+
+    all_paths
+}
+
+/// Checks for semantic equivalence between two `precompute2` trees.
+///
+/// Two trees are considered equivalent if they generate the same set of "normalized paths",
+/// where each path is associated with a bitvector of applicable LLM tokens.
+/// A normalized path collapses consecutive edge keys of the form `(k, None)`.
+///
+/// # Arguments
+/// * `a`: An `Arc` to the first trie's root node.
+/// * `b`: An `Arc` to the second trie's root node.
+///
+/// # Returns
+/// `true` if the tries are semantically equivalent, `false` otherwise.
+#[allow(dead_code)]
+pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
+    if Arc::ptr_eq(a, b) { return true; }
+    let paths_a = get_normalized_paths_from_root(a);
+    let paths_b = get_normalized_paths_from_root(b);
+    paths_a == paths_b
 }
 
 
@@ -638,7 +728,7 @@ impl GrammarConstraint {
         merge_nodes_trie2(&mut precomputed2);
         // simplify_trie2_merge_edges(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
-        context_aware_merge_trie2(&mut precomputed2);
+        // context_aware_merge_trie2(&mut precomputed2);
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
