@@ -1264,6 +1264,8 @@ pub(crate) fn merge_trie2_nodes_if_needed(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
+    let mut new_destinations = BTreeMap::new();
+
     let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         if !root.acc.trie2_nodes.iter().any(
@@ -1274,7 +1276,9 @@ pub(crate) fn merge_trie2_nodes_if_needed(
         }
         let mut new_acc = (*root.acc).clone();
         // Create a single new destination for this merge operation.
-        let new_destination = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone()))
+            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+            .clone();
         let edge_key = (0, None);
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
