@@ -16,7 +16,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::{Arc};
 use std::cell::RefCell;
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 
 use bimap::BiBTreeMap;
@@ -174,15 +174,14 @@ fn sample_normalized_path(
     let mut current_bv = root.read().unwrap().value.live_tokens.clone();
 
     for _ in 0..max_path_length {
-        let guard = current_node.read().unwrap();
 
         // With some probability, if we are at an end node, we terminate.
-        if guard.value.end && rng.gen_bool(0.2) { // 20% chance to terminate at an end node
+        if current_node.read().unwrap().value.end && rng.gen_bool(0.2) { // 20% chance to terminate at an end node
             return Some((path, current_bv));
         }
 
         let mut possible_moves = Vec::new();
-        for (ek, dest_map) in guard.children() {
+        for (ek, dest_map) in current_node.read().unwrap().children() {
             for (child_ptr, edge_bv) in dest_map {
                 let intersection = &current_bv & edge_bv;
                 if !intersection.is_empty() {
@@ -195,7 +194,7 @@ fn sample_normalized_path(
 
         if possible_moves.is_empty() {
             // Dead end. If it's an end node, it's a valid path.
-            if guard.value.end {
+            if current_node.read().unwrap().value.end {
                 return Some((path, current_bv));
             }
             return None;
@@ -232,7 +231,7 @@ fn get_bvs_for_normalized_path(
     let mut final_bv = LLMTokenBV::zeros();
 
     let initial_bv = root.read().unwrap().value.live_tokens.clone();
-    q.push_back((root.clone(), 0, 0, initial_bv));
+    q.push_back((root.clone(), 0, 0, initial_bv.clone()));
 
     // Visited key: (node_ptr, path_idx, pending_k)
     let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, usize, usize), LLMTokenBV> = HashMap::new();
