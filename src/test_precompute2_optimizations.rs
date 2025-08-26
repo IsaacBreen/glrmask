@@ -10,7 +10,7 @@
 //! - Factoring common logic into small helpers.
 
 use crate::constraint::{
-    are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2,
+    are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size, GrammarConstraint, Precomputed2,
 };
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::JSONConvertible;
@@ -53,7 +53,7 @@ fn assert_optimized_equivalent(original_precomputed2: &Precomputed2) {
     }
 
     // Apply optimization passes
-    context_aware_merge_trie2(&mut optimized_precomputed2);
+    optimize_trie2_size(&mut optimized_precomputed2);
 
     // Compare the original and optimized trees for semantic equivalence
     assert_eq!(
