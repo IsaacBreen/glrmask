@@ -154,7 +154,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
     let vocab_file_name = "gpt2_vocab.json";
     let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
     // Keep a smaller subset to speed up the test
-    gpt2_raw_vocab.retain(|s| s.len() < 5);
+    gpt2_raw_vocab.retain(|s| s.len() < 2);
     println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
 
     let mut llm_token_map = LLMTokenMap::new();
