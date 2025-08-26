@@ -490,9 +490,9 @@ impl GrammarConstraint {
 
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
-                        print_summary_flat();
-                        print_summary();
-                        reset();
+                        // print_summary_flat();
+                        // print_summary();
+                        // reset();
                 }
 
                 let mut out = Vec::new();
