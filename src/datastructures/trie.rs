@@ -68,6 +68,9 @@ where
     T: Clone + JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
+        let total_nodes = self.count_all_reachable_nodes();
+        let mut pb = tqdm!(total = total_nodes, desc = "Serializing Trie to JSON", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
         let mut nodes_json_list: Vec<JSONNode> = Vec::new();
         // Maps the raw pointer of an Arc<RwLock<Trie>> to its index in nodes_json_list
         let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie<EK, EV, T>>, usize> = HashMap::new();
@@ -129,6 +132,7 @@ where
             ("children".to_string(), JSONNode::Array(root_children_json_data)),
             ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
         ]));
+        let _ = pb.update(1);
 
 
         // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
@@ -185,6 +189,7 @@ where
                 ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
                 ("weak_children".to_string(), JSONNode::Array(current_node_weak_children_json_bfs)),
             ]));
+            let _ = pb.update(1);
         }
 
         JSONNode::Object(BTreeMap::from_iter(vec![
@@ -212,6 +217,7 @@ where
                 let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie<EK, EV, T>>>> = HashMap::new();
 
                 // Pass 1: Create node shells (value, max_depth, empty children)
+                let mut pb1 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 1/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
                         JSONNode::Object(n_obj) => {
@@ -229,10 +235,12 @@ where
                             deserialized_arcs.insert(i, new_node_arc);
                         }
                         _ => return Err(format!("Node data at index {} is not an object", i)),
-                    }
+                    };
+                    let _ = pb1.update(1);
                 }
 
                 // Pass 2: Link children by populating the `children` BTreeMaps
+                let mut pb2 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 2/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
                         JSONNode::Object(n_obj) => {
@@ -331,7 +339,8 @@ where
                             }
                         }
                         _ => unreachable!("Node data should be an object, checked in Pass 1"),
-                    }
+                    };
+                    let _ = pb2.update(1);
                 }
 
                 let root_arc_final = deserialized_arcs.get(&root_idx)
@@ -360,6 +369,44 @@ where
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         T::from_json(node).map(|val| Arc::new(RwLock::new(val)))
+    }
+}
+
+impl<EK: Ord, EV, T> Trie<EK, EV, T> {
+    /// Counts all unique nodes reachable from `self` via strong or weak edges.
+    /// This is a helper for serialization progress bars.
+    fn count_all_reachable_nodes(&self) -> usize {
+        let mut count = 1; // for self
+        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        // Enqueue self's children
+        for destinations_map in self.children.values() {
+            for node_ptr in destinations_map.keys() {
+                if let Some(child_arc) = node_ptr.upgrade() {
+                    let child_arc_ptr = Arc::as_ptr(&child_arc);
+                    if visited_arcs.insert(child_arc_ptr) {
+                        queue.push_back(child_arc);
+                    }
+                }
+            }
+        }
+
+        while let Some(node_arc) = queue.pop_front() {
+            count += 1;
+            let node_guard = node_arc.read().expect("RwLock poisoned during node count for serialization");
+            for destinations_map in node_guard.children.values() {
+                for node_ptr in destinations_map.keys() {
+                    if let Some(child_arc) = node_ptr.upgrade() {
+                        let child_arc_ptr = Arc::as_ptr(&child_arc);
+                        if visited_arcs.insert(child_arc_ptr) {
+                            queue.push_back(child_arc);
+                        }
+                    }
+                }
+            }
+        }
+        count
     }
 }
 
