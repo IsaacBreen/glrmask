@@ -127,10 +127,10 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
 
     const FORCE_RECOMPUTE: bool = false;
     const SAVE_TO_CACHE: bool = false;
+    use crate::json_serialization;
     use flate2::read::GzDecoder;
     use flate2::write::GzEncoder;
     use flate2::Compression;
-    use crate::json_serialization;
 
     let cache_dir = Path::new(".cache/test_precompute2");
     fs::create_dir_all(cache_dir)?;
@@ -173,7 +173,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
         original_precomputed2 = Precomputed2::from_json_reader(decompressor)?;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
-        println!("\nConstructing GrammarConstraint (will generate Precompute2)...");
+        println!("\nConstructing GrammarConstraint (will generate Precomputed2)...");
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(
             compiled_grammar.clone(),
             llm_token_map.clone(),
