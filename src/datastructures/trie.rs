@@ -211,6 +211,8 @@ where
 
                 let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie<EK, EV, T>>>> = HashMap::new();
 
+                let mut pb_pass1 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 1/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
                 // Pass 1: Create node shells (value, max_depth, empty children)
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
@@ -230,7 +232,11 @@ where
                         }
                         _ => return Err(format!("Node data at index {} is not an object", i)),
                     }
+                    let _ = pb_pass1.update(1);
                 }
+                pb_pass1.finish().unwrap();
+
+                let mut pb_pass2 = tqdm!(total = nodes_array.len(), desc = "Linking nodes (pass 2/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
                 // Pass 2: Link children by populating the `children` BTreeMaps
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
@@ -332,7 +338,9 @@ where
                         }
                         _ => unreachable!("Node data should be an object, checked in Pass 1"),
                     }
+                    let _ = pb_pass2.update(1);
                 }
+                pb_pass2.finish().unwrap();
 
                 let root_arc_final = deserialized_arcs.get(&root_idx)
                     .ok_or_else(|| format!("Root index {} not found in deserialized_arcs map after linking", root_idx))?

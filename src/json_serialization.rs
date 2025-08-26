@@ -14,6 +14,8 @@ use std::io::{Read, Write};
 use std::sync::{Arc, RwLock};
 use crate::constraint::Precomputed2;
 use crate::datastructures::gss::PrecomputeNode2;
+use kdam::{tqdm, BarExt};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 // Added for streaming
 
 // --- JSONNode Enum ---
@@ -997,6 +999,7 @@ fn stream_trie_to_writer<W: Write>(
     }
 
     // Pass 2: Write nodes to stream one by one.
+    let mut pb = tqdm!(total = idx_to_arc.len(), desc = "Writing trie nodes", disable = !PROGRESS_BAR_ENABLED, leave=false);
     write!(writer, "{{\"nodes\":[",).map_err(|e| e.to_string())?;
 
     for (i, node_arc) in idx_to_arc.iter().enumerate() {
@@ -1041,8 +1044,10 @@ fn stream_trie_to_writer<W: Write>(
         ]));
 
         node_json.to_writer(&mut writer)?;
+        let _ = pb.update(1);
     }
 
+    pb.finish().unwrap();
     write!(writer, "],\"root_idx\":0}}").map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1053,6 +1058,7 @@ pub fn write_precomputed2_to_stream<W: Write>(
     mut writer: W,
 ) -> Result<(), String> {
     writer.write_all(b"[").map_err(|e| e.to_string())?;
+    let mut pb = tqdm!(total = precomputed2.len(), desc = "Writing tries", disable = !PROGRESS_BAR_ENABLED, leave=false);
     let mut first = true;
     for (key, trie_root_arc) in precomputed2 {
         if !first {
@@ -1064,7 +1070,36 @@ pub fn write_precomputed2_to_stream<W: Write>(
         writer.write_all(b",").map_err(|e| e.to_string())?;
         stream_trie_to_writer(trie_root_arc, &mut writer)?;
         writer.write_all(b"]").map_err(|e| e.to_string())?;
+        let _ = pb.update(1);
     }
+    pb.finish().unwrap();
     writer.write_all(b"]").map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Custom deserializer for `Precomputed2` from a stream.
+pub fn read_precomputed2_from_stream<R: Read>(
+    reader: R,
+) -> Result<Precomputed2, String> {
+    // This is not fully "streaming" as it loads the entire structure as SerdeValue first,
+    // but it allows for progress reporting during the conversion to the final Trie format.
+    let pairs: Vec<(SerdeValue, SerdeValue)> = serde_json::from_reader(reader)
+        .map_err(|e| format!("Failed to parse precomputed2 stream as array of pairs: {}", e))?;
+
+    let mut map = Precomputed2::new();
+    let mut pb = tqdm!(total = pairs.len(), desc = "Loading tries from JSON", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
+    for (key_val, trie_val) in pairs {
+        let key_node = JSONNode::from_serde_value(key_val)?;
+        let key = <(crate::datastructures::hybrid_bitset::HybridBitset, usize)>::from_json(key_node)?;
+
+        let trie_node = JSONNode::from_serde_value(trie_val)?;
+        let trie_arc: Arc<RwLock<PrecomputeNode2>> = JSONConvertible::from_json(trie_node)?;
+
+        map.insert(key, trie_arc);
+        let _ = pb.update(1);
+    }
+    pb.finish().unwrap();
+
+    Ok(map)
 }
