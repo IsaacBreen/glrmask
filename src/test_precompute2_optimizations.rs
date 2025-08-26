@@ -2,6 +2,7 @@
 // It verifies that optimizations produce a semantically equivalent tree.
 
 use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use std::collections::BTreeMap;
@@ -44,6 +45,11 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
     // --- Setup Phase ---
     println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
 
+    const FORCE_RECOMPUTE: bool = false;
+    let cache_dir = Path::new(".cache/test_precompute2");
+    fs::create_dir_all(cache_dir)?;
+    let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json");
+
     // 1. Load and compile the JavaScript grammar.
     let grammar_path = "src/js.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
@@ -53,10 +59,10 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
 
     // 2. Load a small, representative vocabulary.
     println!("\nLoading GPT-2 vocabulary...");
-    let cache_dir = Path::new(".cache/test_vocabs");
+    let vocab_cache_dir = Path::new(".cache/test_vocabs");
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
     let vocab_file_name = "gpt2_vocab.json";
-    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
     // Keep a smaller subset to speed up the test
     gpt2_raw_vocab.retain(|s| s.len() < 5);
     println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
@@ -72,19 +78,34 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
     }
 
     // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-    let dummy_eof_placeholder = 0;
-    println!("\nConstructing GrammarConstraint...");
-    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
-        compiled_grammar.clone(),
-        llm_token_map.clone(),
-        LLMTokenID(dummy_eof_placeholder),
-        max_original_llm_token_id_val
-    );
-    println!("GrammarConstraint constructed successfully.");
+    let original_precomputed2: Precomputed2;
+
+    if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+        println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+        let json_string = fs::read_to_string(&precomputed2_cache_path)?;
+        let json_node = JSONNode::from_json_string(&json_string)?;
+        original_precomputed2 = Precomputed2::from_json(json_node)?;
+        println!("Successfully loaded Precomputed2 from cache.");
+    } else {
+        println!("\nConstructing GrammarConstraint (will generate Precomputed2)...");
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+            compiled_grammar.clone(),
+            llm_token_map.clone(),
+            LLMTokenID(0), // dummy_eof_placeholder
+            max_original_llm_token_id_val,
+        );
+        println!("GrammarConstraint constructed successfully.");
+        original_precomputed2 = grammar_constraint.precomputed2;
+
+        println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+        let json_node = original_precomputed2.to_json();
+        let json_string = json_node.to_json_string();
+        fs::write(&precomputed2_cache_path, json_string)?;
+        println!("Successfully saved Precomputed2 to cache.");
+    }
 
     // 4. Deep-clone the original precomputed2 tree.
     println!("\nCloning the original precomputed2 tree...");
-    let original_precomputed2 = &grammar_constraint.precomputed2;
     let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
     for (sid, root_arc) in original_precomputed2.iter() {
         let (cloned_root, _map) = clone_trie2_graph(root_arc);

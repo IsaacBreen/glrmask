@@ -4,6 +4,7 @@ local_system:
     - src/datastructures/trie.rs
     - src/lib.rs
     - src/test_constraint_js.rs
+    - src/json_serialization.rs
     - src/test_precompute2_optimizations.rs
   conversation_file:
   compile_command:
@@ -248,7 +249,6 @@ local_system:
       ///
       /// # Returns
       /// `true` if the tries are semantically equivalent, `false` otherwise.
-      #[allow(dead_code)]
       pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
           if Arc::ptr_eq(a, b) { return true; }
           let paths_a = get_normalized_paths_from_root(a);
@@ -862,7 +862,7 @@ local_system:
           }
       }
 
-      fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
           // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
@@ -944,7 +944,7 @@ local_system:
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
       }
 
-      fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
 
           const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
@@ -1031,7 +1031,7 @@ local_system:
           crate::debug!(2, "Finished factoring common destinations in trie 2.");
       }
 
-      fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Simplifying trie 2 by merging sequential edges.");
 
           let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -1135,7 +1135,7 @@ local_system:
 
       // Context-aware Trie2 merging (conservative, masked, cycle-safe)
 
-      fn build_incoming_maps_trie2(
+      pub fn build_incoming_maps_trie2(
           roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
       ) -> (
           HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
@@ -1512,7 +1512,7 @@ local_system:
 
       /// Greedy, conservative, context-aware merge for Trie 2.
       /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
-      fn context_aware_merge_trie2(
+      pub fn context_aware_merge_trie2(
           roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
       ) {
           crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
@@ -1689,7 +1689,7 @@ local_system:
           true
       }
 
-      fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
           let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -1815,7 +1815,7 @@ local_system:
           node_arc
       }
 
-      fn clone_trie2_graph(
+      pub fn clone_trie2_graph(
           root: &Arc<RwLock<PrecomputeNode2>>,
       ) -> (
           Arc<RwLock<PrecomputeNode2>>,
@@ -7433,6 +7433,7 @@ local_system:
       mod test_constraint_python;
       mod profiler;
       mod test_constraint_js;
+      mod test_precompute2_optimizations;
     src/test_constraint_js.rs: |
       // This file contains integration tests for the GrammarConstraint using a full JavaScript grammar.
       // It is structured as follows:
@@ -8779,6 +8780,835 @@ local_system:
           assert!(glr_state.is_ok(), "Final parser state is not OK.");
 
           Ok(())
+      }
+    src/json_serialization.rs: |
+      use std::collections::{BTreeMap, HashMap, BTreeSet, HashSet};
+      use std::hash::Hash;
+      use std::marker::Sized;
+      use bimap::BiBTreeMap;
+
+      // Import the derive macro
+      use json_convertible_derive::JSONConvertible;
+
+      // Add these lines for serde_json
+      use serde_json::Value as SerdeValue;
+      use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
+      use std::convert::TryInto;
+
+      // --- JSONNode Enum ---
+      #[derive(Debug, Clone, PartialEq)]
+      pub enum JSONNode {
+          Null,
+          Bool(bool),
+          Int(i128),
+          UInt(u128),
+          Float(f64),
+          String(String),
+          Array(Vec<JSONNode>),
+          Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
+      }
+
+      impl JSONNode {
+          // New method to convert JSONNode to serde_json::Value
+          fn to_serde_value(&self) -> SerdeValue {
+              match self {
+                  JSONNode::Null => SerdeValue::Null,
+                  JSONNode::Bool(b) => SerdeValue::Bool(*b),
+                  JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).expect(format!("Int {} out of range for serde_json::Value", i).as_str())),
+                  JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).expect(format!("UInt {} out of range for serde_json::Value", u).as_str())),
+                  JSONNode::Float(f) => {
+                      // serde_json::Number::from_f64 returns None for NaN/Infinity
+                      // We'll convert such cases to SerdeValue::Null, a common practice.
+                      serde_json::Number::from_f64(*f)
+                          .map(SerdeValue::Number)
+                          .unwrap_or(SerdeValue::Null)
+                  }
+                  JSONNode::String(s) => SerdeValue::String(s.clone()),
+                  JSONNode::Array(arr) => {
+                      SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
+                  }
+                  JSONNode::Object(obj) => {
+                      let mut map = SerdeMap::new();
+                      for (k, v) in obj {
+                          map.insert(k.clone(), v.to_serde_value());
+                      }
+                      SerdeValue::Object(map)
+                  }
+              }
+          }
+
+          // New method to convert serde_json::Value to JSONNode
+          fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
+              match s_val {
+                  SerdeValue::Null => Ok(JSONNode::Null),
+                  SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
+                  SerdeValue::Number(n) => {
+                      if let Some(i) = n.as_i64() {
+                          Ok(JSONNode::Int(i as i128))
+                      } else if let Some(u) = n.as_u64() {
+                          Ok(JSONNode::UInt(u as u128))
+                      } else if let Some(f) = n.as_f64() {
+                          Ok(JSONNode::Float(f))
+                      } else {
+                          Err(format!("Unsupported number type in serde_json::Value: {}", n))
+                      }
+                  }
+                  SerdeValue::String(s) => Ok(JSONNode::String(s)),
+                  SerdeValue::Array(arr) => {
+                      let mut nodes = Vec::with_capacity(arr.len());
+                      for val in arr {
+                          nodes.push(Self::from_serde_value(val)?);
+                      }
+                      Ok(JSONNode::Array(nodes))
+                  }
+                  SerdeValue::Object(obj_map) => {
+                      let mut btree_map = BTreeMap::new();
+                      for (k, v) in obj_map {
+                          btree_map.insert(k, Self::from_serde_value(v)?);
+                      }
+                      Ok(JSONNode::Object(btree_map))
+                  }
+              }
+          }
+
+          // Update to_json_string to use serde_json
+          pub fn to_json_string(&self) -> String {
+              let serde_value = self.to_serde_value();
+              // serde_json::to_string can fail, though less likely for SerdeValue -> String
+              // For simplicity here, unwrap, but consider error handling for production
+              serde_json::to_string(&serde_value).unwrap_or_else(|e| {
+                  // Fallback or panic for critical error
+                  eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
+                  // A minimal JSON representation of an error or "null"
+                  "{\"error\":\"serialization_failed\"}".to_string()
+              })
+          }
+
+          // Update from_json_string to use serde_json
+          pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
+              let serde_value: SerdeValue = serde_json::from_str(s)
+                  .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
+              Self::from_serde_value(serde_value)
+          }
+
+          pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
+              match self {
+                  JSONNode::Object(obj) => Ok(obj),
+                  _ => Err("Expected JSONNode::Object".to_string()),
+              }
+          }
+      }
+
+      // --- JSONConvertible Trait ---
+      pub trait JSONConvertible: Sized {
+          fn to_json(&self) -> JSONNode;
+          fn from_json(node: JSONNode) -> Result<Self, String>;
+      }
+
+      // --- Implementations for Primitives ---
+
+      impl JSONConvertible for () {
+          fn to_json(&self) -> JSONNode { JSONNode::Null }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Null => Ok(()),
+                  _ => Err("Expected JSONNode::Null for unit type".to_string()),
+              }
+          }
+      }
+
+      macro_rules! impl_json_for_tuple {
+          ( $($T:ident : $idx:tt),+ ) => {
+              impl<$($T: JSONConvertible),+> JSONConvertible for ($($T,)+) {
+                  fn to_json(&self) -> JSONNode {
+                      JSONNode::Array(vec![
+                          $(self.$idx.to_json()),+
+                      ])
+                  }
+
+                  fn from_json(node: JSONNode) -> Result<Self, String> {
+                      match node {
+                          JSONNode::Array(arr) => {
+                              const N: usize = [$(stringify!($T)),+].len();
+                              if arr.len() != N {
+                                  return Err(format!(
+                                      "Expected JSONNode::Array with {} elements for tuple, got {}",
+                                      N,
+                                      arr.len()
+                                  ));
+                              }
+                              Ok(($(
+                                  $T::from_json(arr[$idx].clone())?
+                              ,)+))
+                          }
+                          _ => Err("Expected JSONNode::Array for tuple".to_string()),
+                      }
+                  }
+              }
+          };
+      }
+
+      impl_json_for_tuple!(T0:0);
+      impl_json_for_tuple!(T0:0, T1:1);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10, T11:11);
+
+      impl JSONConvertible for bool {
+          fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Bool(b) => Ok(b),
+                  _ => Err("Expected JSONNode::Bool for bool".to_string()),
+              }
+          }
+      }
+
+      // --- Implementations for numeric primitives without precision loss ---
+      macro_rules! impl_json_for_signed {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Int(n)   => {
+                                  if n >= (<$t>::MIN as i128) && n <= (<$t>::MAX as i128) {
+                                      Ok(n as $t)
+                                  } else {
+                                      Err(format!("Integer {} out of range for {}", n, stringify!($t)))
+                                  }
+                              },
+                              JSONNode::UInt(u)  => {
+                                  // Check if u fits into the positive range of $t
+                                  if u <= (<$t>::MAX as u128) {
+                                      Ok(u as $t)
+                                  } else {
+                                      Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
+                                  }
+                              },
+                              other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      macro_rules! impl_json_for_unsigned {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::UInt(u) => {
+                                  if u <= (<$t>::MAX as u128) {
+                                      Ok(u as $t)
+                                  } else {
+                                      Err(format!("Unsigned integer {} out of range for {}", u, stringify!($t)))
+                                  }
+                              },
+                              JSONNode::Int(n)  => {
+                                  if n >= 0 {
+                                      let u_n = n as u128;
+                                      if u_n <= (<$t>::MAX as u128) {
+                                          Ok(u_n as $t)
+                                      } else {
+                                          Err(format!("Integer {} (as u128) out of range for {}", n, stringify!($t)))
+                                      }
+                                  } else {
+                                      Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
+                                  }
+                              },
+                              other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      macro_rules! impl_json_for_float {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Float(f) => Ok(f as $t),
+                              JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
+                              JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
+                              other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      // Signed integers
+      impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
+      // Unsigned integers
+      impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
+      // Floating-point types
+      impl_json_for_float!(f32, f64);
+
+
+      impl JSONConvertible for String {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::String(s) => Ok(s),
+                  _ => Err("Expected JSONNode::String for String".to_string()),
+              }
+          }
+      }
+
+      impl<'a> JSONConvertible for &'a str {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.to_string()) }
+          fn from_json(_node: JSONNode) -> Result<Self, String> {
+              Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+          }
+      }
+
+      // --- Implementations for Option ---
+      impl<T: JSONConvertible> JSONConvertible for Option<T> {
+          fn to_json(&self) -> JSONNode {
+              match self {
+                  Some(val) => val.to_json(),
+                  None => JSONNode::Null,
+              }
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Null => Ok(None),
+                  _ => T::from_json(node).map(Some),
+              }
+          }
+      }
+
+      // --- Implementations for Collections ---
+
+      // Generic Vec<T>
+      impl<T: JSONConvertible> JSONConvertible for Vec<T> {
+          fn to_json(&self) -> JSONNode {
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
+              }
+          }
+      }
+
+      // Generic array
+      impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
+          fn to_json(&self) -> JSONNode {
+              // Convert array elements to JSONNode and wrap in a JSON array
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      // First convert each JSONNode into T, collecting into a Vec<T>
+                      let vec: Vec<T> = arr
+                          .into_iter()
+                          .map(T::from_json)
+                          .collect::<Result<_, _>>()?;
+                      // Then try to convert Vec<T> into [T; N]; error if length mismatch
+                      vec.try_into()
+                          .map_err(|v: Vec<T>| {
+                              format!(
+                                  "Expected array of length {} for [T; N], got length {}",
+                                  N,
+                                  v.len()
+                              )
+                          })
+                  }
+                  _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
+              }
+          }
+      }
+
+
+      impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
+          fn to_json(&self) -> JSONNode {
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
+              }
+          }
+      }
+
+      impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
+          fn to_json(&self) -> JSONNode {
+              let mut vec: Vec<_> = self.iter().collect();
+              vec.sort(); // Sort for deterministic output
+              JSONNode::Array(vec.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
+              }
+          }
+      }
+
+      impl<K, V> JSONConvertible for BTreeMap<K, V>
+      where
+          K: JSONConvertible + Ord, // Keys in BTreeMap must be Ord
+          V: JSONConvertible,
+      {
+          fn to_json(&self) -> JSONNode {
+              // BTreeMap is already sorted by key, so iter() gives deterministic order
+              let pairs = self.iter().map(|(k, v)| {
+                  JSONNode::Array(vec![k.to_json(), v.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = BTreeMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let v_node = pair_vec.pop().unwrap();
+                                  let k_node = pair_vec.pop().unwrap();
+                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
+              }
+          }
+      }
+
+      impl<K, V> JSONConvertible for HashMap<K, V>
+      where
+          K: JSONConvertible + Eq + Hash + Ord, // Ord needed for sorting for deterministic JSON
+          V: JSONConvertible,
+      {
+          fn to_json(&self) -> JSONNode {
+              let mut sorted_pairs: Vec<_> = self.iter().collect();
+              // Sort by key for deterministic JSON output
+              sorted_pairs.sort_by_key(|(k, _)| *k); // Requires K: Ord
+
+              let pairs = sorted_pairs.into_iter().map(|(k, v)| {
+                  JSONNode::Array(vec![k.to_json(), v.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = HashMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let v_node = pair_vec.pop().unwrap();
+                                  let k_node = pair_vec.pop().unwrap();
+                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for HashMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
+              }
+          }
+      }
+
+      impl<L, R> JSONConvertible for BiBTreeMap<L, R>
+      where
+          L: JSONConvertible + Ord + Eq, // BiBTreeMap requires Ord + Eq for both left and right
+          R: JSONConvertible + Ord + Eq,
+      {
+          fn to_json(&self) -> JSONNode {
+              // BiBTreeMap iter() is sorted by the left value (L)
+              let pairs = self.iter().map(|(l, r)| {
+                  JSONNode::Array(vec![l.to_json(), r.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = BiBTreeMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let r_node = pair_vec.pop().unwrap();
+                                  let l_node = pair_vec.pop().unwrap();
+                                  map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
+              }
+          }
+      }
+
+      // --- Tests (optional, but good for verifying) ---
+      #[cfg(test)]
+      mod tests {
+          use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
+
+          // Example struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct MyStruct {
+              field1: i32,
+              field2: String,
+              optional_field: Option::<bool>,
+              list_of_numbers: Vec::<u32>,
+              byte_buffer: Vec::<u8>,
+          }
+
+          // Example generic struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
+              item_t: T,
+              item_u: U,
+              description: String,
+          }
+
+          // Example unit struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct MyUnitStruct;
+
+          #[test]
+          fn test_my_struct_serialization_deserialization() {
+              let original = MyStruct {
+                  field1: 42,
+                  field2: "hello".to_string(),
+                  optional_field: Some(true),
+                  list_of_numbers: vec![1, 2, 3],
+                  byte_buffer: vec![10, 20, 30],
+              };
+
+              let json_node = original.to_json();
+
+              // Expected JSON structure (BTreeMap for object means fields are sorted by key)
+              // {
+              //   "byte_buffer": [UInt(10), UInt(20), UInt(30)],
+              //   "field1": Int(42),
+              //   "field2": "hello",
+              //   "list_of_numbers": [UInt(1), UInt(2), UInt(3)],
+              //   "optional_field": true
+              // }
+
+              if let JSONNode::Object(obj) = &json_node {
+                  assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
+                  assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
+                  assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
+                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
+                       assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+                  } else {
+                      panic!("list_of_numbers not found or not an array");
+                  }
+                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
+                       assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                  } else {
+                      panic!("byte_buffer not found or not an array");
+                  }
+              } else {
+                  panic!("Expected JSONNode::Object, got {:?}", json_node);
+              }
+
+              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_my_struct_optional_none() {
+              let original = MyStruct {
+                  field1: 1,
+                  field2: "world".to_string(),
+                  optional_field: None,
+                  list_of_numbers: vec![],
+                  byte_buffer: vec![],
+              };
+              let json_node = original.to_json();
+              // { "byte_buffer": [], "field1": Int(1), "field2": "world", "list_of_numbers": [], "optional_field": null }
+              if let JSONNode::Object(obj) = &json_node {
+                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
+                   assert_eq!(obj.get("field1"), Some(&JSONNode::Int(1)));
+              } else {
+                  panic!("Expected JSONNode::Object");
+              }
+              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_generic_struct_serialization() {
+              let original = GenericStruct {
+                  item_t: 123i32,
+                  item_u: "test_string".to_string(),
+                  description: "A generic item".to_string(),
+              };
+              let json_node = original.to_json();
+              // {
+              //   "description": "A generic item",
+              //   "item_t": Int(123),
+              //   "item_u": "test_string"
+              // }
+              if let JSONNode::Object(obj) = &json_node {
+                  assert_eq!(obj.get("item_t"), Some(&JSONNode::Int(123)));
+              } else {
+                  panic!("Expected JSONNode::Object");
+              }
+              let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_generic_struct_with_custom_type() {
+              let my_s = MyStruct {
+                  field1: 1, field2: "inner".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
+              };
+              let original = GenericStruct {
+                  item_t: my_s.clone(),
+                  item_u: MyUnitStruct,
+                  description: "Struct with custom types".to_string(),
+              };
+              let json_node = original.to_json();
+              let deserialized = GenericStruct::<MyStruct, MyUnitStruct>::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_unit_struct_serialization() {
+              let original = MyUnitStruct;
+              let json_node = original.to_json();
+              assert_eq!(json_node, JSONNode::Object(BTreeMap::new())); // Derive macro makes unit structs empty objects
+              let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_btreemap_serialization() {
+              let mut map = BTreeMap::new();
+              map.insert("b_key".to_string(), 20i32);
+              map.insert("a_key".to_string(), 10i32);
+
+              let json_node = map.to_json();
+              // Expected: [["a_key", Int(10)], ["b_key", Int(20)]] (sorted by key)
+              match json_node {
+                  JSONNode::Array(pairs) => {
+                      assert_eq!(pairs.len(), 2);
+                      // Check first pair
+                      match &pairs[0] {
+                          JSONNode::Array(pair1) => {
+                              assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
+                              assert_eq!(pair1[1], JSONNode::Int(10));
+                          }
+                          _ => panic!("Expected array for pair"),
+                      }
+                      // Check second pair
+                      match &pairs[1] {
+                          JSONNode::Array(pair2) => {
+                              assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
+                              assert_eq!(pair2[1], JSONNode::Int(20));
+                          }
+                          _ => panic!("Expected array for pair"),
+                      }
+                  }
+                  _ => panic!("Expected JSONNode::Array for BTreeMap"),
+              }
+
+              let deserialized: BTreeMap<String, i32> = BTreeMap::from_json(map.to_json()).unwrap();
+              assert_eq!(map, deserialized);
+          }
+
+          #[test]
+          fn test_vec_u8_specialization() {
+              let data: Vec<u8> = vec![1, 2, 255];
+              let json_node = data.to_json();
+              // Expected: [UInt(1), UInt(2), UInt(255)]
+              match json_node {
+                  JSONNode::Array(ref nums) => {
+                      assert_eq!(nums.len(), 3);
+                      assert_eq!(nums[0], JSONNode::UInt(1));
+                      assert_eq!(nums[1], JSONNode::UInt(2));
+                      assert_eq!(nums[2], JSONNode::UInt(255));
+                  }
+                  _ => panic!("Expected JSONNode::Array for Vec<u8>"),
+              }
+              let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
+              assert_eq!(data, deserialized);
+
+              // Test invalid u8 from various JSONNode number types
+              let invalid_json_uint_too_large = JSONNode::Array(vec![JSONNode::UInt(256)]);
+              assert!(Vec::<u8>::from_json(invalid_json_uint_too_large).is_err());
+
+              let invalid_json_int_too_large = JSONNode::Array(vec![JSONNode::Int(256)]);
+              assert!(Vec::<u8>::from_json(invalid_json_int_too_large).is_err());
+
+              let invalid_json_int_neg = JSONNode::Array(vec![JSONNode::Int(-1)]);
+              assert!(Vec::<u8>::from_json(invalid_json_int_neg).is_err());
+
+              let invalid_json_float = JSONNode::Array(vec![JSONNode::Float(10.5)]);
+              assert!(Vec::<u8>::from_json(invalid_json_float).is_err()); // Floats not convertible to u8 by default
+
+              // Test valid u8 from Int
+              let valid_json_int = JSONNode::Array(vec![JSONNode::Int(128)]);
+              let deserialized_from_int: Vec<u8> = Vec::from_json(valid_json_int).unwrap();
+              assert_eq!(deserialized_from_int, vec![128u8]);
+          }
+
+          #[test]
+          fn test_large_numbers() {
+              let large_u128 = u128::MAX;
+              let json_u128 = large_u128.to_json();
+              assert_eq!(json_u128, JSONNode::UInt(u128::MAX));
+              let deserialized_u128 = u128::from_json(json_u128).unwrap();
+              assert_eq!(large_u128, deserialized_u128);
+
+              let large_i128 = i128::MIN;
+              let json_i128 = large_i128.to_json();
+              assert_eq!(json_i128, JSONNode::Int(i128::MIN));
+              let deserialized_i128 = i128::from_json(json_i128).unwrap();
+              assert_eq!(large_i128, deserialized_i128);
+
+              let float_val = 123.456f64;
+              let json_float = float_val.to_json();
+              assert_eq!(json_float, JSONNode::Float(123.456f64));
+              let deserialized_float = f64::from_json(json_float).unwrap();
+              assert_eq!(float_val, deserialized_float);
+
+              // Test conversion from Int to Float
+              let int_node = JSONNode::Int(123);
+              let float_from_int = f64::from_json(int_node).unwrap();
+              assert_eq!(float_from_int, 123.0f64);
+
+              // Test conversion from UInt to Float
+              let uint_node = JSONNode::UInt(456);
+              let float_from_uint = f64::from_json(uint_node).unwrap();
+              assert_eq!(float_from_uint, 456.0f64);
+
+              // Test that integer types do not deserialize from Float
+              let float_node_exact_int = JSONNode::Float(123.0);
+              assert!(i32::from_json(float_node_exact_int.clone()).is_err());
+              assert!(u32::from_json(float_node_exact_int.clone()).is_err());
+
+              let float_node_inexact_int = JSONNode::Float(123.7);
+              assert!(i32::from_json(float_node_inexact_int.clone()).is_err());
+              assert!(u32::from_json(float_node_inexact_int.clone()).is_err());
+
+              // Test range errors for integer types
+              assert!(i8::from_json(JSONNode::Int(128)).is_err()); // 128 is out of range for i8
+              assert!(i8::from_json(JSONNode::UInt(128)).is_err());// 128 is out of range for i8
+              assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
+              assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
+              assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
+          }
+
+          #[test]
+          fn test_json_string_conversion() {
+              let original = MyStruct {
+                  field1: 42,
+                  field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
+                  optional_field: Some(true),
+                  list_of_numbers: vec![1, 2, 3],
+                  byte_buffer: vec![10, 20, 30],
+              };
+
+              let json_node_via_trait = original.to_json();
+              let json_string = json_node_via_trait.to_json_string();
+
+              // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
+              // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
+              // or if serde_json::to_string sorts them by default for `Map`).
+              // serde_json sorts object keys by default when serializing.
+              let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
+
+              // We can parse the expected string and our generated string to SerdeValue and compare them
+              // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
+              let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
+              let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
+
+              assert_eq!(serde_val_generated, serde_val_expected);
+
+              // Test deserialization from string
+              let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
+              assert_eq!(json_node_via_trait, parsed_node);
+
+              let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
+              assert_eq!(original, deserialized_struct);
+          }
+
+          #[test]
+          fn test_non_finite_float_serialization() {
+              let node_nan = JSONNode::Float(f64::NAN);
+              assert_eq!(node_nan.to_json_string(), "null");
+
+              let node_inf = JSONNode::Float(f64::INFINITY);
+              assert_eq!(node_inf.to_json_string(), "null");
+
+              let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
+              assert_eq!(node_neg_inf.to_json_string(), "null");
+
+              // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
+              // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
+              // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
+              // you'd adjust JSONConvertible for Option<f64> or f64 itself.
+              // Here, we are testing JSONNode::from_json_string directly.
+              let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
+              assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
+                                                           // then from_serde_value converts SerdeValue::Null to JSONNode::Null
+          }
+
+          #[test]
+          fn test_tuple_serialization() {
+              let original: (i32, String, bool) = (123, "hello".to_string(), true);
+              let json_node = original.to_json();
+              assert_eq!(
+                  json_node,
+                  JSONNode::Array(vec![
+                      JSONNode::Int(123),
+                      JSONNode::String("hello".to_string()),
+                      JSONNode::Bool(true)
+                  ])
+              );
+
+              let deserialized = <(i32, String, bool)>::from_json(json_node).unwrap();
+              assert_eq!(original, deserialized);
+
+              // Test single-element tuple
+              let single_tuple: (i32,) = (42,);
+              let json_node_single = single_tuple.to_json();
+              assert_eq!(json_node_single, JSONNode::Array(vec![JSONNode::Int(42)]));
+              let deserialized_single = <(i32,)>::from_json(json_node_single).unwrap();
+              assert_eq!(single_tuple, deserialized_single);
+
+              // Test wrong number of elements for deserialization
+              let wrong_node = JSONNode::Array(vec![JSONNode::Int(1), JSONNode::Int(2)]);
+              assert!(<(i32, String, bool)>::from_json(wrong_node).is_err());
+          }
       }
     src/test_precompute2_optimizations.rs: |
       // This file contains tests for optimization passes on the Precompute2 trie.
@@ -17669,6 +18499,835 @@ local_system:
 
           Ok(())
       }
+    src/json_serialization.rs: |
+      use std::collections::{BTreeMap, HashMap, BTreeSet, HashSet};
+      use std::hash::Hash;
+      use std::marker::Sized;
+      use bimap::BiBTreeMap;
+
+      // Import the derive macro
+      use json_convertible_derive::JSONConvertible;
+
+      // Add these lines for serde_json
+      use serde_json::Value as SerdeValue;
+      use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
+      use std::convert::TryInto;
+
+      // --- JSONNode Enum ---
+      #[derive(Debug, Clone, PartialEq)]
+      pub enum JSONNode {
+          Null,
+          Bool(bool),
+          Int(i128),
+          UInt(u128),
+          Float(f64),
+          String(String),
+          Array(Vec<JSONNode>),
+          Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
+      }
+
+      impl JSONNode {
+          // New method to convert JSONNode to serde_json::Value
+          fn to_serde_value(&self) -> SerdeValue {
+              match self {
+                  JSONNode::Null => SerdeValue::Null,
+                  JSONNode::Bool(b) => SerdeValue::Bool(*b),
+                  JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).expect(format!("Int {} out of range for serde_json::Value", i).as_str())),
+                  JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).expect(format!("UInt {} out of range for serde_json::Value", u).as_str())),
+                  JSONNode::Float(f) => {
+                      // serde_json::Number::from_f64 returns None for NaN/Infinity
+                      // We'll convert such cases to SerdeValue::Null, a common practice.
+                      serde_json::Number::from_f64(*f)
+                          .map(SerdeValue::Number)
+                          .unwrap_or(SerdeValue::Null)
+                  }
+                  JSONNode::String(s) => SerdeValue::String(s.clone()),
+                  JSONNode::Array(arr) => {
+                      SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
+                  }
+                  JSONNode::Object(obj) => {
+                      let mut map = SerdeMap::new();
+                      for (k, v) in obj {
+                          map.insert(k.clone(), v.to_serde_value());
+                      }
+                      SerdeValue::Object(map)
+                  }
+              }
+          }
+
+          // New method to convert serde_json::Value to JSONNode
+          fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
+              match s_val {
+                  SerdeValue::Null => Ok(JSONNode::Null),
+                  SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
+                  SerdeValue::Number(n) => {
+                      if let Some(i) = n.as_i64() {
+                          Ok(JSONNode::Int(i as i128))
+                      } else if let Some(u) = n.as_u64() {
+                          Ok(JSONNode::UInt(u as u128))
+                      } else if let Some(f) = n.as_f64() {
+                          Ok(JSONNode::Float(f))
+                      } else {
+                          Err(format!("Unsupported number type in serde_json::Value: {}", n))
+                      }
+                  }
+                  SerdeValue::String(s) => Ok(JSONNode::String(s)),
+                  SerdeValue::Array(arr) => {
+                      let mut nodes = Vec::with_capacity(arr.len());
+                      for val in arr {
+                          nodes.push(Self::from_serde_value(val)?);
+                      }
+                      Ok(JSONNode::Array(nodes))
+                  }
+                  SerdeValue::Object(obj_map) => {
+                      let mut btree_map = BTreeMap::new();
+                      for (k, v) in obj_map {
+                          btree_map.insert(k, Self::from_serde_value(v)?);
+                      }
+                      Ok(JSONNode::Object(btree_map))
+                  }
+              }
+          }
+
+          // Update to_json_string to use serde_json
+          pub fn to_json_string(&self) -> String {
+              let serde_value = self.to_serde_value();
+              // serde_json::to_string can fail, though less likely for SerdeValue -> String
+              // For simplicity here, unwrap, but consider error handling for production
+              serde_json::to_string(&serde_value).unwrap_or_else(|e| {
+                  // Fallback or panic for critical error
+                  eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
+                  // A minimal JSON representation of an error or "null"
+                  "{\"error\":\"serialization_failed\"}".to_string()
+              })
+          }
+
+          // Update from_json_string to use serde_json
+          pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
+              let serde_value: SerdeValue = serde_json::from_str(s)
+                  .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
+              Self::from_serde_value(serde_value)
+          }
+
+          pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
+              match self {
+                  JSONNode::Object(obj) => Ok(obj),
+                  _ => Err("Expected JSONNode::Object".to_string()),
+              }
+          }
+      }
+
+      // --- JSONConvertible Trait ---
+      pub trait JSONConvertible: Sized {
+          fn to_json(&self) -> JSONNode;
+          fn from_json(node: JSONNode) -> Result<Self, String>;
+      }
+
+      // --- Implementations for Primitives ---
+
+      impl JSONConvertible for () {
+          fn to_json(&self) -> JSONNode { JSONNode::Null }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Null => Ok(()),
+                  _ => Err("Expected JSONNode::Null for unit type".to_string()),
+              }
+          }
+      }
+
+      macro_rules! impl_json_for_tuple {
+          ( $($T:ident : $idx:tt),+ ) => {
+              impl<$($T: JSONConvertible),+> JSONConvertible for ($($T,)+) {
+                  fn to_json(&self) -> JSONNode {
+                      JSONNode::Array(vec![
+                          $(self.$idx.to_json()),+
+                      ])
+                  }
+
+                  fn from_json(node: JSONNode) -> Result<Self, String> {
+                      match node {
+                          JSONNode::Array(arr) => {
+                              const N: usize = [$(stringify!($T)),+].len();
+                              if arr.len() != N {
+                                  return Err(format!(
+                                      "Expected JSONNode::Array with {} elements for tuple, got {}",
+                                      N,
+                                      arr.len()
+                                  ));
+                              }
+                              Ok(($(
+                                  $T::from_json(arr[$idx].clone())?
+                              ,)+))
+                          }
+                          _ => Err("Expected JSONNode::Array for tuple".to_string()),
+                      }
+                  }
+              }
+          };
+      }
+
+      impl_json_for_tuple!(T0:0);
+      impl_json_for_tuple!(T0:0, T1:1);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10, T11:11);
+
+      impl JSONConvertible for bool {
+          fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Bool(b) => Ok(b),
+                  _ => Err("Expected JSONNode::Bool for bool".to_string()),
+              }
+          }
+      }
+
+      // --- Implementations for numeric primitives without precision loss ---
+      macro_rules! impl_json_for_signed {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Int(n)   => {
+                                  if n >= (<$t>::MIN as i128) && n <= (<$t>::MAX as i128) {
+                                      Ok(n as $t)
+                                  } else {
+                                      Err(format!("Integer {} out of range for {}", n, stringify!($t)))
+                                  }
+                              },
+                              JSONNode::UInt(u)  => {
+                                  // Check if u fits into the positive range of $t
+                                  if u <= (<$t>::MAX as u128) {
+                                      Ok(u as $t)
+                                  } else {
+                                      Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
+                                  }
+                              },
+                              other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      macro_rules! impl_json_for_unsigned {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::UInt(u) => {
+                                  if u <= (<$t>::MAX as u128) {
+                                      Ok(u as $t)
+                                  } else {
+                                      Err(format!("Unsigned integer {} out of range for {}", u, stringify!($t)))
+                                  }
+                              },
+                              JSONNode::Int(n)  => {
+                                  if n >= 0 {
+                                      let u_n = n as u128;
+                                      if u_n <= (<$t>::MAX as u128) {
+                                          Ok(u_n as $t)
+                                      } else {
+                                          Err(format!("Integer {} (as u128) out of range for {}", n, stringify!($t)))
+                                      }
+                                  } else {
+                                      Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
+                                  }
+                              },
+                              other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      macro_rules! impl_json_for_float {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Float(f) => Ok(f as $t),
+                              JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
+                              JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
+                              other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      // Signed integers
+      impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
+      // Unsigned integers
+      impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
+      // Floating-point types
+      impl_json_for_float!(f32, f64);
+
+
+      impl JSONConvertible for String {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::String(s) => Ok(s),
+                  _ => Err("Expected JSONNode::String for String".to_string()),
+              }
+          }
+      }
+
+      impl<'a> JSONConvertible for &'a str {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.to_string()) }
+          fn from_json(_node: JSONNode) -> Result<Self, String> {
+              Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+          }
+      }
+
+      // --- Implementations for Option ---
+      impl<T: JSONConvertible> JSONConvertible for Option<T> {
+          fn to_json(&self) -> JSONNode {
+              match self {
+                  Some(val) => val.to_json(),
+                  None => JSONNode::Null,
+              }
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Null => Ok(None),
+                  _ => T::from_json(node).map(Some),
+              }
+          }
+      }
+
+      // --- Implementations for Collections ---
+
+      // Generic Vec<T>
+      impl<T: JSONConvertible> JSONConvertible for Vec<T> {
+          fn to_json(&self) -> JSONNode {
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
+              }
+          }
+      }
+
+      // Generic array
+      impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
+          fn to_json(&self) -> JSONNode {
+              // Convert array elements to JSONNode and wrap in a JSON array
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      // First convert each JSONNode into T, collecting into a Vec<T>
+                      let vec: Vec<T> = arr
+                          .into_iter()
+                          .map(T::from_json)
+                          .collect::<Result<_, _>>()?;
+                      // Then try to convert Vec<T> into [T; N]; error if length mismatch
+                      vec.try_into()
+                          .map_err(|v: Vec<T>| {
+                              format!(
+                                  "Expected array of length {} for [T; N], got length {}",
+                                  N,
+                                  v.len()
+                              )
+                          })
+                  }
+                  _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
+              }
+          }
+      }
+
+
+      impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
+          fn to_json(&self) -> JSONNode {
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
+              }
+          }
+      }
+
+      impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
+          fn to_json(&self) -> JSONNode {
+              let mut vec: Vec<_> = self.iter().collect();
+              vec.sort(); // Sort for deterministic output
+              JSONNode::Array(vec.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
+              }
+          }
+      }
+
+      impl<K, V> JSONConvertible for BTreeMap<K, V>
+      where
+          K: JSONConvertible + Ord, // Keys in BTreeMap must be Ord
+          V: JSONConvertible,
+      {
+          fn to_json(&self) -> JSONNode {
+              // BTreeMap is already sorted by key, so iter() gives deterministic order
+              let pairs = self.iter().map(|(k, v)| {
+                  JSONNode::Array(vec![k.to_json(), v.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = BTreeMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let v_node = pair_vec.pop().unwrap();
+                                  let k_node = pair_vec.pop().unwrap();
+                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
+              }
+          }
+      }
+
+      impl<K, V> JSONConvertible for HashMap<K, V>
+      where
+          K: JSONConvertible + Eq + Hash + Ord, // Ord needed for sorting for deterministic JSON
+          V: JSONConvertible,
+      {
+          fn to_json(&self) -> JSONNode {
+              let mut sorted_pairs: Vec<_> = self.iter().collect();
+              // Sort by key for deterministic JSON output
+              sorted_pairs.sort_by_key(|(k, _)| *k); // Requires K: Ord
+
+              let pairs = sorted_pairs.into_iter().map(|(k, v)| {
+                  JSONNode::Array(vec![k.to_json(), v.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = HashMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let v_node = pair_vec.pop().unwrap();
+                                  let k_node = pair_vec.pop().unwrap();
+                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for HashMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
+              }
+          }
+      }
+
+      impl<L, R> JSONConvertible for BiBTreeMap<L, R>
+      where
+          L: JSONConvertible + Ord + Eq, // BiBTreeMap requires Ord + Eq for both left and right
+          R: JSONConvertible + Ord + Eq,
+      {
+          fn to_json(&self) -> JSONNode {
+              // BiBTreeMap iter() is sorted by the left value (L)
+              let pairs = self.iter().map(|(l, r)| {
+                  JSONNode::Array(vec![l.to_json(), r.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = BiBTreeMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let r_node = pair_vec.pop().unwrap();
+                                  let l_node = pair_vec.pop().unwrap();
+                                  map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
+              }
+          }
+      }
+
+      // --- Tests (optional, but good for verifying) ---
+      #[cfg(test)]
+      mod tests {
+          use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
+
+          // Example struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct MyStruct {
+              field1: i32,
+              field2: String,
+              optional_field: Option::<bool>,
+              list_of_numbers: Vec::<u32>,
+              byte_buffer: Vec::<u8>,
+          }
+
+          // Example generic struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
+              item_t: T,
+              item_u: U,
+              description: String,
+          }
+
+          // Example unit struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct MyUnitStruct;
+
+          #[test]
+          fn test_my_struct_serialization_deserialization() {
+              let original = MyStruct {
+                  field1: 42,
+                  field2: "hello".to_string(),
+                  optional_field: Some(true),
+                  list_of_numbers: vec![1, 2, 3],
+                  byte_buffer: vec![10, 20, 30],
+              };
+
+              let json_node = original.to_json();
+
+              // Expected JSON structure (BTreeMap for object means fields are sorted by key)
+              // {
+              //   "byte_buffer": [UInt(10), UInt(20), UInt(30)],
+              //   "field1": Int(42),
+              //   "field2": "hello",
+              //   "list_of_numbers": [UInt(1), UInt(2), UInt(3)],
+              //   "optional_field": true
+              // }
+
+              if let JSONNode::Object(obj) = &json_node {
+                  assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
+                  assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
+                  assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
+                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
+                       assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+                  } else {
+                      panic!("list_of_numbers not found or not an array");
+                  }
+                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
+                       assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                  } else {
+                      panic!("byte_buffer not found or not an array");
+                  }
+              } else {
+                  panic!("Expected JSONNode::Object, got {:?}", json_node);
+              }
+
+              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_my_struct_optional_none() {
+              let original = MyStruct {
+                  field1: 1,
+                  field2: "world".to_string(),
+                  optional_field: None,
+                  list_of_numbers: vec![],
+                  byte_buffer: vec![],
+              };
+              let json_node = original.to_json();
+              // { "byte_buffer": [], "field1": Int(1), "field2": "world", "list_of_numbers": [], "optional_field": null }
+              if let JSONNode::Object(obj) = &json_node {
+                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
+                   assert_eq!(obj.get("field1"), Some(&JSONNode::Int(1)));
+              } else {
+                  panic!("Expected JSONNode::Object");
+              }
+              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_generic_struct_serialization() {
+              let original = GenericStruct {
+                  item_t: 123i32,
+                  item_u: "test_string".to_string(),
+                  description: "A generic item".to_string(),
+              };
+              let json_node = original.to_json();
+              // {
+              //   "description": "A generic item",
+              //   "item_t": Int(123),
+              //   "item_u": "test_string"
+              // }
+              if let JSONNode::Object(obj) = &json_node {
+                  assert_eq!(obj.get("item_t"), Some(&JSONNode::Int(123)));
+              } else {
+                  panic!("Expected JSONNode::Object");
+              }
+              let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_generic_struct_with_custom_type() {
+              let my_s = MyStruct {
+                  field1: 1, field2: "inner".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
+              };
+              let original = GenericStruct {
+                  item_t: my_s.clone(),
+                  item_u: MyUnitStruct,
+                  description: "Struct with custom types".to_string(),
+              };
+              let json_node = original.to_json();
+              let deserialized = GenericStruct::<MyStruct, MyUnitStruct>::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_unit_struct_serialization() {
+              let original = MyUnitStruct;
+              let json_node = original.to_json();
+              assert_eq!(json_node, JSONNode::Object(BTreeMap::new())); // Derive macro makes unit structs empty objects
+              let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_btreemap_serialization() {
+              let mut map = BTreeMap::new();
+              map.insert("b_key".to_string(), 20i32);
+              map.insert("a_key".to_string(), 10i32);
+
+              let json_node = map.to_json();
+              // Expected: [["a_key", Int(10)], ["b_key", Int(20)]] (sorted by key)
+              match json_node {
+                  JSONNode::Array(pairs) => {
+                      assert_eq!(pairs.len(), 2);
+                      // Check first pair
+                      match &pairs[0] {
+                          JSONNode::Array(pair1) => {
+                              assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
+                              assert_eq!(pair1[1], JSONNode::Int(10));
+                          }
+                          _ => panic!("Expected array for pair"),
+                      }
+                      // Check second pair
+                      match &pairs[1] {
+                          JSONNode::Array(pair2) => {
+                              assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
+                              assert_eq!(pair2[1], JSONNode::Int(20));
+                          }
+                          _ => panic!("Expected array for pair"),
+                      }
+                  }
+                  _ => panic!("Expected JSONNode::Array for BTreeMap"),
+              }
+
+              let deserialized: BTreeMap<String, i32> = BTreeMap::from_json(map.to_json()).unwrap();
+              assert_eq!(map, deserialized);
+          }
+
+          #[test]
+          fn test_vec_u8_specialization() {
+              let data: Vec<u8> = vec![1, 2, 255];
+              let json_node = data.to_json();
+              // Expected: [UInt(1), UInt(2), UInt(255)]
+              match json_node {
+                  JSONNode::Array(ref nums) => {
+                      assert_eq!(nums.len(), 3);
+                      assert_eq!(nums[0], JSONNode::UInt(1));
+                      assert_eq!(nums[1], JSONNode::UInt(2));
+                      assert_eq!(nums[2], JSONNode::UInt(255));
+                  }
+                  _ => panic!("Expected JSONNode::Array for Vec<u8>"),
+              }
+              let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
+              assert_eq!(data, deserialized);
+
+              // Test invalid u8 from various JSONNode number types
+              let invalid_json_uint_too_large = JSONNode::Array(vec![JSONNode::UInt(256)]);
+              assert!(Vec::<u8>::from_json(invalid_json_uint_too_large).is_err());
+
+              let invalid_json_int_too_large = JSONNode::Array(vec![JSONNode::Int(256)]);
+              assert!(Vec::<u8>::from_json(invalid_json_int_too_large).is_err());
+
+              let invalid_json_int_neg = JSONNode::Array(vec![JSONNode::Int(-1)]);
+              assert!(Vec::<u8>::from_json(invalid_json_int_neg).is_err());
+
+              let invalid_json_float = JSONNode::Array(vec![JSONNode::Float(10.5)]);
+              assert!(Vec::<u8>::from_json(invalid_json_float).is_err()); // Floats not convertible to u8 by default
+
+              // Test valid u8 from Int
+              let valid_json_int = JSONNode::Array(vec![JSONNode::Int(128)]);
+              let deserialized_from_int: Vec<u8> = Vec::from_json(valid_json_int).unwrap();
+              assert_eq!(deserialized_from_int, vec![128u8]);
+          }
+
+          #[test]
+          fn test_large_numbers() {
+              let large_u128 = u128::MAX;
+              let json_u128 = large_u128.to_json();
+              assert_eq!(json_u128, JSONNode::UInt(u128::MAX));
+              let deserialized_u128 = u128::from_json(json_u128).unwrap();
+              assert_eq!(large_u128, deserialized_u128);
+
+              let large_i128 = i128::MIN;
+              let json_i128 = large_i128.to_json();
+              assert_eq!(json_i128, JSONNode::Int(i128::MIN));
+              let deserialized_i128 = i128::from_json(json_i128).unwrap();
+              assert_eq!(large_i128, deserialized_i128);
+
+              let float_val = 123.456f64;
+              let json_float = float_val.to_json();
+              assert_eq!(json_float, JSONNode::Float(123.456f64));
+              let deserialized_float = f64::from_json(json_float).unwrap();
+              assert_eq!(float_val, deserialized_float);
+
+              // Test conversion from Int to Float
+              let int_node = JSONNode::Int(123);
+              let float_from_int = f64::from_json(int_node).unwrap();
+              assert_eq!(float_from_int, 123.0f64);
+
+              // Test conversion from UInt to Float
+              let uint_node = JSONNode::UInt(456);
+              let float_from_uint = f64::from_json(uint_node).unwrap();
+              assert_eq!(float_from_uint, 456.0f64);
+
+              // Test that integer types do not deserialize from Float
+              let float_node_exact_int = JSONNode::Float(123.0);
+              assert!(i32::from_json(float_node_exact_int.clone()).is_err());
+              assert!(u32::from_json(float_node_exact_int.clone()).is_err());
+
+              let float_node_inexact_int = JSONNode::Float(123.7);
+              assert!(i32::from_json(float_node_inexact_int.clone()).is_err());
+              assert!(u32::from_json(float_node_inexact_int.clone()).is_err());
+
+              // Test range errors for integer types
+              assert!(i8::from_json(JSONNode::Int(128)).is_err()); // 128 is out of range for i8
+              assert!(i8::from_json(JSONNode::UInt(128)).is_err());// 128 is out of range for i8
+              assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
+              assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
+              assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
+          }
+
+          #[test]
+          fn test_json_string_conversion() {
+              let original = MyStruct {
+                  field1: 42,
+                  field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
+                  optional_field: Some(true),
+                  list_of_numbers: vec![1, 2, 3],
+                  byte_buffer: vec![10, 20, 30],
+              };
+
+              let json_node_via_trait = original.to_json();
+              let json_string = json_node_via_trait.to_json_string();
+
+              // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
+              // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
+              // or if serde_json::to_string sorts them by default for `Map`).
+              // serde_json sorts object keys by default when serializing.
+              let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
+
+              // We can parse the expected string and our generated string to SerdeValue and compare them
+              // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
+              let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
+              let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
+
+              assert_eq!(serde_val_generated, serde_val_expected);
+
+              // Test deserialization from string
+              let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
+              assert_eq!(json_node_via_trait, parsed_node);
+
+              let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
+              assert_eq!(original, deserialized_struct);
+          }
+
+          #[test]
+          fn test_non_finite_float_serialization() {
+              let node_nan = JSONNode::Float(f64::NAN);
+              assert_eq!(node_nan.to_json_string(), "null");
+
+              let node_inf = JSONNode::Float(f64::INFINITY);
+              assert_eq!(node_inf.to_json_string(), "null");
+
+              let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
+              assert_eq!(node_neg_inf.to_json_string(), "null");
+
+              // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
+              // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
+              // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
+              // you'd adjust JSONConvertible for Option<f64> or f64 itself.
+              // Here, we are testing JSONNode::from_json_string directly.
+              let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
+              assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
+                                                           // then from_serde_value converts SerdeValue::Null to JSONNode::Null
+          }
+
+          #[test]
+          fn test_tuple_serialization() {
+              let original: (i32, String, bool) = (123, "hello".to_string(), true);
+              let json_node = original.to_json();
+              assert_eq!(
+                  json_node,
+                  JSONNode::Array(vec![
+                      JSONNode::Int(123),
+                      JSONNode::String("hello".to_string()),
+                      JSONNode::Bool(true)
+                  ])
+              );
+
+              let deserialized = <(i32, String, bool)>::from_json(json_node).unwrap();
+              assert_eq!(original, deserialized);
+
+              // Test single-element tuple
+              let single_tuple: (i32,) = (42,);
+              let json_node_single = single_tuple.to_json();
+              assert_eq!(json_node_single, JSONNode::Array(vec![JSONNode::Int(42)]));
+              let deserialized_single = <(i32,)>::from_json(json_node_single).unwrap();
+              assert_eq!(single_tuple, deserialized_single);
+
+              // Test wrong number of elements for deserialization
+              let wrong_node = JSONNode::Array(vec![JSONNode::Int(1), JSONNode::Int(2)]);
+              assert!(<(i32, String, bool)>::from_json(wrong_node).is_err());
+          }
+      }
     src/test_precompute2_optimizations.rs: |
       // This file contains tests for optimization passes on the Precompute2 trie.
       // It verifies that optimizations produce a semantically equivalent tree.
@@ -17785,7 +19444,7 @@ local_system:
 
           Ok(())
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
   core_guidance_inserted: true
   prev_apply_mode: git-llm
 system:
@@ -18061,7 +19720,6 @@ messages:
       ///
       /// # Returns
       /// `true` if the tries are semantically equivalent, `false` otherwise.
-      #[allow(dead_code)]
       pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
           if Arc::ptr_eq(a, b) { return true; }
           let paths_a = get_normalized_paths_from_root(a);
@@ -18675,7 +20333,7 @@ messages:
           }
       }
 
-      fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
           // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
@@ -18757,7 +20415,7 @@ messages:
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
       }
 
-      fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
 
           const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
@@ -18844,7 +20502,7 @@ messages:
           crate::debug!(2, "Finished factoring common destinations in trie 2.");
       }
 
-      fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Simplifying trie 2 by merging sequential edges.");
 
           let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -18948,7 +20606,7 @@ messages:
 
       // Context-aware Trie2 merging (conservative, masked, cycle-safe)
 
-      fn build_incoming_maps_trie2(
+      pub fn build_incoming_maps_trie2(
           roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
       ) -> (
           HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
@@ -19325,7 +20983,7 @@ messages:
 
       /// Greedy, conservative, context-aware merge for Trie 2.
       /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
-      fn context_aware_merge_trie2(
+      pub fn context_aware_merge_trie2(
           roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
       ) {
           crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
@@ -19502,7 +21160,7 @@ messages:
           true
       }
 
-      fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
           let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -19628,7 +21286,7 @@ messages:
           node_arc
       }
 
-      fn clone_trie2_graph(
+      pub fn clone_trie2_graph(
           root: &Arc<RwLock<PrecomputeNode2>>,
       ) -> (
           Arc<RwLock<PrecomputeNode2>>,
@@ -25256,6 +26914,7 @@ messages:
       mod test_constraint_python;
       mod profiler;
       mod test_constraint_js;
+      mod test_precompute2_optimizations;
 
       ```
     metadata:
@@ -26613,11 +28272,964 @@ messages:
     metadata:
       filename: src/test_constraint_js.rs
   - user: |-
-      I want to 'scale up' my development of optimisation passes for the precompute2 tree. For this, I need a quick way to tell if an optimisation pass has failed, ie resulted in a tree that wasn't equivalent to the original.
-      I want to do this using a new file with a test. It should build a constraint from the Javascript grammar, like `test_constraint_js.rs` does.
-      Clone the precompute2 tree so we have the original.
-      Then we'll apply some optimizations to the tree. For now, we'll just do `context_aware_merge_trie2`, which I've commented out of `fn precompute2`.
-      Then it should have some way of testing equivalence with the original tree.
+      ```rust 'src/json_serialization.rs'
+      use std::collections::{BTreeMap, HashMap, BTreeSet, HashSet};
+      use std::hash::Hash;
+      use std::marker::Sized;
+      use bimap::BiBTreeMap;
+
+      // Import the derive macro
+      use json_convertible_derive::JSONConvertible;
+
+      // Add these lines for serde_json
+      use serde_json::Value as SerdeValue;
+      use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
+      use std::convert::TryInto;
+
+      // --- JSONNode Enum ---
+      #[derive(Debug, Clone, PartialEq)]
+      pub enum JSONNode {
+          Null,
+          Bool(bool),
+          Int(i128),
+          UInt(u128),
+          Float(f64),
+          String(String),
+          Array(Vec<JSONNode>),
+          Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
+      }
+
+      impl JSONNode {
+          // New method to convert JSONNode to serde_json::Value
+          fn to_serde_value(&self) -> SerdeValue {
+              match self {
+                  JSONNode::Null => SerdeValue::Null,
+                  JSONNode::Bool(b) => SerdeValue::Bool(*b),
+                  JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).expect(format!("Int {} out of range for serde_json::Value", i).as_str())),
+                  JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).expect(format!("UInt {} out of range for serde_json::Value", u).as_str())),
+                  JSONNode::Float(f) => {
+                      // serde_json::Number::from_f64 returns None for NaN/Infinity
+                      // We'll convert such cases to SerdeValue::Null, a common practice.
+                      serde_json::Number::from_f64(*f)
+                          .map(SerdeValue::Number)
+                          .unwrap_or(SerdeValue::Null)
+                  }
+                  JSONNode::String(s) => SerdeValue::String(s.clone()),
+                  JSONNode::Array(arr) => {
+                      SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
+                  }
+                  JSONNode::Object(obj) => {
+                      let mut map = SerdeMap::new();
+                      for (k, v) in obj {
+                          map.insert(k.clone(), v.to_serde_value());
+                      }
+                      SerdeValue::Object(map)
+                  }
+              }
+          }
+
+          // New method to convert serde_json::Value to JSONNode
+          fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
+              match s_val {
+                  SerdeValue::Null => Ok(JSONNode::Null),
+                  SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
+                  SerdeValue::Number(n) => {
+                      if let Some(i) = n.as_i64() {
+                          Ok(JSONNode::Int(i as i128))
+                      } else if let Some(u) = n.as_u64() {
+                          Ok(JSONNode::UInt(u as u128))
+                      } else if let Some(f) = n.as_f64() {
+                          Ok(JSONNode::Float(f))
+                      } else {
+                          Err(format!("Unsupported number type in serde_json::Value: {}", n))
+                      }
+                  }
+                  SerdeValue::String(s) => Ok(JSONNode::String(s)),
+                  SerdeValue::Array(arr) => {
+                      let mut nodes = Vec::with_capacity(arr.len());
+                      for val in arr {
+                          nodes.push(Self::from_serde_value(val)?);
+                      }
+                      Ok(JSONNode::Array(nodes))
+                  }
+                  SerdeValue::Object(obj_map) => {
+                      let mut btree_map = BTreeMap::new();
+                      for (k, v) in obj_map {
+                          btree_map.insert(k, Self::from_serde_value(v)?);
+                      }
+                      Ok(JSONNode::Object(btree_map))
+                  }
+              }
+          }
+
+          // Update to_json_string to use serde_json
+          pub fn to_json_string(&self) -> String {
+              let serde_value = self.to_serde_value();
+              // serde_json::to_string can fail, though less likely for SerdeValue -> String
+              // For simplicity here, unwrap, but consider error handling for production
+              serde_json::to_string(&serde_value).unwrap_or_else(|e| {
+                  // Fallback or panic for critical error
+                  eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
+                  // A minimal JSON representation of an error or "null"
+                  "{\"error\":\"serialization_failed\"}".to_string()
+              })
+          }
+
+          // Update from_json_string to use serde_json
+          pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
+              let serde_value: SerdeValue = serde_json::from_str(s)
+                  .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
+              Self::from_serde_value(serde_value)
+          }
+
+          pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
+              match self {
+                  JSONNode::Object(obj) => Ok(obj),
+                  _ => Err("Expected JSONNode::Object".to_string()),
+              }
+          }
+      }
+
+      // --- JSONConvertible Trait ---
+      pub trait JSONConvertible: Sized {
+          fn to_json(&self) -> JSONNode;
+          fn from_json(node: JSONNode) -> Result<Self, String>;
+      }
+
+      // --- Implementations for Primitives ---
+
+      impl JSONConvertible for () {
+          fn to_json(&self) -> JSONNode { JSONNode::Null }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Null => Ok(()),
+                  _ => Err("Expected JSONNode::Null for unit type".to_string()),
+              }
+          }
+      }
+
+      macro_rules! impl_json_for_tuple {
+          ( $($T:ident : $idx:tt),+ ) => {
+              impl<$($T: JSONConvertible),+> JSONConvertible for ($($T,)+) {
+                  fn to_json(&self) -> JSONNode {
+                      JSONNode::Array(vec![
+                          $(self.$idx.to_json()),+
+                      ])
+                  }
+
+                  fn from_json(node: JSONNode) -> Result<Self, String> {
+                      match node {
+                          JSONNode::Array(arr) => {
+                              const N: usize = [$(stringify!($T)),+].len();
+                              if arr.len() != N {
+                                  return Err(format!(
+                                      "Expected JSONNode::Array with {} elements for tuple, got {}",
+                                      N,
+                                      arr.len()
+                                  ));
+                              }
+                              Ok(($(
+                                  $T::from_json(arr[$idx].clone())?
+                              ,)+))
+                          }
+                          _ => Err("Expected JSONNode::Array for tuple".to_string()),
+                      }
+                  }
+              }
+          };
+      }
+
+      impl_json_for_tuple!(T0:0);
+      impl_json_for_tuple!(T0:0, T1:1);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10);
+      impl_json_for_tuple!(T0:0, T1:1, T2:2, T3:3, T4:4, T5:5, T6:6, T7:7, T8:8, T9:9, T10:10, T11:11);
+
+      impl JSONConvertible for bool {
+          fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Bool(b) => Ok(b),
+                  _ => Err("Expected JSONNode::Bool for bool".to_string()),
+              }
+          }
+      }
+
+      // --- Implementations for numeric primitives without precision loss ---
+      macro_rules! impl_json_for_signed {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Int(n)   => {
+                                  if n >= (<$t>::MIN as i128) && n <= (<$t>::MAX as i128) {
+                                      Ok(n as $t)
+                                  } else {
+                                      Err(format!("Integer {} out of range for {}", n, stringify!($t)))
+                                  }
+                              },
+                              JSONNode::UInt(u)  => {
+                                  // Check if u fits into the positive range of $t
+                                  if u <= (<$t>::MAX as u128) {
+                                      Ok(u as $t)
+                                  } else {
+                                      Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
+                                  }
+                              },
+                              other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      macro_rules! impl_json_for_unsigned {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::UInt(u) => {
+                                  if u <= (<$t>::MAX as u128) {
+                                      Ok(u as $t)
+                                  } else {
+                                      Err(format!("Unsigned integer {} out of range for {}", u, stringify!($t)))
+                                  }
+                              },
+                              JSONNode::Int(n)  => {
+                                  if n >= 0 {
+                                      let u_n = n as u128;
+                                      if u_n <= (<$t>::MAX as u128) {
+                                          Ok(u_n as $t)
+                                      } else {
+                                          Err(format!("Integer {} (as u128) out of range for {}", n, stringify!($t)))
+                                      }
+                                  } else {
+                                      Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
+                                  }
+                              },
+                              other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      macro_rules! impl_json_for_float {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Float(f) => Ok(f as $t),
+                              JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
+                              JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
+                              other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      // Signed integers
+      impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
+      // Unsigned integers
+      impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
+      // Floating-point types
+      impl_json_for_float!(f32, f64);
+
+
+      impl JSONConvertible for String {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::String(s) => Ok(s),
+                  _ => Err("Expected JSONNode::String for String".to_string()),
+              }
+          }
+      }
+
+      impl<'a> JSONConvertible for &'a str {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.to_string()) }
+          fn from_json(_node: JSONNode) -> Result<Self, String> {
+              Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+          }
+      }
+
+      // --- Implementations for Option ---
+      impl<T: JSONConvertible> JSONConvertible for Option<T> {
+          fn to_json(&self) -> JSONNode {
+              match self {
+                  Some(val) => val.to_json(),
+                  None => JSONNode::Null,
+              }
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Null => Ok(None),
+                  _ => T::from_json(node).map(Some),
+              }
+          }
+      }
+
+      // --- Implementations for Collections ---
+
+      // Generic Vec<T>
+      impl<T: JSONConvertible> JSONConvertible for Vec<T> {
+          fn to_json(&self) -> JSONNode {
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
+              }
+          }
+      }
+
+      // Generic array
+      impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
+          fn to_json(&self) -> JSONNode {
+              // Convert array elements to JSONNode and wrap in a JSON array
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      // First convert each JSONNode into T, collecting into a Vec<T>
+                      let vec: Vec<T> = arr
+                          .into_iter()
+                          .map(T::from_json)
+                          .collect::<Result<_, _>>()?;
+                      // Then try to convert Vec<T> into [T; N]; error if length mismatch
+                      vec.try_into()
+                          .map_err(|v: Vec<T>| {
+                              format!(
+                                  "Expected array of length {} for [T; N], got length {}",
+                                  N,
+                                  v.len()
+                              )
+                          })
+                  }
+                  _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
+              }
+          }
+      }
+
+
+      impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
+          fn to_json(&self) -> JSONNode {
+              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
+              }
+          }
+      }
+
+      impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
+          fn to_json(&self) -> JSONNode {
+              let mut vec: Vec<_> = self.iter().collect();
+              vec.sort(); // Sort for deterministic output
+              JSONNode::Array(vec.iter().map(|item| item.to_json()).collect())
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
+                  _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
+              }
+          }
+      }
+
+      impl<K, V> JSONConvertible for BTreeMap<K, V>
+      where
+          K: JSONConvertible + Ord, // Keys in BTreeMap must be Ord
+          V: JSONConvertible,
+      {
+          fn to_json(&self) -> JSONNode {
+              // BTreeMap is already sorted by key, so iter() gives deterministic order
+              let pairs = self.iter().map(|(k, v)| {
+                  JSONNode::Array(vec![k.to_json(), v.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = BTreeMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let v_node = pair_vec.pop().unwrap();
+                                  let k_node = pair_vec.pop().unwrap();
+                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
+              }
+          }
+      }
+
+      impl<K, V> JSONConvertible for HashMap<K, V>
+      where
+          K: JSONConvertible + Eq + Hash + Ord, // Ord needed for sorting for deterministic JSON
+          V: JSONConvertible,
+      {
+          fn to_json(&self) -> JSONNode {
+              let mut sorted_pairs: Vec<_> = self.iter().collect();
+              // Sort by key for deterministic JSON output
+              sorted_pairs.sort_by_key(|(k, _)| *k); // Requires K: Ord
+
+              let pairs = sorted_pairs.into_iter().map(|(k, v)| {
+                  JSONNode::Array(vec![k.to_json(), v.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = HashMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let v_node = pair_vec.pop().unwrap();
+                                  let k_node = pair_vec.pop().unwrap();
+                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for HashMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
+              }
+          }
+      }
+
+      impl<L, R> JSONConvertible for BiBTreeMap<L, R>
+      where
+          L: JSONConvertible + Ord + Eq, // BiBTreeMap requires Ord + Eq for both left and right
+          R: JSONConvertible + Ord + Eq,
+      {
+          fn to_json(&self) -> JSONNode {
+              // BiBTreeMap iter() is sorted by the left value (L)
+              let pairs = self.iter().map(|(l, r)| {
+                  JSONNode::Array(vec![l.to_json(), r.to_json()])
+              }).collect();
+              JSONNode::Array(pairs)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Array(arr) => {
+                      let mut map = BiBTreeMap::new();
+                      for pair_node in arr {
+                          match pair_node {
+                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                                  let r_node = pair_vec.pop().unwrap();
+                                  let l_node = pair_vec.pop().unwrap();
+                                  map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
+                              }
+                              _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
+                          }
+                      }
+                      Ok(map)
+                  }
+                  _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
+              }
+          }
+      }
+
+      // --- Tests (optional, but good for verifying) ---
+      #[cfg(test)]
+      mod tests {
+          use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
+
+          // Example struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct MyStruct {
+              field1: i32,
+              field2: String,
+              optional_field: Option::<bool>,
+              list_of_numbers: Vec::<u32>,
+              byte_buffer: Vec::<u8>,
+          }
+
+          // Example generic struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
+              item_t: T,
+              item_u: U,
+              description: String,
+          }
+
+          // Example unit struct using the derive
+          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+          struct MyUnitStruct;
+
+          #[test]
+          fn test_my_struct_serialization_deserialization() {
+              let original = MyStruct {
+                  field1: 42,
+                  field2: "hello".to_string(),
+                  optional_field: Some(true),
+                  list_of_numbers: vec![1, 2, 3],
+                  byte_buffer: vec![10, 20, 30],
+              };
+
+              let json_node = original.to_json();
+
+              // Expected JSON structure (BTreeMap for object means fields are sorted by key)
+              // {
+              //   "byte_buffer": [UInt(10), UInt(20), UInt(30)],
+              //   "field1": Int(42),
+              //   "field2": "hello",
+              //   "list_of_numbers": [UInt(1), UInt(2), UInt(3)],
+              //   "optional_field": true
+              // }
+
+              if let JSONNode::Object(obj) = &json_node {
+                  assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
+                  assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
+                  assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
+                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
+                       assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+                  } else {
+                      panic!("list_of_numbers not found or not an array");
+                  }
+                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
+                       assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                  } else {
+                      panic!("byte_buffer not found or not an array");
+                  }
+              } else {
+                  panic!("Expected JSONNode::Object, got {:?}", json_node);
+              }
+
+              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_my_struct_optional_none() {
+              let original = MyStruct {
+                  field1: 1,
+                  field2: "world".to_string(),
+                  optional_field: None,
+                  list_of_numbers: vec![],
+                  byte_buffer: vec![],
+              };
+              let json_node = original.to_json();
+              // { "byte_buffer": [], "field1": Int(1), "field2": "world", "list_of_numbers": [], "optional_field": null }
+              if let JSONNode::Object(obj) = &json_node {
+                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
+                   assert_eq!(obj.get("field1"), Some(&JSONNode::Int(1)));
+              } else {
+                  panic!("Expected JSONNode::Object");
+              }
+              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_generic_struct_serialization() {
+              let original = GenericStruct {
+                  item_t: 123i32,
+                  item_u: "test_string".to_string(),
+                  description: "A generic item".to_string(),
+              };
+              let json_node = original.to_json();
+              // {
+              //   "description": "A generic item",
+              //   "item_t": Int(123),
+              //   "item_u": "test_string"
+              // }
+              if let JSONNode::Object(obj) = &json_node {
+                  assert_eq!(obj.get("item_t"), Some(&JSONNode::Int(123)));
+              } else {
+                  panic!("Expected JSONNode::Object");
+              }
+              let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_generic_struct_with_custom_type() {
+              let my_s = MyStruct {
+                  field1: 1, field2: "inner".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
+              };
+              let original = GenericStruct {
+                  item_t: my_s.clone(),
+                  item_u: MyUnitStruct,
+                  description: "Struct with custom types".to_string(),
+              };
+              let json_node = original.to_json();
+              let deserialized = GenericStruct::<MyStruct, MyUnitStruct>::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_unit_struct_serialization() {
+              let original = MyUnitStruct;
+              let json_node = original.to_json();
+              assert_eq!(json_node, JSONNode::Object(BTreeMap::new())); // Derive macro makes unit structs empty objects
+              let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
+              assert_eq!(original, deserialized);
+          }
+
+          #[test]
+          fn test_btreemap_serialization() {
+              let mut map = BTreeMap::new();
+              map.insert("b_key".to_string(), 20i32);
+              map.insert("a_key".to_string(), 10i32);
+
+              let json_node = map.to_json();
+              // Expected: [["a_key", Int(10)], ["b_key", Int(20)]] (sorted by key)
+              match json_node {
+                  JSONNode::Array(pairs) => {
+                      assert_eq!(pairs.len(), 2);
+                      // Check first pair
+                      match &pairs[0] {
+                          JSONNode::Array(pair1) => {
+                              assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
+                              assert_eq!(pair1[1], JSONNode::Int(10));
+                          }
+                          _ => panic!("Expected array for pair"),
+                      }
+                      // Check second pair
+                      match &pairs[1] {
+                          JSONNode::Array(pair2) => {
+                              assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
+                              assert_eq!(pair2[1], JSONNode::Int(20));
+                          }
+                          _ => panic!("Expected array for pair"),
+                      }
+                  }
+                  _ => panic!("Expected JSONNode::Array for BTreeMap"),
+              }
+
+              let deserialized: BTreeMap<String, i32> = BTreeMap::from_json(map.to_json()).unwrap();
+              assert_eq!(map, deserialized);
+          }
+
+          #[test]
+          fn test_vec_u8_specialization() {
+              let data: Vec<u8> = vec![1, 2, 255];
+              let json_node = data.to_json();
+              // Expected: [UInt(1), UInt(2), UInt(255)]
+              match json_node {
+                  JSONNode::Array(ref nums) => {
+                      assert_eq!(nums.len(), 3);
+                      assert_eq!(nums[0], JSONNode::UInt(1));
+                      assert_eq!(nums[1], JSONNode::UInt(2));
+                      assert_eq!(nums[2], JSONNode::UInt(255));
+                  }
+                  _ => panic!("Expected JSONNode::Array for Vec<u8>"),
+              }
+              let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
+              assert_eq!(data, deserialized);
+
+              // Test invalid u8 from various JSONNode number types
+              let invalid_json_uint_too_large = JSONNode::Array(vec![JSONNode::UInt(256)]);
+              assert!(Vec::<u8>::from_json(invalid_json_uint_too_large).is_err());
+
+              let invalid_json_int_too_large = JSONNode::Array(vec![JSONNode::Int(256)]);
+              assert!(Vec::<u8>::from_json(invalid_json_int_too_large).is_err());
+
+              let invalid_json_int_neg = JSONNode::Array(vec![JSONNode::Int(-1)]);
+              assert!(Vec::<u8>::from_json(invalid_json_int_neg).is_err());
+
+              let invalid_json_float = JSONNode::Array(vec![JSONNode::Float(10.5)]);
+              assert!(Vec::<u8>::from_json(invalid_json_float).is_err()); // Floats not convertible to u8 by default
+
+              // Test valid u8 from Int
+              let valid_json_int = JSONNode::Array(vec![JSONNode::Int(128)]);
+              let deserialized_from_int: Vec<u8> = Vec::from_json(valid_json_int).unwrap();
+              assert_eq!(deserialized_from_int, vec![128u8]);
+          }
+
+          #[test]
+          fn test_large_numbers() {
+              let large_u128 = u128::MAX;
+              let json_u128 = large_u128.to_json();
+              assert_eq!(json_u128, JSONNode::UInt(u128::MAX));
+              let deserialized_u128 = u128::from_json(json_u128).unwrap();
+              assert_eq!(large_u128, deserialized_u128);
+
+              let large_i128 = i128::MIN;
+              let json_i128 = large_i128.to_json();
+              assert_eq!(json_i128, JSONNode::Int(i128::MIN));
+              let deserialized_i128 = i128::from_json(json_i128).unwrap();
+              assert_eq!(large_i128, deserialized_i128);
+
+              let float_val = 123.456f64;
+              let json_float = float_val.to_json();
+              assert_eq!(json_float, JSONNode::Float(123.456f64));
+              let deserialized_float = f64::from_json(json_float).unwrap();
+              assert_eq!(float_val, deserialized_float);
+
+              // Test conversion from Int to Float
+              let int_node = JSONNode::Int(123);
+              let float_from_int = f64::from_json(int_node).unwrap();
+              assert_eq!(float_from_int, 123.0f64);
+
+              // Test conversion from UInt to Float
+              let uint_node = JSONNode::UInt(456);
+              let float_from_uint = f64::from_json(uint_node).unwrap();
+              assert_eq!(float_from_uint, 456.0f64);
+
+              // Test that integer types do not deserialize from Float
+              let float_node_exact_int = JSONNode::Float(123.0);
+              assert!(i32::from_json(float_node_exact_int.clone()).is_err());
+              assert!(u32::from_json(float_node_exact_int.clone()).is_err());
+
+              let float_node_inexact_int = JSONNode::Float(123.7);
+              assert!(i32::from_json(float_node_inexact_int.clone()).is_err());
+              assert!(u32::from_json(float_node_inexact_int.clone()).is_err());
+
+              // Test range errors for integer types
+              assert!(i8::from_json(JSONNode::Int(128)).is_err()); // 128 is out of range for i8
+              assert!(i8::from_json(JSONNode::UInt(128)).is_err());// 128 is out of range for i8
+              assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
+              assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
+              assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
+          }
+
+          #[test]
+          fn test_json_string_conversion() {
+              let original = MyStruct {
+                  field1: 42,
+                  field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
+                  optional_field: Some(true),
+                  list_of_numbers: vec![1, 2, 3],
+                  byte_buffer: vec![10, 20, 30],
+              };
+
+              let json_node_via_trait = original.to_json();
+              let json_string = json_node_via_trait.to_json_string();
+
+              // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
+              // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
+              // or if serde_json::to_string sorts them by default for `Map`).
+              // serde_json sorts object keys by default when serializing.
+              let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
+
+              // We can parse the expected string and our generated string to SerdeValue and compare them
+              // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
+              let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
+              let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
+
+              assert_eq!(serde_val_generated, serde_val_expected);
+
+              // Test deserialization from string
+              let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
+              assert_eq!(json_node_via_trait, parsed_node);
+
+              let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
+              assert_eq!(original, deserialized_struct);
+          }
+
+          #[test]
+          fn test_non_finite_float_serialization() {
+              let node_nan = JSONNode::Float(f64::NAN);
+              assert_eq!(node_nan.to_json_string(), "null");
+
+              let node_inf = JSONNode::Float(f64::INFINITY);
+              assert_eq!(node_inf.to_json_string(), "null");
+
+              let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
+              assert_eq!(node_neg_inf.to_json_string(), "null");
+
+              // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
+              // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
+              // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
+              // you'd adjust JSONConvertible for Option<f64> or f64 itself.
+              // Here, we are testing JSONNode::from_json_string directly.
+              let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
+              assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
+                                                           // then from_serde_value converts SerdeValue::Null to JSONNode::Null
+          }
+
+          #[test]
+          fn test_tuple_serialization() {
+              let original: (i32, String, bool) = (123, "hello".to_string(), true);
+              let json_node = original.to_json();
+              assert_eq!(
+                  json_node,
+                  JSONNode::Array(vec![
+                      JSONNode::Int(123),
+                      JSONNode::String("hello".to_string()),
+                      JSONNode::Bool(true)
+                  ])
+              );
+
+              let deserialized = <(i32, String, bool)>::from_json(json_node).unwrap();
+              assert_eq!(original, deserialized);
+
+              // Test single-element tuple
+              let single_tuple: (i32,) = (42,);
+              let json_node_single = single_tuple.to_json();
+              assert_eq!(json_node_single, JSONNode::Array(vec![JSONNode::Int(42)]));
+              let deserialized_single = <(i32,)>::from_json(json_node_single).unwrap();
+              assert_eq!(single_tuple, deserialized_single);
+
+              // Test wrong number of elements for deserialization
+              let wrong_node = JSONNode::Array(vec![JSONNode::Int(1), JSONNode::Int(2)]);
+              assert!(<(i32, String, bool)>::from_json(wrong_node).is_err());
+          }
+      }
+
+      ```
+    metadata:
+      filename: src/json_serialization.rs
+  - user: |-
+      ```rust 'src/test_precompute2_optimizations.rs'
+      // This file contains tests for optimization passes on the Precompute2 trie.
+      // It verifies that optimizations produce a semantically equivalent tree.
+
+      use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
+      use crate::interface::{CompiledGrammar, GrammarDefinition};
+      use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+      use std::collections::BTreeMap;
+      use std::fs::{self, File};
+      use std::io::{BufReader, Write};
+      use std::path::Path;
+      use std::sync::Arc;
+      use reqwest::blocking;
+
+      // Helper function copied from test_constraint_js.rs
+      fn load_or_download_gpt2_vocab(
+          cache_dir: &Path,
+          file_name: &str,
+          url: &str,
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+          fs::create_dir_all(cache_dir)?;
+          let cache_path = cache_dir.join(file_name);
+
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
+              println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+              let file = File::open(cache_path)?;
+              let reader = BufReader::new(file);
+              serde_json::from_reader(reader)?
+          } else {
+              println!("Downloading GPT-2 vocab from: {}", url);
+              let response = blocking::get(url)?.error_for_status()?;
+              let content = response.text()?;
+
+              let mut file = File::create(&cache_path)?;
+              file.write_all(content.as_bytes())?;
+              println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
+      }
+
+      #[test]
+      fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::error::Error>> {
+          // --- Setup Phase ---
+          println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
+
+          // 1. Load and compile the JavaScript grammar.
+          let grammar_path = "src/js.ebnf";
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Compiling GrammarDefinition into CompiledGrammar...");
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+          println!("Successfully compiled GrammarDefinition.");
+
+          // 2. Load a small, representative vocabulary.
+          println!("\nLoading GPT-2 vocabulary...");
+          let cache_dir = Path::new(".cache/test_vocabs");
+          let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+          let vocab_file_name = "gpt2_vocab.json";
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+          // Keep a smaller subset to speed up the test
+          gpt2_raw_vocab.retain(|s| s.len() < 5);
+          println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+
+          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+          let dummy_eof_placeholder = 0;
+          println!("\nConstructing GrammarConstraint...");
+          let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(dummy_eof_placeholder),
+              max_original_llm_token_id_val
+          );
+          println!("GrammarConstraint constructed successfully.");
+
+          // 4. Deep-clone the original precomputed2 tree.
+          println!("\nCloning the original precomputed2 tree...");
+          let original_precomputed2 = &grammar_constraint.precomputed2;
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+          println!("Cloning complete.");
+
+          // 5. Apply optimization passes to the cloned tree.
+          println!("\nApplying optimization passes to the cloned tree...");
+          context_aware_merge_trie2(&mut optimized_precomputed2);
+          println!("Optimization passes applied.");
+
+          // 6. Compare the original and optimized trees for semantic equivalence.
+          println!("\nComparing original and optimized trees for equivalence...");
+          assert_eq!(original_precomputed2.len(), optimized_precomputed2.len(), "Number of tokenizer states with trees differs.");
+
+          for sid in original_precomputed2.keys() {
+              let original_root = original_precomputed2.get(sid).unwrap();
+              let optimized_root = optimized_precomputed2.get(sid).unwrap();
+
+              assert!(are_precompute2_trees_equivalent(original_root, optimized_root), "Mismatch found for tokenizer state ID: {}", sid.0);
+              println!("  - OK for tokenizer state ID: {}", sid.0);
+          }
+
+          println!("\nEquivalence test passed: All trees are semantically equivalent after optimization.");
+
+          Ok(())
+      }
+
+      ```
+    metadata:
+      filename: src/test_precompute2_optimizations.rs
+  - user: I want to make test_precompute2_optimizations.rs much quicker to run by
+      adding the ability to load a serialized precompute2 trie from file, if it's
+      found. If it isn't found, it should be created and serialized. It should still
+      be possible to force creating it via a constant flag, though.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -26634,242 +29246,162 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've created a new test to verify your optimization passes and made the necessary functions public to support it. Here are the changes as a git diff:
+      I've updated `test_precompute2_optimizations.rs` to cache the generated `precompute2` trie. On subsequent runs, it will load from the cache, significantly speeding up the test. You can set the `FORCE_RECOMPUTE` constant to `true` to bypass the cache and regenerate the trie.
+
+      This required making several supporting types serializable. I've added the necessary `JSONConvertible` implementations for `StateID`, `TokenizerStateID`, and `PrecomputedNodeContents` in `json_serialization.rs` to keep the changes centralized.
+
+      Here are the patches for the affected files:
 
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -258,8 +258,7 @@
-       /// # Returns
-       /// `true` if the tries are semantically equivalent, `false` otherwise.
-      -#[allow(dead_code)]
-      -pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
-      +pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
-           if Arc::ptr_eq(a, b) { return true; }
-           let paths_a = get_normalized_paths_from_root(a);
-           let paths_b = get_normalized_paths_from_root(b);
-      @@ -908,7 +907,7 @@
+      --- a/src/json_serialization.rs
+      +++ b/src/json_serialization.rs
+      @@ -3,6 +3,10 @@
+       use std::marker::Sized;
+       use bimap::BiBTreeMap;
+       
+      +use crate::datastructures::gss::PrecomputedNodeContents;
+      +use crate::datastructures::hybrid_bitset::HybridBitset;
+      +use crate::glr::table::StateID;
+      +use crate::tokenizer::TokenizerStateID;
+       // Import the derive macro
+       use json_convertible_derive::JSONConvertible;
+       
+      @@ -138,6 +142,51 @@
            }
        }
        
-      -fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-      +pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
+      +impl JSONConvertible for StateID {
+      +    fn to_json(&self) -> JSONNode {
+      +        self.0.to_json()
+      +    }
+      +    fn from_json(node: JSONNode) -> Result<Self, String> {
+      +        usize::from_json(node).map(StateID)
+      +    }
+      +}
+      +
+      +impl JSONConvertible for TokenizerStateID {
+      +    fn to_json(&self) -> JSONNode {
+      +        self.0.to_json()
+      +    }
+      +    fn from_json(node: JSONNode) -> Result<Self, String> {
+      +        usize::from_json(node).map(TokenizerStateID)
+      +    }
+      +}
+      +
+      +impl JSONConvertible for PrecomputedNodeContents {
+      +    fn to_json(&self) -> JSONNode {
+      +        let mut obj = BTreeMap::new();
+      +        obj.insert("end".to_string(), self.end.to_json());
+      +        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
+      +        JSONNode::Object(obj)
+      +    }
+      +
+      +    fn from_json(node: JSONNode) -> Result<Self, String> {
+      +        match node {
+      +            JSONNode::Object(mut obj) => {
+      +                let end = obj
+      +                    .remove("end")
+      +                    .ok_or_else(|| "Missing field end".to_string())
+      +                    .and_then(bool::from_json)?;
+      +                let live_tokens = obj
+      +                    .remove("live_tokens")
+      +                    .ok_or_else(|| "Missing field live_tokens".to_string())
+      +                    .and_then(HybridBitset::from_json)?;
+      +                Ok(PrecomputedNodeContents { end, live_tokens })
+      +            }
+      +            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
+      +        }
+      +    }
+      +}
+      +
+       // --- Implementations for Primitives ---
        
-           // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
-      @@ -985,7 +984,7 @@
-           crate::debug!(2, "Finished pruning dead paths from trie 2.");
-       }
-       
-      -fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-      +pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
-       
-           const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
-      @@ -1068,7 +1067,7 @@
-           crate::debug!(2, "Finished factoring common destinations in trie 2.");
-       }
-       
-      -fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-      +pub fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Simplifying trie 2 by merging sequential edges.");
-       
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-      @@ -1167,7 +1166,7 @@
-       
-       // Context-aware Trie2 merging (conservative, masked, cycle-safe)
-       
-      -fn build_incoming_maps_trie2(
-      +pub fn build_incoming_maps_trie2(
-           roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-       ) -> (
-           HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
-      @@ -1450,7 +1449,7 @@
-       
-       /// Greedy, conservative, context-aware merge for Trie 2.
-       /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
-      -fn context_aware_merge_trie2(
-      +pub fn context_aware_merge_trie2(
-           roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-       ) {
-           crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
-      @@ -1630,7 +1629,7 @@
-           true
-       }
-       
-      -fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-      +pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
-           crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
-       
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-      @@ -1744,7 +1743,7 @@
-           node_arc
-       }
-       
-      -fn clone_trie2_graph(
-      +pub fn clone_trie2_graph(
-           root: &Arc<RwLock<PrecomputeNode2>>,
-       ) -> (
-           Arc<RwLock<PrecomputeNode2>>,
+       impl JSONConvertible for () {
 
       ``````diff
-      diff --git a/src/lib.rs b/src/lib.rs
-      --- a/src/lib.rs
-      +++ b/src/lib.rs
-      @@ -10,3 +10,4 @@
-       mod test_constraint_python;
-       mod profiler;
-       mod test_constraint_js;
-      +mod test_precompute2_optimizations;
-
-      ``````diff
-      diff --git a/src/test_precompute2_optimizations.rs b/src/test_precompute2_optimizations.rs
-      new file mode 100644
-      --- /dev/null
+      --- a/src/test_precompute2_optimizations.rs
       +++ b/src/test_precompute2_optimizations.rs
-      @@ -0,0 +1,108 @@
-      +// This file contains tests for optimization passes on the Precompute2 trie.
-      +// It verifies that optimizations produce a semantically equivalent tree.
-      +
-      +use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
-      +use crate::interface::{CompiledGrammar, GrammarDefinition};
-      +use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-      +use std::collections::BTreeMap;
-      +use std::fs::{self, File};
-      +use std::io::{BufReader, Write};
-      +use std::path::Path;
-      +use std::sync::Arc;
-      +use reqwest::blocking;
-      +
-      +// Helper function copied from test_constraint_js.rs
-      +fn load_or_download_gpt2_vocab(
-      +    cache_dir: &Path,
-      +    file_name: &str,
-      +    url: &str,
-      +) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+      @@ -2,6 +2,7 @@
+       // It verifies that optimizations produce a semantically equivalent tree.
+       
+       use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
+      +use crate::json_serialization::{JSONConvertible, JSONNode};
+       use crate::interface::{CompiledGrammar, GrammarDefinition};
+       use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+       use std::collections::BTreeMap;
+      @@ -39,6 +40,11 @@
+           // --- Setup Phase ---
+           println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
+       
+      +    const FORCE_RECOMPUTE: bool = false;
+      +    let cache_dir = Path::new(".cache/test_precompute2");
       +    fs::create_dir_all(cache_dir)?;
-      +    let cache_path = cache_dir.join(file_name);
+      +    let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json");
       +
-      +    let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
-      +        println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
-      +        let file = File::open(cache_path)?;
-      +        let reader = BufReader::new(file);
-      +        serde_json::from_reader(reader)?
-      +    } else {
-      +        println!("Downloading GPT-2 vocab from: {}", url);
-      +        let response = blocking::get(url)?.error_for_status()?;
-      +        let content = response.text()?;
-      +
-      +        let mut file = File::create(&cache_path)?;
-      +        file.write_all(content.as_bytes())?;
-      +        println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
-      +
-      +        serde_json::from_str(&content)?
-      +    };
-      +    Ok(vocab_map.into_keys().collect())
-      +}
-      +
-      +#[test]
-      +fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::error::Error>> {
-      +    // --- Setup Phase ---
-      +    println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
-      +
-      +    // 1. Load and compile the JavaScript grammar.
-      +    let grammar_path = "src/js.ebnf";
-      +    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
-      +    println!("Compiling GrammarDefinition into CompiledGrammar...");
-      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-      +    println!("Successfully compiled GrammarDefinition.");
-      +
-      +    // 2. Load a small, representative vocabulary.
-      +    println!("\nLoading GPT-2 vocabulary...");
-      +    let cache_dir = Path::new(".cache/test_vocabs");
-      +    let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+           // 1. Load and compile the JavaScript grammar.
+           let grammar_path = "src/js.ebnf";
+           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+      @@ -47,9 +53,9 @@
+       
+           // 2. Load a small, representative vocabulary.
+           println!("\nLoading GPT-2 vocabulary...");
+      -    let cache_dir = Path::new(".cache/test_vocabs");
+      +    let vocab_cache_dir = Path::new(".cache/test_vocabs");
+           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+      -    let vocab_file_name = "gpt2_vocab.json";
+      -    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
       +    let vocab_file_name = "gpt2_vocab.json";
-      +    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-      +    // Keep a smaller subset to speed up the test
-      +    gpt2_raw_vocab.retain(|s| s.len() < 5);
-      +    println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+      +    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
+           // Keep a smaller subset to speed up the test
+           gpt2_raw_vocab.retain(|s| s.len() < 5);
+           println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+      @@ -66,23 +72,35 @@
+           }
+       
+           // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+      -    let dummy_eof_placeholder = 0;
+      -    println!("\nConstructing GrammarConstraint...");
+      -    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar.clone(),
+      -        llm_token_map.clone(),
+      -        LLMTokenID(dummy_eof_placeholder),
+      -        max_original_llm_token_id_val
+      -    );
+      -    println!("GrammarConstraint constructed successfully.");
+      +    let original_precomputed2: Precomputed2;
       +
-      +    let mut llm_token_map = LLMTokenMap::new();
-      +    let mut max_original_llm_token_id_val: usize = 0;
-      +    for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
-      +        let id_val = i;
-      +        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-      +        let token_bytes = processed_token_str.as_bytes().to_vec();
-      +        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-      +        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+      +    if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+      +        println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+      +        let json_string = fs::read_to_string(&precomputed2_cache_path)?;
+      +        let json_node = JSONNode::from_json_string(&json_string)?;
+      +        original_precomputed2 = Precomputed2::from_json(json_node)?;
+      +        println!("Successfully loaded Precomputed2 from cache.");
+      +    } else {
+      +        println!("\nConstructing GrammarConstraint (will generate Precomputed2)...");
+      +        let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+      +            compiled_grammar.clone(),
+      +            llm_token_map.clone(),
+      +            LLMTokenID(0), // dummy_eof_placeholder
+      +            max_original_llm_token_id_val,
+      +        );
+      +        println!("GrammarConstraint constructed successfully.");
+      +        original_precomputed2 = grammar_constraint.precomputed2;
+      +
+      +        println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+      +        let json_node = original_precomputed2.to_json();
+      +        let json_string = json_node.to_json_string();
+      +        fs::write(&precomputed2_cache_path, json_string)?;
+      +        println!("Successfully saved Precomputed2 to cache.");
       +    }
-      +
-      +    // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-      +    let dummy_eof_placeholder = 0;
-      +    println!("\nConstructing GrammarConstraint...");
-      +    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
-      +        compiled_grammar.clone(),
-      +        llm_token_map.clone(),
-      +        LLMTokenID(dummy_eof_placeholder),
-      +        max_original_llm_token_id_val
-      +    );
-      +    println!("GrammarConstraint constructed successfully.");
-      +
-      +    // 4. Deep-clone the original precomputed2 tree.
-      +    println!("\nCloning the original precomputed2 tree...");
-      +    let original_precomputed2 = &grammar_constraint.precomputed2;
-      +    let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
-      +    for (sid, root_arc) in original_precomputed2.iter() {
-      +        let (cloned_root, _map) = clone_trie2_graph(root_arc);
-      +        optimized_precomputed2.insert(*sid, cloned_root);
-      +    }
-      +    println!("Cloning complete.");
-      +
-      +    // 5. Apply optimization passes to the cloned tree.
-      +    println!("\nApplying optimization passes to the cloned tree...");
-      +    context_aware_merge_trie2(&mut optimized_precomputed2);
-      +    println!("Optimization passes applied.");
-      +
-      +    // 6. Compare the original and optimized trees for semantic equivalence.
-      +    println!("\nComparing original and optimized trees for equivalence...");
-      +    assert_eq!(original_precomputed2.len(), optimized_precomputed2.len(), "Number of tokenizer states with trees differs.");
-      +
-      +    for sid in original_precomputed2.keys() {
-      +        let original_root = original_precomputed2.get(sid).unwrap();
-      +        let optimized_root = optimized_precomputed2.get(sid).unwrap();
-      +
-      +        assert!(are_precompute2_trees_equivalent(original_root, optimized_root), "Mismatch found for tokenizer state ID: {}", sid.0);
-      +        println!("  - OK for tokenizer state ID: {}", sid.0);
-      +    }
-      +
-      +    println!("\nEquivalence test passed: All trees are semantically equivalent after optimization.");
-      +
-      +    Ok(())
-      +}
+       
+           // 4. Deep-clone the original precomputed2 tree.
+           println!("\nCloning the original precomputed2 tree...");
+      -    let original_precomputed2 = &grammar_constraint.precomputed2;
+           let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+           for (sid, root_arc) in original_precomputed2.iter() {
+               let (cloned_root, _map) = clone_trie2_graph(root_arc);
+               optimized_precomputed2.insert(*sid, cloned_root);
 
       ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/lib.rs
-      Applying patch to 'src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to src/lib.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/test_precompute2_optimizations.rs
-      Detected 'new file mode'.
-      Applying patch to 'src/test_precompute2_optimizations.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_precompute2_optimizations.rs.
-      Confirmed creation of src/test_precompute2_optimizations.rs.
-      Added newly created file src/test_precompute2_optimizations.rs to attached files state.
-    metadata:
-  - user: 'Changes committed with message: "feat: Add test for precompute2 optimization
-      equivalence"'
     metadata:
 ...
