@@ -6,8 +6,10 @@ EOF ::= '<|EOF|>';
 
 // --- Lexical Grammar (Simplified) ---
 IGNORE ::= ( WS | COMMENT )+ ;
-WS ::= [ \t\n\r]+ ;
-COMMENT ::= '//' [^\n\r]* ; // Simplified to only single-line comments
+WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
+SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ; // Non-greedy match
+MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ; // Non-greedy match
 
 // --- Statements (Core set) ---
 statement_list ::= statement+ ;
