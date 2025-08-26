@@ -648,6 +648,10 @@ impl GrammarConstraint {
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
         Trie::recompute_all_max_depths(&roots2_final);
 
+        // Final safety sweep: ensure no dangling weak edges remain (all weak edges must upgrade()).
+        let purged = Trie::purge_dangling_weak_edges(&roots2_final);
+        crate::debug!(2, "Purged {} dangling weak edges in precomputed trie 2.", purged);
+
         precomputed2
     }
 
@@ -1981,13 +1985,13 @@ impl<'r> Precomputer<'r> {
                     })
                 }
             },
-            // Merge GLR states when multiple parents flow into the same node.
+            // merge: Union of predecessor sets from different paths.
             |ctx_accum: &mut ForwardCtx, ctx_new: ForwardCtx| {
                 let mut other = ctx_new;
                 ctx_accum.glr.merge_with(other.glr);
                 // parent_ptr should already match (the node being processed).
             },
-            // Process: nothing to mutate on nodes here; keep going.
+            // process: nothing to mutate on nodes here; keep going.
             |_node_data, _ctx| true,
         );
 
