@@ -1,16 +1,22 @@
 // This file contains tests for optimization passes on the Precompute2 trie.
 // It verifies that optimizations produce a semantically equivalent tree.
 
-use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
+use crate::constraint::{
+    are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2,
+};
 use crate::json_serialization::JSONConvertible;
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use reqwest::blocking;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
+use std::error::Error;
+
 // Helper function copied from test_constraint_js.rs
 fn load_or_download_gpt2_vocab(
     cache_dir: &Path,
@@ -37,6 +43,70 @@ fn load_or_download_gpt2_vocab(
         serde_json::from_str(&content)?
     };
     Ok(vocab_map.into_keys().collect())
+}
+
+// --- Compact Helpers for Inline EBNF-based tests ---
+
+fn compiled_grammar_from_inline_ebnf(ebnf_src: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
+    // Persist inline EBNF to a stable cache file (based on a hash) and compile from that path.
+    let cache_dir = Path::new(".cache/test_precompute2/inline_ebnf");
+    fs::create_dir_all(cache_dir)?;
+    let mut hasher = DefaultHasher::new();
+    ebnf_src.hash(&mut hasher);
+    let hash = hasher.finish();
+    let ebnf_path = cache_dir.join(format!("inline_{}.ebnf", hash));
+    fs::write(&ebnf_path, ebnf_src)?;
+    let grammar_definition = GrammarDefinition::from_ebnf_file(ebnf_path.to_str().unwrap())?;
+    Ok(CompiledGrammar::from_definition(Arc::new(grammar_definition)))
+}
+
+fn build_llm_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
+    let mut map = LLMTokenMap::new();
+    let mut max_id = 0usize;
+    for (i, tok) in tokens.iter().enumerate() {
+        map.insert(tok.as_bytes().to_vec(), LLMTokenID(i));
+        max_id = max_id.max(i);
+    }
+    (map, max_id)
+}
+
+fn precomputed2_from_ebnf_and_tokens(ebnf_src: &str, tokens: &[&str]) -> Result<Precomputed2, Box<dyn Error>> {
+    let compiled = compiled_grammar_from_inline_ebnf(ebnf_src)?;
+    let (llm_token_map, max_original_llm_token_id) = build_llm_map(tokens);
+    let gc = GrammarConstraint::from_compiled_grammar(
+        compiled,
+        llm_token_map,
+        LLMTokenID(0), // dummy EOF placeholder
+        max_original_llm_token_id,
+    );
+    Ok(gc.precomputed2)
+}
+
+fn optimize_and_assert_equivalent(pre2: &Precomputed2) {
+    // Deep-clone the original tree graph-wise (preserve DAG sharing if any)
+    let mut optimized_pre2: Precomputed2 = BTreeMap::new();
+    for (sid, root_arc) in pre2.iter() {
+        let (cloned_root, _node_map) = clone_trie2_graph(root_arc);
+        optimized_pre2.insert(*sid, cloned_root);
+    }
+    // Apply optimization passes
+    context_aware_merge_trie2(&mut optimized_pre2);
+
+    // Compare semantic equivalence per tokenizer-state root
+    assert_eq!(
+        pre2.len(),
+        optimized_pre2.len(),
+        "Number of tokenizer roots differs after optimization"
+    );
+    for sid in pre2.keys() {
+        let a = pre2.get(sid).unwrap();
+        let b = optimized_pre2.get(sid).unwrap();
+        assert!(
+            are_precompute2_trees_equivalent(a, b),
+            "Mismatch for tokenizer state ID {}",
+            sid.0
+        );
+    }
 }
 
 #[test]
@@ -140,5 +210,163 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
 
     println!("\nEquivalence test passed: All trees are semantically equivalent after optimization.");
 
+    Ok(())
+}
+
+// --- Compact tests based on grammars from test_constraint_basic.rs ---
+
+#[test]
+fn test_precompute2_opt_equivalence_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= 'a' EOF; EOF ::= '$';
+    let ebnf = r#"
+S ::= 'a' EOF ;
+EOF ::= '$' ;
+"#;
+    let tokens = ["a", "$", "a$"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_a_plus() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= 'a'+ EOF;
+    let ebnf = r#"
+S ::= 'a'+ EOF ;
+EOF ::= '$' ;
+"#;
+    let tokens = ["a", "aa", "aaa", "$"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_hash_opt_a() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= HASH_OPT_A | HASH_OPT_A A ; HASH_OPT_A ::= '#' 'a'? ; A ::= 'a';
+    let ebnf = r#"
+S ::= HASH_OPT_A | HASH_OPT_A A ;
+HASH_OPT_A ::= '#' 'a'? ;
+A ::= 'a' ;
+"#;
+    let tokens = ["#", "a", "#a"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_hash_opt_aa() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= HASH_OPT_AA | HASH_OPT_AA A A ; HASH_OPT_AA ::= '#' ('a' 'a')? ; A ::= 'a';
+    let ebnf = r#"
+S ::= HASH_OPT_AA | HASH_OPT_AA A A ;
+HASH_OPT_AA ::= '#' ( 'a' 'a' )? ;
+A ::= 'a' ;
+"#;
+    let tokens = ["#", "a", "#a", "#aa"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_ignore_ws_a_b() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= 'a' 'b' with whitespace ignored.
+    let ebnf = r#"
+#![ignore(WS)]
+S ::= 'a' 'b' ;
+WS ::= ' ' ;
+"#;
+    let tokens = ["a", " ", "b", "a b", "ab"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= E EOF; E ::= '(' E ')' | 'i'
+    let ebnf = r#"
+S ::= E EOF ;
+E ::= '(' E ')' | 'i' ;
+EOF ::= '$' ;
+"#;
+    let tokens = ["i", "(", ")", "(i", "$"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_expression_no_times_parens() -> Result<(), Box<dyn Error>> {
+    // Grammar: E -> E '+' T | T; T -> F; F -> 'i' ; with EOF end
+    let ebnf = r#"
+S ::= E EOF ;
+E ::= E '+' T | T ;
+T ::= F ;
+F ::= 'i' ;
+EOF ::= '$' ;
+"#;
+    let tokens = ["i", "+", "+i", "$"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_expression_no_times() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= E EOF; E ::= E '+' T | T ; T ::= F ; F ::= '(' E ')' | 'i'
+    let ebnf = r#"
+S ::= E EOF ;
+E ::= E '+' T | T ;
+T ::= F ;
+F ::= '(' E ')' | 'i' ;
+EOF ::= '$' ;
+"#;
+    let tokens = ["i", "+", "(", ")", "(i", "+i", "$"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_unbalanced_like() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= E EOF; E ::= T; T ::= F; F ::= '(' E | 'i'
+    let ebnf = r#"
+S ::= E EOF ;
+E ::= T ;
+T ::= F ;
+F ::= '(' E | 'i' ;
+EOF ::= '$' ;
+"#;
+    let tokens = ["(", "i", "(i", "$"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+    // Grammar equivalent to a* b (via mutual recursion)
+    let ebnf = r#"
+S ::= A E | 'b' ;
+E ::= S ;
+A ::= 'a' ;
+"#;
+    let tokens = ["a", "b", "ab", "aab"];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
+    Ok(())
+}
+
+#[test]
+fn test_precompute2_opt_equivalence_x_space_equals() -> Result<(), Box<dyn Error>> {
+    // Grammar: S ::= 'x' ' ' '='
+    let ebnf = r#"
+S ::= 'x' ' ' '=' ;
+"#;
+    let tokens = ["x", " =", " ", "="];
+    let pre2 = precomputed2_from_ebnf_and_tokens(ebnf, &tokens)?;
+    optimize_and_assert_equivalent(&pre2);
     Ok(())
 }
