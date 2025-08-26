@@ -59,8 +59,8 @@ where
     /// Inserts `default` if the key is absent, then returns a mutable reference
     /// to the value for the key (existing or newly inserted).
     pub fn or_insert(self, default: V) -> &'a mut V {
-        if let Some(value) = self.map.get_mut(&self.key) {
-            return value;
+        if self.map.contains_key(&self.key) {
+            return self.map.get_mut(&self.key).unwrap();
         }
         self.map.insert(self.key.clone(), default);
         self.map.get_mut(&self.key).unwrap()
@@ -72,8 +72,8 @@ where
     where
         F: FnOnce() -> V,
     {
-        if let Some(value) = self.map.get_mut(&self.key) {
-            return value;
+        if self.map.contains_key(&self.key) {
+            return self.map.get_mut(&self.key).unwrap();
         }
         self.map.insert(self.key.clone(), f());
         self.map.get_mut(&self.key).unwrap()
