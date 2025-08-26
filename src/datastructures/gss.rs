@@ -864,23 +864,38 @@ impl GSSNode {
             return;
         }
 
-        // Both sides are internal (or self is internal, other internal); merge NodeMaps in place.
-        match (self, other) {
-            (GSSNode::Internal(lhs_i), GSSNode::Internal(_rhs_i)) => {
-                // 1) Merge the other map into lhs_internals in place
-                merge_node_maps(&mut lhs_i.predecessors, other.predecessors(), merge_depth);
+        // Both sides are internal (or self is internal, other internal); merge NodeMaps.
+        let self_predecessors = self.predecessors().clone();
+        let other_predecessors = other.predecessors().clone();
 
-                // 2) Canonicalize across all edges to maximize sharing (cheap hash-keyed pass)
-                if merge_depth > 0 {
-                    canonicalize_across_map_by_hash(&mut lhs_i.predecessors);
+        let mut merged_map = self_predecessors;
+        merge_node_maps(&mut merged_map, &other_predecessors, merge_depth);
+
+        let final_predecessors = if merge_depth > 0 {
+            // After merging, unify structurally identical predecessors to increase sharing.
+            let mut canonical_map: HashMap<GSSNode, Arc<GSSNode>> = HashMap::new();
+            let mut unified_predecessors = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in merged_map {
+                let mut unified_preds_by_depth = BTreeMap::new();
+                for (depth, pred_vec) in preds_by_depth {
+                    let mut unified_pred_vec = Vec::new();
+                    for pred_arc in pred_vec {
+                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+                        unified_pred_vec.push(canonical_arc);
+                    }
+                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                    unified_preds_by_depth.insert(depth, unified_pred_vec);
                 }
-
-                // 3) Recompute caches once
-                lhs_i.hash_key_cache = compute_hash_key_internal(&lhs_i.predecessors);
-                lhs_i.max_depth = compute_max_depth(&lhs_i.predecessors);
+                unified_predecessors.insert(edge_val, unified_preds_by_depth);
             }
-            _ => unreachable!("Internal branch guarded above"),
-        }
+            unified_predecessors
+        } else {
+            merged_map
+        };
+
+        *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
     }
 
     #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
