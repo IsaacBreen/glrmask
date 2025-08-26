@@ -167,38 +167,26 @@ local_system:
       type NormalizedPath = Vec<(usize, StateID)>;
       type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
 
-      /// Normalizes a path by merging consecutive `(k, None)` segments.
-      fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
-          let mut result = Vec::new();
-          let mut current_k = 0;
-          for (k, sid_opt) in path {
-              current_k += *k;
-              if let Some(sid) = sid_opt {
-                  result.push((current_k, *sid));
-                  current_k = 0;
-              }
-          }
-          result
-      }
-
       /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
       /// Each path is associated with the intersection of LLM token bitvectors along its edges.
       fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
           let mut all_paths = PathMap::new();
-          let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
+          // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
+          let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
 
           let initial_bv = root.read().unwrap().value.live_tokens.clone();
-          q.push_back((root.clone(), vec![], initial_bv));
+          q.push_back((root.clone(), vec![], 0, initial_bv));
 
-          let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
-          visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
+          // Visited key: (node_ptr, normalized path, pending_k)
+          let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, NormalizedPath, usize), LLMTokenBV> = HashMap::new();
+          visited.insert((Arc::as_ptr(root), vec![], 0), root.read().unwrap().value.live_tokens.clone());
 
-          while let Some((node_arc, path, bv)) = q.pop_front() {
+          while let Some((node_arc, path, current_k, bv)) = q.pop_front() {
               let node_guard = node_arc.read().unwrap();
 
               if node_guard.value.end {
-                  let normalized = normalize_path(&path);
-                  all_paths.entry(normalized)
+                  // The `path` is already normalized. The pending `current_k` is discarded as per original logic.
+                  all_paths.entry(path)
                       .and_modify(|e| *e |= &bv)
                       .or_insert(bv.clone());
               }
@@ -209,10 +197,16 @@ local_system:
                       if new_bv.is_empty() { continue; }
 
                       if let Some(child_arc) = child_ptr.upgrade() {
+                          let (k, sid_opt) = ek;
+                          let mut new_k = current_k + *k;
                           let mut new_path = path.clone();
-                          new_path.push(ek.clone());
 
-                          let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
+                          if let Some(sid) = sid_opt {
+                              new_path.push((new_k, *sid));
+                              new_k = 0;
+                          }
+
+                          let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
 
                           if let Some(existing_bv) = visited.get_mut(&visited_key) {
                               let new_tokens = &new_bv - &*existing_bv;
@@ -220,16 +214,15 @@ local_system:
                                   continue;
                               }
                               *existing_bv |= &new_tokens;
-                              q.push_back((child_arc, new_path, new_tokens));
+                              q.push_back((child_arc, new_path, new_k, new_tokens));
                           } else {
                               visited.insert(visited_key, new_bv.clone());
-                              q.push_back((child_arc, new_path, new_bv));
+                              q.push_back((child_arc, new_path, new_k, new_bv));
                           }
                       }
                   }
               }
           }
-
           all_paths
       }
 
@@ -7577,7 +7570,7 @@ local_system:
 
       /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
       /// Each path is associated with the intersection of LLM token bitvectors along its edges.
-      fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+      fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>, max_path_length: usize) -> PathMap {
           let mut all_paths = PathMap::new();
           // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
           let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
@@ -7614,6 +7607,11 @@ local_system:
                               new_k = 0;
                           }
 
+                          if new_path.len() > max_path_length {
+                              continue;
+                          }
+
+
                           let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
 
                           if let Some(existing_bv) = visited.get_mut(&visited_key) {
@@ -7648,8 +7646,9 @@ local_system:
       /// `true` if the tries are semantically equivalent, `false` otherwise.
       pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
           if Arc::ptr_eq(a, b) { return true; }
-          let paths_a = get_normalized_paths_from_root(a);
-          let paths_b = get_normalized_paths_from_root(b);
+          const MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK: usize = 32;
+          let paths_a = get_normalized_paths_from_root(a, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
+          let paths_b = get_normalized_paths_from_root(b, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
           paths_a == paths_b
       }
 
@@ -15011,38 +15010,26 @@ messages:
       type NormalizedPath = Vec<(usize, StateID)>;
       type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
 
-      /// Normalizes a path by merging consecutive `(k, None)` segments.
-      fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
-          let mut result = Vec::new();
-          let mut current_k = 0;
-          for (k, sid_opt) in path {
-              current_k += *k;
-              if let Some(sid) = sid_opt {
-                  result.push((current_k, *sid));
-                  current_k = 0;
-              }
-          }
-          result
-      }
-
       /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
       /// Each path is associated with the intersection of LLM token bitvectors along its edges.
       fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
           let mut all_paths = PathMap::new();
-          let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
+          // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
+          let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
 
           let initial_bv = root.read().unwrap().value.live_tokens.clone();
-          q.push_back((root.clone(), vec![], initial_bv));
+          q.push_back((root.clone(), vec![], 0, initial_bv));
 
-          let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
-          visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
+          // Visited key: (node_ptr, normalized path, pending_k)
+          let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, NormalizedPath, usize), LLMTokenBV> = HashMap::new();
+          visited.insert((Arc::as_ptr(root), vec![], 0), root.read().unwrap().value.live_tokens.clone());
 
-          while let Some((node_arc, path, bv)) = q.pop_front() {
+          while let Some((node_arc, path, current_k, bv)) = q.pop_front() {
               let node_guard = node_arc.read().unwrap();
 
               if node_guard.value.end {
-                  let normalized = normalize_path(&path);
-                  all_paths.entry(normalized)
+                  // The `path` is already normalized. The pending `current_k` is discarded as per original logic.
+                  all_paths.entry(path)
                       .and_modify(|e| *e |= &bv)
                       .or_insert(bv.clone());
               }
@@ -15053,10 +15040,16 @@ messages:
                       if new_bv.is_empty() { continue; }
 
                       if let Some(child_arc) = child_ptr.upgrade() {
+                          let (k, sid_opt) = ek;
+                          let mut new_k = current_k + *k;
                           let mut new_path = path.clone();
-                          new_path.push(ek.clone());
 
-                          let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
+                          if let Some(sid) = sid_opt {
+                              new_path.push((new_k, *sid));
+                              new_k = 0;
+                          }
+
+                          let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
 
                           if let Some(existing_bv) = visited.get_mut(&visited_key) {
                               let new_tokens = &new_bv - &*existing_bv;
@@ -15064,16 +15057,15 @@ messages:
                                   continue;
                               }
                               *existing_bv |= &new_tokens;
-                              q.push_back((child_arc, new_path, new_tokens));
+                              q.push_back((child_arc, new_path, new_k, new_tokens));
                           } else {
                               visited.insert(visited_key, new_bv.clone());
-                              q.push_back((child_arc, new_path, new_bv));
+                              q.push_back((child_arc, new_path, new_k, new_bv));
                           }
                       }
                   }
               }
           }
-
           all_paths
       }
 
@@ -22265,11 +22257,15 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: Modify `get_normalized_paths_from_root` normalize paths *as it goes* rather
-      than at the end. We can do this by just checking whether the item at the end
-      of the path has `None` state ID and, if so, don't push a new item to the path,
-      but add the number to the existing item at the top of the stack and replace
-      the state ID at the top of the stack with this edge's state ID.
+  - user: "`get_normalized_paths_from_root` can loop forever, because the precompute2
+      trie can be recursive. Fix this. Add a param for max path length. Return all
+      paths less than or equal to that length. Stop as soon as a path *would exceed*
+      that length. Do not stop as soon as the path *reaches* that length - if the
+      top of the path has a `None` state ID, we won't actually add to the path, we'll
+      just add the edge's number to top path item and replace its state ID with the
+      edge's state ID. ie once we reach the max length there might still be work we
+      need to do before we *exceed* it, so we must do that before adding the path
+      to the outputs."
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -22286,100 +22282,46 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
+      I've identified the potential for an infinite loop in `get_normalized_paths_from_root` due to cycles in the `PrecomputeNode2` trie. To fix this, I'll introduce a maximum path length to bound the traversal.
+
+      Here are the patches for the necessary changes:
+
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -190,58 +190,53 @@
-       type NormalizedPath = Vec<(usize, StateID)>;
-       type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
+      @@ -188,7 +188,7 @@
        
-      -/// Normalizes a path by merging consecutive `(k, None)` segments.
-      -fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
-      -    let mut result = Vec::new();
-      -    let mut current_k = 0;
-      -    for (k, sid_opt) in path {
-      -        current_k += *k;
-      -        if let Some(sid) = sid_opt {
-      -            result.push((current_k, *sid));
-      -            current_k = 0;
-      -        }
-      -    }
-      -    result
-      -}
-      -
        /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
        /// Each path is associated with the intersection of LLM token bitvectors along its edges.
-       fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+      -fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+      +fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>, max_path_length: usize) -> PathMap {
            let mut all_paths = PathMap::new();
-      -    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
-      +    // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
-      +    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
-       
-           let initial_bv = root.read().unwrap().value.live_tokens.clone();
-      -    q.push_back((root.clone(), vec![], initial_bv));
-      -
-      -    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
-      -    visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
-      -
-      -    while let Some((node_arc, path, bv)) = q.pop_front() {
-      +    q.push_back((root.clone(), vec![], 0, initial_bv));
+           // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
+           let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
+      @@ -223,6 +223,11 @@
+                               new_path.push((new_k, *sid));
+                               new_k = 0;
+                           }
       +
-      +    // Visited key: (node_ptr, normalized path, pending_k)
-      +    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, NormalizedPath, usize), LLMTokenBV> = HashMap::new();
-      +    visited.insert((Arc::as_ptr(root), vec![], 0), root.read().unwrap().value.live_tokens.clone());
-      +
-      +    while let Some((node_arc, path, current_k, bv)) = q.pop_front() {
-               let node_guard = node_arc.read().unwrap();
-       
-               if node_guard.value.end {
-      -            let normalized = normalize_path(&path);
-      -            all_paths.entry(normalized)
-      +            // The `path` is already normalized. The pending `current_k` is discarded as per original logic.
-      +            all_paths.entry(path)
-                       .and_modify(|e| *e |= &bv)
-                       .or_insert(bv.clone());
-               }
-       
-               for (ek, dest_map) in node_guard.children() {
-                   for (child_ptr, edge_bv) in dest_map {
-                       let new_bv = &bv & edge_bv;
-                       if new_bv.is_empty() { continue; }
-       
-                       if let Some(child_arc) = child_ptr.upgrade() {
-      +                    let (k, sid_opt) = ek;
-      +                    let mut new_k = current_k + *k;
-                           let mut new_path = path.clone();
-      -                    new_path.push(ek.clone());
-      -
-      -                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
-      +
-      +                    if let Some(sid) = sid_opt {
-      +                        new_path.push((new_k, *sid));
-      +                        new_k = 0;
+      +                    if new_path.len() > max_path_length {
+      +                        continue;
       +                    }
       +
-      +                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
        
-                           if let Some(existing_bv) = visited.get_mut(&visited_key) {
-                               let new_tokens = &new_bv - &*existing_bv;
-                               if new_tokens.is_empty() {
-                                   continue;
-                               }
-                               *existing_bv |= &new_tokens;
-      -                        q.push_back((child_arc, new_path, new_tokens));
-      +                        q.push_back((child_arc, new_path, new_k, new_tokens));
-                           } else {
-                               visited.insert(visited_key, new_bv.clone());
-      -                        q.push_back((child_arc, new_path, new_bv));
-      +                        q.push_back((child_arc, new_path, new_k, new_bv));
-                           }
-                       }
-                   }
-               }
-           }
-      -
-           all_paths
+                           let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
+       
+      @@ -253,8 +258,9 @@
+       /// # Returns
+       /// `true` if the tries are semantically equivalent, `false` otherwise.
+       pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
+           if Arc::ptr_eq(a, b) { return true; }
+      -    let paths_a = get_normalized_paths_from_root(a);
+      -    let paths_b = get_normalized_paths_from_root(b);
+      +    const MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK: usize = 32;
+      +    let paths_a = get_normalized_paths_from_root(a, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
+      +    let paths_b = get_normalized_paths_from_root(b, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
+           paths_a == paths_b
        }
        
 
@@ -22394,7 +22336,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor(constraint): Normalize paths
-      incrementally in get_normalized_paths_from_root"'
+  - user: 'Changes committed with message: "Fix: Prevent infinite loops in get_normalized_paths_from_root
+      by limiting path length"'
     metadata:
 ...

@@ -161,7 +161,7 @@ type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
 
 /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
 /// Each path is associated with the intersection of LLM token bitvectors along its edges.
-fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
+fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>, max_path_length: usize) -> PathMap {
     let mut all_paths = PathMap::new();
     // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
     let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
@@ -198,6 +198,11 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMa
                         new_k = 0;
                     }
 
+                    if new_path.len() > max_path_length {
+                        continue;
+                    }
+
+
                     let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
 
                     if let Some(existing_bv) = visited.get_mut(&visited_key) {
@@ -232,8 +237,9 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMa
 /// `true` if the tries are semantically equivalent, `false` otherwise.
 pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
     if Arc::ptr_eq(a, b) { return true; }
-    let paths_a = get_normalized_paths_from_root(a);
-    let paths_b = get_normalized_paths_from_root(b);
+    const MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK: usize = 32;
+    let paths_a = get_normalized_paths_from_root(a, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
+    let paths_b = get_normalized_paths_from_root(b, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
     paths_a == paths_b
 }
 
