@@ -929,7 +929,11 @@ fn simplify_trie2_path_compression(roots: &mut BTreeMap<TokenizerStateID, Arc<Rw
                 // Add A -> C
                 let dest_map_ac = a_guard.children_mut().entry(new_key).or_default();
                 let c_key = if new_edge_is_strong { NodePtr::Strong(ArcPtrWrapper::new(c_arc)) } else { NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc))) };
-                dest_map_ac.entry(c_key).and_modify(|ebv| *ebv |= &new_bv).or_insert(new_bv);
+                if let Some(existing_bv) = dest_map_ac.get_mut(&c_key) {
+                    *existing_bv |= &new_bv;
+                } else {
+                    dest_map_ac.insert(c_key, new_bv);
+                }
 
                 changed = true;
                 break; // Restart scan since graph changed.
