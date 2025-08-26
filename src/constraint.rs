@@ -1747,11 +1747,9 @@ fn clone_trie2_graph(
                     let entries = dest_map
                         .iter()
                         .map(|(node_ptr, ev)| {
-                            // A weak pointer might be dangling if the graph is in a transient state
-                            // during transformations. We should only clone edges that are valid.
-                            node_ptr.upgrade().map(|_| (node_ptr.clone(), ev.clone()))
+                            let _ = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (snapshot)");
+                            (node_ptr.clone(), ev.clone())
                         })
-                        .filter_map(|x| x) // Filter out None from dangling weak pointers
                         .collect::<Vec<_>>();
                     (ek.clone(), entries)
                 })
@@ -1761,9 +1759,7 @@ fn clone_trie2_graph(
         // For each child, ensure it exists in map (create a blank new node with same value).
         for (_ek, entries) in &children_snapshot {
             for (node_ptr, _ev) in entries {
-                // The snapshot is already filtered, so this upgrade should not fail.
-                // Using expect here is safe because we filtered out dangling pointers before.
-                let child_arc_old = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (map population); this should not happen after filtering");
+                let child_arc_old = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (map population)");
                 let child_ptr_old = Arc::as_ptr(&child_arc_old);
                 if !map.contains_key(&child_ptr_old) {
                     let child_value = { child_arc_old.read().expect("poison").value.clone() };
@@ -1780,8 +1776,7 @@ fn clone_trie2_graph(
             for (ek, entries) in children_snapshot {
                 let dest_map = new_g.children_mut().entry(ek).or_default();
                 for (old_node_ptr, ev) in entries {
-                    // This should also be safe due to pre-filtering.
-                    let child_arc_old = old_node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (wiring); this should not happen after filtering");
+                    let child_arc_old = old_node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (wiring)");
                     let child_ptr_old = Arc::as_ptr(&child_arc_old);
                     let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
                     // Preserve strong/weak kind of the original key
