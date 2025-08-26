@@ -119,9 +119,13 @@ fn load_or_download_gpt2_vocab(
     Ok(vocab_map.into_keys().collect())
 }
 
-#[cfg(not(rustrover))]
 #[test]
 fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(rustrover) {
+        println!("Skipping test_precompute2_optimizations_are_equivalent_for_js in rustrover mode.");
+        return Ok(());
+    }
+
     // --- Setup Phase ---
     println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
