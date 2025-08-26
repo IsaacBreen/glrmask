@@ -1088,6 +1088,7 @@ pub fn read_precomputed2_from_stream<R: Read>(
         .map_err(|e| format!("Failed to parse precomputed2 stream as array of pairs: {}", e))?;
 
     let mut map: Precomputed2 = BTreeMap::new();
+    println!("Deserializing {} tries from JSON", pairs.len());
     let mut pb = tqdm!(total = pairs.len(), desc = "Loading tries from JSON", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
     for (key_val, trie_val) in pairs {
