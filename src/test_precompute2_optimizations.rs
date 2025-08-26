@@ -109,6 +109,7 @@ fn optimize_and_assert_equivalent(pre2: &Precomputed2) {
     }
 }
 
+#[cfg(not(rustrover))]
 #[test]
 fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::error::Error>> {
     // --- Setup Phase ---
