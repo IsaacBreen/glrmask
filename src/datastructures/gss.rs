@@ -392,87 +392,6 @@ fn compute_hash_key_root(acc: &Acc) -> u64 {
     hasher.finish()
 }
 
-// Helper for pointer-based operations
-fn ptr_usize<T>(arc: &Arc<T>) -> usize {
-    Arc::as_ptr(arc) as usize
-}
-
-fn sort_dedup_by_ptr(v: &mut Vec<Arc<GSSNode>>) {
-    v.sort_by_key(|a| ptr_usize(a));
-    v.dedup_by_key(|a| Arc::as_ptr(a));
-}
-
-fn dedup_and_canonicalize_list(
-    list: &mut Vec<Arc<GSSNode>>,
-    merge_depth: usize,
-) {
-    // 1) Fast pointer dedup
-    sort_dedup_by_ptr(list);
-
-    if list.len() <= 1 {
-        return;
-    }
-
-    // 2) Fast path: if all referentially equal to the first (shouldn’t happen after step 1), bail
-    //    Kept for symmetry; real work below.
-    if list.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])) {
-        list.truncate(1);
-        return;
-    }
-
-    // 3) Group by hash to avoid many structural comparisons
-    use std::collections::HashMap;
-    let mut by_hash: HashMap<u64, Vec<Arc<GSSNode>>> = HashMap::new();
-    for arc in list.drain(..) {
-        by_hash.entry(arc.hash_code()).or_default().push(arc);
-    }
-
-    // 4) Within each hash group, canonicalize structurally-equal nodes to a single Arc
-    let mut distinct: Vec<Arc<GSSNode>> = Vec::new();
-    for (_h, mut group) in by_hash {
-        // Pointer dedup inside group (cheap)
-        sort_dedup_by_ptr(&mut group);
-        if group.len() <= 1 {
-            distinct.extend(group);
-            continue;
-        }
-
-        // One representative per structural-equality class in this hash bucket
-        'next_in_group: for arc in group {
-            for canon in distinct.iter() {
-                if arc.hash_code() == canon.hash_code() && *arc == **canon {
-                    // Replace with canonical pointer
-                    continue 'next_in_group;
-                }
-            }
-            distinct.push(arc);
-        }
-    }
-
-    if merge_depth == 0 {
-        // Keep all distinct (no structural merging), pointer-dedup already done
-        distinct.sort_by_key(|a| ptr_usize(a));
-        distinct.dedup_by_key(|a| Arc::as_ptr(a));
-        *list = distinct;
-        return;
-    }
-
-    // merge_depth > 0: we must collapse into a single node iff we still have >1 structurally-distinct nodes
-    if distinct.len() == 1 {
-        *list = distinct;
-        return;
-    }
-
-    // We actually need to merge different nodes here.
-    let mut iter = distinct.into_iter();
-    let first = iter.next().unwrap();
-    let mut merged = (*first).clone();
-    for other in iter {
-        merged.merge_with_depth(merge_depth - 1, &other);
-    }
-    *list = vec![Arc::new(merged)];
-}
-
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
 fn process_predecessors(incoming: &NodeSet) -> NodeMap {
@@ -513,71 +432,66 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 }
 
 /// Merges the `source` NodeMap into the `target` NodeMap.
-fn merge_node_maps(target: &mut NodeMap, source: &NodeMap, merge_depth: usize) {
-    for (edge_val, source_preds_by_depth) in source.iter() {
+fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
+    for (edge_val, source_preds_by_depth) in source {
         let target_preds_by_depth = target.entry(edge_val.clone()).or_default();
+        for (dest_key, source_preds_vec) in source_preds_by_depth {
+            let target_preds_vec = target_preds_by_depth.entry(dest_key).or_default();
 
-        for (dest_key, source_preds_vec) in source_preds_by_depth.iter() {
-            let target_preds_vec = target_preds_by_depth.entry(*dest_key).or_default();
-
-            if source_preds_vec.is_empty() {
-                // Nothing to merge at this (edge, depth)
-                continue;
-            }
-
-            // Fast path: append then dedup/canonicalize/merge as needed
-            // We clone Arc pointers (cheap), not whole nodes/maps.
-            target_preds_vec.reserve(source_preds_vec.len());
-            for child in source_preds_vec.iter() {
-                target_preds_vec.push(child.clone());
-            }
-
-            // Now in-place reduce:
-            dedup_and_canonicalize_list(target_preds_vec, merge_depth);
-        }
-    }
-}
-
-fn canonicalize_across_map_by_hash(predecessors: &mut NodeMap) {
-    use std::collections::HashMap;
-    let mut canonical: HashMap<u64, Vec<Arc<GSSNode>>> = HashMap::new();
-
-    for preds_by_depth in predecessors.values_mut() {
-        for vec in preds_by_depth.values_mut() {
-            if vec.len() <= 1 {
-                continue;
-            }
-
-            let mut new_vec: Vec<Arc<GSSNode>> = Vec::with_capacity(vec.len());
-            'next_pred: for arc in vec.drain(..) {
-                let h = arc.hash_code();
-                if let Some(bucket) = canonical.get_mut(&h) {
-                    // 1) pointer match
-                    for c in bucket.iter() {
-                        if Arc::ptr_eq(c, &arc) {
-                            new_vec.push(c.clone());
-                            continue 'next_pred;
-                        }
+            if merge_depth == 0 {
+                if *target_preds_vec == source_preds_vec {
+                    continue;
+                } else if target_preds_vec.len() == 1 && source_preds_vec.len() > 1 {
+                    if source_preds_vec.contains(&target_preds_vec[0]) {
+                        *target_preds_vec = source_preds_vec;
+                        continue;
+                    } else {
+                        target_preds_vec.extend(source_preds_vec);
+                        continue;
                     }
-                    // 2) structural match
-                    for c in bucket.iter() {
-                        if *arc == **c {
-                            new_vec.push(c.clone());
-                            continue 'next_pred;
-                        }
+                } else if target_preds_vec.len() > 1 && source_preds_vec.len() == 1 {
+                    if target_preds_vec.contains(&source_preds_vec[0]) {
+                        continue;
+                    } else {
+                        target_preds_vec.extend(source_preds_vec);
+                        continue;
                     }
-                    // 3) new canonical
-                    bucket.push(arc.clone());
-                    new_vec.push(arc);
                 } else {
-                    canonical.insert(h, vec![arc.clone()]);
-                    new_vec.push(arc);
+                    target_preds_vec.extend(source_preds_vec);
+                    continue;
                 }
             }
 
-            // Keep deterministic ordering and pointer dedup inside this vec
-            sort_dedup_by_ptr(&mut new_vec);
-            *vec = new_vec;
+            let mut nodes_to_merge = source_preds_vec;
+            if !target_preds_vec.is_empty() {
+                nodes_to_merge.extend(target_preds_vec.drain(..));
+            }
+
+            if nodes_to_merge.len() <= 1 {
+                *target_preds_vec = nodes_to_merge;
+            } else {
+                // Optimization: group by structural identity before merging to avoid redundant work.
+                let mut grouped_nodes: HashMap<GSSNode, Arc<GSSNode>> = HashMap::with_capacity(nodes_to_merge.len());
+                for node_arc in nodes_to_merge {
+                    grouped_nodes.entry((*node_arc).clone()).or_insert(node_arc);
+                }
+
+                let mut iter = grouped_nodes.into_values();
+                if let Some(first) = iter.next() {
+                    let mut merged = first.as_ref().clone();
+                    for other in iter {
+                        merged._merge(&other, merge_depth - 1);
+                    }
+                    let mut merged_arc = Arc::new(merged);
+                    if merged_arc == first {
+                        merged_arc = first;
+                    }
+                    *target_preds_vec = vec![merged_arc];
+                } else {
+                    // This case should be unreachable if nodes_to_merge was not empty.
+                    *target_preds_vec = vec![];
+                }
+            }
         }
     }
 }
@@ -864,23 +778,38 @@ impl GSSNode {
             return;
         }
 
-        // Both sides are internal (or self is internal, other internal); merge NodeMaps in place.
-        match (self, other) {
-            (GSSNode::Internal(lhs_i), GSSNode::Internal(_rhs_i)) => {
-                // 1) Merge the other map into lhs_internals in place
-                merge_node_maps(&mut lhs_i.predecessors, other.predecessors(), merge_depth);
+        // Both sides are internal (or self is internal, other internal); merge NodeMaps.
+        let self_predecessors = self.predecessors().clone();
+        let other_predecessors = other.predecessors().clone();
 
-                // 2) Canonicalize across all edges to maximize sharing (cheap hash-keyed pass)
-                if merge_depth > 0 {
-                    canonicalize_across_map_by_hash(&mut lhs_i.predecessors);
+        let mut merged_map = self_predecessors;
+        merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
+
+        let final_predecessors = if merge_depth > 0 {
+            // After merging, unify structurally identical predecessors to increase sharing.
+            let mut canonical_map: HashMap<GSSNode, Arc<GSSNode>> = HashMap::new();
+            let mut unified_predecessors = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in merged_map {
+                let mut unified_preds_by_depth = BTreeMap::new();
+                for (depth, pred_vec) in preds_by_depth {
+                    let mut unified_pred_vec = Vec::new();
+                    for pred_arc in pred_vec {
+                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+                        unified_pred_vec.push(canonical_arc);
+                    }
+                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                    unified_preds_by_depth.insert(depth, unified_pred_vec);
                 }
-
-                // 3) Recompute caches once
-                lhs_i.hash_key_cache = compute_hash_key_internal(&lhs_i.predecessors);
-                lhs_i.max_depth = compute_max_depth(&lhs_i.predecessors);
+                unified_predecessors.insert(edge_val, unified_preds_by_depth);
             }
-            _ => unreachable!("Internal branch guarded above"),
-        }
+            unified_predecessors
+        } else {
+            merged_map
+        };
+
+        *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
     }
 
     #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
