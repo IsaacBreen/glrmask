@@ -1,6 +1,3 @@
-// This file contains tests for optimization passes on the Precompute2 trie.
-// It verifies that optimizations produce a semantically equivalent tree.
-
 use crate::constraint::{
     are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2,
 };
@@ -43,70 +40,6 @@ fn load_or_download_gpt2_vocab(
         serde_json::from_str(&content)?
     };
     Ok(vocab_map.into_keys().collect())
-}
-
-// --- Compact Helpers for Inline EBNF-based tests ---
-
-fn compiled_grammar_from_inline_ebnf(ebnf_src: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
-    // Persist inline EBNF to a stable cache file (based on a hash) and compile from that path.
-    let cache_dir = Path::new(".cache/test_precompute2/inline_ebnf");
-    fs::create_dir_all(cache_dir)?;
-    let mut hasher = DefaultHasher::new();
-    ebnf_src.hash(&mut hasher);
-    let hash = hasher.finish();
-    let ebnf_path = cache_dir.join(format!("inline_{}.ebnf", hash));
-    fs::write(&ebnf_path, ebnf_src)?;
-    let grammar_definition = GrammarDefinition::from_ebnf_file(ebnf_path.to_str().unwrap())?;
-    Ok(CompiledGrammar::from_definition(Arc::new(grammar_definition)))
-}
-
-fn build_llm_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
-    let mut map = LLMTokenMap::new();
-    let mut max_id = 0usize;
-    for (i, tok) in tokens.iter().enumerate() {
-        map.insert(tok.as_bytes().to_vec(), LLMTokenID(i));
-        max_id = max_id.max(i);
-    }
-    (map, max_id)
-}
-
-fn precomputed2_from_ebnf_and_tokens(ebnf_src: &str, tokens: &[&str]) -> Result<Precomputed2, Box<dyn Error>> {
-    let compiled = compiled_grammar_from_inline_ebnf(ebnf_src)?;
-    let (llm_token_map, max_original_llm_token_id) = build_llm_map(tokens);
-    let gc = GrammarConstraint::from_compiled_grammar(
-        compiled,
-        llm_token_map,
-        LLMTokenID(0), // dummy EOF placeholder
-        max_original_llm_token_id,
-    );
-    Ok(gc.precomputed2)
-}
-
-fn optimize_and_assert_equivalent(pre2: &Precomputed2) {
-    // Deep-clone the original tree graph-wise (preserve DAG sharing if any)
-    let mut optimized_pre2: Precomputed2 = BTreeMap::new();
-    for (sid, root_arc) in pre2.iter() {
-        let (cloned_root, _node_map) = clone_trie2_graph(root_arc);
-        optimized_pre2.insert(*sid, cloned_root);
-    }
-    // Apply optimization passes
-    context_aware_merge_trie2(&mut optimized_pre2);
-
-    // Compare semantic equivalence per tokenizer-state root
-    assert_eq!(
-        pre2.len(),
-        optimized_pre2.len(),
-        "Number of tokenizer roots differs after optimization"
-    );
-    for sid in pre2.keys() {
-        let a = pre2.get(sid).unwrap();
-        let b = optimized_pre2.get(sid).unwrap();
-        assert!(
-            are_precompute2_trees_equivalent(a, b),
-            "Mismatch for tokenizer state ID {}",
-            sid.0
-        );
-    }
 }
 
 #[cfg(not(rustrover))]
