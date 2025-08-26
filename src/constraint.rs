@@ -44,6 +44,7 @@ use crate::glr::grammar::Terminal;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::interface::CompiledGrammar;
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
+use crate::datastructures::entry_api::EntryApi;
 
 const MERGE_THRESHOLD: usize = 20;
 

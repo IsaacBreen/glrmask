@@ -1,6 +1,5 @@
+use ordered_hash_map::OrderedHashMap;
 use std::hash::Hash;
-
-use crate::datastructures::ordered_hash_map::OrderedHashMap;
 
 /// A lightweight, trait-based "entry" API for OrderedHashMap.
 ///
