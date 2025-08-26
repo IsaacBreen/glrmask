@@ -727,7 +727,7 @@ impl GrammarConstraint {
         merge_nodes_trie2(&mut precomputed2);
         // simplify_trie2_merge_edges(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
-        // context_aware_merge_trie2(&mut precomputed2);
+        context_aware_merge_trie2(&mut precomputed2);
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
