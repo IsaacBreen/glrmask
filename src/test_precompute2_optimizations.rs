@@ -4,6 +4,7 @@
 use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
@@ -44,43 +45,66 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
     // --- Setup Phase ---
     println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
 
-    // 1. Load and compile the JavaScript grammar.
-    let grammar_path = "src/js.ebnf";
-    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
-    println!("Compiling GrammarDefinition into CompiledGrammar...");
-    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-    println!("Successfully compiled GrammarDefinition.");
+    const FORCE_RECREATE_CONSTRAINT: bool = false;
+    let cache_dir = Path::new(".cache/test_constraints");
+    fs::create_dir_all(cache_dir)?;
+    let constraint_cache_path = cache_dir.join("js_constraint_for_opt_test.json");
 
-    // 2. Load a small, representative vocabulary.
-    println!("\nLoading GPT-2 vocabulary...");
-    let cache_dir = Path::new(".cache/test_vocabs");
-    let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
-    let vocab_file_name = "gpt2_vocab.json";
-    let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
-    // Keep a smaller subset to speed up the test
-    gpt2_raw_vocab.retain(|s| s.len() < 5);
-    println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+    let grammar_constraint = if !FORCE_RECREATE_CONSTRAINT && constraint_cache_path.exists() {
+        println!("\nLoading GrammarConstraint from cache: {:?}", constraint_cache_path);
+        let file = File::open(&constraint_cache_path)?;
+        let reader = BufReader::new(file);
+        let json_node: JSONNode = serde_json::from_reader(reader)?;
+        GrammarConstraint::from_json(json_node).map_err(|e| e.into())
+    } else {
+        println!("\nCreating GrammarConstraint from scratch...");
+        // 1. Load and compile the JavaScript grammar.
+        let grammar_path = "src/js.ebnf";
+        let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+        println!("Compiling GrammarDefinition into CompiledGrammar...");
+        let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+        println!("Successfully compiled GrammarDefinition.");
 
-    let mut llm_token_map = LLMTokenMap::new();
-    let mut max_original_llm_token_id_val: usize = 0;
-    for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
-        let id_val = i;
-        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
-        let token_bytes = processed_token_str.as_bytes().to_vec();
-        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
-        max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-    }
+        // 2. Load a small, representative vocabulary.
+        println!("\nLoading GPT-2 vocabulary...");
+        let vocab_cache_dir = Path::new(".cache/test_vocabs");
+        let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+        let vocab_file_name = "gpt2_vocab.json";
+        let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
+        // Keep a smaller subset to speed up the test
+        gpt2_raw_vocab.retain(|s| s.len() < 5);
+        println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
 
-    // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-    let dummy_eof_placeholder = 0;
-    println!("\nConstructing GrammarConstraint...");
-    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
-        compiled_grammar.clone(),
-        llm_token_map.clone(),
-        LLMTokenID(dummy_eof_placeholder),
-        max_original_llm_token_id_val
-    );
-    println!("GrammarConstraint constructed successfully.");
+        let mut llm_token_map = LLMTokenMap::new();
+        let mut max_original_llm_token_id_val: usize = 0;
+        for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+            let id_val = i;
+            let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+            let token_bytes = processed_token_str.as_bytes().to_vec();
+            llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+            max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+        }
+
+        // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+        let dummy_eof_placeholder = 0;
+        println!("\nConstructing GrammarConstraint...");
+        let constraint = GrammarConstraint::from_compiled_grammar(
+            compiled_grammar.clone(),
+            llm_token_map.clone(),
+            LLMTokenID(dummy_eof_placeholder),
+            max_original_llm_token_id_val
+        );
+        println!("GrammarConstraint constructed successfully.");
+
+        println!("\nSerializing GrammarConstraint to cache: {:?}", constraint_cache_path);
+        let json_node = constraint.to_json();
+        let mut file = File::create(&constraint_cache_path)?;
+        let json_string = serde_json::to_string_pretty(&json_node)?;
+        file.write_all(json_string.as_bytes())?;
+        println!("Serialization complete.");
+
+        Ok(constraint)
+    }?;
 
     // 4. Deep-clone the original precomputed2 tree.
     println!("\nCloning the original precomputed2 tree...");
