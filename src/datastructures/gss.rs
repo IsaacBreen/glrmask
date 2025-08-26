@@ -470,27 +470,17 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
             if nodes_to_merge.len() <= 1 {
                 *target_preds_vec = nodes_to_merge;
             } else {
-                // Optimization: group by structural identity before merging to avoid redundant work.
-                let mut grouped_nodes: HashMap<GSSNode, Arc<GSSNode>> = HashMap::with_capacity(nodes_to_merge.len());
-                for node_arc in nodes_to_merge {
-                    grouped_nodes.entry((*node_arc).clone()).or_insert(node_arc);
+                let mut iter = nodes_to_merge.into_iter();
+                let first = iter.next().unwrap();
+                let mut merged = first.as_ref().clone();
+                for other in iter {
+                    merged._merge(&other, merge_depth - 1);
                 }
-
-                let mut iter = grouped_nodes.into_values();
-                if let Some(first) = iter.next() {
-                    let mut merged = first.as_ref().clone();
-                    for other in iter {
-                        merged._merge(&other, merge_depth - 1);
-                    }
-                    let mut merged_arc = Arc::new(merged);
-                    if merged_arc == first {
-                        merged_arc = first;
-                    }
-                    *target_preds_vec = vec![merged_arc];
-                } else {
-                    // This case should be unreachable if nodes_to_merge was not empty.
-                    *target_preds_vec = vec![];
+                let mut merged = Arc::new(merged);
+                if merged == first {
+                    merged = first;
                 }
+                *target_preds_vec = vec![merged];
             }
         }
     }
@@ -787,7 +777,7 @@ impl GSSNode {
 
         let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
-            let mut canonical_map: HashMap<GSSNode, Arc<GSSNode>> = HashMap::new();
+            let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
 
             for (edge_val, preds_by_depth) in merged_map {
