@@ -1663,28 +1663,24 @@ fn deduplicate_recursive_trie2(
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = deduplicate_recursive_trie2(
-                        child_arc.clone(),
-                        canonical_nodes,
-                        visited,
-                        shape_hash_memo,
-                        shape_eq_cache,
-                        pb,
-                    );
-                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                    };
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-                } else {
-                    // Dangling weak pointer. It will be omitted from new_dest_map, effectively pruning it.
+                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive_trie2");
+                let canonical_child_arc = deduplicate_recursive_trie2(
+                    child_arc.clone(),
+                    canonical_nodes,
+                    visited,
+                    shape_hash_memo,
+                    shape_eq_cache,
+                    pb,
+                );
+                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
                     children_changed = true;
                 }
+                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                    NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                } else {
+                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                };
+                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
                 new_children_map.insert(edge_key.clone(), new_dest_map);
@@ -2678,25 +2674,21 @@ impl<'r> Precomputer<'r> {
         let mut children_changed = false;
 
         {
-        let node_guard = node_arc.read().unwrap();
+            let node_guard = node_arc.read().unwrap();
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
-                    let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
-                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                    };
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-                } else {
-                    // Dangling weak pointer. It will be omitted from new_dest_map, effectively pruning it.
+                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive");
+                let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
                     children_changed = true;
                 }
+                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                    NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                } else {
+                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                };
+                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
                 new_children_map.insert(edge_key.clone(), new_dest_map);
