@@ -502,7 +502,6 @@ where
     fn from_json_reader<R: Read>(mut reader: R) -> Result<Self, String> {
         // This is a simplified streaming reader for BTreeMap assuming it's an array of [key, value] pairs.
         // It's not a full JSON parser, but sufficient for the expected format.
-        let mut map = BTreeMap::new();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
         let json_node = JSONNode::from_json_string(&String::from_utf8(buf).map_err(|e| e.to_string())?)?;
@@ -581,36 +580,12 @@ where
     }
 }
 
-// Add implementation for Arc<RwLock<T>>
-use std::sync::{Arc, RwLock}; // Make sure these are imported
-
-impl<T: JSONConvertible> JSONConvertible for Arc<RwLock<T>> {
-    fn to_json(&self) -> JSONNode {
-        self.read()
-            .expect("RwLock poisoned during JSON serialization")
-            .to_json()
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        T::from_json(node).map(|val| Arc::new(RwLock::new(val)))
-    }
-
-    fn to_writer<W: Write>(&self, writer: W) -> Result<(), String> {
-        self.read()
-            .map_err(|e| format!("RwLock poisoned during streaming serialization: {}", e))?
-            .to_writer(writer)
-    }
-
-    fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
-        T::from_json_reader(reader).map(|val| Arc::new(RwLock::new(val)))
-    }
-}
-
 // --- Tests (optional, but good for verifying) ---
 #[cfg(test)]
 mod tests {
     use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
     use std::io::Cursor;
+    use std::sync::{Arc, RwLock};
 
     // Example struct using the derive
     #[derive(Debug, Clone, PartialEq, JSONConvertible)]
@@ -983,19 +958,5 @@ mod tests {
 
         let deserialized_vec: Vec<i32> = Vec::from_json_reader(Cursor::new(buffer)).unwrap();
         assert_eq!(original_vec, deserialized_vec);
-    }
-
-    #[test]
-    fn test_streaming_arc_rwlock() {
-        let original_inner = MyStruct {
-            field1: 1, field2: "arc_test".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
-        };
-        let original_arc = Arc::new(RwLock::new(original_inner.clone()));
-
-        let mut buffer = Vec::new();
-        original_arc.to_writer(&mut buffer).unwrap();
-
-        let deserialized_arc = Arc::<RwLock<MyStruct>>::from_json_reader(Cursor::new(buffer)).unwrap();
-        assert_eq!(*deserialized_arc.read().unwrap(), original_inner);
     }
 }

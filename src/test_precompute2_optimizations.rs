@@ -1,7 +1,7 @@
 // This file contains tests for optimization passes on the Precompute2 trie.
 // It verifies that optimizations produce a semantically equivalent tree.
 
-use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2, PrecomputeNode2};
+use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
@@ -11,6 +11,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use reqwest::blocking;
+use crate::datastructures::gss::PrecomputeNode2;
 
 // Helper function copied from test_constraint_js.rs
 fn load_or_download_gpt2_vocab(
