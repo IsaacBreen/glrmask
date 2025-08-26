@@ -237,7 +237,6 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMa
 ///
 /// # Returns
 /// `true` if the tries are semantically equivalent, `false` otherwise.
-#[allow(dead_code)]
 pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
     if Arc::ptr_eq(a, b) { return true; }
     let paths_a = get_normalized_paths_from_root(a);
@@ -851,7 +850,7 @@ impl GrammarConstraint {
     }
 }
 
-fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
     // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
@@ -933,7 +932,7 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
 }
 
-fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
 
     const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
@@ -1020,7 +1019,7 @@ fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerState
     crate::debug!(2, "Finished factoring common destinations in trie 2.");
 }
 
-fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Simplifying trie 2 by merging sequential edges.");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -1124,7 +1123,7 @@ fn simplify_trie2_merge_edges(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<
 
 // Context-aware Trie2 merging (conservative, masked, cycle-safe)
 
-fn build_incoming_maps_trie2(
+pub fn build_incoming_maps_trie2(
     roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
 ) -> (
     HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
@@ -1501,7 +1500,7 @@ fn redirect_incoming_tokens_trie2(
 
 /// Greedy, conservative, context-aware merge for Trie 2.
 /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
-fn context_aware_merge_trie2(
+pub fn context_aware_merge_trie2(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
 ) {
     crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
@@ -1678,7 +1677,7 @@ fn trie2_shape_eq(
     true
 }
 
-fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -1804,7 +1803,7 @@ fn deduplicate_recursive_trie2(
     node_arc
 }
 
-fn clone_trie2_graph(
+pub fn clone_trie2_graph(
     root: &Arc<RwLock<PrecomputeNode2>>,
 ) -> (
     Arc<RwLock<PrecomputeNode2>>,
