@@ -23,44 +23,9 @@ local_system:
       mod test_constraint_python;
       mod profiler;
       mod test_constraint_js;
-    src/datastructures/entry_api.rs: ''
-    src/datastructures/mod.rs: |
-      pub mod charmap;
-      pub mod frozenset;
-      pub mod gss;
-      pub mod trie;
-      pub mod u8set;
-      pub mod vocab_prefix_tree;
-      pub mod hybrid_bitset;
-      pub mod hybrid_l2_bitset;
-      pub mod arc_wrapper;
-      pub mod ordered_hash_map;
-      pub mod cache;
-      mod entry_api;
-
-      pub use arc_wrapper::ArcPtrWrapper;
-  prev_file_contents:
-    src/lib.rs: |
-      pub mod finite_automata;
-      pub mod glr;
-      pub mod constraint;
-      mod constraint_extra;
-      pub mod datastructures;
-      pub mod interface;
-      mod r#macro;
-      pub mod tokenizer;
-      mod types;
-      mod tests_apr25;
-      mod multi_dfa;
-      pub mod json_serialization;
-      mod test_constraint_basic;
-      mod test_constraint_python;
-      mod profiler;
-      mod test_constraint_js;
     src/datastructures/entry_api.rs: |
+      use ordered_hash_map::OrderedHashMap;
       use std::hash::Hash;
-
-      use crate::datastructures::ordered_hash_map::OrderedHashMap;
 
       /// A lightweight, trait-based "entry" API for OrderedHashMap.
       ///
@@ -175,9 +140,136 @@ local_system:
 
       pub use arc_wrapper::ArcPtrWrapper;
       pub use entry_api::{EntryApi, OrderedMapEntry};
+  prev_file_contents:
+    src/lib.rs: |
+      pub mod finite_automata;
+      pub mod glr;
+      pub mod constraint;
+      mod constraint_extra;
+      pub mod datastructures;
+      pub mod interface;
+      mod r#macro;
+      pub mod tokenizer;
+      mod types;
+      mod tests_apr25;
+      mod multi_dfa;
+      pub mod json_serialization;
+      mod test_constraint_basic;
+      mod test_constraint_python;
+      mod profiler;
+      mod test_constraint_js;
+    src/datastructures/entry_api.rs: |
+      use ordered_hash_map::OrderedHashMap;
+      use std::hash::Hash;
+
+      /// A lightweight, trait-based "entry" API for OrderedHashMap.
+      ///
+      /// This is an extension trait that provides a familiar entry-style workflow:
+      /// map.entry(key).and_modify(|v| { .. }).or_insert(value)
+      ///
+      /// Notes:
+      /// - This implementation is intentionally minimal and only exposes the most commonly
+      ///   used methods: `or_insert`, `or_insert_with`, and `and_modify`.
+      /// - To keep the implementation generic and safe without depending on OrderedHashMap
+      ///   internals, we require K: Clone so that we can re-query after insertion.
+      ///   This allows returning an &'a mut V using only the standard get_mut/insert APIs.
+      ///
+      /// If your keys are not Clone, consider introducing a Clone wrapper (e.g., Arc, newtype
+      /// around indices, etc.) or extend OrderedHashMap with a more direct insert-and-get_mut
+      /// operation.
+      pub trait EntryApi<K, V> {
+          type Entry<'a>
+          where
+              Self: 'a,
+              K: 'a,
+              V: 'a;
+
+          /// Returns an "entry" object for the given key that supports:
+          /// - and_modify(|v| { ... })
+          /// - or_insert(default_value)
+          /// - or_insert_with(|| default_value)
+          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
+      }
+
+      /// The entry wrapper returned by EntryApi::entry.
+      /// It allows calling and_modify(...).or_insert(...) style chains.
+      pub struct OrderedMapEntry<'a, K, V> {
+          map: &'a mut OrderedHashMap<K, V>,
+          key: K,
+      }
+
+      impl<'a, K, V> OrderedMapEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// If the key is present, apply `f` to the existing value, then return self for chaining.
+          /// If the key is absent, do nothing and return self for chaining.
+          ///
+          /// Example:
+          ///   map.entry(k).and_modify(|v| *v += 1).or_insert(0);
+          pub fn and_modify<F>(mut self, f: F) -> Self
+          where
+              F: FnOnce(&mut V),
+          {
+              if let Some(v) = self.map.get_mut(&self.key) {
+                  f(v);
+              }
+              self
+          }
+
+          /// Inserts `default` if the key is absent, then returns a mutable reference
+          /// to the value for the key (existing or newly inserted).
+          pub fn or_insert(self, default: V) -> &'a mut V {
+              if let Some(index) = self.map.get_index_of(&self.key) {
+                  return self.map.get_index_mut(index).unwrap().1;
+              }
+              let (index, _) = self.map.insert_full(self.key, default);
+              self.map.get_index_mut(index).unwrap().1
+          }
+
+          /// Inserts the result of `f` if the key is absent, then returns a mutable reference
+          /// to the value for the key (existing or newly inserted).
+          pub fn or_insert_with<F>(self, f: F) -> &'a mut V
+          where
+              F: FnOnce() -> V,
+          {
+              if let Some(index) = self.map.get_index_of(&self.key) {
+                  return self.map.get_index_mut(index).unwrap().1;
+              }
+              let (index, _) = self.map.insert_full(self.key, f());
+              self.map.get_index_mut(index).unwrap().1
+          }
+      }
+
+      impl<K, V> EntryApi<K, V> for OrderedHashMap<K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          type Entry<'a> = OrderedMapEntry<'a, K, V> where Self: 'a, K: 'a, V: 'a;
+
+          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
+              OrderedMapEntry { map: self, key }
+          }
+      }
+    src/datastructures/mod.rs: |
+      pub mod charmap;
+      pub mod frozenset;
+      pub mod gss;
+      pub mod trie;
+      pub mod u8set;
+      pub mod vocab_prefix_tree;
+      pub mod hybrid_bitset;
+      pub mod hybrid_l2_bitset;
+      pub mod arc_wrapper;
+      pub mod ordered_hash_map;
+      pub mod cache;
+      pub mod entry_api;
+
+      pub use arc_wrapper::ArcPtrWrapper;
+      pub use entry_api::{EntryApi, OrderedMapEntry};
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -185,14 +277,14 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
 messages:
   - user: |-
       Developer note (core guidance):
@@ -234,57 +326,8 @@ messages:
       filename: src/lib.rs
   - user: |-
       ```rust 'src/datastructures/entry_api.rs'
-
-      ```
-    metadata:
-      filename: src/datastructures/entry_api.rs
-  - user: |-
-      ```rust 'src/datastructures/mod.rs'
-      pub mod charmap;
-      pub mod frozenset;
-      pub mod gss;
-      pub mod trie;
-      pub mod u8set;
-      pub mod vocab_prefix_tree;
-      pub mod hybrid_bitset;
-      pub mod hybrid_l2_bitset;
-      pub mod arc_wrapper;
-      pub mod ordered_hash_map;
-      pub mod cache;
-      mod entry_api;
-
-      pub use arc_wrapper::ArcPtrWrapper;
-
-      ```
-    metadata:
-      filename: src/datastructures/mod.rs
-  - user: |-
-      ```
-      error[E0599]: no method named `entry` found for mutable reference `&mut OrderedHashMap<NodePtr<RwLock<Trie<..., ..., ...>>>, ...>` in the current scope
-      ```
-      It appears that `OrderedHashMap` doesn't have an entry API. Define a trait and implement one.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      ```rust "src/datastructures/entry_api.rs"
+      use ordered_hash_map::OrderedHashMap;
       use std::hash::Hash;
-
-      use crate::datastructures::ordered_hash_map::OrderedHashMap;
 
       /// A lightweight, trait-based "entry" API for OrderedHashMap.
       ///
@@ -383,9 +426,12 @@ messages:
               OrderedMapEntry { map: self, key }
           }
       }
-      ```
 
-      ```rust "src/datastructures/mod.rs"
+      ```
+    metadata:
+      filename: src/datastructures/entry_api.rs
+  - user: |-
+      ```rust 'src/datastructures/mod.rs'
       pub mod charmap;
       pub mod frozenset;
       pub mod gss;
@@ -401,26 +447,108 @@ messages:
 
       pub use arc_wrapper::ArcPtrWrapper;
       pub use entry_api::{EntryApi, OrderedMapEntry};
+
+      ```
+    metadata:
+      filename: src/datastructures/mod.rs
+  - user: |+
+      error[E0499]: cannot borrow `*self.map` as mutable more than once at a time
+        --> src/datastructures/entry_api.rs:67:9
+         |
+      40 | impl<'a, K, V> OrderedMapEntry<'a, K, V>
+         |      -- lifetime `'a` defined here
+      ...
+      63 |             if let Some(v) = self.map.get_mut(&self.key) {
+         |                              -------- first mutable borrow occurs here
+      64 |                 return v;
+         |                        - returning this value requires that `*self.map` is borrowed for `'a`
+      ...
+      67 |         self.map.insert(self.key.clone(), default);
+         |         ^^^^^^^^ second mutable borrow occurs here
+
+    metadata:
+  - user: Fix this.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, output git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: diff --git a/FILE b/FILE
+                  - The patch must be directly applicable to the current working tree.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. The borrow checker error you're seeing is a classic issue in Rust when a function has multiple paths, one of which returns a mutable reference that lives for `'a`, while another path tries to perform a subsequent mutable operation. The compiler conservatively assumes the borrow from `get_mut` might live for `'a` across all paths, causing a conflict.
+
+      To fix this, we can refactor the `or_insert` and `or_insert_with` methods to first check for the key's existence using an immutable borrow, and only then perform mutable operations. This avoids the overlapping mutable borrow scenario. The most performant way to do this with `OrderedHashMap` is to use its index-based APIs.
+
+      Here is the patch to fix the issue in `src/datastructures/entry_api.rs`:
+
+      ```diff
+      diff --git a/src/datastructures/entry_api.rs b/src/datastructures/entry_api.rs
+      --- a/src/datastructures/entry_api.rs
+      +++ b/src/datastructures/entry_api.rs
+      @@ -59,26 +59,20 @@
+           /// Inserts `default` if the key is absent, then returns a mutable reference
+           /// to the value for the key (existing or newly inserted).
+           pub fn or_insert(self, default: V) -> &'a mut V {
+      -        if let Some(v) = self.map.get_mut(&self.key) {
+      -            return v;
+      +        if let Some(index) = self.map.get_index_of(&self.key) {
+      +            return self.map.get_index_mut(index).unwrap().1;
+               }
+      -        // Insert using a clone of the key, so we can still look it up afterwards.
+      -        self.map.insert(self.key.clone(), default);
+      -        // Safe to unwrap because we just inserted this key.
+      -        self.map
+      -            .get_mut(&self.key)
+      -            .expect("Inserted key must be present")
+      +        let (index, _) = self.map.insert_full(self.key, default);
+      +        self.map.get_index_mut(index).unwrap().1
+           }
+       
+           /// Inserts the result of `f` if the key is absent, then returns a mutable reference
+           /// to the value for the key (existing or newly inserted).
+           pub fn or_insert_with<F>(self, f: F) -> &'a mut V
+           where
+               F: FnOnce() -> V,
+           {
+      -        if let Some(v) = self.map.get_mut(&self.key) {
+      -            return v;
+      -        }
+      -        // Insert using a clone of the key, so we can still look it up afterwards.
+      -        self.map.insert(self.key.clone(), f());
+      -        // Safe to unwrap because we just inserted this key.
+      -        self.map
+      -            .get_mut(&self.key)
+      -            .expect("Inserted key must be present")
+      +        if let Some(index) = self.map.get_index_of(&self.key) {
+      +            return self.map.get_index_mut(index).unwrap().1;
+      +        }
+      +        let (index, _) = self.map.insert_full(self.key, f());
+      +        self.map.get_index_mut(index).unwrap().1
+           }
+       }
+       
+
       ```
     metadata:
   - user: |
-      Identified target file 'src/datastructures/entry_api.rs' on fence open line 1:
-      ```rust "src/datastructures/entry_api.rs"
-      Identified target file 'src/datastructures/mod.rs' on fence open line 2:
-      ```rust "src/datastructures/mod.rs"
-      Found 2 code blocks.
-      Matching against available files:
-        1: src/datastructures/entry_api.rs
-        2: src/lib.rs
-        3: src/datastructures/mod.rs
-      --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to src/datastructures/entry_api.rs based on explicit fence path.
-      Assigned block to src/datastructures/mod.rs based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 1
-      --- Phase 6: Applying changes to assigned files ---
-      Successfully updated file: src/datastructures/entry_api.rs
-      Successfully updated file: src/datastructures/mod.rs
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/entry_api.rs
+      Applying patch to 'src/datastructures/entry_api.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/entry_api.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Add entry API for OrderedHashMap"'
+  - user: 'Changes committed with message: "Fix: Use index-based access to avoid double
+      mutable borrow in entry_api"'
     metadata:
 ...
