@@ -234,7 +234,7 @@ where
                     }
                     let _ = pb_pass1.update(1);
                 }
-                pb_pass1.finish().unwrap();
+                // pb_pass1.finish().unwrap();
 
                 let mut pb_pass2 = tqdm!(total = nodes_array.len(), desc = "Linking nodes (pass 2/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
@@ -340,7 +340,7 @@ where
                     }
                     let _ = pb_pass2.update(1);
                 }
-                pb_pass2.finish().unwrap();
+                // pb_pass2.finish().unwrap();
 
                 let root_arc_final = deserialized_arcs.get(&root_idx)
                     .ok_or_else(|| format!("Root index {} not found in deserialized_arcs map after linking", root_idx))?
