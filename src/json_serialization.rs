@@ -10,6 +10,7 @@ use json_convertible_derive::JSONConvertible;
 use serde_json::Value as SerdeValue;
 use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
 use std::convert::TryInto;
+use std::io::{Read, Write}; // Added for streaming
 
 // --- JSONNode Enum ---
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +108,20 @@ impl JSONNode {
         Self::from_serde_value(serde_value)
     }
 
+    // New method to write JSONNode directly to a writer
+    pub fn to_writer<W: Write>(&self, writer: W) -> Result<(), String> {
+        let serde_value = self.to_serde_value();
+        serde_json::to_writer(writer, &serde_value)
+            .map_err(|e| format!("Failed to write JSONNode to writer: {}", e))
+    }
+
+    // New method to read JSONNode directly from a reader
+    pub fn from_json_reader<R: Read>(reader: R) -> Result<JSONNode, String> {
+        let serde_value: SerdeValue = serde_json::from_reader(reader)
+            .map_err(|e| format!("Failed to read JSONNode from reader: {}", e))?;
+        Self::from_serde_value(serde_value)
+    }
+
     pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
         match self {
             JSONNode::Object(obj) => Ok(obj),
@@ -119,6 +134,16 @@ impl JSONNode {
 pub trait JSONConvertible: Sized {
     fn to_json(&self) -> JSONNode;
     fn from_json(node: JSONNode) -> Result<Self, String>;
+
+    // Default implementation for streaming serialization
+    fn to_writer<W: Write>(&self, writer: W) -> Result<(), String> {
+        self.to_json().to_writer(writer)
+    }
+
+    // Default implementation for streaming deserialization
+    fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
+        JSONNode::from_json_reader(reader).and_then(Self::from_json)
+    }
 }
 
 // --- Implementations for Primitives ---
@@ -159,6 +184,28 @@ macro_rules! impl_json_for_tuple {
                     }
                     _ => Err("Expected JSONNode::Array for tuple".to_string()),
                 }
+            }
+
+            // Implement to_writer for tuples
+            fn to_writer<W: Write>(&self, mut writer: W) -> Result<(), String> {
+                write!(writer, "[").map_err(|e| e.to_string())?;
+                let mut first = true;
+                $(
+                    if !first {
+                        write!(writer, ",").map_err(|e| e.to_string())?;
+                    }
+                    self.$idx.to_writer(&mut writer)?;
+                    first = false;
+                )+
+                write!(writer, "]").map_err(|e| e.to_string())?;
+                Ok(())
+            }
+
+            // Implement from_json_reader for tuples
+            fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
+                // This is more complex for tuples directly from reader without an intermediate JSONNode.
+                // For now, use the default that goes via JSONNode.
+                JSONNode::from_json_reader(reader).and_then(Self::from_json)
             }
         }
     };
@@ -324,6 +371,24 @@ impl<T: JSONConvertible> JSONConvertible for Vec<T> {
             _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
         }
     }
+
+    fn to_writer<W: Write>(&self, mut writer: W) -> Result<(), String> {
+        write!(writer, "[").map_err(|e| e.to_string())?;
+        let mut first = true;
+        for item in self {
+            if !first {
+                write!(writer, ",").map_err(|e| e.to_string())?;
+            }
+            item.to_writer(&mut writer)?;
+            first = false;
+        }
+        write!(writer, "]").map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
+        JSONNode::from_json_reader(reader).and_then(Self::from_json)
+    }
 }
 
 // Generic array
@@ -415,6 +480,34 @@ where
             _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
         }
     }
+
+    fn to_writer<W: Write>(&self, mut writer: W) -> Result<(), String> {
+        write!(writer, "[").map_err(|e| e.to_string())?;
+        let mut first = true;
+        for (k, v) in self {
+            if !first {
+                write!(writer, ",").map_err(|e| e.to_string())?;
+            }
+            write!(writer, "[").map_err(|e| e.to_string())?;
+            k.to_writer(&mut writer)?;
+            write!(writer, ",").map_err(|e| e.to_string())?;
+            v.to_writer(&mut writer)?;
+            write!(writer, "]").map_err(|e| e.to_string())?;
+            first = false;
+        }
+        write!(writer, "]").map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn from_json_reader<R: Read>(mut reader: R) -> Result<Self, String> {
+        // This is a simplified streaming reader for BTreeMap assuming it's an array of [key, value] pairs.
+        // It's not a full JSON parser, but sufficient for the expected format.
+        let mut map = BTreeMap::new();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        let json_node = JSONNode::from_json_string(&String::from_utf8(buf).map_err(|e| e.to_string())?)?;
+        Self::from_json(json_node)
+    }
 }
 
 impl<K, V> JSONConvertible for HashMap<K, V>
@@ -488,10 +581,36 @@ where
     }
 }
 
+// Add implementation for Arc<RwLock<T>>
+use std::sync::{Arc, RwLock}; // Make sure these are imported
+
+impl<T: JSONConvertible> JSONConvertible for Arc<RwLock<T>> {
+    fn to_json(&self) -> JSONNode {
+        self.read()
+            .expect("RwLock poisoned during JSON serialization")
+            .to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        T::from_json(node).map(|val| Arc::new(RwLock::new(val)))
+    }
+
+    fn to_writer<W: Write>(&self, writer: W) -> Result<(), String> {
+        self.read()
+            .map_err(|e| format!("RwLock poisoned during streaming serialization: {}", e))?
+            .to_writer(writer)
+    }
+
+    fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
+        T::from_json_reader(reader).map(|val| Arc::new(RwLock::new(val)))
+    }
+}
+
 // --- Tests (optional, but good for verifying) ---
 #[cfg(test)]
 mod tests {
     use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
+    use std::io::Cursor;
 
     // Example struct using the derive
     #[derive(Debug, Clone, PartialEq, JSONConvertible)]
@@ -824,5 +943,59 @@ mod tests {
         // Test wrong number of elements for deserialization
         let wrong_node = JSONNode::Array(vec![JSONNode::Int(1), JSONNode::Int(2)]);
         assert!(<(i32, String, bool)>::from_json(wrong_node).is_err());
+    }
+
+    #[test]
+    fn test_streaming_serialization_deserialization() {
+        let original = MyStruct {
+            field1: 42,
+            field2: "streaming test".to_string(),
+            optional_field: Some(false),
+            list_of_numbers: vec![10, 20],
+            byte_buffer: vec![1, 2, 3],
+        };
+
+        let mut buffer = Vec::new();
+        original.to_writer(&mut buffer).unwrap();
+
+        let deserialized = MyStruct::from_json_reader(Cursor::new(buffer)).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_streaming_btreemap() {
+        let mut original_map = BTreeMap::new();
+        original_map.insert("key1".to_string(), 100);
+        original_map.insert("key2".to_string(), 200);
+
+        let mut buffer = Vec::new();
+        original_map.to_writer(&mut buffer).unwrap();
+
+        let deserialized_map: BTreeMap<String, i32> = BTreeMap::from_json_reader(Cursor::new(buffer)).unwrap();
+        assert_eq!(original_map, deserialized_map);
+    }
+
+    #[test]
+    fn test_streaming_vec() {
+        let original_vec = vec![1, 2, 3];
+        let mut buffer = Vec::new();
+        original_vec.to_writer(&mut buffer).unwrap();
+
+        let deserialized_vec: Vec<i32> = Vec::from_json_reader(Cursor::new(buffer)).unwrap();
+        assert_eq!(original_vec, deserialized_vec);
+    }
+
+    #[test]
+    fn test_streaming_arc_rwlock() {
+        let original_inner = MyStruct {
+            field1: 1, field2: "arc_test".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
+        };
+        let original_arc = Arc::new(RwLock::new(original_inner.clone()));
+
+        let mut buffer = Vec::new();
+        original_arc.to_writer(&mut buffer).unwrap();
+
+        let deserialized_arc = Arc::<RwLock<MyStruct>>::from_json_reader(Cursor::new(buffer)).unwrap();
+        assert_eq!(*deserialized_arc.read().unwrap(), original_inner);
     }
 }
