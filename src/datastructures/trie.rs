@@ -68,9 +68,6 @@ where
     T: Clone + JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
-        let total_nodes = self.count_all_reachable_nodes();
-        let mut pb = tqdm!(total = total_nodes, desc = "Serializing Trie to JSON", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
         let mut nodes_json_list: Vec<JSONNode> = Vec::new();
         // Maps the raw pointer of an Arc<RwLock<Trie>> to its index in nodes_json_list
         let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie<EK, EV, T>>, usize> = HashMap::new();
@@ -132,7 +129,6 @@ where
             ("children".to_string(), JSONNode::Array(root_children_json_data)),
             ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
         ]));
-        let _ = pb.update(1);
 
 
         // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
@@ -189,7 +185,6 @@ where
                 ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
                 ("weak_children".to_string(), JSONNode::Array(current_node_weak_children_json_bfs)),
             ]));
-            let _ = pb.update(1);
         }
 
         JSONNode::Object(BTreeMap::from_iter(vec![
@@ -217,7 +212,6 @@ where
                 let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie<EK, EV, T>>>> = HashMap::new();
 
                 // Pass 1: Create node shells (value, max_depth, empty children)
-                let mut pb1 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 1/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
                         JSONNode::Object(n_obj) => {
@@ -235,12 +229,10 @@ where
                             deserialized_arcs.insert(i, new_node_arc);
                         }
                         _ => return Err(format!("Node data at index {} is not an object", i)),
-                    };
-                    let _ = pb1.update(1);
+                    }
                 }
 
                 // Pass 2: Link children by populating the `children` BTreeMaps
-                let mut pb2 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 2/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
                         JSONNode::Object(n_obj) => {
@@ -339,8 +331,7 @@ where
                             }
                         }
                         _ => unreachable!("Node data should be an object, checked in Pass 1"),
-                    };
-                    let _ = pb2.update(1);
+                    }
                 }
 
                 let root_arc_final = deserialized_arcs.get(&root_idx)
@@ -369,158 +360,6 @@ where
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         T::from_json(node).map(|val| Arc::new(RwLock::new(val)))
-    }
-}
-
-impl<EK, EV, T> Trie<EK, EV, T>
-where
-    EK: Ord + Clone + JSONConvertible + Debug,
-    EV: Clone + JSONConvertible,
-    T: Clone + JSONConvertible,
-{
-    /// Helper to create a `JSONNode` for a single Trie node, using a pre-populated map of child indices.
-    /// This avoids re-traversing the graph.
-    fn to_json_single_node(&self, arc_ptr_to_idx_map: &HashMap<*const RwLock<Trie<EK, EV, T>>, usize>) -> JSONNode {
-        let mut root_children_json_data = Vec::new();
-        let mut root_weak_children_json_data = Vec::new();
-
-        for (edge_key, destinations_map) in &self.children {
-            let ek_json = edge_key.to_json();
-            let mut strong_dests_json = Vec::new();
-            let mut weak_dests_json = Vec::new();
-
-            for (node_ptr, edge_val) in destinations_map {
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    let child_idx = *arc_ptr_to_idx_map.get(&child_arc_ptr)
-                        .expect("Child pointer not found in pre-computed index map during streaming serialization");
-
-                    let dest_entry = JSONNode::Array(vec![
-                        child_idx.to_json(),
-                        edge_val.to_json(),
-                    ]);
-                    if node_ptr.is_strong() {
-                        strong_dests_json.push(dest_entry);
-                    } else {
-                        weak_dests_json.push(dest_entry);
-                    }
-                }
-            }
-            if !strong_dests_json.is_empty() {
-                root_children_json_data.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(strong_dests_json)]));
-            }
-            if !weak_dests_json.is_empty() {
-                root_weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(weak_dests_json)]));
-            }
-        }
-
-        JSONNode::Object(BTreeMap::from_iter(vec![
-            ("value".to_string(), self.value.to_json()),
-            ("max_depth".to_string(), self.max_depth.to_json()),
-            ("children".to_string(), JSONNode::Array(root_children_json_data)),
-            ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
-        ]))
-    }
-
-    /// Serializes the Trie graph reachable from `self` to a writer in a streaming fashion.
-    /// This avoids allocating a giant `JSONNode` in memory for the entire graph.
-    pub fn stream_trie_to_writer(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        // --- Pass 1: Discover all nodes and assign indices ---
-        let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie<EK, EV, T>>, usize> = HashMap::new();
-        let mut indexed_nodes: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = Vec::new();
-        let mut bfs_q: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
-
-        // Discover children of `self` (the root, index 0)
-        for destinations_map in self.children.values() {
-            for node_ptr in destinations_map.keys() {
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    if arc_ptr_to_idx_map.get(&child_arc_ptr).is_none() {
-                        let new_idx = indexed_nodes.len() + 1; // 0 is root
-                        arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                        indexed_nodes.push(child_arc.clone());
-                        bfs_q.push_back(child_arc);
-                    }
-                }
-            }
-        }
-
-        // BFS to discover all other reachable nodes
-        while let Some(current_arc) = bfs_q.pop_front() {
-            let node_guard = current_arc.read().expect("RwLock poisoned during node discovery for streaming");
-            for destinations_map in node_guard.children.values() {
-                for node_ptr in destinations_map.keys() {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        let child_arc_ptr = Arc::as_ptr(&child_arc);
-                        if arc_ptr_to_idx_map.get(&child_arc_ptr).is_none() {
-                            let new_idx = indexed_nodes.len() + 1;
-                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                            indexed_nodes.push(child_arc.clone());
-                            bfs_q.push_back(child_arc);
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Pass 2: Stream JSON to writer ---
-        let total_nodes = indexed_nodes.len() + 1;
-        let mut pb = tqdm!(total = total_nodes, desc = "Streaming Trie to JSON", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-        writer.write_all(b"{\"root_idx\":0,\"nodes\":[")?;
-
-        // Serialize `self` as node 0, assuming JSONNode has a Display/to_string impl.
-        writer.write_all(self.to_json_single_node(&arc_ptr_to_idx_map).to_string().as_bytes())?;
-        let _ = pb.update(1);
-
-        // Serialize other nodes
-        for node_arc in indexed_nodes {
-            writer.write_all(b",")?;
-            let node_guard = node_arc.read().expect("RwLock poisoned during streaming serialization");
-            writer.write_all(node_guard.to_json_single_node(&arc_ptr_to_idx_map).to_string().as_bytes())?;
-            let _ = pb.update(1);
-        }
-
-        writer.write_all(b"]}")?;
-        Ok(())
-    }
-}
-
-impl<EK: Ord, EV, T> Trie<EK, EV, T> {
-    /// Counts all unique nodes reachable from `self` via strong or weak edges.
-    /// This is a helper for serialization progress bars.
-    fn count_all_reachable_nodes(&self) -> usize {
-        let mut count = 1; // for self
-        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
-        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
-
-        // Enqueue self's children
-        for destinations_map in self.children.values() {
-            for node_ptr in destinations_map.keys() {
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    if visited_arcs.insert(child_arc_ptr) {
-                        queue.push_back(child_arc);
-                    }
-                }
-            }
-        }
-
-        while let Some(node_arc) = queue.pop_front() {
-            count += 1;
-            let node_guard = node_arc.read().expect("RwLock poisoned during node count for serialization");
-            for destinations_map in node_guard.children.values() {
-                for node_ptr in destinations_map.keys() {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        let child_arc_ptr = Arc::as_ptr(&child_arc);
-                        if visited_arcs.insert(child_arc_ptr) {
-                            queue.push_back(child_arc);
-                        }
-                    }
-                }
-            }
-        }
-        count
     }
 }
 
