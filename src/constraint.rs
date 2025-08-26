@@ -499,7 +499,7 @@ impl GrammarConstraint {
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
                     // Restrict the GLR state to the LLM tokens allowed on this edge.
-                    crate::debug!(3, "Trie2: Restricting GLR state to edge bitset: {:?}", edge_bv);
+                    // crate::debug!(3, "Trie2: Restricting GLR state to edge bitset: {:?}", edge_bv);
                     allow_only_llm_tokens_and_prune_arc(
                         &mut glr_s_copy.active_state.stack,
                         edge_bv,
