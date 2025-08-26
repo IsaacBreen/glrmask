@@ -178,7 +178,7 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>, max_path_
 
         if node_guard.value.end {
             // The `path` is already normalized. The pending `current_k` is discarded as per original logic.
-            all_paths.entry(path)
+            all_paths.entry(path.clone())
                 .and_modify(|e| *e |= &bv)
                 .or_insert(bv.clone());
         }
