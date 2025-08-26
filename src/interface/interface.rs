@@ -12,7 +12,7 @@ use kdam::tqdm;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
-use std::fs;
+use std::{env, fs};
 use std::collections::BTreeMap as StdMap;
 use crate::glr::analyze::{simplify_grammar};
 use crate::glr::grammar::regex_name;
@@ -637,7 +637,7 @@ impl GrammarDefinition {
                         resolving_stack,
                     );
                     resolving_stack.remove(name);
-                    
+
                     let resolved_expr = result?;
                     memo.insert(name.clone(), resolved_expr.clone());
                     Ok(resolved_expr)
@@ -723,7 +723,10 @@ impl GrammarDefinition {
         ];
         let start_production_id = 0; // The augmented start production is always the first one.
 
-        for (name, expr) in tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED, leave=false) {
+        let it = grammar_exprs.iter();
+        #[cfg(not(rustrover))]
+        let it = tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED, leave=false, desc = "Converting grammar expressions to productions");
+        for (name, expr) in it {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
