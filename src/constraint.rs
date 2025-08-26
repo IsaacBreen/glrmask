@@ -15,6 +15,9 @@ use std::ops::{BitOr, BitOrAssign};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::{Arc};
 use std::cell::RefCell;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -159,75 +162,171 @@ impl JSONConvertible for GrammarConstraint {
 type NormalizedPath = Vec<(usize, StateID)>;
 type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
 
-/// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
-/// Each path is associated with the intersection of LLM token bitvectors along its edges.
-fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>, max_path_length: usize) -> PathMap {
-    let mut all_paths = PathMap::new();
-    // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
-    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
+/// Samples one normalized path and its associated LLMTokenBV.
+fn sample_normalized_path(
+    root: &Arc<RwLock<PrecomputeNode2>>,
+    rng: &mut impl Rng,
+    max_path_length: usize,
+) -> Option<(NormalizedPath, LLMTokenBV)> {
+    let mut current_node = root.clone();
+    let mut path = Vec::new();
+    let mut current_k = 0;
+    let mut current_bv = root.read().unwrap().value.live_tokens.clone();
 
-    let initial_bv = root.read().unwrap().value.live_tokens.clone();
-    q.push_back((root.clone(), vec![], 0, initial_bv));
+    for _ in 0..max_path_length {
+        let guard = current_node.read().unwrap();
 
-    // Visited key: (node_ptr, normalized path, pending_k)
-    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, NormalizedPath, usize), LLMTokenBV> = HashMap::new();
-    visited.insert((Arc::as_ptr(root), vec![], 0), root.read().unwrap().value.live_tokens.clone());
-
-    while let Some((node_arc, path, current_k, bv)) = q.pop_front() {
-        let node_guard = node_arc.read().unwrap();
-
-        if node_guard.value.end {
-            // The `path` is already normalized. The pending `current_k` is discarded as per original logic.
-            all_paths.entry(path.clone())
-                .and_modify(|e| *e |= &bv)
-                .or_insert(bv.clone());
+        // With some probability, if we are at an end node, we terminate.
+        if guard.value.end && rng.gen_bool(0.2) { // 20% chance to terminate at an end node
+            return Some((path, current_bv));
         }
 
-        for (ek, dest_map) in node_guard.children() {
+        let mut possible_moves = Vec::new();
+        for (ek, dest_map) in guard.children() {
+            for (child_ptr, edge_bv) in dest_map {
+                let intersection = &current_bv & edge_bv;
+                if !intersection.is_empty() {
+                    if let Some(child_arc) = child_ptr.upgrade() {
+                        possible_moves.push((ek.clone(), child_arc, intersection));
+                    }
+                }
+            }
+        }
+
+        if possible_moves.is_empty() {
+            // Dead end. If it's an end node, it's a valid path.
+            if guard.value.end {
+                return Some((path, current_bv));
+            }
+            return None;
+        }
+
+        let (chosen_ek, chosen_child, new_bv) = possible_moves.choose(rng).unwrap().clone();
+        
+        let (k, sid_opt) = chosen_ek;
+        current_k += k;
+        if let Some(sid) = sid_opt {
+            path.push((current_k, sid));
+            current_k = 0;
+        }
+
+        current_node = chosen_child;
+        current_bv = new_bv;
+    }
+
+    // If we hit max_path_length, check if current node is an end node.
+    if current_node.read().unwrap().value.end {
+        Some((path, current_bv))
+    } else {
+        None
+    }
+}
+
+// Finds all ways to produce a normalized path and returns the union of their LLMTokenBVs.
+fn get_bvs_for_normalized_path(
+    root: &Arc<RwLock<PrecomputeNode2>>,
+    path_to_check: &NormalizedPath,
+) -> LLMTokenBV {
+    // State: (current_node, path_idx, pending_k, accumulated_bv)
+    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, usize, usize, LLMTokenBV)> = VecDeque::new();
+    let mut final_bv = LLMTokenBV::zeros();
+
+    let initial_bv = root.read().unwrap().value.live_tokens.clone();
+    q.push_back((root.clone(), 0, 0, initial_bv));
+
+    // Visited key: (node_ptr, path_idx, pending_k)
+    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, usize, usize), LLMTokenBV> = HashMap::new();
+    visited.insert((Arc::as_ptr(root), 0, 0), initial_bv);
+
+    while let Some((node, path_idx, current_k, bv)) = q.pop_front() {
+        let guard = node.read().unwrap();
+
+        if path_idx == path_to_check.len() {
+            // We have matched the whole path. Now, from this node, we need to reach an end node
+            // through a path of only (k, None) edges, with current_k being 0.
+            if current_k == 0 {
+                let mut end_q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, LLMTokenBV)> = VecDeque::new();
+                end_q.push_back((node.clone(), bv.clone()));
+                let mut end_visited: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
+                end_visited.insert(Arc::as_ptr(&node));
+
+                while let Some((end_node, end_bv)) = end_q.pop_front() {
+                    let end_guard = end_node.read().unwrap();
+                    if end_guard.value.end {
+                        final_bv |= &end_bv;
+                    }
+                    for (ek, dest_map) in end_guard.children() {
+                        if ek.1.is_none() { // Only (k, None) edges
+                            for (child_ptr, edge_bv) in dest_map {
+                                let new_bv = &end_bv & edge_bv;
+                                if !new_bv.is_empty() {
+                                    if let Some(child_arc) = child_ptr.upgrade() {
+                                        if end_visited.insert(Arc::as_ptr(&child_arc)) {
+                                            end_q.push_back((child_arc, new_bv));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Try to match the next segment of the path
+        let (target_k, target_sid) = path_to_check[path_idx];
+
+        for (ek, dest_map) in guard.children() {
             for (child_ptr, edge_bv) in dest_map {
                 let new_bv = &bv & edge_bv;
                 if new_bv.is_empty() { continue; }
 
                 if let Some(child_arc) = child_ptr.upgrade() {
                     let (k, sid_opt) = ek;
-                    let mut new_k = current_k + *k;
-                    let mut new_path = path.clone();
-
-                    if let Some(sid) = sid_opt {
-                        new_path.push((new_k, *sid));
-                        new_k = 0;
-                    }
-
-                    if new_path.len() > max_path_length {
-                        continue;
-                    }
-
-
-                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
-
-                    if let Some(existing_bv) = visited.get_mut(&visited_key) {
-                        let new_tokens = &new_bv - &*existing_bv;
-                        if new_tokens.is_empty() {
-                            continue;
+                    
+                    if let Some(sid) = *sid_opt {
+                        if sid == target_sid && current_k + *k == target_k {
+                            // Matched a path segment
+                            let visited_key = (Arc::as_ptr(&child_arc), path_idx + 1, 0);
+                            if let Some(existing_bv) = visited.get_mut(&visited_key) {
+                                let new_tokens = &new_bv - &*existing_bv;
+                                if !new_tokens.is_empty() {
+                                    *existing_bv |= &new_tokens;
+                                    q.push_back((child_arc, path_idx + 1, 0, new_tokens));
+                                }
+                            } else {
+                                visited.insert(visited_key, new_bv.clone());
+                                q.push_back((child_arc, path_idx + 1, 0, new_bv));
+                            }
                         }
-                        *existing_bv |= &new_tokens;
-                        q.push_back((child_arc, new_path, new_k, new_tokens));
                     } else {
-                        visited.insert(visited_key, new_bv.clone());
-                        q.push_back((child_arc, new_path, new_k, new_bv));
+                        // (k, None) edge, just accumulate k
+                        if current_k + *k <= target_k {
+                            let visited_key = (Arc::as_ptr(&child_arc), path_idx, current_k + *k);
+                            if let Some(existing_bv) = visited.get_mut(&visited_key) {
+                                let new_tokens = &new_bv - &*existing_bv;
+                                if !new_tokens.is_empty() {
+                                    *existing_bv |= &new_tokens;
+                                    q.push_back((child_arc, path_idx, current_k + *k, new_tokens));
+                                }
+                            } else {
+                                visited.insert(visited_key, new_bv.clone());
+                                q.push_back((child_arc, path_idx, current_k + *k, new_bv));
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    all_paths
+    final_bv
 }
 
-/// Checks for semantic equivalence between two `precompute2` trees.
+/// Checks for semantic equivalence between two `precompute2` trees using stochastic sampling.
 ///
-/// Two trees are considered equivalent if they generate the same set of "normalized paths",
-/// where each path is associated with a bitvector of applicable LLM tokens.
-/// A normalized path collapses consecutive edge keys of the form `(k, None)`.
+/// Two trees are considered equivalent if, for a number of randomly sampled paths,
+/// the set of allowed LLM tokens for that path is identical in both trees.
 ///
 /// # Arguments
 /// * `a`: An `Arc` to the first trie's root node.
@@ -235,12 +334,42 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>, max_path_
 ///
 /// # Returns
 /// `true` if the tries are semantically equivalent, `false` otherwise.
+/// `true` if the tries are semantically equivalent based on sampling, `false` otherwise.
 pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
     if Arc::ptr_eq(a, b) { return true; }
-    const MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK: usize = 32;
-    let paths_a = get_normalized_paths_from_root(a, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
-    let paths_b = get_normalized_paths_from_root(b, MAX_PATH_LEN_FOR_EQUIVALENCE_CHECK);
-    paths_a == paths_b
+
+    const NUM_SAMPLES: usize = 200;
+    const MAX_PATH_LEN: usize = 32;
+
+    let mut rng = StdRng::seed_from_u64(42); // Deterministic for tests
+
+    for _i in 0..NUM_SAMPLES {
+        // Sample from A, check in B
+        if let Some((path, bv_a)) = sample_normalized_path(a, &mut rng, MAX_PATH_LEN) {
+            let bv_b = get_bvs_for_normalized_path(b, &path);
+            if bv_a != bv_b {
+                println!("Stochastic equivalence check failed (sample from A):");
+                println!("Path: {:?}", path);
+                println!("BV from A: {} tokens", bv_a.len());
+                println!("BV from B: {} tokens", bv_b.len());
+                return false;
+            }
+        }
+
+        // Sample from B, check in A
+        if let Some((path, bv_b)) = sample_normalized_path(b, &mut rng, MAX_PATH_LEN) {
+            let bv_a = get_bvs_for_normalized_path(a, &path);
+            if bv_a != bv_b {
+                println!("Stochastic equivalence check failed (sample from B):");
+                println!("Path: {:?}", path);
+                println!("BV from B: {} tokens", bv_b.len());
+                println!("BV from A: {} tokens", bv_a.len());
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 
