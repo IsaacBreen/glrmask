@@ -1,20 +1,97 @@
+//! Precompute2 optimization equivalence tests.
+//!
+//! This suite verifies that applying optimization passes to the Precompute2
+//! trie graph preserves its semantics by comparing the optimized result
+//! against an unoptimized baseline using are_precompute2_trees_equivalent.
+//!
+//! We keep tests compact by:
+//! - Defining grammars via inline EBNF strings.
+//! - Using small, explicit LLM vocabularies.
+//! - Factoring common logic into small helpers.
+
 use crate::constraint::{
     are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2,
 };
-use crate::json_serialization::JSONConvertible;
 use crate::interface::{CompiledGrammar, GrammarDefinition};
+use crate::json_serialization::JSONConvertible;
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-use std::collections::{BTreeMap, BTreeSet};
+use reqwest::blocking;
+use std::collections::BTreeMap;
+use std::error::Error;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use reqwest::blocking;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use std::error::Error;
 
-// Helper function copied from test_constraint_js.rs
+//
+// -------------------------------
+// Common helpers
+// -------------------------------
+//
+
+fn compiled_from_ebnf_str(ebnf: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
+    let def = GrammarDefinition::from_ebnf_str(ebnf)?;
+    Ok(CompiledGrammar::from_definition(Arc::new(def)))
+}
+
+fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
+    let mut map = LLMTokenMap::new();
+    let mut max_id = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        map.insert(t.as_bytes().to_vec(), LLMTokenID(i));
+        max_id = max_id.max(i);
+    }
+    (map, max_id)
+}
+
+fn assert_optimized_equivalent(original_precomputed2: &Precomputed2) {
+    // Deep clone the original precomputed2 tree(s)
+    let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+    for (sid, root_arc) in original_precomputed2.iter() {
+        let (cloned_root, _map) = clone_trie2_graph(root_arc);
+        optimized_precomputed2.insert(*sid, cloned_root);
+    }
+
+    // Apply optimization passes
+    context_aware_merge_trie2(&mut optimized_precomputed2);
+
+    // Compare the original and optimized trees for semantic equivalence
+    assert_eq!(
+        original_precomputed2.len(),
+        optimized_precomputed2.len(),
+        "Number of tokenizer states with trees differs."
+    );
+
+    for sid in original_precomputed2.keys() {
+        let original_root = original_precomputed2.get(sid).unwrap();
+        let optimized_root = optimized_precomputed2.get(sid).unwrap();
+        assert!(
+            are_precompute2_trees_equivalent(original_root, optimized_root),
+            "Mismatch found for tokenizer state ID: {}",
+            sid.0
+        );
+    }
+}
+
+fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
+    let compiled = compiled_from_ebnf_str(ebnf)?;
+    let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
+    let gc = GrammarConstraint::from_compiled_grammar(
+        compiled,
+        llm_token_map,
+        LLMTokenID(0), // dummy EOF placeholder
+        max_original_llm_token_id,
+    );
+    assert_optimized_equivalent(&gc.precomputed2);
+    Ok(())
+}
+
+//
+// -------------------------------
+// Specialized JS test (large grammar + GPT-2 subset vocab)
+// -------------------------------
+//
+
 fn load_or_download_gpt2_vocab(
     cache_dir: &Path,
     file_name: &str,
@@ -44,9 +121,9 @@ fn load_or_download_gpt2_vocab(
 
 #[cfg(not(rustrover))]
 #[test]
-fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::error::Error>> {
+fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
     // --- Setup Phase ---
-    println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
+    println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
     const FORCE_RECOMPUTE: bool = false;
     const SAVE_TO_CACHE: bool = false;
@@ -54,6 +131,7 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use crate::json_serialization;
+
     let cache_dir = Path::new(".cache/test_precompute2");
     fs::create_dir_all(cache_dir)?;
     let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
@@ -92,7 +170,6 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
         println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
         let file = File::open(&precomputed2_cache_path)?;
         let decompressor = GzDecoder::new(BufReader::new(file));
-        // Reading is not fully streamed to avoid complexity, but this avoids storing the huge uncompressed file on disk.
         original_precomputed2 = Precomputed2::from_json_reader(decompressor)?;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
@@ -116,33 +193,230 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
         }
     }
 
-    // 4. Deep-clone the original precomputed2 tree.
-    println!("\nCloning the original precomputed2 tree...");
-    let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
-    for (sid, root_arc) in original_precomputed2.iter() {
-        let (cloned_root, _map) = clone_trie2_graph(root_arc);
-        optimized_precomputed2.insert(*sid, cloned_root);
-    }
-    println!("Cloning complete.");
+    // 4. Assert that the optimized result is equivalent to the baseline.
+    assert_optimized_equivalent(&original_precomputed2);
 
-    // 5. Apply optimization passes to the cloned tree.
-    println!("\nApplying optimization passes to the cloned tree...");
-    context_aware_merge_trie2(&mut optimized_precomputed2);
-    println!("Optimization passes applied.");
-
-    // 6. Compare the original and optimized trees for semantic equivalence.
-    println!("\nComparing original and optimized trees for equivalence...");
-    assert_eq!(original_precomputed2.len(), optimized_precomputed2.len(), "Number of tokenizer states with trees differs.");
-
-    for sid in original_precomputed2.keys() {
-        let original_root = original_precomputed2.get(sid).unwrap();
-        let optimized_root = optimized_precomputed2.get(sid).unwrap();
-
-        assert!(are_precompute2_trees_equivalent(original_root, optimized_root), "Mismatch found for tokenizer state ID: {}", sid.0);
-        println!("  - OK for tokenizer state ID: {}", sid.0);
-    }
-
-    println!("\nEquivalence test passed: All trees are semantically equivalent after optimization.");
+    println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
 
     Ok(())
+}
+
+//
+// -------------------------------
+// Compact tests using inline EBNF
+// (based on grammars in test_constraint_basic.rs)
+// -------------------------------
+//
+
+// Trivial: S -> A EOF; A -> 'a'; EOF -> '$'
+#[test]
+fn test_p2_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= A EOF;
+        A ::= 'a';
+        EOF ::= '$';
+    "#;
+    let llm = ["a", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Simple choice: S -> X EOF; X -> A B_OR_C | AB
+#[test]
+fn test_p2_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= X EOF;
+        X ::= A B_OR_C | AB;
+        A ::= 'a';
+        B_OR_C ::= 'b' | 'c';
+        AB ::= 'ab';
+        EOF ::= '$';
+    "#;
+    let llm = ["ab", "ac", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Expression grammar (E -> E + T | T; T -> T * F | F; F -> (E) | i)
+#[test]
+fn test_p2_opt_expression_full() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= E PLUS T | T;
+        T ::= T TIMES F | F;
+        F ::= LPAREN E RPAREN | I;
+
+        PLUS ::= '+';
+        TIMES ::= '*';
+        LPAREN ::= '(';
+        RPAREN ::= ')';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["i", "+", "*", "(", ")", "(i", "+i", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Expression (no '*'): E -> E + T | T; T -> F; F -> (E) | i
+#[test]
+fn test_p2_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= E PLUS T | T;
+        T ::= F;
+        F ::= LPAREN E RPAREN | I;
+
+        PLUS ::= '+';
+        LPAREN ::= '(';
+        RPAREN ::= ')';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["i", "+", "(", ")", "(i", "+i", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Expression (no parens): E -> E + T | T; T -> T * F | F; F -> i
+#[test]
+fn test_p2_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= E PLUS T | T;
+        T ::= T TIMES F | F;
+        F ::= I;
+
+        PLUS ::= '+';
+        TIMES ::= '*';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["i", "+", "*", "+i", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Expression (no '+' or '*'): E -> T; T -> F; F -> (E) | i
+#[test]
+fn test_p2_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= T;
+        T ::= F;
+        F ::= LPAREN E RPAREN | I;
+
+        LPAREN ::= '(';
+        RPAREN ::= ')';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["i", "(", ")", "(i", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Direct recursion: E -> '(' E | 'i'; S -> E EOF
+#[test]
+fn test_p2_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= LPAREN E | I;
+
+        LPAREN ::= '(';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["i", "(", "(i", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Same as above, but limited vocab: only "(i" (to exercise multi-grammar-token LLM token)
+#[test]
+fn test_p2_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= LPAREN E | I;
+
+        LPAREN ::= '(';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["(i"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Unbalanced parens variant (F -> '(' E | 'i')
+#[test]
+fn test_p2_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= E EOF;
+        E ::= T;
+        T ::= F;
+        F ::= LPAREN E | I;
+
+        LPAREN ::= '(';
+        I ::= 'i';
+        EOF ::= '$';
+    "#;
+    let llm = ["i", "(", "(i", "$"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Indirect recursion simplified: S -> 'a' E | 'b'; E -> S
+#[test]
+fn test_p2_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= A E | B;
+        E ::= S;
+
+        A ::= 'a';
+        B ::= 'b';
+    "#;
+    let llm = ["a", "b"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Repetition: S ::= A*, A ::= 'a'
+#[test]
+fn test_p2_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= A*;
+        A ::= 'a';
+    "#;
+    let llm = ["a"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// a+ token: S ::= A_PLUS; A_PLUS ::= 'a'+
+#[test]
+fn test_p2_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= A_PLUS;
+        A_PLUS ::= 'a'+;
+    "#;
+    let llm = ["a", "aaa"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// Ignore whitespace: WS ignored between tokens. S ::= A B; A='a'; B='b'; WS=' '
+// LLM tokens include "a", " ", "b", "a b"
+#[test]
+fn test_p2_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        #![ignore(WS)]
+        S ::= A B;
+        A ::= 'a';
+        B ::= 'b';
+        WS ::= ' '+;
+    "#;
+    let llm = ["a", " ", "b", "a b"];
+    run_equivalence_test(ebnf, &llm)
+}
+
+// 'x' SPACE+ '=' pattern (compact variant of x_eq)
+#[test]
+fn test_p2_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
+    let ebnf = r#"
+        S ::= X SPACE EQUALS;
+        X ::= 'x';
+        SPACE ::= ' '+;
+        EQUALS ::= '=';
+    "#;
+    let llm = ["x", " ="];
+    run_equivalence_test(ebnf, &llm)
 }
