@@ -106,14 +106,14 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
         println!("GrammarConstraint constructed successfully.");
         original_precomputed2 = grammar_constraint.precomputed2;
 
-        println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
         if SAVE_TO_CACHE {
+            println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
             let file = File::create(&precomputed2_cache_path)?;
             let writer = BufWriter::new(file);
             let mut encoder = GzEncoder::new(writer, Compression::default());
             json_serialization::write_precomputed2_to_stream(&original_precomputed2, &mut encoder)?;
+            println!("Successfully saved Precomputed2 to cache.");
         }
-        println!("Successfully saved Precomputed2 to cache.");
     }
 
     // 4. Deep-clone the original precomputed2 tree.
