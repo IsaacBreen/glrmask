@@ -30,7 +30,7 @@ use std::sync::Arc;
 //
 
 fn compiled_from_ebnf_str(ebnf: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
-    let def = GrammarDefinition::from_ebnf_str(ebnf)?;
+    let def = GrammarDefinition::from_ebnf(ebnf)?;
     Ok(CompiledGrammar::from_definition(Arc::new(def)))
 }
 
