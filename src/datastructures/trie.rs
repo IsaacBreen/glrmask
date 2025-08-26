@@ -68,6 +68,9 @@ where
     T: Clone + JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
+        let total_nodes = self.count_reachable_nodes();
+        let mut pb = tqdm!(total = total_nodes, desc = "Serializing Trie", disable = !PROGRESS_BAR_ENABLED);
+
         let mut nodes_json_list: Vec<JSONNode> = Vec::new();
         // Maps the raw pointer of an Arc<RwLock<Trie>> to its index in nodes_json_list
         let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie<EK, EV, T>>, usize> = HashMap::new();
@@ -129,6 +132,7 @@ where
             ("children".to_string(), JSONNode::Array(root_children_json_data)),
             ("weak_children".to_string(), JSONNode::Array(root_weak_children_json_data)),
         ]));
+        let _ = pb.update(1);
 
 
         // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
@@ -185,6 +189,7 @@ where
                 ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
                 ("weak_children".to_string(), JSONNode::Array(current_node_weak_children_json_bfs)),
             ]));
+            let _ = pb.update(1);
         }
 
         JSONNode::Object(BTreeMap::from_iter(vec![
@@ -211,6 +216,8 @@ where
 
                 let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie<EK, EV, T>>>> = HashMap::new();
 
+                let mut pb1 = tqdm!(total = nodes_array.len(), desc = "Deserializing Trie (pass 1/2)", disable = !PROGRESS_BAR_ENABLED);
+
                 // Pass 1: Create node shells (value, max_depth, empty children)
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
                     match node_data_json {
@@ -230,10 +237,14 @@ where
                         }
                         _ => return Err(format!("Node data at index {} is not an object", i)),
                     }
+                    let _ = pb1.update(1);
                 }
+
+                let mut pb2 = tqdm!(total = nodes_array.len(), desc = "Deserializing Trie (pass 2/2)", disable = !PROGRESS_BAR_ENABLED);
 
                 // Pass 2: Link children by populating the `children` BTreeMaps
                 for (i, node_data_json) in nodes_array.iter().enumerate() {
+                    let _ = pb2.update(1);
                     match node_data_json {
                         JSONNode::Object(n_obj) => {
                             let current_node_arc = deserialized_arcs.get(&i)
@@ -779,6 +790,37 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             // node_guard lock is released here
         }
         result
+    }
+
+    /// Counts all unique nodes reachable from `self`.
+    fn count_reachable_nodes(&self) -> usize {
+        let mut visited: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        // Seed queue with direct children of `self`
+        for dest_map in self.children.values() {
+            for node_ptr in dest_map.keys() {
+                if let Some(child_arc) = node_ptr.upgrade() {
+                    if visited.insert(Arc::as_ptr(&child_arc)) {
+                        queue.push_back(child_arc);
+                    }
+                }
+            }
+        }
+
+        while let Some(arc) = queue.pop_front() {
+            let guard = arc.read().unwrap();
+            for dest_map in guard.children.values() {
+                for node_ptr in dest_map.keys() {
+                    if let Some(child_arc) = node_ptr.upgrade() {
+                        if visited.insert(Arc::as_ptr(&child_arc)) {
+                            queue.push_back(child_arc);
+                        }
+                    }
+                }
+            }
+        }
+        1 + visited.len() // 1 for self, plus all unique descendants
     }
 
     /// Checks if there are any cycles reachable from the given `root_arc`.
