@@ -41,7 +41,7 @@ fn load_or_download_gpt2_vocab(
 }
 
 #[test]
-fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::error::Error>> {
+fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
     // --- Setup Phase ---
     println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
 
