@@ -56,7 +56,7 @@ fn stream_trie_to_writer<W: Write>(
 
     let mut head = 0;
     while head < idx_to_arc.len() {
-        let current_arc = &idx_to_arc[head];
+        let current_arc = idx_to_arc[head].clone();
         head += 1;
 
         let guard = current_arc.read().map_err(|_| "RwLock poisoned during discovery".to_string())?;
