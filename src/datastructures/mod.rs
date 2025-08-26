@@ -9,6 +9,7 @@ pub mod hybrid_l2_bitset;
 pub mod arc_wrapper;
 pub mod ordered_hash_map;
 pub mod cache;
-mod entry_api;
+pub mod entry_api;
 
 pub use arc_wrapper::ArcPtrWrapper;
+pub use entry_api::{EntryApi, OrderedMapEntry};
