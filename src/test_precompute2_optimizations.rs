@@ -173,7 +173,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
         original_precomputed2 = Precomputed2::from_json_reader(decompressor)?;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
-        println!("\nConstructing GrammarConstraint (will generate Precomputed2)...");
+        println!("\nConstructing GrammarConstraint (will generate Precompute2)...");
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(
             compiled_grammar.clone(),
             llm_token_map.clone(),
@@ -208,11 +208,11 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
 // -------------------------------
 //
 
-// Trivial: S -> A EOF; A -> 'a'; EOF -> '$'
+// Trivial: s -> A EOF; A -> 'a'; EOF -> '$'
 #[test]
 fn test_p2_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= A EOF;
+        s ::= A EOF;
         A ::= 'a';
         EOF ::= '$';
     "#;
@@ -220,12 +220,12 @@ fn test_p2_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Simple choice: S -> X EOF; X -> A B_OR_C | AB
+// Simple choice: s -> x EOF; x -> A B_OR_C | AB
 #[test]
 fn test_p2_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= X EOF;
-        X ::= A B_OR_C | AB;
+        s ::= x EOF;
+        x ::= A B_OR_C | AB;
         A ::= 'a';
         B_OR_C ::= 'b' | 'c';
         AB ::= 'ab';
@@ -235,14 +235,14 @@ fn test_p2_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Expression grammar (E -> E + T | T; T -> T * F | F; F -> (E) | i)
+// Expression grammar (e -> e + t | t; t -> t * f | f; f -> (e) | i)
 #[test]
 fn test_p2_opt_expression_full() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= E PLUS T | T;
-        T ::= T TIMES F | F;
-        F ::= LPAREN E RPAREN | I;
+        s ::= e EOF;
+        e ::= e PLUS t | t;
+        t ::= t TIMES f | f;
+        f ::= LPAREN e RPAREN | I;
 
         PLUS ::= '+';
         TIMES ::= '*';
@@ -255,14 +255,14 @@ fn test_p2_opt_expression_full() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Expression (no '*'): E -> E + T | T; T -> F; F -> (E) | i
+// Expression (no '*'): e -> e + t | t; t -> f; f -> (e) | i
 #[test]
 fn test_p2_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= E PLUS T | T;
-        T ::= F;
-        F ::= LPAREN E RPAREN | I;
+        s ::= e EOF;
+        e ::= e PLUS t | t;
+        t ::= f;
+        f ::= LPAREN e RPAREN | I;
 
         PLUS ::= '+';
         LPAREN ::= '(';
@@ -274,14 +274,14 @@ fn test_p2_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Expression (no parens): E -> E + T | T; T -> T * F | F; F -> i
+// Expression (no parens): e -> e + t | t; t -> t * f | f; f -> i
 #[test]
 fn test_p2_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= E PLUS T | T;
-        T ::= T TIMES F | F;
-        F ::= I;
+        s ::= e EOF;
+        e ::= e PLUS t | t;
+        t ::= t TIMES f | f;
+        f ::= I;
 
         PLUS ::= '+';
         TIMES ::= '*';
@@ -292,14 +292,14 @@ fn test_p2_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Expression (no '+' or '*'): E -> T; T -> F; F -> (E) | i
+// Expression (no '+' or '*'): e -> t; t -> f; f -> (e) | i
 #[test]
 fn test_p2_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= T;
-        T ::= F;
-        F ::= LPAREN E RPAREN | I;
+        s ::= e EOF;
+        e ::= t;
+        t ::= f;
+        f ::= LPAREN e RPAREN | I;
 
         LPAREN ::= '(';
         RPAREN ::= ')';
@@ -310,12 +310,12 @@ fn test_p2_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Direct recursion: E -> '(' E | 'i'; S -> E EOF
+// Direct recursion: e -> '(' e | 'i'; s -> e EOF
 #[test]
 fn test_p2_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= LPAREN E | I;
+        s ::= e EOF;
+        e ::= LPAREN e | I;
 
         LPAREN ::= '(';
         I ::= 'i';
@@ -329,8 +329,8 @@ fn test_p2_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
 #[test]
 fn test_p2_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= LPAREN E | I;
+        s ::= e EOF;
+        e ::= LPAREN e | I;
 
         LPAREN ::= '(';
         I ::= 'i';
@@ -340,14 +340,14 @@ fn test_p2_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn E
     run_equivalence_test(ebnf, &llm)
 }
 
-// Unbalanced parens variant (F -> '(' E | 'i')
+// Unbalanced parens variant (f -> '(' e | 'i')
 #[test]
 fn test_p2_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= E EOF;
-        E ::= T;
-        T ::= F;
-        F ::= LPAREN E | I;
+        s ::= e EOF;
+        e ::= t;
+        t ::= f;
+        f ::= LPAREN e | I;
 
         LPAREN ::= '(';
         I ::= 'i';
@@ -357,12 +357,12 @@ fn test_p2_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Indirect recursion simplified: S -> 'a' E | 'b'; E -> S
+// Indirect recursion simplified: s -> 'a' e | 'b'; e -> s
 #[test]
 fn test_p2_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= A E | B;
-        E ::= S;
+        s ::= A e | B;
+        e ::= s;
 
         A ::= 'a';
         B ::= 'b';
@@ -371,35 +371,35 @@ fn test_p2_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
     run_equivalence_test(ebnf, &llm)
 }
 
-// Repetition: S ::= A*, A ::= 'a'
+// Repetition: s ::= A*, A ::= 'a'
 #[test]
 fn test_p2_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= A*;
+        s ::= A*;
         A ::= 'a';
     "#;
     let llm = ["a"];
     run_equivalence_test(ebnf, &llm)
 }
 
-// a+ token: S ::= A_PLUS; A_PLUS ::= 'a'+
+// a+ token: s ::= A_PLUS; A_PLUS ::= 'a'+
 #[test]
 fn test_p2_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= A_PLUS;
+        s ::= A_PLUS;
         A_PLUS ::= 'a'+;
     "#;
     let llm = ["a", "aaa"];
     run_equivalence_test(ebnf, &llm)
 }
 
-// Ignore whitespace: WS ignored between tokens. S ::= A B; A='a'; B='b'; WS=' '
+// Ignore whitespace: WS ignored between tokens. s ::= A B; A='a'; B='b'; WS=' '
 // LLM tokens include "a", " ", "b", "a b"
 #[test]
 fn test_p2_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         #![ignore(WS)]
-        S ::= A B;
+        s ::= A B;
         A ::= 'a';
         B ::= 'b';
         WS ::= ' '+;
@@ -412,7 +412,7 @@ fn test_p2_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
 #[test]
 fn test_p2_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
-        S ::= X SPACE EQUALS;
+        s ::= X SPACE EQUALS;
         X ::= 'x';
         SPACE ::= ' '+;
         EQUALS ::= '=';
