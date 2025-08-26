@@ -1112,6 +1112,9 @@ fn trie2_skeleton_hash(
     if let Some(h) = memo.get(&ptr) {
         return *h;
     }
+    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+    memo.insert(ptr, 0);
+
     let g = arc.read().expect("poison");
     let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
     g.value.end.hash(&mut hasher);
@@ -1212,6 +1215,9 @@ fn trie2_masked_shape_hash(
     let ptr = Arc::as_ptr(arc);
     let mfp = bv_fp(mask);
     if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+
+    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+    memo.insert((ptr, mfp), 0);
 
     let g = arc.read().expect("poison");
     let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());

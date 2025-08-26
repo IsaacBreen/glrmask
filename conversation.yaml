@@ -639,10 +639,14 @@ local_system:
                       }
                   }
               }
+
+
+              // Clean up after rewiring
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
-              simplify_trie2_zero_none_edges(&mut precomputed2);
+              // simplify_trie2_zero_none_edges(&mut precomputed2);
+              context_aware_merge_trie2(&mut precomputed2);
               // merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -1050,6 +1054,439 @@ local_system:
           }
 
           crate::debug!(2, "Done simplifying trie 2 (0, None) edges.");
+      }
+
+      // Context-aware Trie2 merging (conservative, masked, cycle-safe)
+
+      fn build_incoming_maps_trie2(
+          roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+      ) -> (
+          HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
+          HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+      ) {
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(&roots_vec);
+
+          // ptr -> Arc
+          let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+          for n in &all_nodes {
+              arc_map.insert(Arc::as_ptr(n), n.clone());
+          }
+
+          // incoming edges and union of incoming EVs
+          let mut incoming: HashMap<
+              *const RwLock<PrecomputeNode2>,
+              Vec<(Arc<RwLock<PrecomputeNode2>>, EdgeKey2, bool, LLMTokenBV)>
+          > = HashMap::new();
+          let mut incoming_union: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+          for src in &all_nodes {
+              let src_ptr = Arc::as_ptr(src);
+              let g = src.read().expect("poison");
+              for (ek, dest_map) in g.children() {
+                  for (np, ev) in dest_map.iter() {
+                      if let Some(dst) = np.upgrade() {
+                          let dst_ptr = Arc::as_ptr(&dst);
+                          let is_strong = np.is_strong();
+                          incoming.entry(dst_ptr).or_default().push((src.clone(), ek.clone(), is_strong, ev.clone()));
+                          incoming_union.entry(dst_ptr).and_modify(|u| *u |= ev).or_insert(ev.clone());
+                      }
+                  }
+              }
+              // make sure we have keys for nodes with 0 incoming (union stays zeros)
+              incoming.entry(src_ptr).or_default();
+              incoming_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+          }
+
+          (incoming, incoming_union, arc_map)
+      }
+
+      fn bv_fp(mask: &LLMTokenBV) -> u64 {
+          use std::collections::hash_map::DefaultHasher;
+          let mut h = DeterministicHasher::new(DefaultHasher::new());
+          mask.hash(&mut h);
+          h.finish()
+      }
+
+      /// Structural hash that ignores edge BVs, but keeps end flag, edge keys, strong-vs-weak, and structure.
+      fn trie2_skeleton_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          if let Some(h) = memo.get(&ptr) {
+              return *h;
+          }
+          let g = arc.read().expect("poison");
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+          g.value.end.hash(&mut hasher);
+
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in g.children() {
+              for (np, _ev) in dest_map {
+                  let child = np.upgrade().expect("dangling weak in skeleton hash");
+                  let ch = trie2_skeleton_hash(&child, memo);
+                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  ek.hash(&mut h2);
+                  np.is_strong().hash(&mut h2);
+                  ch.hash(&mut h2);
+                  edge_hashes.push(h2.finish());
+              }
+          }
+          drop(g);
+
+          edge_hashes.sort_unstable();
+          for e in edge_hashes {
+              e.hash(&mut hasher);
+          }
+          let out = hasher.finish();
+          memo.insert(ptr, out);
+          out
+      }
+
+      /// Structural eq that ignores edge BVs, but respects end flag, edge keys, strong/weak and structure.
+      fn trie2_skeleton_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
+          if let Some(v) = cache.get(&(p1, p2)) { return *v; }
+          cache.insert((p1, p2), true); // optimistic to break cycles
+
+          let ga = a.read().expect("poison");
+          let gb = b.read().expect("poison");
+          if ga.value.end != gb.value.end { cache.insert((p1, p2), false); return false; }
+          if ga.children().len() != gb.children().len() { cache.insert((p1, p2), false); return false; }
+
+          for (ek, ma) in ga.children() {
+              if let Some(mb) = gb.children().get(ek) {
+                  // Partition by strong/weak
+                  let mut strong_a: Vec<_> = ma.keys().filter(|k| k.is_strong()).collect();
+                  let mut strong_b: Vec<_> = mb.keys().filter(|k| k.is_strong()).collect();
+                  let mut weak_a: Vec<_> = ma.keys().filter(|k| !k.is_strong()).collect();
+                  let mut weak_b: Vec<_> = mb.keys().filter(|k| !k.is_strong()).collect();
+
+                  if strong_a.len() != strong_b.len() || weak_a.len() != weak_b.len() {
+                      cache.insert((p1, p2), false); return false;
+                  }
+
+                  // For strong children: match by recursive skeleton
+                  'outer_s: for ka in strong_a {
+                      let ca = ka.upgrade().expect("dangling");
+                      let mut matched = false;
+                      for i in 0..strong_b.len() {
+                          let cb = strong_b[i].upgrade().expect("dangling");
+                          if trie2_skeleton_eq(&ca, &cb, cache) {
+                              strong_b.remove(i);
+                              matched = true;
+                              break;
+                          }
+                      }
+                      if !matched { cache.insert((p1, p2), false); return false; }
+                  }
+                  // For weak children
+                  'outer_w: for ka in weak_a {
+                      let ca = ka.upgrade().expect("dangling");
+                      let mut matched = false;
+                      for i in 0..weak_b.len() {
+                          let cb = weak_b[i].upgrade().expect("dangling");
+                          if trie2_skeleton_eq(&ca, &cb, cache) {
+                              weak_b.remove(i);
+                              matched = true;
+                              break;
+                          }
+                      }
+                      if !matched { cache.insert((p1, p2), false); return false; }
+                  }
+              } else {
+                  cache.insert((p1, p2), false);
+                  return false;
+              }
+          }
+          true
+      }
+
+      /// Masked shape hash: masks edge EV by `mask`, ignores edges whose (EV & mask) is empty.
+      fn trie2_masked_shape_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+          memo: &mut HashMap<(*const RwLock<PrecomputeNode2>, u64), u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          let mfp = bv_fp(mask);
+          if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+
+          let g = arc.read().expect("poison");
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+          g.value.end.hash(&mut hasher);
+
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in g.children() {
+              for (np, ev) in dest_map {
+                  let masked = ev & mask;
+                  if masked.is_empty() { continue; }
+                  let child = np.upgrade().expect("dangling weak in masked hash");
+                  let ch = trie2_masked_shape_hash(&child, mask, memo);
+
+                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  ek.hash(&mut h2);
+                  np.is_strong().hash(&mut h2);
+                  masked.hash(&mut h2);
+                  ch.hash(&mut h2);
+                  edge_hashes.push(h2.finish());
+              }
+          }
+          drop(g);
+
+          edge_hashes.sort_unstable();
+          for e in edge_hashes {
+              e.hash(&mut hasher);
+          }
+          let out = hasher.finish();
+          memo.insert((ptr, mfp), out);
+          out
+      }
+
+      /// Masked shape equality: edges compared after (EV & mask); edges with empty masked EV are ignored.
+      fn trie2_masked_shape_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+          cache: &mut HashMap<((*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), u64), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
+          let mfp = bv_fp(mask);
+          if let Some(v) = cache.get(&((p1, p2), mfp)) { return *v; }
+          cache.insert(((p1, p2), mfp), true); // optimistic to break cycles
+
+          let ga = a.read().expect("poison");
+          let gb = b.read().expect("poison");
+          if ga.value.end != gb.value.end { cache.insert(((p1, p2), mfp), false); return false; }
+
+          // Build masked children multiset for (ek, is_strong, masked_ev, child)
+          fn masked_children(
+              g: &PrecomputeNode2,
+              mask: &LLMTokenBV,
+          ) -> BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> {
+              let mut out: BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> = BTreeMap::new();
+              for (ek, dest_map) in g.children() {
+                  for (np, ev) in dest_map {
+                      let masked = ev & mask;
+                      if masked.is_empty() { continue; }
+                      let child = np.upgrade().expect("dangling");
+                      out.entry((ek.0, ek.1, np.is_strong()))
+                          .or_default().push((masked, child));
+                  }
+              }
+              out
+          }
+
+          let mut ca = masked_children(&ga, mask);
+          let mut cb = masked_children(&gb, mask);
+          drop(ga); drop(gb);
+
+          if ca.len() != cb.len() { cache.insert(((p1, p2), mfp), false); return false; }
+
+          for (key, mut va) in ca {
+              let vb = match cb.get_mut(&key) {
+                  Some(v) => v,
+                  None => { cache.insert(((p1, p2), mfp), false); return false; }
+              };
+              if va.len() != vb.len() { cache.insert(((p1, p2), mfp), false); return false; }
+
+              'outer: for (e_va, c_a) in va.drain(..) {
+                  for i in 0..vb.len() {
+                      let (ref e_vb, ref c_b) = vb[i];
+                      if &e_va == e_vb && trie2_masked_shape_eq(&c_a, c_b, mask, cache) {
+                          vb.remove(i);
+                          continue 'outer;
+                      }
+                  }
+                  cache.insert(((p1, p2), mfp), false);
+                  return false;
+              }
+              if !vb.is_empty() {
+                  cache.insert(((p1, p2), mfp), false);
+                  return false;
+              }
+          }
+          true
+      }
+
+      fn has_strong_path_trie2(
+          from: &Arc<RwLock<PrecomputeNode2>>,
+          to: &Arc<RwLock<PrecomputeNode2>>,
+      ) -> bool {
+          // Reuse detect_cycle: returns true if `to` is reachable from `from` via STRONG edges.
+          let to_ptr = {
+              let g = to.read().expect("poison");
+              &*g as *const _
+          };
+          Trie::detect_cycle(to_ptr, from)
+      }
+
+      /// Redirect the M-portion of incoming edges of `from_arc` to `to_arc`, keeping edge-kind.
+      /// Skips redirection for any source that is reachable from `to_arc` via strong edges (cycle risk).
+      fn redirect_incoming_tokens_trie2(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+          arc_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+          incoming: &mut HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
+          incoming_union: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          from_arc: &Arc<RwLock<PrecomputeNode2>>,
+          to_arc: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+      ) {
+          type EdgeKey2 = (usize, Option<StateID>);
+          let from_ptr = Arc::as_ptr(from_arc);
+          let to_ptr = Arc::as_ptr(to_arc);
+
+          let mut moved_union = LLMTokenBV::zeros();
+
+          if let Some(inc_list) = incoming.get_mut(&from_ptr) {
+              // Work on a snapshot to avoid borrow conflicts while mutating sources.
+              let snapshot = inc_list.clone();
+              for (src_arc, ek, is_strong, ev) in snapshot {
+                  let to_move = ev & mask;
+                  if to_move.is_empty() { continue; }
+
+                  // Safety: do not create cycle. Ensure no strong path from `to_arc` to `src_arc`.
+                  if has_strong_path_trie2(to_arc, &src_arc) {
+                      continue; // unsafe to redirect this source
+                  }
+
+                  // Mutate src: subtract to_move from edge to `from`, add to `to`.
+                  {
+                      let mut sg = src_arc.write().expect("poison");
+                      // Remove/subtract from -> from_arc
+                      let dest_map = match sg.children_mut().get_mut(&ek) {
+                          Some(m) => m,
+                          None => continue,
+                      };
+                      let from_key = if is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(from_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(from_arc)))
+                      };
+                      let mut remove_from_entry = false;
+                      if let Some(ev_old) = dest_map.get_mut(&from_key) {
+                          *ev_old -= &to_move;
+                          if ev_old.is_empty() {
+                              remove_from_entry = true;
+                          }
+                      }
+                      if remove_from_entry {
+                          dest_map.remove(&from_key);
+                      }
+                      // Insert/merge into -> to_arc (keep same strong/weak)
+                      let to_key = if is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(to_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(to_arc)))
+                      };
+                      if let Some(ev_to) = dest_map.get_mut(&to_key) {
+                          *ev_to |= &to_move;
+                      } else {
+                          dest_map.insert(to_key, to_move.clone());
+                      }
+                      if dest_map.is_empty() {
+                          sg.children_mut().remove(&ek);
+                      }
+                  }
+
+                  // Reflect incoming bookkeeping: update incoming (from_ptr) and (to_ptr)
+                  // Subtract from `from_ptr`
+                  if let Some(list) = incoming.get_mut(&from_ptr) {
+                      // Update the entry for this (src, ek, is_strong)
+                      for it in list.iter_mut() {
+                          if Arc::ptr_eq(&it.0, &src_arc) && it.1 == ek && it.2 == is_strong {
+                              it.3 -= &to_move;
+                          }
+                      }
+                  }
+                  // Add/merge into `to_ptr`
+                  incoming.entry(to_ptr).or_default().push((src_arc.clone(), ek, is_strong, to_move.clone()));
+                  moved_union |= &to_move;
+              }
+          }
+
+          if !moved_union.is_empty() {
+              // Update unions
+              incoming_union.entry(to_ptr).and_modify(|u| *u |= &moved_union).or_insert(moved_union.clone());
+
+              // Also mark `to_arc` live_tokens with moved tokens (helps backward passes)
+              {
+                  let mut tg = to_arc.write().expect("poison");
+                  tg.value.live_tokens |= moved_union.clone();
+              }
+          }
+      }
+
+      /// Greedy, conservative, context-aware merge for Trie 2.
+      /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
+      fn context_aware_merge_trie2(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+      ) {
+          crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          let (mut incoming, mut incoming_union, arc_map) = build_incoming_maps_trie2(roots);
+          // Skeleton buckets to reduce pairwise checks
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(&roots_vec);
+
+          let mut skeleton_memo = HashMap::new();
+          let mut buckets: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+          for n in &all_nodes {
+              let h = trie2_skeleton_hash(n, &mut skeleton_memo);
+              buckets.entry(h).or_default().push(n.clone());
+          }
+
+          let mut shape_memo: std::collections::HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+          let mut eq_cache_masked = HashMap::new();
+          let mut eq_cache_skeleton = HashMap::new();
+
+          // Greedy pass within each bucket
+          for (_h, mut group) in buckets {
+              if group.len() < 2 { continue; }
+              // small heuristic: sort by pointer to have deterministic order
+              group.sort_by_key(|a| Arc::as_ptr(a) as usize);
+
+              'outer: for i in 0..group.len() {
+                  let a = &group[i];
+                  for j in (i+1)..group.len() {
+                      let b = &group[j];
+                      if Arc::ptr_eq(a, b) { continue; }
+
+                      // Additional quick reject: skeleton must match (already bucketed, but due to hash collision)
+                      if !trie2_skeleton_eq(a, b, &mut eq_cache_skeleton) {
+                          continue;
+                      }
+
+                      let a_ptr = Arc::as_ptr(a);
+                      let b_ptr = Arc::as_ptr(b);
+                      let ua = incoming_union.get(&a_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                      let ub = incoming_union.get(&b_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                      let m = &(&ua & &ub);
+                      if m.is_empty() { continue; }
+
+                      // Must have masked equality under intersection
+                      if !trie2_masked_shape_eq(a, b, &m, &mut eq_cache_masked) {
+                          continue;
+                      }
+
+                      // Redirect mask-portion of B -> A (safe per source)
+                      redirect_incoming_tokens_trie2(roots, &arc_map, &mut incoming, &mut incoming_union, b, a, &m);
+                  }
+              }
+          }
+
+          crate::debug!(2, "Context-aware merging in trie 2 complete.");
       }
 
       fn trie2_shape_hash(
@@ -7530,10 +7967,14 @@ local_system:
                       }
                   }
               }
+
+
+              // Clean up after rewiring
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
-              simplify_trie2_zero_none_edges(&mut precomputed2);
+              // simplify_trie2_zero_none_edges(&mut precomputed2);
+              context_aware_merge_trie2(&mut precomputed2);
               // merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -7941,6 +8382,445 @@ local_system:
           }
 
           crate::debug!(2, "Done simplifying trie 2 (0, None) edges.");
+      }
+
+      // Context-aware Trie2 merging (conservative, masked, cycle-safe)
+
+      fn build_incoming_maps_trie2(
+          roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+      ) -> (
+          HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
+          HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+      ) {
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(&roots_vec);
+
+          // ptr -> Arc
+          let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+          for n in &all_nodes {
+              arc_map.insert(Arc::as_ptr(n), n.clone());
+          }
+
+          // incoming edges and union of incoming EVs
+          let mut incoming: HashMap<
+              *const RwLock<PrecomputeNode2>,
+              Vec<(Arc<RwLock<PrecomputeNode2>>, EdgeKey2, bool, LLMTokenBV)>
+          > = HashMap::new();
+          let mut incoming_union: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+          for src in &all_nodes {
+              let src_ptr = Arc::as_ptr(src);
+              let g = src.read().expect("poison");
+              for (ek, dest_map) in g.children() {
+                  for (np, ev) in dest_map.iter() {
+                      if let Some(dst) = np.upgrade() {
+                          let dst_ptr = Arc::as_ptr(&dst);
+                          let is_strong = np.is_strong();
+                          incoming.entry(dst_ptr).or_default().push((src.clone(), ek.clone(), is_strong, ev.clone()));
+                          incoming_union.entry(dst_ptr).and_modify(|u| *u |= ev).or_insert(ev.clone());
+                      }
+                  }
+              }
+              // make sure we have keys for nodes with 0 incoming (union stays zeros)
+              incoming.entry(src_ptr).or_default();
+              incoming_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+          }
+
+          (incoming, incoming_union, arc_map)
+      }
+
+      fn bv_fp(mask: &LLMTokenBV) -> u64 {
+          use std::collections::hash_map::DefaultHasher;
+          let mut h = DeterministicHasher::new(DefaultHasher::new());
+          mask.hash(&mut h);
+          h.finish()
+      }
+
+      /// Structural hash that ignores edge BVs, but keeps end flag, edge keys, strong-vs-weak, and structure.
+      fn trie2_skeleton_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          if let Some(h) = memo.get(&ptr) {
+              return *h;
+          }
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert(ptr, 0);
+
+          let g = arc.read().expect("poison");
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+          g.value.end.hash(&mut hasher);
+
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in g.children() {
+              for (np, _ev) in dest_map {
+                  let child = np.upgrade().expect("dangling weak in skeleton hash");
+                  let ch = trie2_skeleton_hash(&child, memo);
+                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  ek.hash(&mut h2);
+                  np.is_strong().hash(&mut h2);
+                  ch.hash(&mut h2);
+                  edge_hashes.push(h2.finish());
+              }
+          }
+          drop(g);
+
+          edge_hashes.sort_unstable();
+          for e in edge_hashes {
+              e.hash(&mut hasher);
+          }
+          let out = hasher.finish();
+          memo.insert(ptr, out);
+          out
+      }
+
+      /// Structural eq that ignores edge BVs, but respects end flag, edge keys, strong/weak and structure.
+      fn trie2_skeleton_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
+          if let Some(v) = cache.get(&(p1, p2)) { return *v; }
+          cache.insert((p1, p2), true); // optimistic to break cycles
+
+          let ga = a.read().expect("poison");
+          let gb = b.read().expect("poison");
+          if ga.value.end != gb.value.end { cache.insert((p1, p2), false); return false; }
+          if ga.children().len() != gb.children().len() { cache.insert((p1, p2), false); return false; }
+
+          for (ek, ma) in ga.children() {
+              if let Some(mb) = gb.children().get(ek) {
+                  // Partition by strong/weak
+                  let mut strong_a: Vec<_> = ma.keys().filter(|k| k.is_strong()).collect();
+                  let mut strong_b: Vec<_> = mb.keys().filter(|k| k.is_strong()).collect();
+                  let mut weak_a: Vec<_> = ma.keys().filter(|k| !k.is_strong()).collect();
+                  let mut weak_b: Vec<_> = mb.keys().filter(|k| !k.is_strong()).collect();
+
+                  if strong_a.len() != strong_b.len() || weak_a.len() != weak_b.len() {
+                      cache.insert((p1, p2), false); return false;
+                  }
+
+                  // For strong children: match by recursive skeleton
+                  'outer_s: for ka in strong_a {
+                      let ca = ka.upgrade().expect("dangling");
+                      let mut matched = false;
+                      for i in 0..strong_b.len() {
+                          let cb = strong_b[i].upgrade().expect("dangling");
+                          if trie2_skeleton_eq(&ca, &cb, cache) {
+                              strong_b.remove(i);
+                              matched = true;
+                              break;
+                          }
+                      }
+                      if !matched { cache.insert((p1, p2), false); return false; }
+                  }
+                  // For weak children
+                  'outer_w: for ka in weak_a {
+                      let ca = ka.upgrade().expect("dangling");
+                      let mut matched = false;
+                      for i in 0..weak_b.len() {
+                          let cb = weak_b[i].upgrade().expect("dangling");
+                          if trie2_skeleton_eq(&ca, &cb, cache) {
+                              weak_b.remove(i);
+                              matched = true;
+                              break;
+                          }
+                      }
+                      if !matched { cache.insert((p1, p2), false); return false; }
+                  }
+              } else {
+                  cache.insert((p1, p2), false);
+                  return false;
+              }
+          }
+          true
+      }
+
+      /// Masked shape hash: masks edge EV by `mask`, ignores edges whose (EV & mask) is empty.
+      fn trie2_masked_shape_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+          memo: &mut HashMap<(*const RwLock<PrecomputeNode2>, u64), u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          let mfp = bv_fp(mask);
+          if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert((ptr, mfp), 0);
+
+          let g = arc.read().expect("poison");
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+          g.value.end.hash(&mut hasher);
+
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in g.children() {
+              for (np, ev) in dest_map {
+                  let masked = ev & mask;
+                  if masked.is_empty() { continue; }
+                  let child = np.upgrade().expect("dangling weak in masked hash");
+                  let ch = trie2_masked_shape_hash(&child, mask, memo);
+
+                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  ek.hash(&mut h2);
+                  np.is_strong().hash(&mut h2);
+                  masked.hash(&mut h2);
+                  ch.hash(&mut h2);
+                  edge_hashes.push(h2.finish());
+              }
+          }
+          drop(g);
+
+          edge_hashes.sort_unstable();
+          for e in edge_hashes {
+              e.hash(&mut hasher);
+          }
+          let out = hasher.finish();
+          memo.insert((ptr, mfp), out);
+          out
+      }
+
+      /// Masked shape equality: edges compared after (EV & mask); edges with empty masked EV are ignored.
+      fn trie2_masked_shape_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+          cache: &mut HashMap<((*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), u64), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
+          let mfp = bv_fp(mask);
+          if let Some(v) = cache.get(&((p1, p2), mfp)) { return *v; }
+          cache.insert(((p1, p2), mfp), true); // optimistic to break cycles
+
+          let ga = a.read().expect("poison");
+          let gb = b.read().expect("poison");
+          if ga.value.end != gb.value.end { cache.insert(((p1, p2), mfp), false); return false; }
+
+          // Build masked children multiset for (ek, is_strong, masked_ev, child)
+          fn masked_children(
+              g: &PrecomputeNode2,
+              mask: &LLMTokenBV,
+          ) -> BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> {
+              let mut out: BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> = BTreeMap::new();
+              for (ek, dest_map) in g.children() {
+                  for (np, ev) in dest_map {
+                      let masked = ev & mask;
+                      if masked.is_empty() { continue; }
+                      let child = np.upgrade().expect("dangling");
+                      out.entry((ek.0, ek.1, np.is_strong()))
+                          .or_default().push((masked, child));
+                  }
+              }
+              out
+          }
+
+          let mut ca = masked_children(&ga, mask);
+          let mut cb = masked_children(&gb, mask);
+          drop(ga); drop(gb);
+
+          if ca.len() != cb.len() { cache.insert(((p1, p2), mfp), false); return false; }
+
+          for (key, mut va) in ca {
+              let vb = match cb.get_mut(&key) {
+                  Some(v) => v,
+                  None => { cache.insert(((p1, p2), mfp), false); return false; }
+              };
+              if va.len() != vb.len() { cache.insert(((p1, p2), mfp), false); return false; }
+
+              'outer: for (e_va, c_a) in va.drain(..) {
+                  for i in 0..vb.len() {
+                      let (ref e_vb, ref c_b) = vb[i];
+                      if &e_va == e_vb && trie2_masked_shape_eq(&c_a, c_b, mask, cache) {
+                          vb.remove(i);
+                          continue 'outer;
+                      }
+                  }
+                  cache.insert(((p1, p2), mfp), false);
+                  return false;
+              }
+              if !vb.is_empty() {
+                  cache.insert(((p1, p2), mfp), false);
+                  return false;
+              }
+          }
+          true
+      }
+
+      fn has_strong_path_trie2(
+          from: &Arc<RwLock<PrecomputeNode2>>,
+          to: &Arc<RwLock<PrecomputeNode2>>,
+      ) -> bool {
+          // Reuse detect_cycle: returns true if `to` is reachable from `from` via STRONG edges.
+          let to_ptr = {
+              let g = to.read().expect("poison");
+              &*g as *const _
+          };
+          Trie::detect_cycle(to_ptr, from)
+      }
+
+      /// Redirect the M-portion of incoming edges of `from_arc` to `to_arc`, keeping edge-kind.
+      /// Skips redirection for any source that is reachable from `to_arc` via strong edges (cycle risk).
+      fn redirect_incoming_tokens_trie2(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+          arc_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+          incoming: &mut HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
+          incoming_union: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          from_arc: &Arc<RwLock<PrecomputeNode2>>,
+          to_arc: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+      ) {
+          type EdgeKey2 = (usize, Option<StateID>);
+          let from_ptr = Arc::as_ptr(from_arc);
+          let to_ptr = Arc::as_ptr(to_arc);
+
+          let mut moved_union = LLMTokenBV::zeros();
+
+          if let Some(inc_list) = incoming.get_mut(&from_ptr) {
+              // Work on a snapshot to avoid borrow conflicts while mutating sources.
+              let snapshot = inc_list.clone();
+              for (src_arc, ek, is_strong, ev) in snapshot {
+                  let to_move = ev & mask;
+                  if to_move.is_empty() { continue; }
+
+                  // Safety: do not create cycle. Ensure no strong path from `to_arc` to `src_arc`.
+                  if has_strong_path_trie2(to_arc, &src_arc) {
+                      continue; // unsafe to redirect this source
+                  }
+
+                  // Mutate src: subtract to_move from edge to `from`, add to `to`.
+                  {
+                      let mut sg = src_arc.write().expect("poison");
+                      // Remove/subtract from -> from_arc
+                      let dest_map = match sg.children_mut().get_mut(&ek) {
+                          Some(m) => m,
+                          None => continue,
+                      };
+                      let from_key = if is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(from_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(from_arc)))
+                      };
+                      let mut remove_from_entry = false;
+                      if let Some(ev_old) = dest_map.get_mut(&from_key) {
+                          *ev_old -= &to_move;
+                          if ev_old.is_empty() {
+                              remove_from_entry = true;
+                          }
+                      }
+                      if remove_from_entry {
+                          dest_map.remove(&from_key);
+                      }
+                      // Insert/merge into -> to_arc (keep same strong/weak)
+                      let to_key = if is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(to_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(to_arc)))
+                      };
+                      if let Some(ev_to) = dest_map.get_mut(&to_key) {
+                          *ev_to |= &to_move;
+                      } else {
+                          dest_map.insert(to_key, to_move.clone());
+                      }
+                      if dest_map.is_empty() {
+                          sg.children_mut().remove(&ek);
+                      }
+                  }
+
+                  // Reflect incoming bookkeeping: update incoming (from_ptr) and (to_ptr)
+                  // Subtract from `from_ptr`
+                  if let Some(list) = incoming.get_mut(&from_ptr) {
+                      // Update the entry for this (src, ek, is_strong)
+                      for it in list.iter_mut() {
+                          if Arc::ptr_eq(&it.0, &src_arc) && it.1 == ek && it.2 == is_strong {
+                              it.3 -= &to_move;
+                          }
+                      }
+                  }
+                  // Add/merge into `to_ptr`
+                  incoming.entry(to_ptr).or_default().push((src_arc.clone(), ek, is_strong, to_move.clone()));
+                  moved_union |= &to_move;
+              }
+          }
+
+          if !moved_union.is_empty() {
+              // Update unions
+              incoming_union.entry(to_ptr).and_modify(|u| *u |= &moved_union).or_insert(moved_union.clone());
+
+              // Also mark `to_arc` live_tokens with moved tokens (helps backward passes)
+              {
+                  let mut tg = to_arc.write().expect("poison");
+                  tg.value.live_tokens |= moved_union.clone();
+              }
+          }
+      }
+
+      /// Greedy, conservative, context-aware merge for Trie 2.
+      /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
+      fn context_aware_merge_trie2(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+      ) {
+          crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          let (mut incoming, mut incoming_union, arc_map) = build_incoming_maps_trie2(roots);
+          // Skeleton buckets to reduce pairwise checks
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(&roots_vec);
+
+          let mut skeleton_memo = HashMap::new();
+          let mut buckets: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+          for n in &all_nodes {
+              let h = trie2_skeleton_hash(n, &mut skeleton_memo);
+              buckets.entry(h).or_default().push(n.clone());
+          }
+
+          let mut shape_memo: std::collections::HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+          let mut eq_cache_masked = HashMap::new();
+          let mut eq_cache_skeleton = HashMap::new();
+
+          // Greedy pass within each bucket
+          for (_h, mut group) in buckets {
+              if group.len() < 2 { continue; }
+              // small heuristic: sort by pointer to have deterministic order
+              group.sort_by_key(|a| Arc::as_ptr(a) as usize);
+
+              'outer: for i in 0..group.len() {
+                  let a = &group[i];
+                  for j in (i+1)..group.len() {
+                      let b = &group[j];
+                      if Arc::ptr_eq(a, b) { continue; }
+
+                      // Additional quick reject: skeleton must match (already bucketed, but due to hash collision)
+                      if !trie2_skeleton_eq(a, b, &mut eq_cache_skeleton) {
+                          continue;
+                      }
+
+                      let a_ptr = Arc::as_ptr(a);
+                      let b_ptr = Arc::as_ptr(b);
+                      let ua = incoming_union.get(&a_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                      let ub = incoming_union.get(&b_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                      let m = &(&ua & &ub);
+                      if m.is_empty() { continue; }
+
+                      // Must have masked equality under intersection
+                      if !trie2_masked_shape_eq(a, b, &m, &mut eq_cache_masked) {
+                          continue;
+                      }
+
+                      // Redirect mask-portion of B -> A (safe per source)
+                      redirect_incoming_tokens_trie2(roots, &arc_map, &mut incoming, &mut incoming_union, b, a, &m);
+                  }
+              }
+          }
+
+          crate::debug!(2, "Context-aware merging in trie 2 complete.");
       }
 
       fn trie2_shape_hash(
@@ -13786,9 +14666,9 @@ local_system:
           }
       }
 
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: plan-git-llm
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -13803,7 +14683,7 @@ system:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: plan-git-llm
+  apply_mode: git-llm
 messages:
   - user: |-
       Developer note (core guidance):
@@ -14456,10 +15336,14 @@ messages:
                       }
                   }
               }
+
+
+              // Clean up after rewiring
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
-              simplify_trie2_zero_none_edges(&mut precomputed2);
+              // simplify_trie2_zero_none_edges(&mut precomputed2);
+              context_aware_merge_trie2(&mut precomputed2);
               // merge_nodes_trie2(&mut precomputed2);
               let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
@@ -14867,6 +15751,439 @@ messages:
           }
 
           crate::debug!(2, "Done simplifying trie 2 (0, None) edges.");
+      }
+
+      // Context-aware Trie2 merging (conservative, masked, cycle-safe)
+
+      fn build_incoming_maps_trie2(
+          roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+      ) -> (
+          HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
+          HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+      ) {
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(&roots_vec);
+
+          // ptr -> Arc
+          let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+          for n in &all_nodes {
+              arc_map.insert(Arc::as_ptr(n), n.clone());
+          }
+
+          // incoming edges and union of incoming EVs
+          let mut incoming: HashMap<
+              *const RwLock<PrecomputeNode2>,
+              Vec<(Arc<RwLock<PrecomputeNode2>>, EdgeKey2, bool, LLMTokenBV)>
+          > = HashMap::new();
+          let mut incoming_union: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+
+          for src in &all_nodes {
+              let src_ptr = Arc::as_ptr(src);
+              let g = src.read().expect("poison");
+              for (ek, dest_map) in g.children() {
+                  for (np, ev) in dest_map.iter() {
+                      if let Some(dst) = np.upgrade() {
+                          let dst_ptr = Arc::as_ptr(&dst);
+                          let is_strong = np.is_strong();
+                          incoming.entry(dst_ptr).or_default().push((src.clone(), ek.clone(), is_strong, ev.clone()));
+                          incoming_union.entry(dst_ptr).and_modify(|u| *u |= ev).or_insert(ev.clone());
+                      }
+                  }
+              }
+              // make sure we have keys for nodes with 0 incoming (union stays zeros)
+              incoming.entry(src_ptr).or_default();
+              incoming_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+          }
+
+          (incoming, incoming_union, arc_map)
+      }
+
+      fn bv_fp(mask: &LLMTokenBV) -> u64 {
+          use std::collections::hash_map::DefaultHasher;
+          let mut h = DeterministicHasher::new(DefaultHasher::new());
+          mask.hash(&mut h);
+          h.finish()
+      }
+
+      /// Structural hash that ignores edge BVs, but keeps end flag, edge keys, strong-vs-weak, and structure.
+      fn trie2_skeleton_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          if let Some(h) = memo.get(&ptr) {
+              return *h;
+          }
+          let g = arc.read().expect("poison");
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+          g.value.end.hash(&mut hasher);
+
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in g.children() {
+              for (np, _ev) in dest_map {
+                  let child = np.upgrade().expect("dangling weak in skeleton hash");
+                  let ch = trie2_skeleton_hash(&child, memo);
+                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  ek.hash(&mut h2);
+                  np.is_strong().hash(&mut h2);
+                  ch.hash(&mut h2);
+                  edge_hashes.push(h2.finish());
+              }
+          }
+          drop(g);
+
+          edge_hashes.sort_unstable();
+          for e in edge_hashes {
+              e.hash(&mut hasher);
+          }
+          let out = hasher.finish();
+          memo.insert(ptr, out);
+          out
+      }
+
+      /// Structural eq that ignores edge BVs, but respects end flag, edge keys, strong/weak and structure.
+      fn trie2_skeleton_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
+          if let Some(v) = cache.get(&(p1, p2)) { return *v; }
+          cache.insert((p1, p2), true); // optimistic to break cycles
+
+          let ga = a.read().expect("poison");
+          let gb = b.read().expect("poison");
+          if ga.value.end != gb.value.end { cache.insert((p1, p2), false); return false; }
+          if ga.children().len() != gb.children().len() { cache.insert((p1, p2), false); return false; }
+
+          for (ek, ma) in ga.children() {
+              if let Some(mb) = gb.children().get(ek) {
+                  // Partition by strong/weak
+                  let mut strong_a: Vec<_> = ma.keys().filter(|k| k.is_strong()).collect();
+                  let mut strong_b: Vec<_> = mb.keys().filter(|k| k.is_strong()).collect();
+                  let mut weak_a: Vec<_> = ma.keys().filter(|k| !k.is_strong()).collect();
+                  let mut weak_b: Vec<_> = mb.keys().filter(|k| !k.is_strong()).collect();
+
+                  if strong_a.len() != strong_b.len() || weak_a.len() != weak_b.len() {
+                      cache.insert((p1, p2), false); return false;
+                  }
+
+                  // For strong children: match by recursive skeleton
+                  'outer_s: for ka in strong_a {
+                      let ca = ka.upgrade().expect("dangling");
+                      let mut matched = false;
+                      for i in 0..strong_b.len() {
+                          let cb = strong_b[i].upgrade().expect("dangling");
+                          if trie2_skeleton_eq(&ca, &cb, cache) {
+                              strong_b.remove(i);
+                              matched = true;
+                              break;
+                          }
+                      }
+                      if !matched { cache.insert((p1, p2), false); return false; }
+                  }
+                  // For weak children
+                  'outer_w: for ka in weak_a {
+                      let ca = ka.upgrade().expect("dangling");
+                      let mut matched = false;
+                      for i in 0..weak_b.len() {
+                          let cb = weak_b[i].upgrade().expect("dangling");
+                          if trie2_skeleton_eq(&ca, &cb, cache) {
+                              weak_b.remove(i);
+                              matched = true;
+                              break;
+                          }
+                      }
+                      if !matched { cache.insert((p1, p2), false); return false; }
+                  }
+              } else {
+                  cache.insert((p1, p2), false);
+                  return false;
+              }
+          }
+          true
+      }
+
+      /// Masked shape hash: masks edge EV by `mask`, ignores edges whose (EV & mask) is empty.
+      fn trie2_masked_shape_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+          memo: &mut HashMap<(*const RwLock<PrecomputeNode2>, u64), u64>,
+      ) -> u64 {
+          let ptr = Arc::as_ptr(arc);
+          let mfp = bv_fp(mask);
+          if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+
+          let g = arc.read().expect("poison");
+          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+          g.value.end.hash(&mut hasher);
+
+          let mut edge_hashes = Vec::new();
+          for (ek, dest_map) in g.children() {
+              for (np, ev) in dest_map {
+                  let masked = ev & mask;
+                  if masked.is_empty() { continue; }
+                  let child = np.upgrade().expect("dangling weak in masked hash");
+                  let ch = trie2_masked_shape_hash(&child, mask, memo);
+
+                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  ek.hash(&mut h2);
+                  np.is_strong().hash(&mut h2);
+                  masked.hash(&mut h2);
+                  ch.hash(&mut h2);
+                  edge_hashes.push(h2.finish());
+              }
+          }
+          drop(g);
+
+          edge_hashes.sort_unstable();
+          for e in edge_hashes {
+              e.hash(&mut hasher);
+          }
+          let out = hasher.finish();
+          memo.insert((ptr, mfp), out);
+          out
+      }
+
+      /// Masked shape equality: edges compared after (EV & mask); edges with empty masked EV are ignored.
+      fn trie2_masked_shape_eq(
+          a: &Arc<RwLock<PrecomputeNode2>>,
+          b: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+          cache: &mut HashMap<((*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), u64), bool>,
+      ) -> bool {
+          if Arc::ptr_eq(a, b) { return true; }
+          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
+          let mfp = bv_fp(mask);
+          if let Some(v) = cache.get(&((p1, p2), mfp)) { return *v; }
+          cache.insert(((p1, p2), mfp), true); // optimistic to break cycles
+
+          let ga = a.read().expect("poison");
+          let gb = b.read().expect("poison");
+          if ga.value.end != gb.value.end { cache.insert(((p1, p2), mfp), false); return false; }
+
+          // Build masked children multiset for (ek, is_strong, masked_ev, child)
+          fn masked_children(
+              g: &PrecomputeNode2,
+              mask: &LLMTokenBV,
+          ) -> BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> {
+              let mut out: BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> = BTreeMap::new();
+              for (ek, dest_map) in g.children() {
+                  for (np, ev) in dest_map {
+                      let masked = ev & mask;
+                      if masked.is_empty() { continue; }
+                      let child = np.upgrade().expect("dangling");
+                      out.entry((ek.0, ek.1, np.is_strong()))
+                          .or_default().push((masked, child));
+                  }
+              }
+              out
+          }
+
+          let mut ca = masked_children(&ga, mask);
+          let mut cb = masked_children(&gb, mask);
+          drop(ga); drop(gb);
+
+          if ca.len() != cb.len() { cache.insert(((p1, p2), mfp), false); return false; }
+
+          for (key, mut va) in ca {
+              let vb = match cb.get_mut(&key) {
+                  Some(v) => v,
+                  None => { cache.insert(((p1, p2), mfp), false); return false; }
+              };
+              if va.len() != vb.len() { cache.insert(((p1, p2), mfp), false); return false; }
+
+              'outer: for (e_va, c_a) in va.drain(..) {
+                  for i in 0..vb.len() {
+                      let (ref e_vb, ref c_b) = vb[i];
+                      if &e_va == e_vb && trie2_masked_shape_eq(&c_a, c_b, mask, cache) {
+                          vb.remove(i);
+                          continue 'outer;
+                      }
+                  }
+                  cache.insert(((p1, p2), mfp), false);
+                  return false;
+              }
+              if !vb.is_empty() {
+                  cache.insert(((p1, p2), mfp), false);
+                  return false;
+              }
+          }
+          true
+      }
+
+      fn has_strong_path_trie2(
+          from: &Arc<RwLock<PrecomputeNode2>>,
+          to: &Arc<RwLock<PrecomputeNode2>>,
+      ) -> bool {
+          // Reuse detect_cycle: returns true if `to` is reachable from `from` via STRONG edges.
+          let to_ptr = {
+              let g = to.read().expect("poison");
+              &*g as *const _
+          };
+          Trie::detect_cycle(to_ptr, from)
+      }
+
+      /// Redirect the M-portion of incoming edges of `from_arc` to `to_arc`, keeping edge-kind.
+      /// Skips redirection for any source that is reachable from `to_arc` via strong edges (cycle risk).
+      fn redirect_incoming_tokens_trie2(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+          arc_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+          incoming: &mut HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
+          incoming_union: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
+          from_arc: &Arc<RwLock<PrecomputeNode2>>,
+          to_arc: &Arc<RwLock<PrecomputeNode2>>,
+          mask: &LLMTokenBV,
+      ) {
+          type EdgeKey2 = (usize, Option<StateID>);
+          let from_ptr = Arc::as_ptr(from_arc);
+          let to_ptr = Arc::as_ptr(to_arc);
+
+          let mut moved_union = LLMTokenBV::zeros();
+
+          if let Some(inc_list) = incoming.get_mut(&from_ptr) {
+              // Work on a snapshot to avoid borrow conflicts while mutating sources.
+              let snapshot = inc_list.clone();
+              for (src_arc, ek, is_strong, ev) in snapshot {
+                  let to_move = ev & mask;
+                  if to_move.is_empty() { continue; }
+
+                  // Safety: do not create cycle. Ensure no strong path from `to_arc` to `src_arc`.
+                  if has_strong_path_trie2(to_arc, &src_arc) {
+                      continue; // unsafe to redirect this source
+                  }
+
+                  // Mutate src: subtract to_move from edge to `from`, add to `to`.
+                  {
+                      let mut sg = src_arc.write().expect("poison");
+                      // Remove/subtract from -> from_arc
+                      let dest_map = match sg.children_mut().get_mut(&ek) {
+                          Some(m) => m,
+                          None => continue,
+                      };
+                      let from_key = if is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(from_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(from_arc)))
+                      };
+                      let mut remove_from_entry = false;
+                      if let Some(ev_old) = dest_map.get_mut(&from_key) {
+                          *ev_old -= &to_move;
+                          if ev_old.is_empty() {
+                              remove_from_entry = true;
+                          }
+                      }
+                      if remove_from_entry {
+                          dest_map.remove(&from_key);
+                      }
+                      // Insert/merge into -> to_arc (keep same strong/weak)
+                      let to_key = if is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(to_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(to_arc)))
+                      };
+                      if let Some(ev_to) = dest_map.get_mut(&to_key) {
+                          *ev_to |= &to_move;
+                      } else {
+                          dest_map.insert(to_key, to_move.clone());
+                      }
+                      if dest_map.is_empty() {
+                          sg.children_mut().remove(&ek);
+                      }
+                  }
+
+                  // Reflect incoming bookkeeping: update incoming (from_ptr) and (to_ptr)
+                  // Subtract from `from_ptr`
+                  if let Some(list) = incoming.get_mut(&from_ptr) {
+                      // Update the entry for this (src, ek, is_strong)
+                      for it in list.iter_mut() {
+                          if Arc::ptr_eq(&it.0, &src_arc) && it.1 == ek && it.2 == is_strong {
+                              it.3 -= &to_move;
+                          }
+                      }
+                  }
+                  // Add/merge into `to_ptr`
+                  incoming.entry(to_ptr).or_default().push((src_arc.clone(), ek, is_strong, to_move.clone()));
+                  moved_union |= &to_move;
+              }
+          }
+
+          if !moved_union.is_empty() {
+              // Update unions
+              incoming_union.entry(to_ptr).and_modify(|u| *u |= &moved_union).or_insert(moved_union.clone());
+
+              // Also mark `to_arc` live_tokens with moved tokens (helps backward passes)
+              {
+                  let mut tg = to_arc.write().expect("poison");
+                  tg.value.live_tokens |= moved_union.clone();
+              }
+          }
+      }
+
+      /// Greedy, conservative, context-aware merge for Trie 2.
+      /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
+      fn context_aware_merge_trie2(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+      ) {
+          crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          let (mut incoming, mut incoming_union, arc_map) = build_incoming_maps_trie2(roots);
+          // Skeleton buckets to reduce pairwise checks
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(&roots_vec);
+
+          let mut skeleton_memo = HashMap::new();
+          let mut buckets: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
+          for n in &all_nodes {
+              let h = trie2_skeleton_hash(n, &mut skeleton_memo);
+              buckets.entry(h).or_default().push(n.clone());
+          }
+
+          let mut shape_memo: std::collections::HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+          let mut eq_cache_masked = HashMap::new();
+          let mut eq_cache_skeleton = HashMap::new();
+
+          // Greedy pass within each bucket
+          for (_h, mut group) in buckets {
+              if group.len() < 2 { continue; }
+              // small heuristic: sort by pointer to have deterministic order
+              group.sort_by_key(|a| Arc::as_ptr(a) as usize);
+
+              'outer: for i in 0..group.len() {
+                  let a = &group[i];
+                  for j in (i+1)..group.len() {
+                      let b = &group[j];
+                      if Arc::ptr_eq(a, b) { continue; }
+
+                      // Additional quick reject: skeleton must match (already bucketed, but due to hash collision)
+                      if !trie2_skeleton_eq(a, b, &mut eq_cache_skeleton) {
+                          continue;
+                      }
+
+                      let a_ptr = Arc::as_ptr(a);
+                      let b_ptr = Arc::as_ptr(b);
+                      let ua = incoming_union.get(&a_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                      let ub = incoming_union.get(&b_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                      let m = &(&ua & &ub);
+                      if m.is_empty() { continue; }
+
+                      // Must have masked equality under intersection
+                      if !trie2_masked_shape_eq(a, b, &m, &mut eq_cache_masked) {
+                          continue;
+                      }
+
+                      // Redirect mask-portion of B -> A (safe per source)
+                      redirect_incoming_tokens_trie2(roots, &arc_map, &mut incoming, &mut incoming_union, b, a, &m);
+                  }
+              }
+          }
+
+          crate::debug!(2, "Context-aware merging in trie 2 complete.");
       }
 
       fn trie2_shape_hash(
@@ -20721,532 +22038,69 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: |-
-      I want to implement additional simplifications for `trie2` at the end of `precompute2`.
-      There are many opportunities to improve the trie2, make it more compact.
-      Ideas:
-      - There might be cases where we have two edges from two different nodes to two different nodes where we can actually merge the destination into one. Or in other words, the might be cases where we can merge two nodes that are only distantly related.
-      - More concretely, suppose we have some nodes A and B, and some set of incoming edges to A, and some set of incoming edges to B. They don't have to be *all* incoming edges for A/B, just those that we are considering pointing towards the new merged node.
-          - Under what conditions can we merge A and B? There are probably a bunch of ways of specifying it. We need one that's not too horrendously inefficient to use. I'm not sure about efficiency, but here's one way of telling whether it's valid to merge that's fairly straightforward.
-          - Take the union all incoming edges to A that we're considering, called 'union into A'.
-          - Now filter A's subtree by deleting LLM tokens on edges that aren't also in the union into A. Do so recursively. Do the same for B (with the union into A, not the union into B).
-          - Now if the filtered subtree for A is equivalent to that for B, we pass. Otherwise, no merge.
-          - We do the same vice-versa. If this passes too, we can merge.
-          - Wait actually this is trickier than I thought. How do we determine 'equivalence'?
-      - Hmm... Tricky. I obviously don't understand this that well. Anyway, it's one thing to tell what a valid simplification is; it's another to find valid simplifications at scale for tens of thousands of nodes relatively quickly.
-      In general, we construct the tree in a way that's fast to compute, but which create enormous redundancy. It's way bigger than it needs to be. The hope is that we can drastically simplify it afterwards.
-      Figure it out.
+  - user: trie2_skeleton_hash appears to be looping infinitely, causing stack overflow.
+      Fix it.
     metadata:
   - user: |-
-      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
-                  - Give concrete, step-by-step edits the user can apply.
-                  - Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
+      Mode instruction: For this turn, output git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: diff --git a/FILE b/FILE
+                  - The patch must be directly applicable to the current working tree.
+                  - Do not combine multiple files into a single diff block.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: llm
-      phase: instructions-only
+      mode: git-llm
+      phase: default
   - assistant: |-
-      Below are concrete, step-by-step edits to add a conservative, context-aware Trie 2 simplification pass that merges “distantly related” nodes when their masked subtrees are equivalent and the rewiring cannot introduce strong cycles. The pass:
+      Hello! As a helpful assistant, I've analyzed the issue. The stack overflow in `trie2_skeleton_hash` is caused by infinite recursion when processing a graph with cycles. The memoization check only happens before the recursive calls, but the memoization map is only populated after they return.
 
-      - Computes a union of incoming LLM-token bitsets for each node.
-      - Uses a mask M = incoming_union(A) ∩ incoming_union(B) to compare the masked shapes of A and B.
-      - If masked-shapes are equal under M, it rewires only the safe incoming edges to B, moving the M-portion of their tokens to point to A (keeping strong/weak kinds), and leaves the leftover tokens on B.
-      - It skips any rewiring that could create a strong cycle (checked per-edge, per-source).
-      - It then prunes and re-merges to reclaim the space.
+      To fix this, I'll insert a placeholder value into the memoization map *before* the recursive calls. This breaks the cycle, as any recursive call that revisits the current node will find the placeholder and return immediately. The placeholder is then overwritten with the correct hash value at the end of the function.
 
-      This yields real compaction while staying safe and reasonably fast.
+      I noticed that `trie2_masked_shape_hash` has the same logical error, so I've included a fix for it as well to prevent future issues.
 
-      Edits
+      Here is the patch for `src/constraint.rs`:
 
-      1) File: src/constraint.rs
-      Location: Just after simplify_trie2_zero_none_edges (or anywhere near the other trie2 helpers), insert the following helpers.
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1418,6 +1418,10 @@
+           if let Some(h) = memo.get(&ptr) {
+               return *h;
+           }
+      +    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+      +    memo.insert(ptr, 0);
+      +
+           let g = arc.read().expect("poison");
+           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+           g.value.end.hash(&mut hasher);
+      @@ -1500,6 +1504,10 @@
+           let mfp = bv_fp(mask);
+           if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+       
+      +    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+      +    memo.insert((ptr, mfp), 0);
+      +
+           let g = arc.read().expect("poison");
+           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+           g.value.end.hash(&mut hasher);
 
-      Code to insert:
-
-      ```rust
-      // Context-aware Trie2 merging (conservative, masked, cycle-safe)
-
-      fn build_incoming_maps_trie2(
-          roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-      ) -> (
-          HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
-          HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
-          HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
-      ) {
-          type EdgeKey2 = (usize, Option<StateID>);
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(&roots_vec);
-
-          // ptr -> Arc
-          let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-          for n in &all_nodes {
-              arc_map.insert(Arc::as_ptr(n), n.clone());
-          }
-
-          // incoming edges and union of incoming EVs
-          let mut incoming: HashMap<
-              *const RwLock<PrecomputeNode2>,
-              Vec<(Arc<RwLock<PrecomputeNode2>>, EdgeKey2, bool, LLMTokenBV)>
-          > = HashMap::new();
-          let mut incoming_union: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
-
-          for src in &all_nodes {
-              let src_ptr = Arc::as_ptr(src);
-              let g = src.read().expect("poison");
-              for (ek, dest_map) in g.children() {
-                  for (np, ev) in dest_map.iter() {
-                      if let Some(dst) = np.upgrade() {
-                          let dst_ptr = Arc::as_ptr(&dst);
-                          let is_strong = np.is_strong();
-                          incoming.entry(dst_ptr).or_default().push((src.clone(), ek.clone(), is_strong, ev.clone()));
-                          incoming_union.entry(dst_ptr).and_modify(|u| *u |= ev).or_insert(ev.clone());
-                      }
-                  }
-              }
-              // make sure we have keys for nodes with 0 incoming (union stays zeros)
-              incoming.entry(src_ptr).or_default();
-              incoming_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
-          }
-
-          (incoming, incoming_union, arc_map)
-      }
-
-      fn bv_fp(mask: &LLMTokenBV) -> u64 {
-          use std::collections::hash_map::DefaultHasher;
-          let mut h = DeterministicHasher::new(DefaultHasher::new());
-          mask.hash(&mut h);
-          h.finish()
-      }
-
-      /// Structural hash that ignores edge BVs, but keeps end flag, edge keys, strong-vs-weak, and structure.
-      fn trie2_skeleton_hash(
-          arc: &Arc<RwLock<PrecomputeNode2>>,
-          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-      ) -> u64 {
-          let ptr = Arc::as_ptr(arc);
-          if let Some(h) = memo.get(&ptr) {
-              return *h;
-          }
-          let g = arc.read().expect("poison");
-          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-          g.value.end.hash(&mut hasher);
-
-          let mut edge_hashes = Vec::new();
-          for (ek, dest_map) in g.children() {
-              for (np, _ev) in dest_map {
-                  let child = np.upgrade().expect("dangling weak in skeleton hash");
-                  let ch = trie2_skeleton_hash(&child, memo);
-                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-                  ek.hash(&mut h2);
-                  np.is_strong().hash(&mut h2);
-                  ch.hash(&mut h2);
-                  edge_hashes.push(h2.finish());
-              }
-          }
-          drop(g);
-
-          edge_hashes.sort_unstable();
-          for e in edge_hashes {
-              e.hash(&mut hasher);
-          }
-          let out = hasher.finish();
-          memo.insert(ptr, out);
-          out
-      }
-
-      /// Structural eq that ignores edge BVs, but respects end flag, edge keys, strong/weak and structure.
-      fn trie2_skeleton_eq(
-          a: &Arc<RwLock<PrecomputeNode2>>,
-          b: &Arc<RwLock<PrecomputeNode2>>,
-          cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
-      ) -> bool {
-          if Arc::ptr_eq(a, b) { return true; }
-          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
-          if let Some(v) = cache.get(&(p1, p2)) { return *v; }
-          cache.insert((p1, p2), true); // optimistic to break cycles
-
-          let ga = a.read().expect("poison");
-          let gb = b.read().expect("poison");
-          if ga.value.end != gb.value.end { cache.insert((p1, p2), false); return false; }
-          if ga.children().len() != gb.children().len() { cache.insert((p1, p2), false); return false; }
-
-          for (ek, ma) in ga.children() {
-              if let Some(mb) = gb.children().get(ek) {
-                  // Partition by strong/weak
-                  let mut strong_a: Vec<_> = ma.keys().filter(|k| k.is_strong()).collect();
-                  let mut strong_b: Vec<_> = mb.keys().filter(|k| k.is_strong()).collect();
-                  let mut weak_a: Vec<_> = ma.keys().filter(|k| !k.is_strong()).collect();
-                  let mut weak_b: Vec<_> = mb.keys().filter(|k| !k.is_strong()).collect();
-
-                  if strong_a.len() != strong_b.len() || weak_a.len() != weak_b.len() {
-                      cache.insert((p1, p2), false); return false;
-                  }
-
-                  // For strong children: match by recursive skeleton
-                  'outer_s: for ka in strong_a {
-                      let ca = ka.upgrade().expect("dangling");
-                      let mut matched = false;
-                      for i in 0..strong_b.len() {
-                          let cb = strong_b[i].upgrade().expect("dangling");
-                          if trie2_skeleton_eq(&ca, &cb, cache) {
-                              strong_b.remove(i);
-                              matched = true;
-                              break;
-                          }
-                      }
-                      if !matched { cache.insert((p1, p2), false); return false; }
-                  }
-                  // For weak children
-                  'outer_w: for ka in weak_a {
-                      let ca = ka.upgrade().expect("dangling");
-                      let mut matched = false;
-                      for i in 0..weak_b.len() {
-                          let cb = weak_b[i].upgrade().expect("dangling");
-                          if trie2_skeleton_eq(&ca, &cb, cache) {
-                              weak_b.remove(i);
-                              matched = true;
-                              break;
-                          }
-                      }
-                      if !matched { cache.insert((p1, p2), false); return false; }
-                  }
-              } else {
-                  cache.insert((p1, p2), false);
-                  return false;
-              }
-          }
-          true
-      }
-
-      /// Masked shape hash: masks edge EV by `mask`, ignores edges whose (EV & mask) is empty.
-      fn trie2_masked_shape_hash(
-          arc: &Arc<RwLock<PrecomputeNode2>>,
-          mask: &LLMTokenBV,
-          memo: &mut HashMap<(*const RwLock<PrecomputeNode2>, u64), u64>,
-      ) -> u64 {
-          let ptr = Arc::as_ptr(arc);
-          let mfp = bv_fp(mask);
-          if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
-
-          let g = arc.read().expect("poison");
-          let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-          g.value.end.hash(&mut hasher);
-
-          let mut edge_hashes = Vec::new();
-          for (ek, dest_map) in g.children() {
-              for (np, ev) in dest_map {
-                  let masked = ev & mask;
-                  if masked.is_empty() { continue; }
-                  let child = np.upgrade().expect("dangling weak in masked hash");
-                  let ch = trie2_masked_shape_hash(&child, mask, memo);
-
-                  let mut h2 = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-                  ek.hash(&mut h2);
-                  np.is_strong().hash(&mut h2);
-                  masked.hash(&mut h2);
-                  ch.hash(&mut h2);
-                  edge_hashes.push(h2.finish());
-              }
-          }
-          drop(g);
-
-          edge_hashes.sort_unstable();
-          for e in edge_hashes {
-              e.hash(&mut hasher);
-          }
-          let out = hasher.finish();
-          memo.insert((ptr, mfp), out);
-          out
-      }
-
-      /// Masked shape equality: edges compared after (EV & mask); edges with empty masked EV are ignored.
-      fn trie2_masked_shape_eq(
-          a: &Arc<RwLock<PrecomputeNode2>>,
-          b: &Arc<RwLock<PrecomputeNode2>>,
-          mask: &LLMTokenBV,
-          cache: &mut HashMap<((*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), u64), bool>,
-      ) -> bool {
-          if Arc::ptr_eq(a, b) { return true; }
-          let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) { (Arc::as_ptr(a), Arc::as_ptr(b)) } else { (Arc::as_ptr(b), Arc::as_ptr(a)) };
-          let mfp = bv_fp(mask);
-          if let Some(v) = cache.get(&((p1, p2), mfp)) { return *v; }
-          cache.insert(((p1, p2), mfp), true); // optimistic to break cycles
-
-          let ga = a.read().expect("poison");
-          let gb = b.read().expect("poison");
-          if ga.value.end != gb.value.end { cache.insert(((p1, p2), mfp), false); return false; }
-
-          // Build masked children multiset for (ek, is_strong, masked_ev, child)
-          fn masked_children(
-              g: &PrecomputeNode2,
-              mask: &LLMTokenBV,
-          ) -> BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> {
-              let mut out: BTreeMap<(usize, Option<StateID>, bool), Vec<(LLMTokenBV, Arc<RwLock<PrecomputeNode2>>)>> = BTreeMap::new();
-              for (ek, dest_map) in g.children() {
-                  for (np, ev) in dest_map {
-                      let masked = ev & mask;
-                      if masked.is_empty() { continue; }
-                      let child = np.upgrade().expect("dangling");
-                      out.entry((ek.0, ek.1, np.is_strong()))
-                          .or_default().push((masked, child));
-                  }
-              }
-              out
-          }
-
-          let mut ca = masked_children(&ga, mask);
-          let mut cb = masked_children(&gb, mask);
-          drop(ga); drop(gb);
-
-          if ca.len() != cb.len() { cache.insert(((p1, p2), mfp), false); return false; }
-
-          for (key, mut va) in ca {
-              let vb = match cb.get_mut(&key) {
-                  Some(v) => v,
-                  None => { cache.insert(((p1, p2), mfp), false); return false; }
-              };
-              if va.len() != vb.len() { cache.insert(((p1, p2), mfp), false); return false; }
-
-              'outer: for (e_va, c_a) in va.drain(..) {
-                  for i in 0..vb.len() {
-                      let (ref e_vb, ref c_b) = vb[i];
-                      if &e_va == e_vb && trie2_masked_shape_eq(c_a, c_b, mask, cache) {
-                          vb.remove(i);
-                          continue 'outer;
-                      }
-                  }
-                  cache.insert(((p1, p2), mfp), false);
-                  return false;
-              }
-              if !vb.is_empty() {
-                  cache.insert(((p1, p2), mfp), false);
-                  return false;
-              }
-          }
-          true
-      }
-
-      fn has_strong_path_trie2(
-          from: &Arc<RwLock<PrecomputeNode2>>,
-          to: &Arc<RwLock<PrecomputeNode2>>,
-      ) -> bool {
-          // Reuse detect_cycle: returns true if `to` is reachable from `from` via STRONG edges.
-          let to_ptr = {
-              let g = to.read().expect("poison");
-              &*g as *const _
-          };
-          Trie::detect_cycle(to_ptr, from)
-      }
-
-      /// Redirect the M-portion of incoming edges of `from_arc` to `to_arc`, keeping edge-kind.
-      /// Skips redirection for any source that is reachable from `to_arc` via strong edges (cycle risk).
-      fn redirect_incoming_tokens_trie2(
-          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-          arc_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
-          incoming: &mut HashMap<*const RwLock<PrecomputeNode2>, Vec<(Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), bool, LLMTokenBV)>>,
-          incoming_union: &mut HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV>,
-          from_arc: &Arc<RwLock<PrecomputeNode2>>,
-          to_arc: &Arc<RwLock<PrecomputeNode2>>,
-          mask: &LLMTokenBV,
-      ) {
-          type EdgeKey2 = (usize, Option<StateID>);
-          let from_ptr = Arc::as_ptr(from_arc);
-          let to_ptr = Arc::as_ptr(to_arc);
-
-          let mut moved_union = LLMTokenBV::zeros();
-
-          if let Some(inc_list) = incoming.get_mut(&from_ptr) {
-              // Work on a snapshot to avoid borrow conflicts while mutating sources.
-              let snapshot = inc_list.clone();
-              for (src_arc, ek, is_strong, ev) in snapshot {
-                  let to_move = ev & mask;
-                  if to_move.is_empty() { continue; }
-
-                  // Safety: do not create cycle. Ensure no strong path from `to_arc` to `src_arc`.
-                  if has_strong_path_trie2(to_arc, &src_arc) {
-                      continue; // unsafe to redirect this source
-                  }
-
-                  // Mutate src: subtract to_move from edge to `from`, add to `to`.
-                  {
-                      let mut sg = src_arc.write().expect("poison");
-                      // Remove/subtract from -> from_arc
-                      let dest_map = match sg.children_mut().get_mut(&ek) {
-                          Some(m) => m,
-                          None => continue,
-                      };
-                      let from_key = if is_strong {
-                          NodePtr::Strong(ArcPtrWrapper::new(from_arc.clone()))
-                      } else {
-                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(from_arc)))
-                      };
-                      let mut remove_from_entry = false;
-                      if let Some(ev_old) = dest_map.get_mut(&from_key) {
-                          *ev_old -= &to_move;
-                          if ev_old.is_empty() {
-                              remove_from_entry = true;
-                          }
-                      }
-                      if remove_from_entry {
-                          dest_map.remove(&from_key);
-                      }
-                      // Insert/merge into -> to_arc (keep same strong/weak)
-                      let to_key = if is_strong {
-                          NodePtr::Strong(ArcPtrWrapper::new(to_arc.clone()))
-                      } else {
-                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(to_arc)))
-                      };
-                      if let Some(ev_to) = dest_map.get_mut(&to_key) {
-                          *ev_to |= &to_move;
-                      } else {
-                          dest_map.insert(to_key, to_move.clone());
-                      }
-                      if dest_map.is_empty() {
-                          sg.children_mut().remove(&ek);
-                      }
-                  }
-
-                  // Reflect incoming bookkeeping: update incoming (from_ptr) and (to_ptr)
-                  // Subtract from `from_ptr`
-                  if let Some(list) = incoming.get_mut(&from_ptr) {
-                      // Update the entry for this (src, ek, is_strong)
-                      for it in list.iter_mut() {
-                          if Arc::ptr_eq(&it.0, &src_arc) && it.1 == ek && it.2 == is_strong {
-                              it.3 -= &to_move;
-                          }
-                      }
-                  }
-                  // Add/merge into `to_ptr`
-                  incoming.entry(to_ptr).or_default().push((src_arc.clone(), ek, is_strong, to_move.clone()));
-                  moved_union |= &to_move;
-              }
-          }
-
-          if !moved_union.is_empty() {
-              // Update unions
-              incoming_union.entry(to_ptr).and_modify(|u| *u |= &moved_union).or_insert(moved_union.clone());
-
-              // Also mark `to_arc` live_tokens with moved tokens (helps backward passes)
-              {
-                  let mut tg = to_arc.write().expect("poison");
-                  tg.value.live_tokens |= moved_union.clone();
-              }
-          }
-      }
-
-      /// Greedy, conservative, context-aware merge for Trie 2.
-      /// Only redirects the intersection mask portion (M) and only when masked-shape(A) == masked-shape(B).
-      fn context_aware_merge_trie2(
-          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-      ) {
-          crate::debug!(2, "Context-aware merging in trie 2 (masked, conservative)...");
-          type EdgeKey2 = (usize, Option<StateID>);
-
-          let (mut incoming, mut incoming_union, arc_map) = build_incoming_maps_trie2(roots);
-          // Skeleton buckets to reduce pairwise checks
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(&roots_vec);
-
-          let mut skeleton_memo = HashMap::new();
-          let mut buckets: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
-          for n in &all_nodes {
-              let h = trie2_skeleton_hash(n, &mut skeleton_memo);
-              buckets.entry(h).or_default().push(n.clone());
-          }
-
-          let mut shape_memo = HashMap::new(); // for masked-hash if needed later (not here)
-          let mut eq_cache_masked = HashMap::new();
-          let mut eq_cache_skeleton = HashMap::new();
-
-          // Greedy pass within each bucket
-          for (_h, mut group) in buckets {
-              if group.len() < 2 { continue; }
-              // small heuristic: sort by pointer to have deterministic order
-              group.sort_by_key(|a| Arc::as_ptr(a) as usize);
-
-              'outer: for i in 0..group.len() {
-                  let a = &group[i];
-                  for j in (i+1)..group.len() {
-                      let b = &group[j];
-                      if Arc::ptr_eq(a, b) { continue; }
-
-                      // Additional quick reject: skeleton must match (already bucketed, but due to hash collision)
-                      if !trie2_skeleton_eq(a, b, &mut eq_cache_skeleton) {
-                          continue;
-                      }
-
-                      let a_ptr = Arc::as_ptr(a);
-                      let b_ptr = Arc::as_ptr(b);
-                      let ua = incoming_union.get(&a_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
-                      let ub = incoming_union.get(&b_ptr).cloned().unwrap_or_else(LLMTokenBV::zeros);
-                      let m = &(&ua & &ub);
-                      if m.is_empty() { continue; }
-
-                      // Must have masked equality under intersection
-                      if !trie2_masked_shape_eq(a, b, &m, &mut eq_cache_masked) {
-                          continue;
-                      }
-
-                      // Redirect mask-portion of B -> A (safe per source)
-                      redirect_incoming_tokens_trie2(roots, &arc_map, &mut incoming, &mut incoming_union, b, a, &m);
-                  }
-              }
-          }
-
-          crate::debug!(2, "Context-aware merging in trie 2 complete.");
-      }
       ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
 
-      Notes:
-      - All helper functions are self-contained and reuse your existing types and utilities.
-      - This pass never changes edge keys; it only splits/joins edge bitsets and rewires destinations (keeping strong/weak as-is).
-      - It checks per-source safety to avoid forming strong cycles.
-      - It redirects only the intersection of the two nodes’ incoming unions (M), leaving any remaining tokens on the original node, making this a conservative, correctness-preserving merge.
-
-      2) File: src/constraint.rs
-      Location: Inside fn precompute2, after the existing simplifications on trie2 and before promote_weak_edges_to_strong and the final recompute, insert a call to the new pass, then prune/merge again. Specifically, after these lines:
-
-      - prune_dead_paths_trie2(&mut precomputed2);
-      - merge_nodes_trie2(&mut precomputed2);
-      - simplify_trie2_factor_common_destinations(&mut precomputed2);
-      - simplify_trie2_zero_none_edges(&mut precomputed2);
-
-      Insert the following lines:
-
-      ```rust
-      // New: context-aware, masked merge (safe, conservative)
-      context_aware_merge_trie2(&mut precomputed2);
-
-      // Clean up after rewiring
-      prune_dead_paths_trie2(&mut precomputed2);
-      merge_nodes_trie2(&mut precomputed2);
-      ```
-
-      Keep the existing promotion, then recompute depths as you already do.
-
-      3) Optional tuning
-      - If performance is a concern on very large graphs, limit the number of pairwise checks per skeleton bucket. You can add an early-break counter inside the group loop in context_aware_merge_trie2.
-      - You can also skip groups larger than a certain size to keep runtime bounded, or prefer processing nodes with small out-degree first.
-
-      4) Why this is sound
-      - We only move tokens (bitset portions) for which the two subtrees are masked-equivalent, so the downstream behavior (what tokens reach end and how they flow) remains indistinguishable under those tokens.
-      - We never change edge-key semantics; we simply redirect the destination node.
-      - We maintain strong/weak edge kinds and refuse any redirection that could introduce a strong cycle by checking reachability from the new target to the source.
-
-      5) Validation checklist
-      - Run your existing Trie 2 sanity checks after precompute: Trie::recompute_all_max_depths and promote_weak_edges_to_strong, then recompute depths again (you already do this).
-      - Enable logging around the new pass (the crate::debug! calls are already placed) to gauge the number of redirects performed.
-      - If you have equality checks or determinism tests, re-run them; the pass is deterministic due to sorting within groups by pointer.
-
-      6) Future extensions (if you want more compression later)
-      - Add a mask-aware canonicalization cache to merge multiple Bs into A in one go (currently done greedily via repeated rewiring).
-      - Use a stricter candidate prefilter keyed by (end flag, per-key strong/weak multiplicities, shallow degree) to avoid unnecessary masked-eq calls.
-      - Allow redirection of weak incoming edges without the cycle check (they cannot make strong cycles), which increases merge opportunities at little risk.
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Prevent stack overflow in trie hashing
+      by breaking cycles"'
     metadata:
 ...
