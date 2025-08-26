@@ -636,6 +636,7 @@ impl GrammarConstraint {
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
+        simplify_trie2_path_compression(&mut precomputed2);
         // simplify_trie2_zero_none_edges(&mut precomputed2);
         context_aware_merge_trie2(&mut precomputed2);
         // merge_nodes_trie2(&mut precomputed2);
@@ -839,6 +840,103 @@ fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Prec
         guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
     }
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
+}
+
+fn simplify_trie2_path_compression(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+    crate::debug!(2, "Simplifying trie 2 by path compression...");
+
+    let root_node_ptrs: HashSet<_> = roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+    let mut changed = true;
+    let mut passes = 0;
+    const MAX_PASSES: usize = 10; // Safety break for unexpected looping
+
+    while changed && passes < MAX_PASSES {
+        changed = false;
+        passes += 1;
+        crate::debug!(3, "Path compression pass {}", passes);
+
+        let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+
+        // Build incoming/outgoing maps for this pass
+        type EdgeInfo = (Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), LLMTokenBV, bool);
+        let mut incoming: HashMap<*const RwLock<PrecomputeNode2>, Vec<EdgeInfo>> = HashMap::new();
+        let mut outgoing: HashMap<*const RwLock<PrecomputeNode2>, Vec<EdgeInfo>> = HashMap::new();
+
+        for src_arc in &all_nodes {
+            let src_ptr = Arc::as_ptr(src_arc);
+            let guard = src_arc.read().expect("poison");
+            for (ek, dest_map) in guard.children() {
+                for (dest_wrapper, bv) in dest_map {
+                    if let Some(dest_arc) = dest_wrapper.upgrade() {
+                        let dest_ptr = Arc::as_ptr(&dest_arc);
+                        let is_strong = dest_wrapper.is_strong();
+                        let edge_info = (dest_arc.clone(), ek.clone(), bv.clone(), is_strong);
+                        outgoing.entry(src_ptr).or_default().push(edge_info);
+
+                        let reverse_edge_info = (src_arc.clone(), ek.clone(), bv.clone(), is_strong);
+                        incoming.entry(dest_ptr).or_default().push(reverse_edge_info);
+                    }
+                }
+            }
+        }
+
+        for b_arc in &all_nodes {
+            let b_ptr = Arc::as_ptr(b_arc);
+
+            if root_node_ptrs.contains(&b_ptr) || b_arc.read().expect("poison").value.end {
+                continue;
+            }
+
+            let incoming_edges = incoming.get(&b_ptr).map_or(&[][..], |v| v.as_slice());
+            let outgoing_edges = outgoing.get(&b_ptr).map_or(&[][..], |v| v.as_slice());
+
+            if incoming_edges.len() == 1 && outgoing_edges.len() == 1 {
+                let (a_arc, (k1, s1), bv1, a_to_b_is_strong) = incoming_edges[0].clone();
+                let (c_arc, (k2, s2), bv2, b_to_c_is_strong) = outgoing_edges[0].clone();
+
+                if s1.is_some() && s2.is_some() {
+                    continue;
+                }
+
+                let new_key = (k1 + k2, s1.or(s2));
+                let new_bv = &bv1 & &bv2;
+
+                if new_bv.is_empty() {
+                    continue;
+                }
+
+                let new_edge_is_strong = a_to_b_is_strong && b_to_c_is_strong;
+                if new_edge_is_strong {
+                    let a_data_ptr = { &*a_arc.read().unwrap() as *const _ };
+                    if Trie::detect_cycle(a_data_ptr, &c_arc) {
+                        continue; // would create cycle
+                    }
+                }
+
+                // Perform modification
+                let mut a_guard = a_arc.write().expect("poison");
+
+                // Remove A -> B
+                let b_key = if a_to_b_is_strong {
+                    NodePtr::Strong(ArcPtrWrapper::new(b_arc.clone()))
+                } else {
+                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(b_arc)))
+                };
+                if let Some(dest_map) = a_guard.children_mut().get_mut(&(k1, s1)) {
+                    dest_map.remove(&b_key);
+                }
+
+                // Add A -> C
+                let dest_map_ac = a_guard.children_mut().entry(new_key).or_default();
+                let c_key = if new_edge_is_strong { NodePtr::Strong(ArcPtrWrapper::new(c_arc)) } else { NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc))) };
+                dest_map_ac.entry(c_key).and_modify(|ebv| *ebv |= &new_bv).or_insert(new_bv);
+
+                changed = true;
+                break; // Restart scan since graph changed.
+            }
+        }
+    }
+    crate::debug!(2, "Finished simplifying trie 2 by path compression.");
 }
 
 fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {

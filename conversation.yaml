@@ -640,7 +640,6 @@ local_system:
                   }
               }
 
-
               // Clean up after rewiring
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
@@ -1120,6 +1119,9 @@ local_system:
           if let Some(h) = memo.get(&ptr) {
               return *h;
           }
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert(ptr, 0);
+
           let g = arc.read().expect("poison");
           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
           g.value.end.hash(&mut hasher);
@@ -1220,6 +1222,9 @@ local_system:
           let ptr = Arc::as_ptr(arc);
           let mfp = bv_fp(mask);
           if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert((ptr, mfp), 0);
 
           let g = arc.read().expect("poison");
           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
@@ -7968,11 +7973,11 @@ local_system:
                   }
               }
 
-
               // Clean up after rewiring
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
+              simplify_trie2_path_compression(&mut precomputed2);
               // simplify_trie2_zero_none_edges(&mut precomputed2);
               context_aware_merge_trie2(&mut precomputed2);
               // merge_nodes_trie2(&mut precomputed2);
@@ -8176,6 +8181,103 @@ local_system:
               guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
           }
           crate::debug!(2, "Finished pruning dead paths from trie 2.");
+      }
+
+      fn simplify_trie2_path_compression(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+          crate::debug!(2, "Simplifying trie 2 by path compression...");
+
+          let root_node_ptrs: HashSet<_> = roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+          let mut changed = true;
+          let mut passes = 0;
+          const MAX_PASSES: usize = 10; // Safety break for unexpected looping
+
+          while changed && passes < MAX_PASSES {
+              changed = false;
+              passes += 1;
+              crate::debug!(3, "Path compression pass {}", passes);
+
+              let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+
+              // Build incoming/outgoing maps for this pass
+              type EdgeInfo = (Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), LLMTokenBV, bool);
+              let mut incoming: HashMap<*const RwLock<PrecomputeNode2>, Vec<EdgeInfo>> = HashMap::new();
+              let mut outgoing: HashMap<*const RwLock<PrecomputeNode2>, Vec<EdgeInfo>> = HashMap::new();
+
+              for src_arc in &all_nodes {
+                  let src_ptr = Arc::as_ptr(src_arc);
+                  let guard = src_arc.read().expect("poison");
+                  for (ek, dest_map) in guard.children() {
+                      for (dest_wrapper, bv) in dest_map {
+                          if let Some(dest_arc) = dest_wrapper.upgrade() {
+                              let dest_ptr = Arc::as_ptr(&dest_arc);
+                              let is_strong = dest_wrapper.is_strong();
+                              let edge_info = (dest_arc.clone(), ek.clone(), bv.clone(), is_strong);
+                              outgoing.entry(src_ptr).or_default().push(edge_info);
+
+                              let reverse_edge_info = (src_arc.clone(), ek.clone(), bv.clone(), is_strong);
+                              incoming.entry(dest_ptr).or_default().push(reverse_edge_info);
+                          }
+                      }
+                  }
+              }
+
+              for b_arc in &all_nodes {
+                  let b_ptr = Arc::as_ptr(b_arc);
+
+                  if root_node_ptrs.contains(&b_ptr) || b_arc.read().expect("poison").value.end {
+                      continue;
+                  }
+
+                  let incoming_edges = incoming.get(&b_ptr).map_or(&[][..], |v| v.as_slice());
+                  let outgoing_edges = outgoing.get(&b_ptr).map_or(&[][..], |v| v.as_slice());
+
+                  if incoming_edges.len() == 1 && outgoing_edges.len() == 1 {
+                      let (a_arc, (k1, s1), bv1, a_to_b_is_strong) = incoming_edges[0].clone();
+                      let (c_arc, (k2, s2), bv2, b_to_c_is_strong) = outgoing_edges[0].clone();
+
+                      if s1.is_some() && s2.is_some() {
+                          continue;
+                      }
+
+                      let new_key = (k1 + k2, s1.or(s2));
+                      let new_bv = &bv1 & &bv2;
+
+                      if new_bv.is_empty() {
+                          continue;
+                      }
+
+                      let new_edge_is_strong = a_to_b_is_strong && b_to_c_is_strong;
+                      if new_edge_is_strong {
+                          let a_data_ptr = { &*a_arc.read().unwrap() as *const _ };
+                          if Trie::detect_cycle(a_data_ptr, &c_arc) {
+                              continue; // would create cycle
+                          }
+                      }
+
+                      // Perform modification
+                      let mut a_guard = a_arc.write().expect("poison");
+
+                      // Remove A -> B
+                      let b_key = if a_to_b_is_strong {
+                          NodePtr::Strong(ArcPtrWrapper::new(b_arc.clone()))
+                      } else {
+                          NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(b_arc)))
+                      };
+                      if let Some(dest_map) = a_guard.children_mut().get_mut(&(k1, s1)) {
+                          dest_map.remove(&b_key);
+                      }
+
+                      // Add A -> C
+                      let dest_map_ac = a_guard.children_mut().entry(new_key).or_default();
+                      let c_key = if new_edge_is_strong { NodePtr::Strong(ArcPtrWrapper::new(c_arc)) } else { NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc))) };
+                      dest_map_ac.entry(c_key).and_modify(|ebv| *ebv |= &new_bv).or_insert(new_bv);
+
+                      changed = true;
+                      break; // Restart scan since graph changed.
+                  }
+              }
+          }
+          crate::debug!(2, "Finished simplifying trie 2 by path compression.");
       }
 
       fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
@@ -15337,7 +15439,6 @@ messages:
                   }
               }
 
-
               // Clean up after rewiring
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
@@ -15817,6 +15918,9 @@ messages:
           if let Some(h) = memo.get(&ptr) {
               return *h;
           }
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert(ptr, 0);
+
           let g = arc.read().expect("poison");
           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
           g.value.end.hash(&mut hasher);
@@ -15917,6 +16021,9 @@ messages:
           let ptr = Arc::as_ptr(arc);
           let mfp = bv_fp(mask);
           if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+
+          // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+          memo.insert((ptr, mfp), 0);
 
           let g = arc.read().expect("poison");
           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
@@ -22038,8 +22145,9 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: trie2_skeleton_hash appears to be looping infinitely, causing stack overflow.
-      Fix it.
+  - user: |-
+      Add an optimisation pass for the precompute2 tree that simplifies it by kind of 'merging' edges. Generally, we can merge as long as not both of the edges have state IDs. If one of them has a state ID, the merged edge inherits that. And if neither do, it stays None. The pop value k on the edge just gets added. But we have to be careful. We can't just merge willy nilly.
+      Basically the goal is to minimize unnecessary edges.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -22056,38 +22164,126 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the issue. The stack overflow in `trie2_skeleton_hash` is caused by infinite recursion when processing a graph with cycles. The memoization check only happens before the recursive calls, but the memoization map is only populated after they return.
+      I've implemented the requested optimization pass for `precompute2`. This pass simplifies the graph by merging sequential edges where possible, reducing the number of nodes and edges. The logic follows your description: it combines the pop counts (`k`) and merges the optional state IDs, with the constraint that two edges with state IDs cannot be merged.
 
-      To fix this, I'll insert a placeholder value into the memoization map *before* the recursive calls. This breaks the cycle, as any recursive call that revisits the current node will find the placeholder and return immediately. The placeholder is then overwritten with the correct hash value at the end of the function.
-
-      I noticed that `trie2_masked_shape_hash` has the same logical error, so I've included a fix for it as well to prevent future issues.
-
-      Here is the patch for `src/constraint.rs`:
+      Here are the patches for the affected file.
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1418,6 +1418,10 @@
-           if let Some(h) = memo.get(&ptr) {
-               return *h;
-           }
-      +    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
-      +    memo.insert(ptr, 0);
-      +
-           let g = arc.read().expect("poison");
-           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-           g.value.end.hash(&mut hasher);
-      @@ -1500,6 +1504,10 @@
-           let mfp = bv_fp(mask);
-           if let Some(h) = memo.get(&(ptr, mfp)) { return *h; }
+      @@ -711,6 +711,100 @@
+           crate::debug!(2, "Finished pruning dead paths from trie 2.");
+       }
        
-      +    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
-      +    memo.insert((ptr, mfp), 0);
+      +fn simplify_trie2_path_compression(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+      +    crate::debug!(2, "Simplifying trie 2 by path compression...");
       +
-           let g = arc.read().expect("poison");
-           let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-           g.value.end.hash(&mut hasher);
+      +    let root_node_ptrs: HashSet<_> = roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+      +    let mut changed = true;
+      +    let mut passes = 0;
+      +    const MAX_PASSES: usize = 10; // Safety break for unexpected looping
+      +
+      +    while changed && passes < MAX_PASSES {
+      +        changed = false;
+      +        passes += 1;
+      +        crate::debug!(3, "Path compression pass {}", passes);
+      +
+      +        let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+      +
+      +        // Build incoming/outgoing maps for this pass
+      +        type EdgeInfo = (Arc<RwLock<PrecomputeNode2>>, (usize, Option<StateID>), LLMTokenBV, bool);
+      +        let mut incoming: HashMap<*const RwLock<PrecomputeNode2>, Vec<EdgeInfo>> = HashMap::new();
+      +        let mut outgoing: HashMap<*const RwLock<PrecomputeNode2>, Vec<EdgeInfo>> = HashMap::new();
+      +
+      +        for src_arc in &all_nodes {
+      +            let src_ptr = Arc::as_ptr(src_arc);
+      +            let guard = src_arc.read().expect("poison");
+      +            for (ek, dest_map) in guard.children() {
+      +                for (dest_wrapper, bv) in dest_map {
+      +                    if let Some(dest_arc) = dest_wrapper.upgrade() {
+      +                        let dest_ptr = Arc::as_ptr(&dest_arc);
+      +                        let is_strong = dest_wrapper.is_strong();
+      +                        let edge_info = (dest_arc.clone(), ek.clone(), bv.clone(), is_strong);
+      +                        outgoing.entry(src_ptr).or_default().push(edge_info);
+      +
+      +                        let reverse_edge_info = (src_arc.clone(), ek.clone(), bv.clone(), is_strong);
+      +                        incoming.entry(dest_ptr).or_default().push(reverse_edge_info);
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        for b_arc in &all_nodes {
+      +            let b_ptr = Arc::as_ptr(b_arc);
+      +
+      +            if root_node_ptrs.contains(&b_ptr) || b_arc.read().expect("poison").value.end {
+      +                continue;
+      +            }
+      +
+      +            let incoming_edges = incoming.get(&b_ptr).map_or(&[][..], |v| v.as_slice());
+      +            let outgoing_edges = outgoing.get(&b_ptr).map_or(&[][..], |v| v.as_slice());
+      +
+      +            if incoming_edges.len() == 1 && outgoing_edges.len() == 1 {
+      +                let (a_arc, (k1, s1), bv1, a_to_b_is_strong) = incoming_edges[0].clone();
+      +                let (c_arc, (k2, s2), bv2, b_to_c_is_strong) = outgoing_edges[0].clone();
+      +
+      +                if s1.is_some() && s2.is_some() {
+      +                    continue;
+      +                }
+      +
+      +                let new_key = (k1 + k2, s1.or(s2));
+      +                let new_bv = &bv1 & &bv2;
+      +
+      +                if new_bv.is_empty() {
+      +                    continue;
+      +                }
+      +
+      +                let new_edge_is_strong = a_to_b_is_strong && b_to_c_is_strong;
+      +                if new_edge_is_strong {
+      +                    let a_data_ptr = { &*a_arc.read().unwrap() as *const _ };
+      +                    if Trie::detect_cycle(a_data_ptr, &c_arc) {
+      +                        continue; // would create cycle
+      +                    }
+      +                }
+      +
+      +                // Perform modification
+      +                let mut a_guard = a_arc.write().expect("poison");
+      +
+      +                // Remove A -> B
+      +                let b_key = if a_to_b_is_strong {
+      +                    NodePtr::Strong(ArcPtrWrapper::new(b_arc.clone()))
+      +                } else {
+      +                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(b_arc)))
+      +                };
+      +                if let Some(dest_map) = a_guard.children_mut().get_mut(&(k1, s1)) {
+      +                    dest_map.remove(&b_key);
+      +                }
+      +
+      +                // Add A -> C
+      +                let dest_map_ac = a_guard.children_mut().entry(new_key).or_default();
+      +                let c_key = if new_edge_is_strong { NodePtr::Strong(ArcPtrWrapper::new(c_arc)) } else { NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&c_arc))) };
+      +                dest_map_ac.entry(c_key).and_modify(|ebv| *ebv |= &new_bv).or_insert(new_bv);
+      +
+      +                changed = true;
+      +                break; // Restart scan since graph changed.
+      +            }
+      +        }
+      +    }
+      +    crate::debug!(2, "Finished simplifying trie 2 by path compression.");
+      +}
+      +
+       fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+           crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
+       
+      @@ -801,6 +895,7 @@
+               prune_dead_paths_trie2(&mut precomputed2);
+               merge_nodes_trie2(&mut precomputed2);
+               simplify_trie2_factor_common_destinations(&mut precomputed2);
+      +        simplify_trie2_path_compression(&mut precomputed2);
+               // simplify_trie2_zero_none_edges(&mut precomputed2);
+               context_aware_merge_trie2(&mut precomputed2);
+               // merge_nodes_trie2(&mut precomputed2);
 
       ```
     metadata:
@@ -22100,7 +22296,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Prevent stack overflow in trie hashing
-      by breaking cycles"'
+  - user: 'Changes committed with message: "feat: Add path compression simplification
+      to precompute2 trie"'
     metadata:
 ...
