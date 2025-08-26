@@ -648,10 +648,6 @@ impl GrammarConstraint {
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
         Trie::recompute_all_max_depths(&roots2_final);
 
-        // Final safety sweep: ensure no dangling weak edges remain (all weak edges must upgrade()).
-        let purged = Trie::purge_dangling_weak_edges(&roots2_final);
-        crate::debug!(2, "Purged {} dangling weak edges in precomputed trie 2.", purged);
-
         precomputed2
     }
 
