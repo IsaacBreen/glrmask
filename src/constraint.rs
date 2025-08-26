@@ -159,38 +159,26 @@ impl JSONConvertible for GrammarConstraint {
 type NormalizedPath = Vec<(usize, StateID)>;
 type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
 
-/// Normalizes a path by merging consecutive `(k, None)` segments.
-fn normalize_path(path: &[(usize, Option<StateID>)]) -> NormalizedPath {
-    let mut result = Vec::new();
-    let mut current_k = 0;
-    for (k, sid_opt) in path {
-        current_k += *k;
-        if let Some(sid) = sid_opt {
-            result.push((current_k, *sid));
-            current_k = 0;
-        }
-    }
-    result
-}
-
 /// Traverses a `PrecomputeNode2` trie from the root to generate all unique, normalized paths to an end node.
 /// Each path is associated with the intersection of LLM token bitvectors along its edges.
 fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMap {
     let mut all_paths = PathMap::new();
-    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, Vec<(usize, Option<StateID>)>, LLMTokenBV)> = VecDeque::new();
+    // State: node, normalized path so far, accumulated k for pending None-edges, bitvector
+    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, NormalizedPath, usize, LLMTokenBV)> = VecDeque::new();
 
     let initial_bv = root.read().unwrap().value.live_tokens.clone();
-    q.push_back((root.clone(), vec![], initial_bv));
+    q.push_back((root.clone(), vec![], 0, initial_bv));
 
-    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, Vec<(usize, Option<StateID>)>), LLMTokenBV> = HashMap::new();
-    visited.insert((Arc::as_ptr(root), vec![]), root.read().unwrap().value.live_tokens.clone());
+    // Visited key: (node_ptr, normalized path, pending_k)
+    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, NormalizedPath, usize), LLMTokenBV> = HashMap::new();
+    visited.insert((Arc::as_ptr(root), vec![], 0), root.read().unwrap().value.live_tokens.clone());
 
-    while let Some((node_arc, path, bv)) = q.pop_front() {
+    while let Some((node_arc, path, current_k, bv)) = q.pop_front() {
         let node_guard = node_arc.read().unwrap();
 
         if node_guard.value.end {
-            let normalized = normalize_path(&path);
-            all_paths.entry(normalized)
+            // The `path` is already normalized. The pending `current_k` is discarded as per original logic.
+            all_paths.entry(path)
                 .and_modify(|e| *e |= &bv)
                 .or_insert(bv.clone());
         }
@@ -201,10 +189,16 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMa
                 if new_bv.is_empty() { continue; }
 
                 if let Some(child_arc) = child_ptr.upgrade() {
+                    let (k, sid_opt) = ek;
+                    let mut new_k = current_k + *k;
                     let mut new_path = path.clone();
-                    new_path.push(ek.clone());
 
-                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone());
+                    if let Some(sid) = sid_opt {
+                        new_path.push((new_k, *sid));
+                        new_k = 0;
+                    }
+
+                    let visited_key = (Arc::as_ptr(&child_arc), new_path.clone(), new_k);
 
                     if let Some(existing_bv) = visited.get_mut(&visited_key) {
                         let new_tokens = &new_bv - &*existing_bv;
@@ -212,16 +206,15 @@ fn get_normalized_paths_from_root(root: &Arc<RwLock<PrecomputeNode2>>) -> PathMa
                             continue;
                         }
                         *existing_bv |= &new_tokens;
-                        q.push_back((child_arc, new_path, new_tokens));
+                        q.push_back((child_arc, new_path, new_k, new_tokens));
                     } else {
                         visited.insert(visited_key, new_bv.clone());
-                        q.push_back((child_arc, new_path, new_bv));
+                        q.push_back((child_arc, new_path, new_k, new_bv));
                     }
                 }
             }
         }
     }
-
     all_paths
 }
 
