@@ -2,17 +2,15 @@
 // It verifies that optimizations produce a semantically equivalent tree.
 
 use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, context_aware_merge_trie2, GrammarConstraint, Precomputed2};
-use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::json_serialization::JSONConvertible;
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use reqwest::blocking;
-use crate::datastructures::gss::PrecomputeNode2;
-
 // Helper function copied from test_constraint_js.rs
 fn load_or_download_gpt2_vocab(
     cache_dir: &Path,
@@ -41,112 +39,6 @@ fn load_or_download_gpt2_vocab(
     Ok(vocab_map.into_keys().collect())
 }
 
-/// Custom streaming serializer for a single Trie to avoid high memory usage.
-/// This function serializes a Trie graph into a self-contained JSON object to a writer.
-fn stream_trie_to_writer<W: Write>(
-    root_arc: &Arc<RwLock<PrecomputeNode2>>,
-    mut writer: W,
-) -> Result<(), String> {
-    // Pass 1: Discover all nodes via BFS and assign unique indices.
-    let mut ptr_to_idx: HashMap<*const RwLock<PrecomputeNode2>, usize> = HashMap::new();
-    let mut idx_to_arc: Vec<Arc<RwLock<PrecomputeNode2>>> = Vec::new();
-
-    ptr_to_idx.insert(Arc::as_ptr(root_arc), 0);
-    idx_to_arc.push(root_arc.clone());
-
-    let mut head = 0;
-    while head < idx_to_arc.len() {
-        let current_arc = idx_to_arc[head].clone();
-        head += 1;
-
-        let guard = current_arc.read().map_err(|_| "RwLock poisoned during discovery".to_string())?;
-        for child_map in guard.children().values() {
-            for node_ptr in child_map.keys() {
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    if !ptr_to_idx.contains_key(&child_ptr) {
-                        let new_idx = idx_to_arc.len();
-                        ptr_to_idx.insert(child_ptr, new_idx);
-                        idx_to_arc.push(child_arc);
-                    }
-                }
-            }
-        }
-    }
-
-    // Pass 2: Write nodes to stream one by one.
-    write!(writer, "{{\"nodes\":[",).map_err(|e| e.to_string())?;
-
-    for (i, node_arc) in idx_to_arc.iter().enumerate() {
-        if i > 0 {
-            write!(writer, ",").map_err(|e| e.to_string())?;
-        }
-        let guard = node_arc.read().map_err(|_| "RwLock poisoned during serialization".to_string())?;
-
-        // Manually construct the JSON for this single node.
-        let mut children_json_data = Vec::new();
-        let mut weak_children_json_data = Vec::new();
-
-        for (edge_key, destinations_map) in guard.children() {
-            let ek_json = edge_key.to_json();
-            let mut strong_dests_json = Vec::new();
-            let mut weak_dests_json = Vec::new();
-
-            for (node_ptr, edge_val) in destinations_map {
-                if let Some(child_arc) = node_ptr.upgrade() {
-                    let child_idx = ptr_to_idx.get(&Arc::as_ptr(&child_arc)).unwrap();
-                    let dest_entry = JSONNode::Array(vec![child_idx.to_json(), edge_val.to_json()]);
-                    if node_ptr.is_strong() {
-                        strong_dests_json.push(dest_entry);
-                    } else {
-                        weak_dests_json.push(dest_entry);
-                    }
-                }
-            }
-            if !strong_dests_json.is_empty() {
-                children_json_data.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(strong_dests_json)]));
-            }
-            if !weak_dests_json.is_empty() {
-                weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(weak_dests_json)]));
-            }
-        }
-
-        let node_json = JSONNode::Object(BTreeMap::from_iter(vec![
-            ("value".to_string(), guard.value.to_json()),
-            ("max_depth".to_string(), guard.max_depth.to_json()),
-            ("children".to_string(), JSONNode::Array(children_json_data)),
-            ("weak_children".to_string(), JSONNode::Array(weak_children_json_data)),
-        ]));
-
-        node_json.to_writer(&mut writer)?;
-    }
-
-    write!(writer, "],\"root_idx\":0}}").map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Custom streaming serializer for `Precomputed2`.
-fn write_precomputed2_to_stream<W: Write>(
-    precomputed2: &Precomputed2,
-    mut writer: W,
-) -> Result<(), String> {
-    writer.write_all(b"[").map_err(|e| e.to_string())?;
-    let mut first = true;
-    for (key, trie_root_arc) in precomputed2 {
-        if !first {
-            writer.write_all(b",").map_err(|e| e.to_string())?;
-        }
-        first = false;
-        writer.write_all(b"[").map_err(|e| e.to_string())?;
-        key.to_json().to_writer(&mut writer)?;
-        writer.write_all(b",").map_err(|e| e.to_string())?;
-        stream_trie_to_writer(trie_root_arc, &mut writer)?;
-        writer.write_all(b"]").map_err(|e| e.to_string())?;
-    }
-    writer.write_all(b"]").map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[test]
 fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::error::Error>> {
     // --- Setup Phase ---
@@ -157,6 +49,7 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
     use flate2::read::GzDecoder;
     use flate2::write::GzEncoder;
     use flate2::Compression;
+    use crate::json_serialization;
     let cache_dir = Path::new(".cache/test_precompute2");
     fs::create_dir_all(cache_dir)?;
     let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
@@ -214,7 +107,7 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
             let file = File::create(&precomputed2_cache_path)?;
             let writer = BufWriter::new(file);
             let mut encoder = GzEncoder::new(writer, Compression::default());
-            write_precomputed2_to_stream(&original_precomputed2, &mut encoder)?;
+            json_serialization::write_precomputed2_to_stream(&original_precomputed2, &mut encoder)?;
         }
         println!("Successfully saved Precomputed2 to cache.");
     }
