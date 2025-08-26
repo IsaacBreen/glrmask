@@ -46,6 +46,7 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
     println!("--- Setting up for Precompute2 Optimization Equivalence Test ---");
 
     const FORCE_RECOMPUTE: bool = false;
+    const SAVE_TO_CACHE: bool = false;
     let cache_dir = Path::new(".cache/test_precompute2");
     fs::create_dir_all(cache_dir)?;
     let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json");
@@ -98,9 +99,11 @@ fn test_precompute2_optimizations_are_equivalent() -> Result<(), Box<dyn std::er
         original_precomputed2 = grammar_constraint.precomputed2;
 
         println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
-        let json_node = original_precomputed2.to_json();
-        let json_string = json_node.to_json_string();
-        fs::write(&precomputed2_cache_path, json_string)?;
+        if SAVE_TO_CACHE {
+            let json_node = original_precomputed2.to_json();
+            let json_string = json_node.to_json_string();
+            fs::write(&precomputed2_cache_path, json_string)?;
+        }
         println!("Successfully saved Precomputed2 to cache.");
     }
 
