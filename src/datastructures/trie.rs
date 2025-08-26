@@ -1439,13 +1439,15 @@ where
                 let mut weak = Vec::new();
                 for (ek, dest_map) in &src_guard.children {
                     for (node_ptr, _ev) in dest_map {
-                        let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::promote_weak_edges_to_strong");
-                        // Traverse both strong and weak edges
-                        neigh.push(child_arc.clone());
-                        // Record weak edges for possible promotion
-                        if !node_ptr.is_strong() {
-                            weak.push((ek.clone(), child_arc));
+                        if let Some(child_arc) = node_ptr.upgrade() {
+                            // Traverse both strong and weak edges
+                            neigh.push(child_arc.clone());
+                            // Record weak edges for possible promotion
+                            if !node_ptr.is_strong() {
+                                weak.push((ek.clone(), child_arc));
+                            }
                         }
+                        // If upgrade fails, it's a dangling pointer. We simply ignore it.
                     }
                 }
                 (neigh, weak)
