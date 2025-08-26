@@ -632,7 +632,6 @@ impl GrammarConstraint {
             }
         }
 
-
         // Clean up after rewiring
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
