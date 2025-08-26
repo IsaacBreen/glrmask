@@ -1602,13 +1602,14 @@ where
                 let mut empty_keys: Vec<EK> = Vec::new();
                 for (ek, dest_map) in guard.children_mut().iter_mut() {
                     let before_len = dest_map.len();
-                    dest_map.retain(|np, _| {
-                        if np.is_strong() {
-                            true
-                        } else {
-                            np.upgrade().is_some()
-                        }
-                    });
+                    let keys_to_remove: Vec<_> = dest_map
+                        .keys()
+                        .filter(|np| !np.is_strong() && np.upgrade().is_none())
+                        .cloned()
+                        .collect();
+                    for k in keys_to_remove {
+                        dest_map.remove(&k);
+                    }
                     let after_len = dest_map.len();
                     if after_len == 0 {
                         empty_keys.push(ek.clone());
