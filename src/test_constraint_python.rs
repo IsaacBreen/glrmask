@@ -707,7 +707,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     }
 
     // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `IGNORE[0][0][1]` on the edge key and which the LLM token for "\n" on the edge value.
-    if false {
+    #[cfg(false)]
+    {
         // 1. Get the root precompute node for tokenizer state 0.
         let precompute_root_node = grammar_constraint.precomputed.get(&TokenizerStateID(0))
             .expect("Precomputed data for tokenizer state 0 should exist.").read().unwrap();
