@@ -1610,10 +1610,14 @@ pub fn compress_trie2_edges(
                     };
                     // Check state-id merge safety: not both Some(...)
                     let s1 = ek1.1;
-                    let s2 = ek2.1;
-                    if s1.is_some() && s2.is_some() {
+                    // The first edge in a compressible chain must not have a state ID check.
+                    // A state ID check on the first edge (s1) is an intermediate validation
+                    // that is lost if we merge the edges. We can only merge if the first
+                    // edge is just a pop (s1 is None).
+                    if s1.is_some() {
                         continue;
                     }
+                    let s2 = ek2.1;
 
                     // Compute merged edge
                     let merged_k = ek1.0 + ek2.0;
