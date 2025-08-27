@@ -1159,7 +1159,6 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
     crate::debug!(2, "Finished factoring common destinations in trie 2.");
 }
 
-/// Greedy, conservative, context-aware merge for Trie 2.
 pub fn optimize_trie2_size(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
 ) {
