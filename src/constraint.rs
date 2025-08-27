@@ -1205,150 +1205,6 @@ pub fn build_incoming_maps_trie2(
     (incoming, incoming_union, arc_map)
 }
 
-pub fn simplify_trie2_merge_edges(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-) {
-    crate::debug!(2, "Simplifying trie 2 by merging chainable edges (None→{{None,Some}})");
-
-    // Keep merging while progress is made.
-    loop {
-        let (incoming, _incoming_union, arc_map) = build_incoming_maps_trie2(roots);
-
-        // Build a work list first to avoid lock interference while we edit.
-        // Each item: (src_arc, mid_arc, ek1, is_strong1, ev1, outgoing_snapshot)
-        // where outgoing_snapshot = Vec<(ek2, Vec<(child_arc, ev2)>)>
-        let mut work: Vec<(
-            Arc<RwLock<PrecomputeNode2>>,
-            Arc<RwLock<PrecomputeNode2>>,
-            (usize, Option<StateID>),
-            bool,
-            LLMTokenBV,
-            Vec<((usize, Option<StateID>), Vec<(Arc<RwLock<PrecomputeNode2>>, LLMTokenBV)>)>,
-        )> = Vec::new();
-
-        for (mid_ptr, inc_list) in &incoming {
-            // Only merge if the intermediate node has exactly one incoming (from a single edge).
-            if inc_list.len() != 1 {
-                continue;
-            }
-
-            let mid_arc = match arc_map.get(mid_ptr) {
-                Some(a) => a.clone(),
-                None => continue,
-            };
-
-            // Snapshot mid to check viability and its outgoing edges.
-            let (mid_is_end, outgoing_snapshot) = {
-                let mid_guard = mid_arc.read().expect("poison");
-                let mut outs = Vec::new();
-                for (ek2, dest_map) in mid_guard.children() {
-                    let mut pairs = Vec::new();
-                    for (np, ev2) in dest_map {
-                        // Do NOT silently ignore dangling weak pointers: panic loudly.
-                        let child_arc = np
-                            .upgrade()
-                            .expect("Dangling weak pointer in simplify_trie2_merge_edges (mid->child)");
-                        pairs.push((child_arc, ev2.clone()));
-                    }
-                    if !pairs.is_empty() {
-                        outs.push((ek2.clone(), pairs));
-                    }
-                }
-                (mid_guard.value.end, outs)
-            };
-
-            if mid_is_end || outgoing_snapshot.is_empty() {
-                continue; // Do not remove end nodes nor nodes with no outgoing edges.
-            }
-
-            // Get the single incoming edge to this mid node.
-            let (src_arc, ek1, is_strong1, ev1) = {
-                let entry = &inc_list[0];
-                (entry.0.clone(), entry.1, entry.2, entry.3.clone())
-            };
-
-            // Only merge if the first edge's SID is None (None→Some or None→None).
-            // This preserves normalized-path semantics (do not move a pop across a state boundary).
-            if ek1.1.is_some() {
-                continue;
-            }
-
-            work.push((src_arc, mid_arc, ek1.clone(), is_strong1, ev1.clone(), outgoing_snapshot));
-        }
-
-        if work.is_empty() {
-            crate::debug!(2, "No mergeable edge pairs found in this round.");
-            break;
-        }
-
-        let mut changed_in_round = false;
-
-        for (src_arc, mid_arc, ek1, is_strong1, ev1, outgoing) in work {
-            let mut src_guard = src_arc.write().expect("poison");
-
-            let mut added_any = false;
-
-            for (ek2, pairs) in outgoing {
-                // ek1.1 is guaranteed None; merged SID is ek2.1.
-                let merged_key = (ek1.0 + ek2.0, ek2.1.clone());
-
-                for (child_arc, ev2) in pairs {
-                    // Intersect token sets; path must satisfy both edges' token constraints.
-                    let new_ev = &ev1 & &ev2;
-                    if new_ev.is_empty() {
-                        continue;
-                    }
-
-                    // Use auto insert to avoid creating strong cycles; it will pick weak if needed.
-                    let mut ev_opt = Some(new_ev);
-                    src_guard.try_insert_auto(merged_key.clone(), &mut ev_opt, child_arc);
-                    added_any = true;
-                }
-            }
-
-            if added_any {
-                // Remove the old edge src --ek1--> mid.
-                if let Some(dest_map) = src_guard.children_mut().get_mut(&ek1) {
-                    let mid_key = if is_strong1 {
-                        NodePtr::Strong(ArcPtrWrapper::new(mid_arc.clone()))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&mid_arc)))
-                    };
-                    dest_map.remove(&mid_key);
-                    if dest_map.is_empty() {
-                        src_guard.children_mut().remove(&ek1);
-                    }
-                }
-                changed_in_round = true;
-            }
-        }
-
-        if !changed_in_round {
-            crate::debug!(2, "No changes applied in this round.");
-            break;
-        }
-
-        // Clean up after structural rewiring.
-        prune_dead_paths_trie2(roots);
-        merge_nodes_trie2(roots);
-        // Continue loop to catch further opportunities that appear after merging.
-    }
-
-    // Optional: factor common destinations to reduce fan-in further, then clean up.
-    simplify_trie2_factor_common_destinations(roots);
-    prune_dead_paths_trie2(roots);
-    merge_nodes_trie2(roots);
-
-    // Try to strengthen weak edges when safe, and recompute depths.
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let promotions = Trie::promote_weak_edges_to_strong(&roots_vec);
-    crate::debug!(2, "Promoted {} weak edges to strong after merge-edges pass.", promotions);
-
-    Trie::recompute_all_max_depths(&roots_vec);
-
-    crate::debug!(2, "Finished edge-merging simplification for trie 2.");
-}
-
 fn bv_fp(mask: &LLMTokenBV) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let mut h = DeterministicHasher::new(DefaultHasher::new());
@@ -1678,32 +1534,252 @@ fn redirect_incoming_tokens_trie2(
     }
 }
 
-/// Greedy, conservative, context-aware merge for Trie 2.
+/// Merge two consecutive edge keys (k, Option<StateID>) into one, when it is
+/// semantically safe to do so. See get_mask2's step semantics for why the
+/// constraints below are required.
+///
+/// Rules:
+/// - (Some(_), Some(_)) => not mergeable (returns None)
+/// - (None,       Some(s2))                 => Ok: (k1 + k2, Some(s2))
+/// - (Some(s1),   None) if k2 == 0          => Ok: (k1, Some(s1))
+/// - (Some(s1),   None) if k2 > 0           => Not mergeable
+/// - (None,       None)                     => Ok: (k1 + k2, None)
+fn merge_edge_keys_trie2(
+    ek1: (usize, Option<StateID>),
+    ek2: (usize, Option<StateID>),
+) -> Option<(usize, Option<StateID>)> {
+    let (k1, sid1) = ek1;
+    let (k2, sid2) = ek2;
+    match (sid1, sid2) {
+        (Some(_), Some(_)) => None, // two SID checks at different depths cannot be collapsed
+        (None, Some(s2)) => Some((k1 + k2, Some(s2))),
+        (Some(s1), None) => {
+            if k2 == 0 {
+                Some((k1, Some(s1)))
+            } else {
+                None
+            }
+        }
+        (None, None) => Some((k1 + k2, None)),
+    }
+}
+
+/// Compress linear chains in Trie 2 by "merging" adjacent edges when it's
+/// semantically safe:
+///   A -(k1, opt sid1)-> X -(k2, opt sid2)-> Y  ==>  A -(k', opt sid)-> Y
+/// where k' and opt sid are produced by merge_edge_keys_trie2, and edge EV
+/// becomes EV1 ∧ EV2. X must:
+///   - not be an end node
+///   - have exactly one outgoing edge (one EK with exactly one destination)
+///
+/// This does NOT degrade a strong edge to a weak edge. If redirecting a
+/// strong incoming would create a cycle (Y has a strong path to A), the redirection
+/// is skipped for that source.
+///
+/// Returns true if any change was made.
+pub fn compress_linear_chains_trie2(
+    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+) -> bool {
+    crate::debug!(2, "Compressing linear chains in precomputed trie 2...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(&roots_vec);
+
+    // Build incoming maps (includes both strong and weak incoming)
+    let (incoming, _incoming_union, _arc_map) = build_incoming_maps_trie2(roots);
+
+    let mut changed = false;
+
+    // Helper to count total outgoing destinations and capture the single outgoing edge if any
+    fn single_outgoing(
+        n: &Arc<RwLock<PrecomputeNode2>>,
+    ) -> Option<((usize, Option<StateID>), Arc<RwLock<PrecomputeNode2>>, LLMTokenBV)> {
+        let g = n.read().expect("poison");
+        if g.value.end {
+            return None; // Don't compress through end nodes
+        }
+        let mut count = 0usize;
+        let mut out: Option<((usize, Option<StateID>), Arc<RwLock<PrecomputeNode2>>, LLMTokenBV)> = None;
+        for (ek, dest_map) in g.children() {
+            for (np, ev) in dest_map {
+                let child = np.upgrade().expect("Dangling weak pointer in compress_linear_chains_trie2 (outgoing child)");
+                count += 1;
+                if count == 1 {
+                    out = Some((ek.clone(), child, ev.clone()));
+                } else {
+                    return None; // More than one outgoing destination
+                }
+            }
+        }
+        out
+    }
+
+    for mid in &all_nodes {
+        let mid_ptr = Arc::as_ptr(mid);
+
+        // Identify nodes with exactly one outgoing destination and no 'end' flag.
+        let (ek2, to_arc, ev2) = match single_outgoing(mid) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Gather all incoming for this mid (could be empty)
+        let incoming_list = match incoming.get(&mid_ptr) {
+            Some(v) => v.clone(),
+            None => Vec::new(),
+        };
+        if incoming_list.is_empty() {
+            continue;
+        }
+
+        // For each incoming A -(ek1, is_strong, ev1)-> mid, try to redirect part of it to Y
+        for (src_arc, ek1, is_strong, _old_recorded_ev) in incoming_list {
+            // Query current EV on src -> mid edge under ek1; it may have been modified earlier
+            let current_ev_opt = {
+                let mut sg = src_arc.write().expect("poison");
+                let dest_map = match sg.children_mut().get_mut(&ek1) {
+                    Some(m) => Some(m),
+                    None => None,
+                };
+                if let Some(m) = dest_map {
+                    let key_to_mid = if is_strong {
+                        NodePtr::Strong(ArcPtrWrapper::new(mid.clone()))
+                    } else {
+                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(mid)))
+                    };
+                    m.get(&key_to_mid).cloned()
+                } else {
+                    None
+                }
+            };
+            if current_ev_opt.is_none() {
+                continue; // Already removed by a previous redirection
+            }
+            let ev1 = current_ev_opt.unwrap();
+
+            // Tokens that can traverse both edges
+            let to_move = &ev1 & &ev2;
+            if to_move.is_empty() {
+                continue;
+            }
+
+            // Check if keys are mergeable
+            let ek_new = match merge_edge_keys_trie2(ek1, ek2) {
+                Some(k) => k,
+                None => continue,
+            };
+
+            // For strong incoming: prevent strong cycle by skipping unsafe redirection
+            if is_strong && has_strong_path_trie2(&to_arc, &src_arc) {
+                continue; // Unsafe to redirect this source strongly
+            }
+
+            // Apply rewiring on src: subtract to_move from src->mid under ek1; add/merge src->to under ek_new
+            {
+                let mut sg = src_arc.write().expect("poison");
+
+                // 1) Subtract moved tokens from src -> mid
+                if let Some(dest_map) = sg.children_mut().get_mut(&ek1) {
+                    let key_to_mid = if is_strong {
+                        NodePtr::Strong(ArcPtrWrapper::new(mid.clone()))
+                    } else {
+                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(mid)))
+                    };
+                    let mut remove_mid_entry = false;
+                    if let Some(ev_old) = dest_map.get_mut(&key_to_mid) {
+                        *ev_old -= &to_move;
+                        if ev_old.is_empty() {
+                            remove_mid_entry = true;
+                        }
+                    }
+                    if remove_mid_entry {
+                        dest_map.remove(&key_to_mid);
+                    }
+                    if dest_map.is_empty() {
+                        sg.children_mut().remove(&ek1);
+                    }
+                }
+
+                // 2) Add/merge src -> to_arc under ek_new
+                let dest_map_new = sg.children_mut().entry(ek_new.clone()).or_default();
+                let key_to_to = if is_strong {
+                    NodePtr::Strong(ArcPtrWrapper::new(to_arc.clone()))
+                } else {
+                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&to_arc)))
+                };
+                if let Some(ev_to) = dest_map_new.get_mut(&key_to_to) {
+                    *ev_to |= &to_move;
+                } else {
+                    dest_map_new.insert(key_to_to, to_move.clone());
+                }
+
+                // Optional: reflect on node's live_tokens (will be recomputed anyway)
+                sg.value.live_tokens |= to_move.clone();
+            }
+            {
+                let mut tg = to_arc.write().expect("poison");
+                tg.value.live_tokens |= to_move.clone();
+            }
+
+            changed = true;
+        }
+    }
+
+    if changed {
+        crate::debug!(2, "Compression performed; running cleanup passes for trie 2.");
+        prune_dead_paths_trie2(roots);
+        merge_nodes_trie2(roots);
+        simplify_trie2_factor_common_destinations(roots);
+
+        // Try to promote some weak edges that became safe.
+        let roots_vec2: Vec<_> = roots.values().cloned().collect();
+        let promotions = Trie::promote_weak_edges_to_strong(&roots_vec2);
+        if promotions > 0 {
+            crate::debug!(2, "Promoted {} weak edges after compression.", promotions);
+        }
+        let roots_vec3: Vec<_> = roots.values().cloned().collect();
+        Trie::recompute_all_max_depths(&roots_vec3);
+    }
+
+    changed
+}
+
 pub fn optimize_trie2_size(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
 ) {
-    crate::debug!(2, "Optimizing Trie 2 size...");
+    crate::debug!(2, "Running optimize_trie2_size on precomputed trie 2...");
 
-    // Start from a clean baseline.
-    prune_dead_paths_trie2(roots);
-    merge_nodes_trie2(roots);
+    // One or two iterations typically suffice; keep a small cap to be safe.
+    let mut iterations = 0usize;
+    let max_iterations = 3usize;
 
-    // Merge chainable edges (None→{None,Some}) conservatively and safely.
-    simplify_trie2_merge_edges(roots);
+    loop {
+        iterations += 1;
+        let mut changed = false;
 
-    // One more round of factoring and cleanup to reduce further.
-    simplify_trie2_factor_common_destinations(roots);
-    prune_dead_paths_trie2(roots);
-    merge_nodes_trie2(roots);
+        // 1) Try compressing linear chains by merging adjacent edges.
+        changed |= compress_linear_chains_trie2(roots);
 
-    // Strengthen weak edges where safe, recompute depths.
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let promotions = Trie::promote_weak_edges_to_strong(&roots_vec);
-    crate::debug!(2, "Promoted {} weak edges during final optimize pass.", promotions);
+        // 2) Always run a cleanup round (cheap and enables further merges).
+        prune_dead_paths_trie2(roots);
+        merge_nodes_trie2(roots);
+        simplify_trie2_factor_common_destinations(roots);
 
-    Trie::recompute_all_max_depths(&roots_vec);
+        // 3) Attempt to promote weak edges when safe and recompute depths.
+        let roots_vec: Vec<_> = roots.values().cloned().collect();
+        let promotions = Trie::promote_weak_edges_to_strong(&roots_vec);
+        if promotions > 0 {
+            changed = true;
+        }
 
-    crate::debug!(2, "Finished optimizing Trie 2 size.");
+        let roots_vec2: Vec<_> = roots.values().cloned().collect();
+        Trie::recompute_all_max_depths(&roots_vec2);
+
+        if !changed || iterations >= max_iterations {
+            break;
+        }
+    }
+
+    crate::debug!(2, "Finished optimize_trie2_size after {} iteration(s).", iterations);
 }
 
 fn trie2_shape_hash(
