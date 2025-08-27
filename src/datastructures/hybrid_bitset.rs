@@ -334,6 +334,10 @@ impl HybridBitset {
             .map(|(new_idx, old_idx)| (old_idx, new_idx))
             .collect()
     }
+
+    pub fn symmetric_difference(&self, other: &Self) -> Self {
+        self ^ other
+    }
 }
 
 // --- Iterator ---
