@@ -874,11 +874,6 @@ impl GrammarConstraint {
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
-        // New: aggressively compress linear chains where edge keys can be merged safely.
-        // compress_trie2_edges(&mut precomputed2);
-        // Prune and re-merge after compression to canonicalize structure.
-        prune_dead_paths_trie2(&mut precomputed2);
-        merge_nodes_trie2(&mut precomputed2);
 
         // After modifications, some nodes might only be reachable via weak pointers.
         // We must start promotion from *all* nodes to ensure we can recover strong paths.
