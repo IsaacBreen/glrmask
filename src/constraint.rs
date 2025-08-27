@@ -852,25 +852,20 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 2");
 
-        let roots2: Vec<_> = precomputed2.values().cloned().collect();
-        let mut all_nodes = Vec::new();
-        let mut visited_ptrs = HashSet::new();
-        for root_arc in precomputed2.values() {
-            for node in Trie::all_nodes(&[root_arc.clone()]) {
-                if visited_ptrs.insert(Arc::as_ptr(&node)) {
-                    all_nodes.push(node);
-                }
-            }
-        }
+        // To prevent dangling weak pointers, we collect strong references to all nodes
+        // before performing modifications. These strong references are held until
+        // weak edges have been promoted back to strong ones where possible.
+        let roots_before_cleanup: Vec<_> = precomputed2.values().cloned().collect();
+        let all_nodes_pinner = Trie::all_nodes(&roots_before_cleanup);
 
         // Clean up after rewiring
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
-        // context_aware_merge_trie2(&mut precomputed2);
-        // prune_dead_paths_trie2(&mut precomputed2);
-        // merge_nodes_trie2(&mut precomputed2);
-        let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
+
+        // After modifications, some nodes might only be reachable via weak pointers.
+        // We must start promotion from *all* nodes to ensure we can recover strong paths.
+        let promotions2 = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
         // Recompute depths again after promotions, as they can change the graph structure.
