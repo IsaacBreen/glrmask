@@ -65,11 +65,12 @@ fn assert_optimized_equivalent(original_precomputed2: &Precomputed2) {
     for sid in original_precomputed2.keys() {
         let original_root = original_precomputed2.get(sid).unwrap();
         let optimized_root = optimized_precomputed2.get(sid).unwrap();
-        assert!(
-            are_precompute2_trees_equivalent(original_root, optimized_root),
-            "Mismatch found for tokenizer state ID: {}",
-            sid.0
-        );
+        if !are_precompute2_trees_equivalent(original_root, optimized_root) {
+            // Detailed info is now printed inside are_precompute2_trees_equivalent
+            panic!(
+                "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
+                sid.0);
+        }
     }
 }
 

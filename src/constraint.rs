@@ -365,6 +365,12 @@ pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Ar
             if bv_a.is_empty() { continue; } // Skip trivial paths
             let bv_b = get_bv_for_normalized_path(b, &path);
             if bv_a != bv_b {
+                println!("\n--- Precompute2 Equivalence Mismatch ---");
+                println!("Path sampled from Tree A:");
+                println!("  Path: {:?}", path);
+                println!("  BV from A: {:?}", bv_a);
+                println!("  BV from B: {:?}", bv_b);
+                println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
                 return false;
             }
         }
@@ -377,6 +383,12 @@ pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Ar
             if bv_b.is_empty() { continue; } // Skip trivial paths
             let bv_a = get_bv_for_normalized_path(a, &path);
             if bv_a != bv_b {
+                println!("\n--- Precompute2 Equivalence Mismatch ---");
+                println!("Path sampled from Tree B:");
+                println!("  Path: {:?}", path);
+                println!("  BV from A: {:?}", bv_a);
+                println!("  BV from B: {:?}", bv_b);
+                println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
                 return false;
             }
         }
