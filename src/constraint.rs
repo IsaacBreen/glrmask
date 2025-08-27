@@ -238,7 +238,7 @@ fn get_bv_for_normalized_path(
         if path_idx == path.len() {
             // We have successfully traversed the path. Now we need to reach an `end` node from here
             // with only `(k, None)` edges.
-            let end_bv = find_end_bv_from_node(node, bv);
+            let end_bv = find_end_bv_from_node_via_none_edges(node, bv);
             final_bv |= &end_bv;
             continue;
         }
@@ -295,7 +295,8 @@ fn get_bv_for_normalized_path(
 }
 
 /// Helper to find the union of BVs for all paths from a start node to any `end` node
-fn find_end_bv_from_node(
+/// that consist solely of `(k, None)` edges.
+fn find_end_bv_from_node_via_none_edges(
     start_node: Arc<RwLock<PrecomputeNode2>>,
     initial_bv: LLMTokenBV,
 ) -> LLMTokenBV {
@@ -310,22 +311,25 @@ fn find_end_bv_from_node(
             end_bv |= &bv;
         }
 
-        for dest_map in guard.children().values() {
-            for (dest_ptr, edge_bv) in dest_map {
-                let new_bv = &bv & edge_bv;
-                if new_bv.is_empty() { continue; }
+        for (ek, dest_map) in guard.children() {
+            let (_k, sid_opt) = ek;
+            if sid_opt.is_none() { // Only (k, None) edges
+                for (dest_ptr, edge_bv) in dest_map {
+                    let new_bv = &bv & edge_bv;
+                    if new_bv.is_empty() { continue; }
 
-                if let Some(child_arc) = dest_ptr.upgrade() {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    if let Some(existing_bv) = visited.get_mut(&child_ptr) {
-                        let diff = &new_bv - &*existing_bv;
-                        if !diff.is_empty() {
-                            *existing_bv |= &diff;
-                            q.push_back((child_arc, diff));
+                    if let Some(child_arc) = dest_ptr.upgrade() {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        if let Some(existing_bv) = visited.get_mut(&child_ptr) {
+                            let diff = &new_bv - &*existing_bv;
+                            if !diff.is_empty() {
+                                *existing_bv |= &diff;
+                                q.push_back((child_arc, diff));
+                            }
+                        } else {
+                            visited.insert(child_ptr, new_bv.clone());
+                            q.push_back((child_arc, new_bv));
                         }
-                    } else {
-                        visited.insert(child_ptr, new_bv.clone());
-                        q.push_back((child_arc, new_bv));
                     }
                 }
             }
