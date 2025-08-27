@@ -875,6 +875,8 @@ impl GrammarConstraint {
         merge_nodes_trie2(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
 
+        Trie::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
+
         // After modifications, some nodes might only be reachable via weak pointers.
         // We must start promotion from *all* nodes to ensure we can recover strong paths.
         let promotions2 = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
