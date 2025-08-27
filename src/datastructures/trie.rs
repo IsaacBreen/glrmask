@@ -92,7 +92,7 @@ where
             let mut weak_dests_json = Vec::new();
 
             for (node_ptr, edge_val) in destinations_map {
-                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer during Trie serialization");
+                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer during Trie serialization"); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
                 let child_arc_ptr = Arc::as_ptr(&child_arc);
                 let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
                     Some(idx) => *idx,
@@ -148,7 +148,7 @@ where
                 let mut weak_dests_json_bfs = Vec::new();
 
                 for (node_ptr, edge_val) in destinations_map {
-                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer during Trie serialization");
+                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer during Trie serialization"); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
                     let child_arc_ptr = Arc::as_ptr(&child_arc);
                     let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
                         Some(idx) => *idx,
@@ -777,7 +777,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             let node_guard = node_arc.read().expect("RwLock poisoned during BFS"); // Renamed node to node_guard
             for children_map in node_guard.children.values() { // Use node_guard
                 for node_ptr in children_map.keys() {
-                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::all_nodes");
+                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::all_nodes"); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
                     let child_arc_ptr = Arc::as_ptr(&child_arc);
                     if visited_arcs.insert(child_arc_ptr) {
                         queue.push_back(child_arc.clone());
@@ -1252,7 +1252,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                         .flat_map(|(ek, dst_map)| {
                             dst_map.iter().map(move |(node_ptr, ev)| {
                                 // Panic on expired weak pointers.
-                                (ek.clone(), ev.clone(), node_ptr.upgrade().expect("Dangling weak pointer during special_map traversal"))
+                                (ek.clone(), ev.clone(), node_ptr.upgrade().expect("Dangling weak pointer during special_map traversal")) // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
                             })
                         })
                         .collect()
@@ -1654,8 +1654,8 @@ where
                     }
 
                     // Now compare weak children
-                    let self_weak_pairs: Vec<_> = self_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in Trie::eq (self)"), (*ev).clone())).collect();
-                    let mut other_weak_pairs: Vec<_> = other_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in Trie::eq (other)"), (*ev).clone())).collect();
+                    let self_weak_pairs: Vec<_> = self_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in Trie::eq (self)"), (*ev).clone())).collect(); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
+                    let mut other_weak_pairs: Vec<_> = other_weak.iter().map(|(np, ev)| (np.upgrade().expect("Dangling weak pointer in Trie::eq (other)"), (*ev).clone())).collect(); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
 
                     if self_weak_pairs.len() != other_weak_pairs.len() {
                         return false;
@@ -1746,7 +1746,7 @@ where
             for (node_ptr, ev) in strong_children {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
-                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::hash");
+                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::hash"); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
                 if let Ok(child_guard) = child_arc.read() {
                     Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
                     strong_pair_hashes.push(pair_hasher.finish());
@@ -1761,7 +1761,7 @@ where
             weak_children.len().hash(state);
             let mut weak_pair_hashes = Vec::with_capacity(weak_children.len());
             for (node_ptr, ev) in weak_children {
-                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::hash");
+                let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::hash"); // IMPORTANT: DO NOT CHANGE THIS LINE. We MUST panic if a weak pointer is dangling here, we must NOT skip it silently.
                 if let Ok(child_guard) = child_arc.read() {
                     // hash pair (ev, child)
                     let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
