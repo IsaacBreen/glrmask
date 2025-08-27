@@ -380,7 +380,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal.
     #[time_it]
     pub fn special_map<V: Clone>(
-        &self,
+        &mut self,
         initial_nodes_and_values: Vec<(NodeId, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &TrieNode<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
@@ -418,7 +418,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 let node = self.get_node(node_id);
-                let proceed = process(node, &mut agg_v);
+                let proceed = process(self, node, &mut agg_v);
 
                 if !proceed {
                     stopped_nodes.insert(node_id);
@@ -459,11 +459,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal, grouping children by edge key.
     #[time_it]
     pub fn special_map_grouped<V, S, I>(
-        &self,
+        &mut self,
         initial_nodes_and_values: Vec<(NodeId, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&TrieNode<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&mut Self, &TrieNode<EK, EV, T>, &mut V) -> bool,
     ) where
         V: Clone,
         S: FnMut(&V, &EK, &OrderedHashMap<NodeId, EV>) -> I,

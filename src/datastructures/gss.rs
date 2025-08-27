@@ -5,12 +5,11 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::trie::{EdgeInserter, Trie};
+use crate::datastructures::arena::NodeId;
+use crate::datastructures::trie::Trie;
 
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -19,6 +18,7 @@ use crate::glr::grammar::Terminal;
 use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
+use bimap::BiBTreeMap;
 use profiler_macro::{time_it, timeit};
 
 pub(crate) type LLMTokenBV = HybridBitset;
@@ -91,7 +91,7 @@ pub(crate) type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, Pre
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
     pub(crate) terminals_union: HybridL2Bitset,
-    pub(crate) trie2_nodes: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
+    pub(crate) trie2_nodes: BTreeSet<NodeId>,
 }
 
 impl Acc {
@@ -387,7 +387,7 @@ fn compute_hash_key_root(acc: &Acc) -> u64 {
     acc.llm_tokens_union.hash(&mut hasher);
     acc.terminals_union.hash(&mut hasher);
     for trie2_node in &acc.trie2_nodes {
-        trie2_node.hash(&mut hasher);
+        trie2_node.hash(&mut hasher); // trie2_node is a NodeId (usize)
     }
     hasher.finish()
 }
@@ -1181,48 +1181,55 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
 
 pub(crate) fn merge_trie2_nodes_if_needed(
     root_arc: &mut Arc<GSSNode>,
+    trie2_arena: &mut PrecomputeNode2,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut new_destinations = BTreeMap::new();
-
     let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        if !root.acc.trie2_nodes.iter().any(
-            // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read().expect("poison").value.live_tokens != root.acc.llm_tokens_union
-        ) {
-            return Some(root.acc.clone());
-        }
-        let mut new_acc = (*root.acc).clone();
-        // Create a single new destination for this merge operation.
-        let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone()))
-            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
-            .clone();
-        let edge_key = (0, None);
-        let tokens_for_edge = new_acc.llm_tokens_union.clone();
+    let mut new_destinations: BTreeMap<(BTreeSet<NodeId>, LLMTokenBV), NodeId> = BTreeMap::new();
 
-        for source_wrapper in &new_acc.trie2_nodes {
-            let source_arc = source_wrapper.as_arc().clone();
+    let mut root_closure =
+        |root: &GSSRoot| -> Option<Arc<Acc>> {
+            let needs_merge = root.acc.trie2_nodes.iter().any(|node_id| {
+                trie2_arena.get_node(*node_id).value.live_tokens != root.acc.llm_tokens_union
+            });
 
-            let inserter = EdgeInserter::new(
-                source_arc,
-                edge_key,
-                tokens_for_edge.clone(),
-                |e, n| *e |= n,
-                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                |_, _| {}, // Unconditional insertion
-            );
-            // Insert a strong edge to the new shared destination.
-            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
-        }
+            if !needs_merge {
+                return Some(root.acc.clone());
+            }
 
-        // Update the live tokens on the new destination node.
-        new_destination.write().expect("poison").value.live_tokens |= &tokens_for_edge;
+            let mut new_acc = (*root.acc).clone();
+            let key = (new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone());
 
-        // The acc now points only to this new merged destination.
-        new_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_destination)]);
-        Some(Arc::new(new_acc))
-    };
+            let new_destination_id = *new_destinations.entry(key).or_insert_with(|| {
+                trie2_arena.create_node(PrecomputedNodeContents::internal())
+            });
+
+            let edge_key = (0, None);
+            let tokens_for_edge = new_acc.llm_tokens_union.clone();
+
+            for source_id in &new_acc.trie2_nodes {
+                // Manual edge insertion logic
+                let src_node = trie2_arena.get_node_mut(*source_id);
+                let dests = src_node.children.entry(edge_key).or_default();
+                dests
+                    .entry(new_destination_id)
+                    .and_modify(|ev| *ev |= &tokens_for_edge)
+                    .or_insert_with(|| tokens_for_edge.clone());
+
+                // Propagate max_depth if needed. This is a simplification; a full
+                // propagation might be needed if cycles are possible. Assuming DAG.
+                let new_depth = src_node.max_depth + 1;
+                let dest_node = trie2_arena.get_node_mut(new_destination_id);
+                if new_depth > dest_node.max_depth {
+                    dest_node.max_depth = new_depth;
+                }
+            }
+
+            trie2_arena.get_node_mut(new_destination_id).value.live_tokens |= &tokens_for_edge;
+            new_acc.trie2_nodes = BTreeSet::from([new_destination_id]);
+            Some(Arc::new(new_acc))
+        };
+
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
@@ -1305,31 +1312,28 @@ pub(crate) fn fuse_predecessors_recursive(
 
 pub(crate) fn deep_clone_gss_with_trie2_map(
     root: &Arc<GSSNode>,
-    trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+    trie2_map: &HashMap<NodeId, NodeId>,
 ) -> Arc<GSSNode> {
     fn clone_one(
         node: &Arc<GSSNode>,
-        trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+        trie2_map: &HashMap<NodeId, NodeId>,
         memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
     ) -> Arc<GSSNode> {
         let ptr = Arc::as_ptr(node);
         if let Some(cached) = memo.get(&ptr) {
             return cached.clone();
         }
-
         let out = match node.as_ref() {
             GSSNode::Root(root_node) => {
                 // Remap trie2_nodes for the root Acc
                 let mut new_acc = (*root_node.acc).clone();
                 if !new_acc.trie2_nodes.is_empty() {
                     let mut new_set = BTreeSet::new();
-                    for old_wr in &new_acc.trie2_nodes {
-                        let old_arc = old_wr.as_arc().clone();
-                        let old_ptr = Arc::as_ptr(&old_arc);
-                        if let Some(new_arc) = trie2_map.get(&old_ptr) {
-                            new_set.insert(ArcPtrWrapper::new(new_arc.clone()));
+                    for old_id in &new_acc.trie2_nodes {
+                        if let Some(new_id) = trie2_map.get(old_id) {
+                            new_set.insert(*new_id);
                         } else {
-                            new_set.insert(ArcPtrWrapper::new(old_arc));
+                            new_set.insert(*old_id);
                         }
                     }
                     new_acc.trie2_nodes = new_set;
@@ -1337,7 +1341,7 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
                 Arc::new(GSSNode::new(new_acc))
             }
             GSSNode::Internal(internal) => {
-                // Clone predecessors recursively
+                // Clone predecessors recursively, passing the trie2_map down.
                 let mut new_preds: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
                 for (edge_val, preds_by_depth) in &internal.predecessors {
                     let mut new_by_depth = BTreeMap::new();
@@ -1353,7 +1357,6 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
                 Arc::new(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_preds))
             }
         };
-
         memo.insert(ptr, out.clone());
         out
     }
@@ -1942,7 +1945,7 @@ pub(crate) fn format_acc(
             let ptrs: Vec<String> = acc
                 .trie2_nodes
                 .iter()
-                .map(|wrapper| format!("{:p}", { let ptr = Arc::as_ptr(wrapper.as_arc()) as *const PrecomputeNode2; ptr}))
+                .map(|node_id| format!("{}", node_id))
                 .collect();
             Some(format!("Trie2(n={}, [{}])", n, ptrs.join(", ")))
         } else {
@@ -1950,7 +1953,7 @@ pub(crate) fn format_acc(
                 .trie2_nodes
                 .iter()
                 .take(MAX_PTRS_TO_SHOW)
-                .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
+                .map(|node_id| format!("{}", node_id))
                 .collect();
             let remaining = n - MAX_PTRS_TO_SHOW;
             Some(format!("Trie2(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
