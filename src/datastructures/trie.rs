@@ -777,10 +777,11 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             let node_guard = node_arc.read().expect("RwLock poisoned during BFS"); // Renamed node to node_guard
             for children_map in node_guard.children.values() { // Use node_guard
                 for node_ptr in children_map.keys() {
-                    let child_arc = node_ptr.upgrade().expect("Dangling weak pointer in Trie::all_nodes");
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    if visited_arcs.insert(child_arc_ptr) {
-                        queue.push_back(child_arc.clone());
+                    if let Some(child_arc) = node_ptr.upgrade() {
+                        let child_arc_ptr = Arc::as_ptr(&child_arc);
+                        if visited_arcs.insert(child_arc_ptr) {
+                            queue.push_back(child_arc.clone());
+                        }
                     }
                 }
             }

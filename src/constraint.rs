@@ -852,30 +852,24 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 2");
 
+        // By collecting all nodes first, we hold a strong reference to them throughout
+        // the cleanup process, preventing weak pointers from becoming dangling.
         let roots2: Vec<_> = precomputed2.values().cloned().collect();
-        let mut all_nodes = Vec::new();
-        let mut visited_ptrs = HashSet::new();
-        for root_arc in precomputed2.values() {
-            for node in Trie::all_nodes(&[root_arc.clone()]) {
-                if visited_ptrs.insert(Arc::as_ptr(&node)) {
-                    all_nodes.push(node);
-                }
-            }
-        }
+        let _all_nodes_guard = Trie::all_nodes(&roots2);
 
-        // Clean up after rewiring
+        // Clean up after rewiring. These operations are now safe from creating dangling pointers
+        // because _all_nodes_guard keeps all existing nodes alive.
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
-        // context_aware_merge_trie2(&mut precomputed2);
-        // prune_dead_paths_trie2(&mut precomputed2);
-        // merge_nodes_trie2(&mut precomputed2);
+
+        // After modifications, but before `_all_nodes_guard` is dropped, promote weak edges.
+        // This can "save" nodes that lost their last strong ref during modifications.
         let promotions2 = Trie::promote_weak_edges_to_strong(&roots2);
         crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
 
         // Recompute depths again after promotions, as they can change the graph structure.
-        let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
-        Trie::recompute_all_max_depths(&roots2_final);
+        Trie::recompute_all_max_depths(&roots2);
 
         precomputed2
     }
@@ -1187,14 +1181,15 @@ fn trie2_shape_hash(
     let mut edge_hashes = Vec::new();
     for (ek, dest_map) in node_guard.children() {
         for (np, ev) in dest_map {
-            let child = np.upgrade().expect("Dangling weak pointer in trie2_shape_hash");
-            let child_h = trie2_shape_hash(&child, memo);
-            let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            ek.hash(&mut pair_hasher);
-            ev.hash(&mut pair_hasher);
-            np.is_strong().hash(&mut pair_hasher);
-            child_h.hash(&mut pair_hasher);
-            edge_hashes.push(pair_hasher.finish());
+            if let Some(child) = np.upgrade() {
+                let child_h = trie2_shape_hash(&child, memo);
+                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                ek.hash(&mut pair_hasher);
+                ev.hash(&mut pair_hasher);
+                np.is_strong().hash(&mut pair_hasher);
+                child_h.hash(&mut pair_hasher);
+                edge_hashes.push(pair_hasher.finish());
+            }
         }
     }
 
@@ -1252,25 +1247,26 @@ fn trie2_shape_eq(
                 return false;
             }
 
-            let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (np.is_strong(), ev, np.upgrade().expect("Dangling weak pointer in trie2_shape_eq (b)"))).collect();
+            let mut pairs_b: Vec<_> = dest_map_b.iter().filter_map(|(np, ev)| np.upgrade().map(|arc| (np.is_strong(), ev, arc))).collect();
 
             for (np_a, ev_a) in dest_map_a.iter() {
-                let arc_a = np_a.upgrade().expect("Dangling weak pointer in trie2_shape_eq (a)");
-                let is_strong_a = np_a.is_strong();
-                let mut found_match = false;
-                for i in 0..pairs_b.len() {
-                    let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
-                    if is_strong_a == is_strong_b && ev_a == ev_b {
-                        if trie2_shape_eq(&arc_a, arc_b, cache) {
-                            pairs_b.remove(i);
-                            found_match = true;
-                            break;
+                if let Some(arc_a) = np_a.upgrade() {
+                    let is_strong_a = np_a.is_strong();
+                    let mut found_match = false;
+                    for i in 0..pairs_b.len() {
+                        let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
+                        if is_strong_a == is_strong_b && ev_a == ev_b {
+                            if trie2_shape_eq(&arc_a, arc_b, cache) {
+                                pairs_b.remove(i);
+                                found_match = true;
+                                break;
+                            }
                         }
                     }
-                }
-                if !found_match {
-                    cache.insert((p1, p2), false);
-                    return false;
+                    if !found_match {
+                        cache.insert((p1, p2), false);
+                        return false;
+                    }
                 }
             }
         } else {
@@ -1353,24 +1349,25 @@ fn deduplicate_recursive_trie2(
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive_trie2");
-                let canonical_child_arc = deduplicate_recursive_trie2(
-                    child_arc.clone(),
-                    canonical_nodes,
-                    visited,
-                    shape_hash_memo,
-                    shape_eq_cache,
-                    pb,
-                );
-                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                    children_changed = true;
+                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+                    let canonical_child_arc = deduplicate_recursive_trie2(
+                        child_arc.clone(),
+                        canonical_nodes,
+                        visited,
+                        shape_hash_memo,
+                        shape_eq_cache,
+                        pb,
+                    );
+                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                        children_changed = true;
+                    }
+                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                    } else {
+                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                    };
+                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
                 }
-                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                    NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                } else {
-                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                };
-                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
                 new_children_map.insert(edge_key.clone(), new_dest_map);
@@ -1436,9 +1433,12 @@ pub fn clone_trie2_graph(
                 .map(|(ek, dest_map)| {
                     let entries = dest_map
                         .iter()
-                        .map(|(node_ptr, ev)| {
-                            let _ = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (snapshot)");
-                            (node_ptr.clone(), ev.clone())
+                        .filter_map(|(node_ptr, ev)| {
+                            if node_ptr.upgrade().is_some() {
+                                Some((node_ptr.clone(), ev.clone()))
+                            } else {
+                                None
+                            }
                         })
                         .collect::<Vec<_>>();
                     (ek.clone(), entries)
@@ -1449,13 +1449,14 @@ pub fn clone_trie2_graph(
         // For each child, ensure it exists in map (create a blank new node with same value).
         for (_ek, entries) in &children_snapshot {
             for (node_ptr, _ev) in entries {
-                let child_arc_old = node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (map population)");
-                let child_ptr_old = Arc::as_ptr(&child_arc_old);
-                if !map.contains_key(&child_ptr_old) {
-                    let child_value = { child_arc_old.read().expect("poison").value.clone() };
-                    let child_arc_new = Arc::new(RwLock::new(PrecomputeNode2::new(child_value)));
-                    map.insert(child_ptr_old, child_arc_new);
-                    q.push_back(child_arc_old);
+                if let Some(child_arc_old) = node_ptr.upgrade() {
+                    let child_ptr_old = Arc::as_ptr(&child_arc_old);
+                    if !map.contains_key(&child_ptr_old) {
+                        let child_value = { child_arc_old.read().expect("poison").value.clone() };
+                        let child_arc_new = Arc::new(RwLock::new(PrecomputeNode2::new(child_value)));
+                        map.insert(child_ptr_old, child_arc_new);
+                        q.push_back(child_arc_old);
+                    }
                 }
             }
         }
@@ -1466,16 +1467,17 @@ pub fn clone_trie2_graph(
             for (ek, entries) in children_snapshot {
                 let dest_map = new_g.children_mut().entry(ek).or_default();
                 for (old_node_ptr, ev) in entries {
-                    let child_arc_old = old_node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (wiring)");
-                    let child_ptr_old = Arc::as_ptr(&child_arc_old);
-                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
-                    // Preserve strong/weak kind of the original key
-                    let new_key = if old_node_ptr.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(child_arc_new))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc_new)))
-                    };
-                    dest_map.insert(new_key, ev);
+                    if let Some(child_arc_old) = old_node_ptr.upgrade() {
+                        let child_ptr_old = Arc::as_ptr(&child_arc_old);
+                        let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
+                        // Preserve strong/weak kind of the original key
+                        let new_key = if old_node_ptr.is_strong() {
+                            NodePtr::Strong(ArcPtrWrapper::new(child_arc_new))
+                        } else {
+                            NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc_new)))
+                        };
+                        dest_map.insert(new_key, ev);
+                    }
                 }
             }
         }
@@ -2368,17 +2370,18 @@ impl<'r> Precomputer<'r> {
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive");
-                let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
-                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
-                    children_changed = true;
+                if let Some(child_arc) = node_ptr_wrapper.upgrade() {
+                    let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                    if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                        children_changed = true;
+                    }
+                    let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
+                        NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
+                    } else {
+                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
+                    };
+                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
                 }
-                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                    NodePtr::Strong(ArcPtrWrapper::new(canonical_child_arc))
-                } else {
-                    NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&canonical_child_arc)))
-                };
-                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
                 new_children_map.insert(edge_key.clone(), new_dest_map);
