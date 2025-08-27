@@ -22,6 +22,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use bimap::BiBTreeMap;
 
 //
 // -------------------------------
@@ -44,7 +45,11 @@ fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
     (map, max_id)
 }
 
-fn assert_optimized_equivalent(original_precomputed2: &Precomputed2) {
+fn assert_optimized_equivalent(
+    original_precomputed2: &Precomputed2,
+    original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
+    llm_token_map: &LLMTokenMap,
+) {
     // Deep clone the original precomputed2 tree(s)
     let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
     for (sid, root_arc) in original_precomputed2.iter() {
@@ -54,6 +59,14 @@ fn assert_optimized_equivalent(original_precomputed2: &Precomputed2) {
 
     // Apply optimization passes
     optimize_trie2_size(&mut optimized_precomputed2);
+
+    println!("\n--- Dumping Optimized Precompute2 Tree ---");
+    GrammarConstraint::_dump_precomputed2(
+        &optimized_precomputed2,
+        original_to_internal_id_bimap,
+        llm_token_map,
+    );
+    println!("--- Finished Dumping Optimized Tree ---\n");
 
     // Compare the original and optimized trees for semantic equivalence
     assert_eq!(
@@ -83,7 +96,11 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
         LLMTokenID(0), // dummy EOF placeholder
         max_original_llm_token_id,
     );
-    assert_optimized_equivalent(&gc.precomputed2);
+    assert_optimized_equivalent(
+        &gc.precomputed2,
+        &gc.llm_vocab.original_to_internal_id_bimap,
+        &gc.llm_vocab.llm_token_map,
+    );
     Ok(())
 }
 
@@ -198,8 +215,14 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
         }
     }
 
+    let original_to_internal_id_bimap = GrammarConstraint::setup_llm_token_mappings(&llm_token_map);
+
     // 4. Assert that the optimized result is equivalent to the baseline.
-    assert_optimized_equivalent(&original_precomputed2);
+    assert_optimized_equivalent(
+        &original_precomputed2,
+        &original_to_internal_id_bimap,
+        &llm_token_map,
+    );
 
     println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
 
