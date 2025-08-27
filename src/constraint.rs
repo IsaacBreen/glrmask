@@ -1525,6 +1525,7 @@ pub fn compress_trie2_edges(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let mut changed = true;
     let mut iterations = 0usize;
+    let _all_nodes = Trie::all_nodes(&roots_vec);
 
     while changed {
         iterations += 1;
@@ -1680,6 +1681,7 @@ pub fn compress_trie2_edges(
         if changed {
             prune_dead_paths_trie2(roots);
             merge_nodes_trie2(roots);
+            Trie::promote_weak_edges_to_strong(&all_nodes);
         }
     }
     crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
