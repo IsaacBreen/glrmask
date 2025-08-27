@@ -175,18 +175,6 @@ impl<T> fmt::Debug for WeakPtrWrapper<T> {
     }
 }
 
-impl<T> PartialOrd for WeakPtrWrapper<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T> Ord for WeakPtrWrapper<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        Weak::as_ptr(&self.0).cmp(&Weak::as_ptr(&other.0))
-    }
-}
-
 impl<T> ArcPtrWrapper<T> {
     /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
     pub fn new(arc: Arc<T>) -> Self {

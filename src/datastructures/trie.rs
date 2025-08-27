@@ -234,7 +234,7 @@ where
                     }
                     let _ = pb_pass1.update(1);
                 }
-                pb_pass1.finish().unwrap();
+                // pb_pass1.finish().unwrap();
 
                 let mut pb_pass2 = tqdm!(total = nodes_array.len(), desc = "Linking nodes (pass 2/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
@@ -340,7 +340,7 @@ where
                     }
                     let _ = pb_pass2.update(1);
                 }
-                pb_pass2.finish().unwrap();
+                // pb_pass2.finish().unwrap();
 
                 let root_arc_final = deserialized_arcs.get(&root_idx)
                     .ok_or_else(|| format!("Root index {} not found in deserialized_arcs map after linking", root_idx))?
@@ -1200,6 +1200,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
         let total_edges = Self::count_all_edges(&initial_nodes);
+        if PROGRESS_BAR_ENABLED {
+            println!("Progress bar enabled");
+        } else {
+            println!("Progress bar disabled")
+        }
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
         // Seed with the user-supplied starting set
