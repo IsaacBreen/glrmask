@@ -871,6 +871,11 @@ local_system:
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
+              // New: aggressively compress linear chains where edge keys can be merged safely.
+              compress_trie2_edges(&mut precomputed2);
+              // Prune and re-merge after compression to canonicalize structure.
+              prune_dead_paths_trie2(&mut precomputed2);
+              merge_nodes_trie2(&mut precomputed2);
 
               // After modifications, some nodes might only be reachable via weak pointers.
               // We must start promotion from *all* nodes to ensure we can recover strong paths.
@@ -1166,7 +1171,21 @@ local_system:
       pub fn optimize_trie2_size(
           roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
       ) {
-          todo!()
+          crate::debug!(2, "Optimizing Trie 2 size...");
+          // Pin all nodes to prevent dangling weak pointers while we rewire.
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes_pinner = Trie::all_nodes(&roots_vec);
+
+          prune_dead_paths_trie2(roots);
+          merge_nodes_trie2(roots);
+          simplify_trie2_factor_common_destinations(roots);
+          compress_trie2_edges(roots);
+          prune_dead_paths_trie2(roots);
+          merge_nodes_trie2(roots);
+          let promotions = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
+          crate::debug!(2, "Promoted {} weak edges to strong during optimize_trie2_size", promotions);
+          let final_roots: Vec<_> = roots.values().cloned().collect();
+          Trie::recompute_all_max_depths(&final_roots);
       }
 
       fn trie2_shape_hash(
@@ -1211,6 +1230,82 @@ local_system:
           // Update the memo with the real hash.
           memo.insert(ptr, final_hash);
           final_hash
+      }
+
+      /// Cycle-safe, depth-bounded structural hash for Trie2 nodes.
+      /// This "skeleton" hash is intended only for bucketing candidates before
+      /// running exact structural equality. It never recurses indefinitely.
+      fn trie2_skeleton_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      ) -> u64 {
+          const MAX_DEPTH: usize = 64; // generous, but bounded
+          fn inner(
+              node: &Arc<RwLock<PrecomputeNode2>>,
+              memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+              visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
+              depth_left: usize,
+          ) -> u64 {
+              let ptr = Arc::as_ptr(node);
+              if let Some(&h) = memo.get(&ptr) {
+                  return h;
+              }
+              if depth_left == 0 {
+                  // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
+                  let guard = node.read().expect("poison");
+                  let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  (ptr as usize).hash(&mut h);
+                  guard.value.end.hash(&mut h);
+                  let out = h.finish();
+                  memo.insert(ptr, out);
+                  return out;
+              }
+              if !visiting.insert(ptr) {
+                  // Cycle detected on current recursion path: fall back to pointer + end flag.
+                  let guard = node.read().expect("poison");
+                  let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  (ptr as usize).hash(&mut h);
+                  guard.value.end.hash(&mut h);
+                  let out = h.finish();
+                  memo.insert(ptr, out);
+                  return out;
+              }
+
+              let guard = node.read().expect("poison");
+              let mut edge_hashes = Vec::new();
+              for (ek, dest_map) in guard.children() {
+                  for (np, _ev) in dest_map {
+                      let child = np.upgrade().expect("Dangling weak pointer in trie2_skeleton_hash");
+                      let child_h = inner(&child, memo, visiting, depth_left - 1);
+                      let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                      // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
+                      let (k, sid_opt) = ek;
+                      k.hash(&mut pair_hasher);
+                      sid_opt.is_some().hash(&mut pair_hasher);
+                      np.is_strong().hash(&mut pair_hasher);
+                      child_h.hash(&mut pair_hasher);
+                      edge_hashes.push(pair_hasher.finish());
+                  }
+              }
+              drop(guard);
+
+              edge_hashes.sort_unstable();
+              let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+              {
+                  let guard2 = node.read().expect("poison");
+                  guard2.value.end.hash(&mut hasher);
+              }
+              for h in edge_hashes {
+                  h.hash(&mut hasher);
+              }
+              let out = hasher.finish();
+              visiting.remove(&ptr);
+              memo.insert(ptr, out);
+              out
+          }
+
+          let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
+          inner(arc, memo, &mut visiting, MAX_DEPTH)
       }
 
       fn trie2_shape_eq(
@@ -1388,8 +1483,8 @@ local_system:
               // max_depth will be recomputed globally at the end
           }
 
-          // Now find a canonical representative for the current node
-          let fp = trie2_shape_hash(&node_arc, shape_hash_memo);
+          // Now find a canonical representative for the current node using cycle-safe skeleton hash
+          let fp = trie2_skeleton_hash(&node_arc, shape_hash_memo);
           let bucket = canonical_nodes.entry(fp).or_default();
 
           for candidate_arc in bucket.iter() {
@@ -1410,6 +1505,182 @@ local_system:
           bucket.push(node_arc.clone());
           // The visited map already contains (node_ptr, node_arc), which is correct in this case.
           node_arc
+      }
+
+      /// Compress linear chains in Trie2 by merging consecutive edges where safe.
+      ///
+      /// Given A -(k1,s1)-> B and B -(k2,s2)-> C, this pass replaces with
+      /// A -(k1+k2, s1.or(s2))-> C with edge BV = bv1 ∧ bv2,
+      /// provided:
+      ///   - B is not an end node.
+      ///   - B has exactly one outgoing destination (across all keys).
+      ///   - B has exactly one incoming edge (across all parents, strong or weak).
+      ///   - Not both s1 and s2 are Some(...) (i.e., at most one has a state ID).
+      /// This reduces redundant intermediate nodes introduced during construction.
+      pub fn compress_trie2_edges(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>
+      ) {
+          crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          // Helper to count incoming edges for each node (both strong and weak).
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let mut changed = true;
+          let mut iterations = 0usize;
+
+          while changed {
+              iterations += 1;
+              changed = false;
+              let all_nodes = Trie::all_nodes(&roots_vec);
+              let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+              for n in &all_nodes {
+                  arc_map.insert(Arc::as_ptr(n), n.clone());
+              }
+
+              // Build incoming counts
+              let mut incoming_count: HashMap<*const RwLock<PrecomputeNode2>, usize> = HashMap::new();
+              for src_arc in &all_nodes {
+                  let guard = src_arc.read().expect("poison");
+                  for (_ek, dest_map) in guard.children() {
+                      for (node_ptr, _ev) in dest_map {
+                          if let Some(child_arc) = node_ptr.upgrade() {
+                              let ptr = Arc::as_ptr(&child_arc);
+                              *incoming_count.entry(ptr).or_insert(0) += 1;
+                          }
+                      }
+                  }
+              }
+
+              // Try to compress from each source node
+              'src_loop: for src_arc in &all_nodes {
+                  // Snapshot children
+                  let children_snapshot: Vec<(EdgeKey2, Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)>)> = {
+                      let g = src_arc.read().expect("poison");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dest_map)| {
+                              let entries = dest_map
+                                  .iter()
+                                  .map(|(np, ev)| (np.clone(), ev.clone()))
+                                  .collect::<Vec<_>>();
+                              (ek.clone(), entries)
+                          })
+                          .collect()
+                  };
+
+                  for (ek1, entries) in children_snapshot {
+                      for (child_ptr, bv1) in entries {
+                          let child_arc = match child_ptr.upgrade() {
+                              Some(a) => a,
+                              None => continue, // dangling, will be pruned later
+                          };
+                          let child_ptr_raw = Arc::as_ptr(&child_arc);
+
+                          // Preconditions: B has in-degree 1, not end, and exactly one outgoing edge overall.
+                          if incoming_count.get(&child_ptr_raw).cloned().unwrap_or(0) != 1 {
+                              continue;
+                          }
+                          let (is_end, child_outgoing): (bool, Vec<(EdgeKey2, Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)>)>) = {
+                              let cg = child_arc.read().expect("poison");
+                              let mut out = Vec::new();
+                              for (ek, dest_map) in cg.children() {
+                                  let mut v = Vec::new();
+                                  for (np, ev) in dest_map {
+                                      v.push((np.clone(), ev.clone()));
+                                  }
+                                  if !v.is_empty() {
+                                      out.push((ek.clone(), v));
+                                  }
+                              }
+                              (cg.value.end, out)
+                          };
+                          if is_end {
+                              continue;
+                          }
+                          // Exactly one outgoing destination (across all keys)
+                          if child_outgoing.len() != 1 {
+                              continue;
+                          }
+                          let (ek2, dests2) = &child_outgoing[0];
+                          if dests2.len() != 1 {
+                              continue;
+                          }
+                          let (grand_ptr, bv2) = &dests2[0];
+                          let grand_arc = match grand_ptr.upgrade() {
+                              Some(a) => a,
+                              None => continue,
+                          };
+                          // Check state-id merge safety: not both Some(...)
+                          let s1 = ek1.1;
+                          let s2 = ek2.1;
+                          if s1.is_some() && s2.is_some() {
+                              continue;
+                          }
+
+                          // Compute merged edge
+                          let merged_k = ek1.0 + ek2.0;
+                          let merged_sid = s1.or(s2);
+                          let merged_key: EdgeKey2 = (merged_k, merged_sid);
+                          let merged_bv = &bv1 & bv2;
+                          if merged_bv.is_empty() {
+                              continue;
+                          }
+
+                          // Perform rewire on src: subtract moved tokens from src->child edge, add/merge src->grand edge
+                          {
+                              let mut src_w = src_arc.write().expect("poison");
+                              // 1) Reduce/remove src --ek1--> child by merged_bv
+                              if let Some(dest_map_for_ek1) = src_w.children_mut().get_mut(&ek1) {
+                                  let strong_key = NodePtr::Strong(ArcPtrWrapper::new(child_arc.clone()));
+                                  let weak_key = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc)));
+                                  let mut removed = false;
+                                  if let Some(ev) = dest_map_for_ek1.get_mut(&strong_key) {
+                                      *ev -= &merged_bv;
+                                      if ev.is_empty() {
+                                          dest_map_for_ek1.remove(&strong_key);
+                                          removed = true;
+                                      }
+                                  } else if let Some(ev) = dest_map_for_ek1.get_mut(&weak_key) {
+                                      *ev -= &merged_bv;
+                                      if ev.is_empty() {
+                                          dest_map_for_ek1.remove(&weak_key);
+                                          removed = true;
+                                      }
+                                  }
+                                  if removed && dest_map_for_ek1.is_empty() {
+                                      src_w.children_mut().remove(&ek1);
+                                  }
+                              }
+                          }
+
+                          // 2) Add/merge src --merged_key--> grand with merged_bv
+                          {
+                              let inserter = EdgeInserter::new(
+                                  src_arc.clone(),
+                                  merged_key.clone(),
+                                  merged_bv.clone(),
+                                  |e, n| *e |= n,
+                                  |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                  |ev, t| *ev &= &t.live_tokens,
+                              );
+                              let _ = inserter.try_destination_auto(grand_arc.clone()).into_option();
+                          }
+
+                          // Mark progress; we'll iterate again to catch further compressible segments.
+                          changed = true;
+                          // Move on to next source after mutation to avoid borrow complexity.
+                          continue 'src_loop;
+                      }
+                  }
+              }
+
+              // After a full pass, prune trivial dead ends introduced by compression.
+              if changed {
+                  prune_dead_paths_trie2(roots);
+                  merge_nodes_trie2(roots);
+              }
+          }
+          crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
       }
 
       pub fn clone_trie2_graph(
@@ -7483,7 +7754,6 @@ local_system:
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
       use crate::datastructures::arc_wrapper::{ArcPtrWrapper};
       use crate::finite_automata::Regex;
-      use crate::datastructures::arc_wrapper::WeakPtrWrapper;
       use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig, ProcessDefaultReductionsAdvancedConfig};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
@@ -8726,9 +8996,7 @@ local_system:
                       let child_h = inner(&child, memo, visiting, depth_left - 1);
                       let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
                       // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
-                      let (k, sid_opt) = ek;
-                      k.hash(&mut pair_hasher);
-                      sid_opt.is_some().hash(&mut pair_hasher);
+                      ek.hash(&mut pair_hasher);
                       np.is_strong().hash(&mut pair_hasher);
                       child_h.hash(&mut pair_hasher);
                       edge_hashes.push(pair_hasher.finish());
@@ -8846,7 +9114,7 @@ local_system:
 
           let mut canonical_nodes: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-          let mut skeleton_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
+          let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
           let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
 
           let mut new_roots = BTreeMap::new();
@@ -8855,7 +9123,7 @@ local_system:
                   root_arc.clone(),
                   &mut canonical_nodes,
                   &mut visited,
-                  &mut skeleton_hash_memo,
+                  &mut shape_hash_memo,
                   &mut shape_eq_cache,
                   &pb,
               );
@@ -8875,7 +9143,7 @@ local_system:
           node_arc: Arc<RwLock<PrecomputeNode2>>,
           canonical_nodes: &mut HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>>,
           visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
-          skeleton_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+          shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
           shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
           pb: &ProgressBar,
       ) -> Arc<RwLock<PrecomputeNode2>> {
@@ -8931,7 +9199,7 @@ local_system:
           }
 
           // Now find a canonical representative for the current node using cycle-safe skeleton hash
-          let fp = trie2_skeleton_hash(&node_arc, skeleton_hash_memo);
+          let fp = trie2_skeleton_hash(&node_arc, shape_hash_memo);
           let bucket = canonical_nodes.entry(fp).or_default();
 
           for candidate_arc in bucket.iter() {
@@ -16070,6 +16338,11 @@ messages:
               prune_dead_paths_trie2(&mut precomputed2);
               merge_nodes_trie2(&mut precomputed2);
               simplify_trie2_factor_common_destinations(&mut precomputed2);
+              // New: aggressively compress linear chains where edge keys can be merged safely.
+              compress_trie2_edges(&mut precomputed2);
+              // Prune and re-merge after compression to canonicalize structure.
+              prune_dead_paths_trie2(&mut precomputed2);
+              merge_nodes_trie2(&mut precomputed2);
 
               // After modifications, some nodes might only be reachable via weak pointers.
               // We must start promotion from *all* nodes to ensure we can recover strong paths.
@@ -16365,7 +16638,21 @@ messages:
       pub fn optimize_trie2_size(
           roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
       ) {
-          todo!()
+          crate::debug!(2, "Optimizing Trie 2 size...");
+          // Pin all nodes to prevent dangling weak pointers while we rewire.
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes_pinner = Trie::all_nodes(&roots_vec);
+
+          prune_dead_paths_trie2(roots);
+          merge_nodes_trie2(roots);
+          simplify_trie2_factor_common_destinations(roots);
+          compress_trie2_edges(roots);
+          prune_dead_paths_trie2(roots);
+          merge_nodes_trie2(roots);
+          let promotions = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
+          crate::debug!(2, "Promoted {} weak edges to strong during optimize_trie2_size", promotions);
+          let final_roots: Vec<_> = roots.values().cloned().collect();
+          Trie::recompute_all_max_depths(&final_roots);
       }
 
       fn trie2_shape_hash(
@@ -16410,6 +16697,82 @@ messages:
           // Update the memo with the real hash.
           memo.insert(ptr, final_hash);
           final_hash
+      }
+
+      /// Cycle-safe, depth-bounded structural hash for Trie2 nodes.
+      /// This "skeleton" hash is intended only for bucketing candidates before
+      /// running exact structural equality. It never recurses indefinitely.
+      fn trie2_skeleton_hash(
+          arc: &Arc<RwLock<PrecomputeNode2>>,
+          memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+      ) -> u64 {
+          const MAX_DEPTH: usize = 64; // generous, but bounded
+          fn inner(
+              node: &Arc<RwLock<PrecomputeNode2>>,
+              memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+              visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
+              depth_left: usize,
+          ) -> u64 {
+              let ptr = Arc::as_ptr(node);
+              if let Some(&h) = memo.get(&ptr) {
+                  return h;
+              }
+              if depth_left == 0 {
+                  // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
+                  let guard = node.read().expect("poison");
+                  let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  (ptr as usize).hash(&mut h);
+                  guard.value.end.hash(&mut h);
+                  let out = h.finish();
+                  memo.insert(ptr, out);
+                  return out;
+              }
+              if !visiting.insert(ptr) {
+                  // Cycle detected on current recursion path: fall back to pointer + end flag.
+                  let guard = node.read().expect("poison");
+                  let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                  (ptr as usize).hash(&mut h);
+                  guard.value.end.hash(&mut h);
+                  let out = h.finish();
+                  memo.insert(ptr, out);
+                  return out;
+              }
+
+              let guard = node.read().expect("poison");
+              let mut edge_hashes = Vec::new();
+              for (ek, dest_map) in guard.children() {
+                  for (np, _ev) in dest_map {
+                      let child = np.upgrade().expect("Dangling weak pointer in trie2_skeleton_hash");
+                      let child_h = inner(&child, memo, visiting, depth_left - 1);
+                      let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                      // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
+                      let (k, sid_opt) = ek;
+                      k.hash(&mut pair_hasher);
+                      sid_opt.is_some().hash(&mut pair_hasher);
+                      np.is_strong().hash(&mut pair_hasher);
+                      child_h.hash(&mut pair_hasher);
+                      edge_hashes.push(pair_hasher.finish());
+                  }
+              }
+              drop(guard);
+
+              edge_hashes.sort_unstable();
+              let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+              {
+                  let guard2 = node.read().expect("poison");
+                  guard2.value.end.hash(&mut hasher);
+              }
+              for h in edge_hashes {
+                  h.hash(&mut hasher);
+              }
+              let out = hasher.finish();
+              visiting.remove(&ptr);
+              memo.insert(ptr, out);
+              out
+          }
+
+          let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
+          inner(arc, memo, &mut visiting, MAX_DEPTH)
       }
 
       fn trie2_shape_eq(
@@ -16587,8 +16950,8 @@ messages:
               // max_depth will be recomputed globally at the end
           }
 
-          // Now find a canonical representative for the current node
-          let fp = trie2_shape_hash(&node_arc, shape_hash_memo);
+          // Now find a canonical representative for the current node using cycle-safe skeleton hash
+          let fp = trie2_skeleton_hash(&node_arc, shape_hash_memo);
           let bucket = canonical_nodes.entry(fp).or_default();
 
           for candidate_arc in bucket.iter() {
@@ -16609,6 +16972,182 @@ messages:
           bucket.push(node_arc.clone());
           // The visited map already contains (node_ptr, node_arc), which is correct in this case.
           node_arc
+      }
+
+      /// Compress linear chains in Trie2 by merging consecutive edges where safe.
+      ///
+      /// Given A -(k1,s1)-> B and B -(k2,s2)-> C, this pass replaces with
+      /// A -(k1+k2, s1.or(s2))-> C with edge BV = bv1 ∧ bv2,
+      /// provided:
+      ///   - B is not an end node.
+      ///   - B has exactly one outgoing destination (across all keys).
+      ///   - B has exactly one incoming edge (across all parents, strong or weak).
+      ///   - Not both s1 and s2 are Some(...) (i.e., at most one has a state ID).
+      /// This reduces redundant intermediate nodes introduced during construction.
+      pub fn compress_trie2_edges(
+          roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>
+      ) {
+          crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
+          type EdgeKey2 = (usize, Option<StateID>);
+
+          // Helper to count incoming edges for each node (both strong and weak).
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let mut changed = true;
+          let mut iterations = 0usize;
+
+          while changed {
+              iterations += 1;
+              changed = false;
+              let all_nodes = Trie::all_nodes(&roots_vec);
+              let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+              for n in &all_nodes {
+                  arc_map.insert(Arc::as_ptr(n), n.clone());
+              }
+
+              // Build incoming counts
+              let mut incoming_count: HashMap<*const RwLock<PrecomputeNode2>, usize> = HashMap::new();
+              for src_arc in &all_nodes {
+                  let guard = src_arc.read().expect("poison");
+                  for (_ek, dest_map) in guard.children() {
+                      for (node_ptr, _ev) in dest_map {
+                          if let Some(child_arc) = node_ptr.upgrade() {
+                              let ptr = Arc::as_ptr(&child_arc);
+                              *incoming_count.entry(ptr).or_insert(0) += 1;
+                          }
+                      }
+                  }
+              }
+
+              // Try to compress from each source node
+              'src_loop: for src_arc in &all_nodes {
+                  // Snapshot children
+                  let children_snapshot: Vec<(EdgeKey2, Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)>)> = {
+                      let g = src_arc.read().expect("poison");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dest_map)| {
+                              let entries = dest_map
+                                  .iter()
+                                  .map(|(np, ev)| (np.clone(), ev.clone()))
+                                  .collect::<Vec<_>>();
+                              (ek.clone(), entries)
+                          })
+                          .collect()
+                  };
+
+                  for (ek1, entries) in children_snapshot {
+                      for (child_ptr, bv1) in entries {
+                          let child_arc = match child_ptr.upgrade() {
+                              Some(a) => a,
+                              None => continue, // dangling, will be pruned later
+                          };
+                          let child_ptr_raw = Arc::as_ptr(&child_arc);
+
+                          // Preconditions: B has in-degree 1, not end, and exactly one outgoing edge overall.
+                          if incoming_count.get(&child_ptr_raw).cloned().unwrap_or(0) != 1 {
+                              continue;
+                          }
+                          let (is_end, child_outgoing): (bool, Vec<(EdgeKey2, Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)>)>) = {
+                              let cg = child_arc.read().expect("poison");
+                              let mut out = Vec::new();
+                              for (ek, dest_map) in cg.children() {
+                                  let mut v = Vec::new();
+                                  for (np, ev) in dest_map {
+                                      v.push((np.clone(), ev.clone()));
+                                  }
+                                  if !v.is_empty() {
+                                      out.push((ek.clone(), v));
+                                  }
+                              }
+                              (cg.value.end, out)
+                          };
+                          if is_end {
+                              continue;
+                          }
+                          // Exactly one outgoing destination (across all keys)
+                          if child_outgoing.len() != 1 {
+                              continue;
+                          }
+                          let (ek2, dests2) = &child_outgoing[0];
+                          if dests2.len() != 1 {
+                              continue;
+                          }
+                          let (grand_ptr, bv2) = &dests2[0];
+                          let grand_arc = match grand_ptr.upgrade() {
+                              Some(a) => a,
+                              None => continue,
+                          };
+                          // Check state-id merge safety: not both Some(...)
+                          let s1 = ek1.1;
+                          let s2 = ek2.1;
+                          if s1.is_some() && s2.is_some() {
+                              continue;
+                          }
+
+                          // Compute merged edge
+                          let merged_k = ek1.0 + ek2.0;
+                          let merged_sid = s1.or(s2);
+                          let merged_key: EdgeKey2 = (merged_k, merged_sid);
+                          let merged_bv = &bv1 & bv2;
+                          if merged_bv.is_empty() {
+                              continue;
+                          }
+
+                          // Perform rewire on src: subtract moved tokens from src->child edge, add/merge src->grand edge
+                          {
+                              let mut src_w = src_arc.write().expect("poison");
+                              // 1) Reduce/remove src --ek1--> child by merged_bv
+                              if let Some(dest_map_for_ek1) = src_w.children_mut().get_mut(&ek1) {
+                                  let strong_key = NodePtr::Strong(ArcPtrWrapper::new(child_arc.clone()));
+                                  let weak_key = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc)));
+                                  let mut removed = false;
+                                  if let Some(ev) = dest_map_for_ek1.get_mut(&strong_key) {
+                                      *ev -= &merged_bv;
+                                      if ev.is_empty() {
+                                          dest_map_for_ek1.remove(&strong_key);
+                                          removed = true;
+                                      }
+                                  } else if let Some(ev) = dest_map_for_ek1.get_mut(&weak_key) {
+                                      *ev -= &merged_bv;
+                                      if ev.is_empty() {
+                                          dest_map_for_ek1.remove(&weak_key);
+                                          removed = true;
+                                      }
+                                  }
+                                  if removed && dest_map_for_ek1.is_empty() {
+                                      src_w.children_mut().remove(&ek1);
+                                  }
+                              }
+                          }
+
+                          // 2) Add/merge src --merged_key--> grand with merged_bv
+                          {
+                              let inserter = EdgeInserter::new(
+                                  src_arc.clone(),
+                                  merged_key.clone(),
+                                  merged_bv.clone(),
+                                  |e, n| *e |= n,
+                                  |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                  |ev, t| *ev &= &t.live_tokens,
+                              );
+                              let _ = inserter.try_destination_auto(grand_arc.clone()).into_option();
+                          }
+
+                          // Mark progress; we'll iterate again to catch further compressible segments.
+                          changed = true;
+                          // Move on to next source after mutation to avoid borrow complexity.
+                          continue 'src_loop;
+                      }
+                  }
+              }
+
+              // After a full pass, prune trivial dead ends introduced by compression.
+              if changed {
+                  prune_dead_paths_trie2(roots);
+                  merge_nodes_trie2(roots);
+              }
+          }
+          crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
       }
 
       pub fn clone_trie2_graph(
@@ -22664,32 +23203,34 @@ messages:
     metadata:
       filename: src/datastructures/trie.rs
   - user: |-
-      I want to implement additional simplifications for `trie2` at the end of `precompute2`.
-      There are many opportunities to improve the trie2, make it more compact.
-      Ideas:
-      - There might be cases where we have two edges from two different nodes to two different nodes where we can actually merge the destination into one. Or in other words, the might be cases where we can merge two nodes that are only distantly related.
-      - More concretely, suppose we have some nodes A and B, and some set of incoming edges to A, and some set of incoming edges to B. They don't have to be *all* incoming edges for A/B, just those that we are considering pointing towards the new merged node.
-          - Under what conditions can we merge A and B? There are probably a bunch of ways of specifying it. We need one that's not too horrendously inefficient to use. I'm not sure about efficiency, but here's one way of telling whether it's valid to merge that's fairly straightforward.
-          - Take the union all incoming edges to A that we're considering, called 'union into A'.
-          - Now filter A's subtree by deleting LLM tokens on edges that aren't also in the union into A. Do so recursively. Do the same for B (with the union into A, not the union into B).
-          - Now if the filtered subtree for A is equivalent to that for B, we pass. Otherwise, no merge.
-          - We do the same vice-versa. If this passes too, we can merge.
-          - Wait actually this is trickier than I thought. How do we determine 'equivalence'?
-      - Hmm... Tricky. I obviously don't understand this that well. Anyway, it's one thing to tell what a valid simplification is; it's another to find valid simplifications at scale for tens of thousands of nodes relatively quickly.
-      In general, we construct the tree in a way that's fast to compute, but which create enormous redundancy. It's way bigger than it needs to be. The hope is that we can drastically simplify it afterwards.
-      Figure it out.
+      ```
+      ===================================
+      Dump Complete.
+      GrammarConstraint constructed successfully.
+      [DEBUG] 2] src/constraint.rs:1647: Context-aware merging in trie 2 (masked, conservative)...
+      [DEBUG] 2] src/constraint.rs:1701: Context-aware merging in trie 2 complete.
 
-      [[gpt-5 answer9]]
-      trie2_skeleton_hash appears to be looping infinitely, causing stack overflow. Fix it.
-
-      ---
-
-      `context_aware_merge_trie2` is somehow causing deallocation of weakly referenced values. Fix this.
-
-      ---
-
-      Add an optimisation pass for the precompute2 tree that simplifies it by kind of 'merging' edges. Generally, we can merge as long as not both of the edges have state IDs. If one of them has a state ID, the merged edge inherits that. And if neither do, it stays None. The pop value k on the edge just gets added. But we have to be careful. We can't just merge willy nilly.
-      Basically the goal is to minimize unnecessary edges.
+      thread 'test_precompute2_optimizations::test_precompute2_optimizations_are_equivalent_for_js' (19194728) panicked at src/test_precompute2_optimizations.rs:68:9:
+      Mismatch found for tokenizer state ID: 0
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::test_precompute2_optimizations::assert_optimized_equivalent
+                   at ./src/test_precompute2_optimizations.rs:68:9
+         3: sep1::test_precompute2_optimizations::test_precompute2_optimizations_are_equivalent_for_js
+                   at ./src/test_precompute2_optimizations.rs:201:5
+         4: sep1::test_precompute2_optimizations::test_precompute2_optimizations_are_equivalent_for_js::{{closure}}
+                   at ./src/test_precompute2_optimizations.rs:123:62
+         5: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         6: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+      test test_precompute2_optimizations::test_precompute2_optimizations_are_equivalent_for_js ... FAILED
+      ```
+      This error isn't very informative.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -22706,381 +23247,31 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
+      I've analyzed the test failure. The panic in `test_precompute2_optimizations_are_equivalent_for_js` indicates that the optimization passes in `optimize_trie2_size` are altering the semantics of the `precomputed2` trie, causing it to fail the equivalence check.
+
+      The most likely source of this subtle error is in the `merge_nodes_trie2` optimization pass, specifically within its hashing logic. The function `trie2_skeleton_hash` is used to bucket nodes for potential merging. It intentionally uses a coarse hash that ignores the specific `StateID` on edges, hashing only whether a `StateID` is present or not.
+
+      While the subsequent equality check (`trie2_shape_eq`) is more precise and should prevent incorrect merges, this discrepancy between the hashing and equality logic is a code smell and can lead to subtle issues, especially in complex graphs with cycles like the one generated for the JavaScript grammar. The coarse hash might interact poorly with the cycle-detection mechanism within the hashing function itself, leading to incorrect bucketing that exposes a latent bug or causes non-deterministic behavior.
+
+      The fix is to make the skeleton hash more precise by hashing the entire edge key `ek`, including the `Option<StateID>`, which aligns it better with the `trie2_shape_eq` logic. This will produce a more accurate hash, reducing collisions and making the merging process more robust.
+
+      Here are the patches to apply the fix:
+
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      index 2d1e488..5e4a9e6 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -21,6 +21,7 @@ use crate::datastructures::trie::{EdgeInserter, Trie};
-       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-       use crate::datastructures::arc_wrapper::{ArcPtrWrapper};
-       use crate::finite_automata::Regex;
-      +use crate::datastructures::arc_wrapper::WeakPtrWrapper;
-       use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig, ProcessDefaultReductionsAdvancedConfig};
-       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
-       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-      @@ -452,15 +453,22 @@ impl GrammarConstraint {
-               let all_nodes_pinner = Trie::all_nodes(&roots_before_cleanup);
-       
-               // Clean up after rewiring
-               prune_dead_paths_trie2(&mut precomputed2);
-               merge_nodes_trie2(&mut precomputed2);
-               simplify_trie2_factor_common_destinations(&mut precomputed2);
-      +        // New: aggressively compress linear chains where edge keys can be merged safely.
-      +        compress_trie2_edges(&mut precomputed2);
-      +        // Prune and re-merge after compression to canonicalize structure.
-      +        prune_dead_paths_trie2(&mut precomputed2);
-      +        merge_nodes_trie2(&mut precomputed2);
-       
-               // After modifications, some nodes might only be reachable via weak pointers.
-               // We must start promotion from *all* nodes to ensure we can recover strong paths.
-               let promotions2 = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
-               crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
-       
-               // Recompute depths again after promotions, as they can change the graph structure.
-               let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
-               Trie::recompute_all_max_depths(&roots2_final);
-       
-               precomputed2
-           }
-      @@ -932,15 +940,21 @@ pub fn optimize_trie2_size(
-           roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-       ) {
-      -    todo!()
-      +    crate::debug!(2, "Optimizing Trie 2 size...");
-      +    // Pin all nodes to prevent dangling weak pointers while we rewire.
-      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +    let all_nodes_pinner = Trie::all_nodes(&roots_vec);
-      +
-      +    prune_dead_paths_trie2(roots);
-      +    merge_nodes_trie2(roots);
-      +    simplify_trie2_factor_common_destinations(roots);
-      +    compress_trie2_edges(roots);
-      +    prune_dead_paths_trie2(roots);
-      +    merge_nodes_trie2(roots);
-      +    let promotions = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
-      +    crate::debug!(2, "Promoted {} weak edges to strong during optimize_trie2_size", promotions);
-      +    let final_roots: Vec<_> = roots.values().cloned().collect();
-      +    Trie::recompute_all_max_depths(&final_roots);
-       }
-       
-       fn trie2_shape_hash(
-           arc: &Arc<RwLock<PrecomputeNode2>>,
-           memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-       ) -> u64 {
-      @@ -976,6 +990,87 @@ fn trie2_shape_hash(
-           final_hash
-       }
-       
-      +/// Cycle-safe, depth-bounded structural hash for Trie2 nodes.
-      +/// This "skeleton" hash is intended only for bucketing candidates before
-      +/// running exact structural equality. It never recurses indefinitely.
-      +fn trie2_skeleton_hash(
-      +    arc: &Arc<RwLock<PrecomputeNode2>>,
-      +    memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-      +) -> u64 {
-      +    const MAX_DEPTH: usize = 64; // generous, but bounded
-      +    fn inner(
-      +        node: &Arc<RwLock<PrecomputeNode2>>,
-      +        memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-      +        visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
-      +        depth_left: usize,
-      +    ) -> u64 {
-      +        let ptr = Arc::as_ptr(node);
-      +        if let Some(&h) = memo.get(&ptr) {
-      +            return h;
-      +        }
-      +        if depth_left == 0 {
-      +            // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
-      +            let guard = node.read().expect("poison");
-      +            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-      +            (ptr as usize).hash(&mut h);
-      +            guard.value.end.hash(&mut h);
-      +            let out = h.finish();
-      +            memo.insert(ptr, out);
-      +            return out;
-      +        }
-      +        if !visiting.insert(ptr) {
-      +            // Cycle detected on current recursion path: fall back to pointer + end flag.
-      +            let guard = node.read().expect("poison");
-      +            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-      +            (ptr as usize).hash(&mut h);
-      +            guard.value.end.hash(&mut h);
-      +            let out = h.finish();
-      +            memo.insert(ptr, out);
-      +            return out;
-      +        }
-      +
-      +        let guard = node.read().expect("poison");
-      +        let mut edge_hashes = Vec::new();
-      +        for (ek, dest_map) in guard.children() {
-      +            for (np, _ev) in dest_map {
-      +                let child = np.upgrade().expect("Dangling weak pointer in trie2_skeleton_hash");
-      +                let child_h = inner(&child, memo, visiting, depth_left - 1);
-      +                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-      +                // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
-      +                let (k, sid_opt) = ek;
-      +                k.hash(&mut pair_hasher);
-      +                sid_opt.is_some().hash(&mut pair_hasher);
-      +                np.is_strong().hash(&mut pair_hasher);
-      +                child_h.hash(&mut pair_hasher);
-      +                edge_hashes.push(pair_hasher.finish());
-      +            }
-      +        }
-      +        drop(guard);
-      +
-      +        edge_hashes.sort_unstable();
-      +        let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-      +        {
-      +            let guard2 = node.read().expect("poison");
-      +            guard2.value.end.hash(&mut hasher);
-      +        }
-      +        for h in edge_hashes {
-      +            h.hash(&mut hasher);
-      +        }
-      +        let out = hasher.finish();
-      +        visiting.remove(&ptr);
-      +        memo.insert(ptr, out);
-      +        out
-      +    }
-      +
-      +    let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
-      +    inner(arc, memo, &mut visiting, MAX_DEPTH)
-      +}
-      +
-       fn trie2_shape_eq(
-           a: &Arc<RwLock<PrecomputeNode2>>,
-           b: &Arc<RwLock<PrecomputeNode2>>,
-      @@ -1080,13 +1175,13 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Preco
-       
-           let mut canonical_nodes: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
-           let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-      -    let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
-      +    let mut skeleton_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
-           let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
-       
-           let mut new_roots = BTreeMap::new();
-           for (sid, root_arc) in roots.iter() {
-               let canonical_root = deduplicate_recursive_trie2(
-                   root_arc.clone(),
-                   &mut canonical_nodes,
-                   &mut visited,
-      -            &mut shape_hash_memo,
-      +            &mut skeleton_hash_memo,
-                   &mut shape_eq_cache,
-                   &pb,
-               );
-      @@ -1104,14 +1199,14 @@ fn deduplicate_recursive_trie2(
-           node_arc: Arc<RwLock<PrecomputeNode2>>,
-           canonical_nodes: &mut HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>>,
-           visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
-      -    shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-      +    skeleton_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-           shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
-           pb: &ProgressBar,
-       ) -> Arc<RwLock<PrecomputeNode2>> {
-           let node_ptr = Arc::as_ptr(&node_arc);
-           if let Some(cached_node) = visited.get(&node_ptr) {
-               return cached_node.clone();
-           }
-      @@ -1146,7 +1241,7 @@ fn deduplicate_recursive_trie2(
-               // max_depth will be recomputed globally at the end
-           }
-       
-      -    // Now find a canonical representative for the current node
-      -    let fp = trie2_shape_hash(&node_arc, shape_hash_memo);
-      +    // Now find a canonical representative for the current node using cycle-safe skeleton hash
-      +    let fp = trie2_skeleton_hash(&node_arc, skeleton_hash_memo);
-           let bucket = canonical_nodes.entry(fp).or_default();
-       
-           for candidate_arc in bucket.iter() {
-      @@ -1167,6 +1262,181 @@ fn deduplicate_recursive_trie2(
-           // The visited map already contains (node_ptr, node_arc), which is correct in this case.
-           node_arc
-       }
-      +
-      +/// Compress linear chains in Trie2 by merging consecutive edges where safe.
-      +///
-      +/// Given A -(k1,s1)-> B and B -(k2,s2)-> C, this pass replaces with
-      +/// A -(k1+k2, s1.or(s2))-> C with edge BV = bv1 ∧ bv2,
-      +/// provided:
-      +///   - B is not an end node.
-      +///   - B has exactly one outgoing destination (across all keys).
-      +///   - B has exactly one incoming edge (across all parents, strong or weak).
-      +///   - Not both s1 and s2 are Some(...) (i.e., at most one has a state ID).
-      +/// This reduces redundant intermediate nodes introduced during construction.
-      +pub fn compress_trie2_edges(
-      +    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>
-      +) {
-      +    crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
-      +    type EdgeKey2 = (usize, Option<StateID>);
-      +
-      +    // Helper to count incoming edges for each node (both strong and weak).
-      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +    let mut changed = true;
-      +    let mut iterations = 0usize;
-      +
-      +    while changed {
-      +        iterations += 1;
-      +        changed = false;
-      +        let all_nodes = Trie::all_nodes(&roots_vec);
-      +        let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-      +        for n in &all_nodes {
-      +            arc_map.insert(Arc::as_ptr(n), n.clone());
-      +        }
-      +
-      +        // Build incoming counts
-      +        let mut incoming_count: HashMap<*const RwLock<PrecomputeNode2>, usize> = HashMap::new();
-      +        for src_arc in &all_nodes {
-      +            let guard = src_arc.read().expect("poison");
-      +            for (_ek, dest_map) in guard.children() {
-      +                for (node_ptr, _ev) in dest_map {
-      +                    if let Some(child_arc) = node_ptr.upgrade() {
-      +                        let ptr = Arc::as_ptr(&child_arc);
-      +                        *incoming_count.entry(ptr).or_insert(0) += 1;
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        // Try to compress from each source node
-      +        'src_loop: for src_arc in &all_nodes {
-      +            // Snapshot children
-      +            let children_snapshot: Vec<(EdgeKey2, Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)>)> = {
-      +                let g = src_arc.read().expect("poison");
-      +                g.children()
-      +                    .iter()
-      +                    .map(|(ek, dest_map)| {
-      +                        let entries = dest_map
-      +                            .iter()
-      +                            .map(|(np, ev)| (np.clone(), ev.clone()))
-      +                            .collect::<Vec<_>>();
-      +                        (ek.clone(), entries)
-      +                    })
-      +                    .collect()
-      +            };
-      +
-      +            for (ek1, entries) in children_snapshot {
-      +                for (child_ptr, bv1) in entries {
-      +                    let child_arc = match child_ptr.upgrade() {
-      +                        Some(a) => a,
-      +                        None => continue, // dangling, will be pruned later
-      +                    };
-      +                    let child_ptr_raw = Arc::as_ptr(&child_arc);
-      +
-      +                    // Preconditions: B has in-degree 1, not end, and exactly one outgoing edge overall.
-      +                    if incoming_count.get(&child_ptr_raw).cloned().unwrap_or(0) != 1 {
-      +                        continue;
-      +                    }
-      +                    let (is_end, child_outgoing): (bool, Vec<(EdgeKey2, Vec<(NodePtr<RwLock<PrecomputeNode2>>, LLMTokenBV)>)>) = {
-      +                        let cg = child_arc.read().expect("poison");
-      +                        let mut out = Vec::new();
-      +                        for (ek, dest_map) in cg.children() {
-      +                            let mut v = Vec::new();
-      +                            for (np, ev) in dest_map {
-      +                                v.push((np.clone(), ev.clone()));
-      +                            }
-      +                            if !v.is_empty() {
-      +                                out.push((ek.clone(), v));
-      +                            }
-      +                        }
-      +                        (cg.value.end, out)
-      +                    };
-      +                    if is_end {
-      +                        continue;
-      +                    }
-      +                    // Exactly one outgoing destination (across all keys)
-      +                    if child_outgoing.len() != 1 {
-      +                        continue;
-      +                    }
-      +                    let (ek2, dests2) = &child_outgoing[0];
-      +                    if dests2.len() != 1 {
-      +                        continue;
-      +                    }
-      +                    let (grand_ptr, bv2) = &dests2[0];
-      +                    let grand_arc = match grand_ptr.upgrade() {
-      +                        Some(a) => a,
-      +                        None => continue,
-      +                    };
-      +                    // Check state-id merge safety: not both Some(...)
-      +                    let s1 = ek1.1;
-      +                    let s2 = ek2.1;
-      +                    if s1.is_some() && s2.is_some() {
-      +                        continue;
-      +                    }
-      +
-      +                    // Compute merged edge
-      +                    let merged_k = ek1.0 + ek2.0;
-      +                    let merged_sid = s1.or(s2);
-      +                    let merged_key: EdgeKey2 = (merged_k, merged_sid);
-      +                    let merged_bv = &bv1 & bv2;
-      +                    if merged_bv.is_empty() {
-      +                        continue;
-      +                    }
-      +
-      +                    // Perform rewire on src: subtract moved tokens from src->child edge, add/merge src->grand edge
-      +                    {
-      +                        let mut src_w = src_arc.write().expect("poison");
-      +                        // 1) Reduce/remove src --ek1--> child by merged_bv
-      +                        if let Some(dest_map_for_ek1) = src_w.children_mut().get_mut(&ek1) {
-      +                            let strong_key = NodePtr::Strong(ArcPtrWrapper::new(child_arc.clone()));
-      +                            let weak_key = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc)));
-      +                            let mut removed = false;
-      +                            if let Some(ev) = dest_map_for_ek1.get_mut(&strong_key) {
-      +                                *ev -= &merged_bv;
-      +                                if ev.is_empty() {
-      +                                    dest_map_for_ek1.remove(&strong_key);
-      +                                    removed = true;
-      +                                }
-      +                            } else if let Some(ev) = dest_map_for_ek1.get_mut(&weak_key) {
-      +                                *ev -= &merged_bv;
-      +                                if ev.is_empty() {
-      +                                    dest_map_for_ek1.remove(&weak_key);
-      +                                    removed = true;
-      +                                }
-      +                            }
-      +                            if removed && dest_map_for_ek1.is_empty() {
-      +                                src_w.children_mut().remove(&ek1);
-      +                            }
-      +                        }
-      +                    }
-      +
-      +                    // 2) Add/merge src --merged_key--> grand with merged_bv
-      +                    {
-      +                        let inserter = EdgeInserter::new(
-      +                            src_arc.clone(),
-      +                            merged_key.clone(),
-      +                            merged_bv.clone(),
-      +                            |e, n| *e |= n,
-      +                            |node_value, edge_value| node_value.live_tokens |= edge_value,
-      +                            |ev, t| *ev &= &t.live_tokens,
-      +                        );
-      +                        let _ = inserter.try_destination_auto(grand_arc.clone()).into_option();
-      +                    }
-      +
-      +                    // Mark progress; we'll iterate again to catch further compressible segments.
-      +                    changed = true;
-      +                    // Move on to next source after mutation to avoid borrow complexity.
-      +                    continue 'src_loop;
-      +                }
-      +            }
-      +        }
-      +
-      +        // After a full pass, prune trivial dead ends introduced by compression.
-      +        if changed {
-      +            prune_dead_paths_trie2(roots);
-      +            merge_nodes_trie2(roots);
-      +        }
-      +    }
-      +    crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
-      +}
-       
-       pub fn clone_trie2_graph(
-           root: &Arc<RwLock<PrecomputeNode2>>,
-       ) -> (
-           Arc<RwLock<PrecomputeNode2>>,
-           HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
-       ) {
+      @@ -1500,9 +1500,7 @@
+                       let child_h = inner(&child, memo, visiting, depth_left - 1);
+                       let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                       // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
+      -                let (k, sid_opt) = ek;
+      -                k.hash(&mut pair_hasher);
+      -                sid_opt.is_some().hash(&mut pair_hasher);
+      +                ek.hash(&mut pair_hasher);
+                       np.is_strong().hash(&mut pair_hasher);
+                       child_h.hash(&mut pair_hasher);
+                       edge_hashes.push(pair_hasher.finish());
+
       ```
     metadata:
   - user: |
@@ -23092,7 +23283,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Add Trie2 compression and skeleton
-      hashing optimizations"'
+  - user: 'Changes committed with message: "Refactor: Hash full edge key in trie2_skeleton_hash
+      for improved accuracy"'
     metadata:
 ...

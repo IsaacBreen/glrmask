@@ -863,7 +863,7 @@ impl GrammarConstraint {
         merge_nodes_trie2(&mut precomputed2);
         simplify_trie2_factor_common_destinations(&mut precomputed2);
         // New: aggressively compress linear chains where edge keys can be merged safely.
-        // compress_trie2_edges(&mut precomputed2);
+        compress_trie2_edges(&mut precomputed2);
         // Prune and re-merge after compression to canonicalize structure.
         prune_dead_paths_trie2(&mut precomputed2);
         merge_nodes_trie2(&mut precomputed2);
@@ -1270,9 +1270,7 @@ fn trie2_skeleton_hash(
                 let child_h = inner(&child, memo, visiting, depth_left - 1);
                 let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
                 // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
-                let (k, sid_opt) = ek;
-                k.hash(&mut pair_hasher);
-                sid_opt.is_some().hash(&mut pair_hasher);
+                ek.hash(&mut pair_hasher);
                 np.is_strong().hash(&mut pair_hasher);
                 child_h.hash(&mut pair_hasher);
                 edge_hashes.push(pair_hasher.finish());
