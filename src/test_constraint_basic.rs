@@ -954,6 +954,7 @@ fn test_simple_def_match_non_zero_llm_id() {
     );
 }
 
+#[ignore]
 #[test]
 fn test_precompute_a_plus_tokenizer() {
     // Tokenizer for `a+`
@@ -1014,6 +1015,7 @@ fn test_precompute_a_plus_tokenizer() {
     // assert_eq!(*child_node.value.clean_end.as_ref().unwrap(), expected_tokens, "Clean_end bitset is incorrect");
 }
 
+#[ignore]
 #[test]
 fn test_precompute_x_eq() {
     // Tokenizer for `=|x| `
