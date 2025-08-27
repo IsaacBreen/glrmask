@@ -38,7 +38,7 @@ enum Action<'a> {
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
     /// Unwraps an option, panicking with a message from a closure on `None`.
-    fn expect_else<F>(self, f: F)
+    fn expect_else<F>(self, f: F) -> T
     where
         F: FnOnce() -> String;
 }
@@ -366,6 +366,7 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            trie2_arena: Arena::new(),
         }
     }
 
@@ -376,6 +377,7 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            trie2_arena: Arena::new(),
         }
     }
 
@@ -387,6 +389,7 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            trie2_arena: Arena::new(),
         };
         parser_state
     }
@@ -398,6 +401,7 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            trie2_arena: Arena::new(),
         };
         parser_state
     }
@@ -417,6 +421,7 @@ impl GLRParser {
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
             accepted: false,
+            trie2_arena: Arena::new(),
         }
     }
 
@@ -442,6 +447,7 @@ impl GLRParser {
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
             accepted: false,
+            trie2_arena: Arena::new(),
         }
     }
 
@@ -726,7 +732,7 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
@@ -1799,7 +1805,7 @@ impl GLRParser {
         }
 
         // Traverse and define all nodes and edges
-        while let Some(node_arc) = queue.pop_front()) {
+        while let Some(node_arc) = queue.pop_front() {
             let node_ptr = Arc::as_ptr(&node_arc);
             if visited_nodes.contains(&node_ptr) {
                 continue;

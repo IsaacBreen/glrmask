@@ -302,7 +302,7 @@ pub fn calculate_final_stats2(
 
     for (arena, root_id) in precomputed_roots.values() {
         queue.push_back(*root_id);
-        while let Some(node_id) = queue.pop_front()) {
+        while let Some(node_id) = queue.pop_front() {
             if visited_ids.insert(node_id) {
                 all_reachable_nodes.insert(node_id, node_id);
                 let node_guard = arena.get(node_id);
@@ -509,7 +509,7 @@ pub fn calculate_final_stats(
 
     for (arena, root_id) in precomputed_roots.values() {
         queue.push_back(*root_id);
-        while let Some(node_id) = queue.pop_front()) {
+        while let Some(node_id) = queue.pop_front() {
             if visited_ids.insert(node_id) {
                 all_reachable_nodes.insert(node_id, node_id);
                 let node_guard = arena.get(node_id);

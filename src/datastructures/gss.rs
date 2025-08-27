@@ -619,7 +619,7 @@ impl GSSNode {
                 }
 
                 let mut accs: Vec<Arc<Acc>> = Vec::new();
-                while let Some(node) = queue.pop_front()) {
+                while let Some(node) = queue.pop_front() {
                     let ptr = Arc::as_ptr(&node);
                     if !visited_nodes.insert(ptr) {
                         continue;
@@ -2388,7 +2388,7 @@ mod tests {
         let mut visited = HashSet::new();
         let mut final_leaf_trie2_nodes = BTreeSet::new();
 
-        while let Some(node) = q.pop_front()) {
+        while let Some(node) = q.pop_front() {
             if !visited.insert(Arc::as_ptr(&node)) { continue; }
             if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
             for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
@@ -2544,7 +2544,7 @@ mod tests {
         q.push_back(Arc::new(merged));
         let mut visited = HashSet::new();
         let mut leaves = Vec::new();
-        while let Some(node) = q.pop_front()) {
+        while let Some(node) = q.pop_front() {
             if !visited.insert(Arc::as_ptr(&node)) { continue; }
             if node.is_root() { leaves.push(node.clone()); }
             for p in node.predecessors().values().flat_map(|m| m.values()).flatten() {

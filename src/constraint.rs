@@ -3,7 +3,7 @@
 
 use std::sync::RwLock;
 use std::mem;
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, TerminalBV};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -49,6 +49,7 @@ use crate::datastructures::entry_api::EntryApi;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
 use serde_json::Value as SerdeValue;
+use crate::datastructures::ordered_hash_map::Retain;
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -575,6 +576,7 @@ impl GrammarConstraint {
             &internal_llm_token_map_for_precompute,
             &token_name_map,
             internal_max_llm_token,
+            MERGE_THRESHOLD,
             &terminal_follow_map,
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
@@ -627,6 +629,7 @@ impl GrammarConstraint {
         parser:           Option<&GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        token_name_map: &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
@@ -809,6 +812,7 @@ impl GrammarConstraint {
                 // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
 
                 crate::datastructures::gss::merge_trie2_nodes_if_needed(
+                    &mut glr_s.trie2_arena,
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
                 );
@@ -1675,7 +1679,7 @@ pub fn compress_trie2_edges(
             }
         }
     }
-    crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
+    crate::debug!(2, "Finished compressing Trie 2 in ?? iteration(s).");
 }
 
 pub fn clone_trie2_graph(

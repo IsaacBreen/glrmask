@@ -51,6 +51,7 @@ impl JSONConvertible for NodeId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arena<N> {
     nodes: Vec<N>,
 }
@@ -109,7 +110,7 @@ impl<N> Arena<N> {
 /// EK: type of the edge key (must be Ord).
 /// EV: type of the edge value.
 /// T:  type of the value stored within the node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Map from EdgeKey to map of destination node IDs and edge values.
