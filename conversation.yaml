@@ -1,8 +1,8 @@
 local_system:
   attached_files:
     - src/constraint.rs
-    - src/test_precompute2_optimizations.rs
     - src/datastructures/trie.rs
+    - src/test_precompute2_optimizations.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -1619,10 +1619,14 @@ local_system:
                           };
                           // Check state-id merge safety: not both Some(...)
                           let s1 = ek1.1;
-                          let s2 = ek2.1;
-                          if s1.is_some() && s2.is_some() {
+                          // The first edge in a compressible chain must not have a state ID check.
+                          // A state ID check on the first edge (s1) is an intermediate validation
+                          // that is lost if we merge the edges. We can only merge if the first
+                          // edge is just a pop (s1 is None).
+                          if s1.is_some() {
                               continue;
                           }
+                          let s2 = ek2.1;
 
                           // Compute merged edge
                           let merged_k = ek1.0 + ek2.0;
@@ -11454,7 +11458,7 @@ local_system:
               &self.state
           }
       }
-    src/test_precompute2_optimizations.rs: |-
+    src/test_precompute2_optimizations.rs: |
       //! Precompute2 optimization equivalence tests.
       //!
       //! This suite verifies that applying optimization passes to the Precompute2
@@ -11469,6 +11473,7 @@ local_system:
       use crate::constraint::{
           are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size, GrammarConstraint, Precomputed2,
       };
+      use crate::constraint_extra::PrecomputeStats;
       use crate::interface::{CompiledGrammar, GrammarDefinition};
       use crate::json_serialization::JSONConvertible;
       use crate::tokenizer::{LLMTokenID, LLMTokenMap};
@@ -11517,6 +11522,11 @@ local_system:
           // Apply optimization passes
           optimize_trie2_size(&mut optimized_precomputed2);
 
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized);
+
           println!("\n--- Dumping Optimized Precompute2 Tree ---");
           GrammarConstraint::_dump_precomputed2(
               &optimized_precomputed2,
@@ -11542,23 +11552,17 @@ local_system:
                       sid.0);
               }
           }
-      }
 
-      fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
-          let compiled = compiled_from_ebnf_str(ebnf)?;
-          let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
-          let gc = GrammarConstraint::from_compiled_grammar(
-              compiled,
-              llm_token_map,
-              LLMTokenID(0), // dummy EOF placeholder
-              max_original_llm_token_id,
-          );
-          assert_optimized_equivalent(
-              &gc.precomputed2,
-              &gc.llm_vocab.original_to_internal_id_bimap,
-              &gc.llm_vocab.llm_token_map,
-          );
-          Ok(())
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original);
+          crate::constraint_extra::print_precompute_stats2(&stats_original);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final);
       }
 
       //
@@ -17154,10 +17158,14 @@ messages:
                           };
                           // Check state-id merge safety: not both Some(...)
                           let s1 = ek1.1;
-                          let s2 = ek2.1;
-                          if s1.is_some() && s2.is_some() {
+                          // The first edge in a compressible chain must not have a state ID check.
+                          // A state ID check on the first edge (s1) is an intermediate validation
+                          // that is lost if we merge the edges. We can only merge if the first
+                          // edge is just a pop (s1 is None).
+                          if s1.is_some() {
                               continue;
                           }
+                          let s2 = ek2.1;
 
                           // Compute merged edge
                           let merged_k = ek1.0 + ek2.0;
@@ -23302,8 +23310,8 @@ messages:
     metadata:
       filename: src/datastructures/trie.rs
   - user: |-
-      Note that pop comes before state ID check. The ordering is important.
-      It seems `compress_trie2_edges` messes up with the ordering or something. e.g. in the original tree I have an edge (1, Some(6)), but in the output of `compress_trie2_edges` I only have (0, Some(6)).
+      Show precompute2 stats in `assert_optimized_equivalent` before dumping.
+      And then show them again at the end, but for both the original tree and the optimized one, one after the other. (So we'll be showing both stats multiple times -- that's ok.)
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -23320,49 +23328,94 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've analyzed the issue with `compress_trie2_edges`. The problem lies in how it merges edges with associated `StateID` checks. An edge `(k, Some(StateID))` implies that after `k` pops from the parser stack, the top state must be `StateID`.
-
-      The original compression logic incorrectly merges an edge `(k1, Some(S1))` with a subsequent edge `(k2, None)`, resulting in a new edge `(k1+k2, Some(S1))`. This is semantically incorrect because the check for `S1` should occur after `k1` pops, not after `k1+k2` pops.
-
-      The correct behavior is to only compress chains of edges where the initial edge does not have a state check (i.e., its `StateID` is `None`). This ensures that intermediate state validations are not lost.
-
-      I'll provide a patch for `src/constraint.rs` to correct the logic in `compress_trie2_edges`. No changes are needed for the other files you provided.
-
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1548,11 +1548,13 @@
-                           };
-                           // Check state-id merge safety: not both Some(...)
-                           let s1 = ek1.1;
-      +                    // The first edge in a compressible chain must not have a state ID check.
-      +                    // A state ID check on the first edge (s1) is an intermediate validation
-      +                    // that is lost if we merge the edges. We can only merge if the first
-      +                    // edge is just a pop (s1 is None).
-      +                    if s1.is_some() {
-      +                        continue;
-      +                    }
-                           let s2 = ek2.1;
-      -                    if s1.is_some() && s2.is_some() {
-      -                        continue;
-      -                    }
+      diff --git a/src/test_precompute2_optimizations.rs b/src/test_precompute2_optimizations.rs
+      --- a/src/test_precompute2_optimizations.rs
+      +++ b/src/test_precompute2_optimizations.rs
+      @@ -13,6 +13,7 @@
+       use crate::constraint::{
+           are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size, GrammarConstraint, Precomputed2,
+       };
+      +use crate::constraint_extra::PrecomputeStats;
+       use crate::interface::{CompiledGrammar, GrammarDefinition};
+       use crate::json_serialization::JSONConvertible;
+       use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+      @@ -52,6 +53,11 @@
+           // Apply optimization passes
+           optimize_trie2_size(&mut optimized_precomputed2);
        
-                           // Compute merged edge
-                           let merged_k = ek1.0 + ek2.0;
+      +    println!("\n--- Stats for Optimized Precompute2 Tree ---");
+      +    let mut stats_optimized = PrecomputeStats::default();
+      +    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized);
+      +    crate::constraint_extra::print_precompute_stats2(&stats_optimized);
+      +
+           println!("\n--- Dumping Optimized Precompute2 Tree ---");
+           GrammarConstraint::_dump_precomputed2(
+               &optimized_precomputed2,
+      @@ -78,4 +84,15 @@
+                       sid.0);
+               }
+           }
+      +
+      +    println!("\n--- Final Stats Comparison ---");
+      +    println!("\n--- Stats for Original Precompute2 Tree ---");
+      +    let mut stats_original = PrecomputeStats::default();
+      +    crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original);
+      +    crate::constraint_extra::print_precompute_stats2(&stats_original);
+      +
+      +    println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+      +    let mut stats_optimized_final = PrecomputeStats::default();
+      +    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final);
+      +    crate::constraint_extra::print_precompute_stats2(&stats_optimized_final);
+       }
+       
+       //
 
       ```
     metadata:
-  - user: |
-      Apply result (git-llm mode):
+  - user: |-
+      Git apply attempt failed (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Identified target file: src/test_precompute2_optimizations.rs
+      Applying patch to 'src/test_precompute2_optimizations.rs' using custom patcher...
+      Error applying patch to src/test_precompute2_optimizations.rs: Hunk #3 (header: `@@ -78,4 +84,15 @@`) failed: context not found.
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly handle state ID checks
-      during Trie2 edge compression"'
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_precompute2_optimizations.rs
+      Applying patch to 'src/test_precompute2_optimizations.rs' using custom patcher...
+      Error applying patch to src/test_precompute2_optimizations.rs: Hunk #3 (header: `@@ -78,4 +84,15 @@`) failed: context not found.
+
+
+      LLM apply output:
+      Using model 'gf' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/test_precompute2_optimizations.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/test_precompute2_optimizations.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/test_precompute2_optimizations.rs
+    metadata:
+  - user: 'Changes committed with message: "test: Add precompute2 stats logging for
+      optimization tests"'
     metadata:
 ...

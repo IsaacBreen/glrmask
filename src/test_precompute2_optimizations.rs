@@ -12,6 +12,7 @@
 use crate::constraint::{
     are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size, GrammarConstraint, Precomputed2,
 };
+use crate::constraint_extra::PrecomputeStats;
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::JSONConvertible;
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
@@ -60,6 +61,11 @@ fn assert_optimized_equivalent(
     // Apply optimization passes
     optimize_trie2_size(&mut optimized_precomputed2);
 
+    println!("\n--- Stats for Optimized Precompute2 Tree ---");
+    let mut stats_optimized = PrecomputeStats::default();
+    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized);
+    crate::constraint_extra::print_precompute_stats2(&stats_optimized);
+
     println!("\n--- Dumping Optimized Precompute2 Tree ---");
     GrammarConstraint::_dump_precomputed2(
         &optimized_precomputed2,
@@ -85,23 +91,17 @@ fn assert_optimized_equivalent(
                 sid.0);
         }
     }
-}
 
-fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
-    let compiled = compiled_from_ebnf_str(ebnf)?;
-    let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
-    let gc = GrammarConstraint::from_compiled_grammar(
-        compiled,
-        llm_token_map,
-        LLMTokenID(0), // dummy EOF placeholder
-        max_original_llm_token_id,
-    );
-    assert_optimized_equivalent(
-        &gc.precomputed2,
-        &gc.llm_vocab.original_to_internal_id_bimap,
-        &gc.llm_vocab.llm_token_map,
-    );
-    Ok(())
+    println!("\n--- Final Stats Comparison ---");
+    println!("\n--- Stats for Original Precompute2 Tree ---");
+    let mut stats_original = PrecomputeStats::default();
+    crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original);
+    crate::constraint_extra::print_precompute_stats2(&stats_original);
+
+    println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+    let mut stats_optimized_final = PrecomputeStats::default();
+    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final);
+    crate::constraint_extra::print_precompute_stats2(&stats_optimized_final);
 }
 
 //
