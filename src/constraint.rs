@@ -450,9 +450,9 @@ impl GrammarConstraint {
     pub fn new(
         tokenizer:        Regex,
         parser:           GLRParser,
-        llm_token_map:    LLMTokenMap, 
+        llm_token_map:    LLMTokenMap,
         token_name_map:   BiBTreeMap<Terminal, usize>,
-        max_original_llm_token_id: usize, 
+        max_original_llm_token_id: usize,
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
@@ -477,7 +477,7 @@ impl GrammarConstraint {
         // We need to use the parameter `tokenizer` for the computation.
         // Let's rename the parameter to avoid confusion, or be careful.
         // Assuming `tokenizer` in `Self { tokenizer, ... }` refers to the parameter, it's fine.
-        
+
         crate::debug!(2, "Building vocab prefix tree for possible_matches computation");
         let vocab_for_possible_matches = VocabPrefixTree::build(&internal_tokens_for_vocab);
         crate::debug!(2, "Done building vocab prefix tree for possible_matches computation");
@@ -574,7 +574,7 @@ impl GrammarConstraint {
             &llm_vocab.llm_token_map,
         );
 
-        let mut gc = Self {
+        let gc = Self {
             tokenizer,
             parser,
             precomputed,
@@ -593,7 +593,7 @@ impl GrammarConstraint {
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
-        internal_max_llm_token: usize,                       
+        internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -657,7 +657,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
- 
+
         // 1) Build a single base Trie2 root.
         let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
             PrecomputedNodeContents::root(internal_max_llm_token),
@@ -815,7 +815,7 @@ impl GrammarConstraint {
                                     src_w.value.live_tokens |= tokens_to_push.clone();
                                 }
                                 crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
- 
+
                                 let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
@@ -911,7 +911,7 @@ impl GrammarConstraint {
         self.llm_vocab.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
-    #[allow(dead_code)] 
+    #[allow(dead_code)]
     pub(crate) fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
@@ -969,7 +969,7 @@ impl GrammarConstraint {
 
             if let Some(final_state_val) = exec_result.end_state {
                 let final_tokenizer_state_id = TokenizerStateID(final_state_val);
-                
+
                 let matches_possible_from_new_tokenizer_state: BTreeSet<_> = tokenizer
                     .tokens_accessible_from_state(final_tokenizer_state_id)
                     .into_iter()
@@ -980,7 +980,7 @@ impl GrammarConstraint {
                     .iter()
                     .map(|m| GrammarTokenID(m.id))
                     .collect();
-                
+
                 let new_grammar_tokens_to_look_for = &matches_possible_from_new_tokenizer_state - &matches_from_current_segment;
 
                 if !new_grammar_tokens_to_look_for.is_empty() {
@@ -1793,14 +1793,14 @@ impl<'r> Precomputer<'r> {
         parser:           Option<&'r GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        internal_max_llm_token: usize,                       
+        internal_max_llm_token: usize,
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
-        let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
+        let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
-            .map(|(bytes, id)| (id.0 as usize, bytes.clone())) 
+            .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
         crate::debug!(2, "Building vocab prefix tree");
@@ -2163,7 +2163,7 @@ impl<'r> Precomputer<'r> {
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
             let mut node_guard = node_arc.write().expect("poison");
-            
+
             // Check if there are any edges with the ignore token key.
             let ignore_key = Some(ignore_tid);
             if let Some(dest_map_for_ignore_token) = node_guard.children_mut().remove(&ignore_key) {
@@ -2328,7 +2328,7 @@ impl<'r> Precomputer<'r> {
 
         crate::debug!(2, "Done simplifying None edges.");
     }
-    
+
     fn prune_on_no_terminal_follow(&mut self) {
         crate::debug!(2, "Pruning based on terminal follow sets.");
 
@@ -2389,7 +2389,7 @@ impl<'r> Precomputer<'r> {
 
                 let node_ptr: NodePtr = node;
                 edges_to_keep.insert(node_ptr, keys_to_keep);
-    
+
                 true // Continue traversal
             },
         );
@@ -2881,7 +2881,7 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
- 
+
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
@@ -3270,7 +3270,7 @@ impl<'a> GrammarConstraintState<'a> {
         println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
 
         crate::profiler::print_summary_flat();
-        
+
         let counts = step_counts.read().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
