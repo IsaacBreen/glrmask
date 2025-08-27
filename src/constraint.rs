@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::{BitOr, BitOrAssign};
 use std::fmt::{self, Debug, Display, Formatter};
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::cell::RefCell;
 
 use bimap::BiBTreeMap;
@@ -22,18 +22,19 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
-use crate::datastructures::gss::{gather_gss_stats, GSSNode, allow_only_llm_tokens_and_prune_arc, reset_llm_tokens, disallow_terminals_and_prune_arc, GSSPrintConfig, LLMTokenBV, TerminalBV, PrecomputedNodeContents, PrecomputeNode2};
+use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode2, PrecomputedNodeContents, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::datastructures::arc_wrapper::{ArcPtrWrapper};
+use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessTokenAdvancedConfig, ProcessDefaultReductionsAdvancedConfig};
+use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use kdam::{tqdm, BarBuilder};
+use std::io::{Read, Write};
+use kdam::{tqdm, BarBuilder, BarExt};
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
@@ -48,6 +49,7 @@ use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENAB
 use crate::datastructures::entry_api::EntryApi;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
+use serde_json::Value as SerdeValue;
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -3700,4 +3702,143 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
         &self.state
     }
+}
+
+/// Custom streaming serializer for a single Trie to avoid high memory usage.
+/// This function serializes a Trie graph into a self-contained JSON object to a writer.
+fn stream_trie_to_writer<W: Write>(
+    root_arc: &Arc<RwLock<PrecomputeNode2>>,
+    mut writer: W,
+) -> Result<(), String> {
+    // Pass 1: Discover all nodes via BFS and assign unique indices.
+    let mut ptr_to_idx: HashMap<*const RwLock<PrecomputeNode2>, usize> = HashMap::new();
+    let mut idx_to_arc: Vec<Arc<RwLock<PrecomputeNode2>>> = Vec::new();
+
+    ptr_to_idx.insert(Arc::as_ptr(root_arc), 0);
+    idx_to_arc.push(root_arc.clone());
+
+    let mut head = 0;
+    while head < idx_to_arc.len() {
+        let current_arc = idx_to_arc[head].clone();
+        head += 1;
+
+        let guard = current_arc.read().map_err(|_| "RwLock poisoned during discovery".to_string())?;
+        for child_map in guard.children().values() {
+            for node_ptr in child_map.keys() {
+                if let Some(child_arc) = node_ptr.upgrade() {
+                    let child_ptr = Arc::as_ptr(&child_arc);
+                    if !ptr_to_idx.contains_key(&child_ptr) {
+                        let new_idx = idx_to_arc.len();
+                        ptr_to_idx.insert(child_ptr, new_idx);
+                        idx_to_arc.push(child_arc);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: Write nodes to stream one by one.
+    let mut pb = tqdm!(total = idx_to_arc.len(), desc = "Writing trie nodes", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    write!(writer, "{{\"nodes\":[",).map_err(|e| e.to_string())?;
+
+    for (i, node_arc) in idx_to_arc.iter().enumerate() {
+        if i > 0 {
+            write!(writer, ",").map_err(|e| e.to_string())?;
+        }
+        let guard = node_arc.read().map_err(|_| "RwLock poisoned during serialization".to_string())?;
+
+        // Manually construct the JSON for this single node.
+        let mut children_json_data = Vec::new();
+        let mut weak_children_json_data = Vec::new();
+
+        for (edge_key, destinations_map) in guard.children() {
+            let ek_json = edge_key.to_json();
+            let mut strong_dests_json = Vec::new();
+            let mut weak_dests_json = Vec::new();
+
+            for (node_ptr, edge_val) in destinations_map {
+                if let Some(child_arc) = node_ptr.upgrade() {
+                    let child_idx = ptr_to_idx.get(&Arc::as_ptr(&child_arc)).unwrap();
+                    let dest_entry = JSONNode::Array(vec![child_idx.to_json(), edge_val.to_json()]);
+                    if node_ptr.is_strong() {
+                        strong_dests_json.push(dest_entry);
+                    } else {
+                        weak_dests_json.push(dest_entry);
+                    }
+                }
+            }
+            if !strong_dests_json.is_empty() {
+                children_json_data.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(strong_dests_json)]));
+            }
+            if !weak_dests_json.is_empty() {
+                weak_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(weak_dests_json)]));
+            }
+        }
+
+        let node_json = JSONNode::Object(BTreeMap::from_iter(vec![
+            ("value".to_string(), guard.value.to_json()),
+            ("max_depth".to_string(), guard.max_depth.to_json()),
+            ("children".to_string(), JSONNode::Array(children_json_data)),
+            ("weak_children".to_string(), JSONNode::Array(weak_children_json_data)),
+        ]));
+
+        node_json.to_writer(&mut writer)?;
+        let _ = pb.update(1);
+    }
+
+    // pb.finish().unwrap();
+    write!(writer, "],\"root_idx\":0}}").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Custom streaming serializer for `Precomputed2`.
+pub fn write_precomputed2_to_stream<W: Write>(
+    precomputed2: &Precomputed2,
+    mut writer: W,
+) -> Result<(), String> {
+    writer.write_all(b"[").map_err(|e| e.to_string())?;
+    let mut pb = tqdm!(total = precomputed2.len(), desc = "Writing tries", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    let mut first = true;
+    for (key, trie_root_arc) in precomputed2 {
+        if !first {
+            writer.write_all(b",").map_err(|e| e.to_string())?;
+        }
+        first = false;
+        writer.write_all(b"[").map_err(|e| e.to_string())?;
+        key.to_json().to_writer(&mut writer)?;
+        writer.write_all(b",").map_err(|e| e.to_string())?;
+        stream_trie_to_writer(trie_root_arc, &mut writer)?;
+        writer.write_all(b"]").map_err(|e| e.to_string())?;
+        let _ = pb.update(1);
+    }
+    // pb.finish().unwrap();
+    writer.write_all(b"]").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Custom deserializer for `Precomputed2` from a stream.
+pub fn read_precomputed2_from_stream<R: Read>(
+    reader: R,
+) -> Result<Precomputed2, String> {
+    // This is not fully "streaming" as it loads the entire structure as SerdeValue first,
+    // but it allows for progress reporting during the conversion to the final Trie format.
+    let pairs: Vec<(SerdeValue, SerdeValue)> = serde_json::from_reader(reader)
+        .map_err(|e| format!("Failed to parse precomputed2 stream as array of pairs: {}", e))?;
+
+    let mut map: Precomputed2 = BTreeMap::new();
+    let mut pb = tqdm!(total = pairs.len(), desc = "Loading tries from JSON", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
+    for (key_val, trie_val) in pairs {
+        let key_node = JSONNode::from_serde_value(key_val)?;
+        let key = <TokenizerStateID as JSONConvertible>::from_json(key_node)?;
+
+        let trie_node = JSONNode::from_serde_value(trie_val)?;
+        let trie_arc: Arc<RwLock<PrecomputeNode2>> = JSONConvertible::from_json(trie_node)?;
+
+        map.insert(key, trie_arc);
+        let _ = pb.update(1);
+    }
+    // pb.finish().unwrap();
+
+    Ok(map)
 }

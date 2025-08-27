@@ -165,7 +165,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
 
     const FORCE_RECOMPUTE: bool = true;
     const SAVE_TO_CACHE: bool = false;
-    use crate::json_serialization;
+    use crate::{constraint, json_serialization};
     use flate2::read::GzDecoder;
     use flate2::write::GzEncoder;
     use flate2::Compression;
@@ -226,7 +226,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
             let file = File::create(&precomputed2_cache_path)?;
             let writer = BufWriter::new(file);
             let mut encoder = GzEncoder::new(writer, Compression::default());
-            json_serialization::write_precomputed2_to_stream(&original_precomputed2, &mut encoder)?;
+            constraint::write_precomputed2_to_stream(&original_precomputed2, &mut encoder)?;
             println!("Successfully saved Precomputed2 to cache.");
         }
     }
