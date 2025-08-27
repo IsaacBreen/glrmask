@@ -10,7 +10,7 @@ pub mod arc_wrapper;
 pub mod ordered_hash_map;
 pub mod cache;
 pub mod entry_api;
-mod arena;
+pub mod arena;
 
 pub use arc_wrapper::ArcPtrWrapper;
 pub use entry_api::{EntryApi, OrderedMapEntry};

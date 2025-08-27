@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
@@ -26,7 +26,7 @@ impl fmt::Display for CycleDetectedError {
 impl Error for CycleDetectedError {}
 
 /// Represents a node within a `Trie`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrieNode<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to a map of destination node IDs and edge values.
@@ -52,7 +52,8 @@ where
     fn to_json(&self) -> JSONNode {
         JSONNode::Object(BTreeMap::from([
             ("value".to_string(), self.value.to_json()),
-            ("children".to_string(), self.children.to_json()),
+            // ("children".to_string(), self.children.to_json()),
+            todo!(),
             ("max_depth".to_string(), self.max_depth.to_json()),
         ]))
     }
