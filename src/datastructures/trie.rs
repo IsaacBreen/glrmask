@@ -1134,6 +1134,13 @@ where
         self
     }
 
+    pub fn else_create_destination_with(self, value_fn: impl FnOnce() -> T) -> Self {
+        if self.result.is_some() {
+            return self;
+        }
+        self.else_create_destination_with_value(value_fn())
+    }
+
     pub fn else_create_destination(self) -> Self
     where
         T: Default,
@@ -1299,6 +1306,7 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     // Use concrete types for merge tests
     type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
