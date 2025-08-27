@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNodeId, PrecomputeArena};
-use crate::datastructures::gss::{PrecomputeArena2, PrecomputeNode2Id};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+use crate::datastructures::gss::PrecomputeNode2;
 use crate::types::{TerminalID as GrammarTokenID};
-use crate::datastructures::trie::{Arena, NodeId, Trie};
+use crate::datastructures::trie::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -78,10 +78,9 @@ fn format_bv_with_tokens(
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
 pub fn dump_precompute_trie_recursive(
-    arena: &PrecomputeArena,
-    node_id: PrecomputeNodeId,
+    node_arc: &Arc<RwLock<PrecomputeNode>>,
     prefix: String,
-    visited: &mut HashSet<PrecomputeNodeId>,
+    visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
@@ -89,21 +88,21 @@ pub fn dump_precompute_trie_recursive(
     let children_to_visit;
 
     {
-        let node = arena.get(node_id);
+        let node = node_arc.read().expect("RwLock poisoned during dump");
         // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
-            dest_map.iter().map(move |(&child_id, edge_val)| {
+            dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (
                     edge_key.clone(),
                     edge_val.clone(),
-                    child_id,
+                    child_wrapper.upgrade().unwrap(),
                 )
             })
         }).collect::<Vec<_>>();
     }
 
     let num_children = children_to_visit.len();
-    for (i, (edge_key, edge_val_bv, child_id)) in children_to_visit.iter().enumerate() {
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
         let is_last = i == num_children - 1;
         let connector = if is_last { "└──" } else { "├──" };
 
@@ -122,15 +121,17 @@ pub fn dump_precompute_trie_recursive(
 
         let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
 
+        let child_ptr;
         let child_info;
         let is_visited;
         let is_end_node;
         {
-            let child_node = arena.get(*child_id);
-            is_visited = visited.contains(child_id);
+            let child_node = child_arc.read().unwrap();
+            child_ptr = &*child_node as *const PrecomputeNode;
+            is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.end;
             let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
-            child_info = format!("Node ID:{} (MaxDepth: {}){} [Live: {}]", child_id.0, child_node.max_depth, if is_end_node { " [END]" } else { "" }, live_tokens_str);
+            child_info = format!("Node {:p} (MaxDepth: {}){} [Live: {}]", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" }, live_tokens_str);
         }
 
         // Don't shortcut the display for end nodes, even if they are visited.
@@ -144,13 +145,13 @@ pub fn dump_precompute_trie_recursive(
             // This prevents re-printing the children of a shared node and avoids cycles.
             // End nodes are leaves, so they won't recurse anyway.
             if !is_visited {
-                visited.insert(*child_id);
+                visited.insert(child_ptr);
                 let child_prefix = if is_last {
                     format!("{}   ", prefix)
                 } else {
                     format!("{}│  ", prefix)
                 };
-                dump_precompute_trie_recursive(arena, *child_id, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
+                dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
             }
         }
     }
@@ -168,7 +169,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     }
 
     pub fn _dump_precomputed(
-        precomputed: &BTreeMap<TokenizerStateID, (PrecomputeArena, PrecomputeNodeId)>,
+        precomputed: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
         original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
@@ -176,23 +177,25 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         println!("Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
-        let mut visited: HashSet<PrecomputeNodeId> = HashSet::new();
-        for (tokenizer_state_id, (arena, root_node_id)) in precomputed {
+        let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+        for (tokenizer_state_id, root_node_trie) in precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
+            let root_ptr;
             let root_info;
             {
-                let root_node = arena.get(*root_node_id);
+                let root_node = root_node_trie.read().unwrap();
+                root_ptr = &*root_node as *const PrecomputeNode;
                 let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
-                root_info = format!("Root Node ID:{} (MaxDepth: {}){} [Live: {}]", root_node_id.0, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
+                root_info = format!("Root Node {:p} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
             }
             println!("{}", root_info);
 
-            if visited.contains(root_node_id) {
+            if visited.contains(&root_ptr) {
                 println!("  (Root already visited)");
             } else {
-                visited.insert(*root_node_id);
-                dump_precompute_trie_recursive(arena, *root_node_id, "".to_string(), &mut visited, Some(original_to_internal_id_bimap), Some(token_name_map), Some(llm_token_map));
+                visited.insert(root_ptr);
+                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(original_to_internal_id_bimap), Some(token_name_map), Some(llm_token_map));
             }
         }
         println!("\n===================================");
@@ -208,30 +211,32 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         );
     }
 
-    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, (PrecomputeArena2, PrecomputeNode2Id)>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
+    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
         println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
-        let mut visited: HashSet<PrecomputeNode2Id> = HashSet::new();
-        for (tokenizer_state_id, (arena, root_node_id)) in precomputed2 {
+        let mut visited: HashSet<*const PrecomputeNode2> = HashSet::new();
+        for (tokenizer_state_id, root_node_trie) in precomputed2 {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
+            let root_ptr;
             let root_info;
             {
-                let root_node = arena.get(*root_node_id);
+                let root_node = root_node_trie.read().unwrap();
+                root_ptr = &*root_node as *const PrecomputeNode2;
                 let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
-                root_info = format!("Root Node ID:{} (MaxDepth: {}){} [Live: {}]", root_node_id.0, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
+                root_info = format!("Root Node {:p} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
             }
             println!("{}", root_info);
 
-            if visited.contains(root_node_id) {
+            if visited.contains(&root_ptr) {
                 println!("  (Root already visited)");
             } else {
-                visited.insert(*root_node_id);
+                visited.insert(root_ptr);
                 dump_precompute_trie2_recursive(
-                    arena,
-                    *root_node_id,
+                    root_node_trie,
                     "".to_string(),
+                    &mut visited,
                     Some(&original_to_internal_id_bimap),
                     Some(&llm_token_map),
                 );
@@ -243,27 +248,26 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 }
 
 pub fn dump_precompute_trie2_recursive(
-    arena: &PrecomputeArena2,
-    node_id: PrecomputeNode2Id,
+    node_arc: &Arc<RwLock<PrecomputeNode2>>,
     prefix: String,
-    visited: &mut HashSet<PrecomputeNode2Id>,
+    visited: &mut HashSet<*const PrecomputeNode2>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) {
     let children_to_visit = {
-        let node = arena.get(node_id);
+        let node = node_arc.read().expect("RwLock poisoned during dump");
         node.children().iter().flat_map(|(edge_key, dest_map)| {
-            dest_map.iter().map(move |(&child_id, edge_val)| {
+            dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (
                     edge_key.clone(),
                     edge_val.clone(),
-                    child_id,
+                    child_wrapper.upgrade().unwrap(),
                 )
             })
         }).collect::<Vec<_>>()
     };
 
-    for (i, (edge_key, edge_val_bv, child_id)) in children_to_visit.iter().enumerate() {
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
         let is_last = i == children_to_visit.len() - 1;
         let connector = if is_last { "└──" } else { "├──" };
 
@@ -271,10 +275,11 @@ pub fn dump_precompute_trie2_recursive(
         let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string()));
         let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
 
-        let (child_info, is_visited, is_end_node) = {
-            let child_node = arena.get(*child_id);
+        let (child_ptr, child_info, is_visited, is_end_node) = {
+            let child_node = child_arc.read().unwrap();
+            let ptr = Arc::as_ptr(child_arc) as *const PrecomputeNode2;
             let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
-            (format!("Node ID:{} (MaxDepth: {}){} [Live: {}]", child_id.0, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }, live_tokens_str), visited.contains(child_id), child_node.value.end)
+            (ptr, format!("Node {:p} (MaxDepth: {}){} [Live: {}]", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }, live_tokens_str), visited.contains(&ptr), child_node.value.end)
         };
 
         if is_visited && !is_end_node {
@@ -282,35 +287,43 @@ pub fn dump_precompute_trie2_recursive(
         } else {
             println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
             if !is_visited {
-                visited.insert(*child_id);
+                visited.insert(child_ptr);
                 let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
-                dump_precompute_trie2_recursive(arena, *child_id, child_prefix, visited, original_internal_bimap, llm_token_map);
+                dump_precompute_trie2_recursive(child_arc, child_prefix, visited, original_internal_bimap, llm_token_map);
             }
         }
     }
 }
 
 pub fn calculate_final_stats2(
-    precomputed_roots: &BTreeMap<TokenizerStateID, (PrecomputeArena2, PrecomputeNode2Id)>,
+    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
     stats: &mut PrecomputeStats,
 ) {
     crate::debug!(2, "Calculating final precompute2 statistics...");
 
-    let mut all_reachable_nodes: BTreeMap<PrecomputeNode2Id, PrecomputeNode2Id> = BTreeMap::new();
-    let mut queue: VecDeque<PrecomputeNode2Id> = VecDeque::new();
-    let mut visited_ids: HashSet<PrecomputeNode2Id> = HashSet::new();
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = BTreeMap::new();
+    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode2>>> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<*const PrecomputeNode2> = HashSet::new();
 
-    for (arena, root_id) in precomputed_roots.values() {
-        queue.push_back(*root_id);
-        while let Some(node_id) = queue.pop_front() {
-            if visited_ids.insert(node_id) {
-                all_reachable_nodes.insert(node_id, node_id);
-                let node_guard = arena.get(node_id);
-                for dest_map in node_guard.children().values() {
-                    for &child_id in dest_map.keys() {
-                        queue.push_back(child_id);
-                    }
-                }
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read().unwrap();
+            let ptr = &*node_guard as *const PrecomputeNode2;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map
+                        .keys()
+                        .filter_map(|wrapper| wrapper.upgrade())
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
             }
         }
     }
@@ -318,17 +331,19 @@ pub fn calculate_final_stats2(
     *stats = PrecomputeStats::default();
     stats.final_unique_nodes_count = all_reachable_nodes.len();
 
-    let root_node_ids: HashSet<PrecomputeNode2Id> = precomputed_roots
+    let root_node_pointers: HashSet<*const PrecomputeNode2> = precomputed_roots
         .values()
-        .map(|(_arena, root_id)| *root_id)
+        .map(|arc| {
+            let guard = arc.read().unwrap();
+            &*guard as *const PrecomputeNode2
+        })
         .collect();
-    stats.final_root_nodes_count = root_node_ids.len();
+    stats.final_root_nodes_count = root_node_pointers.len();
 
-    for (node_id, _node_id_val) in &all_reachable_nodes {
-        let (arena, _root_id) = precomputed_roots.iter().next().unwrap().1; // Assuming all roots share the same arena for simplicity, or pass arena to this function.
-        let node_guard = arena.get(*node_id).expect("Node not found in arena during final stats calculation");
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read().expect("RwLock poisoned during final stats calculation");
 
-        if !root_node_ids.contains(node_id) {
+        if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
                 stats.final_leaf_nodes_count += 1;
             } else {
@@ -497,38 +512,49 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
 }
 
 pub fn calculate_final_stats(
-    precomputed_roots: &BTreeMap<TokenizerStateID, (PrecomputeArena, PrecomputeNodeId)>,
+    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
     stats: &mut PrecomputeStats,
 ) {
     crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
 
-    // Custom implementation of all_nodes using NodeId for visited set
-    let mut all_reachable_nodes: BTreeMap<PrecomputeNodeId, PrecomputeNodeId> = BTreeMap::new();
-    let mut queue: VecDeque<PrecomputeNodeId> = VecDeque::new();
-    let mut visited_ids: HashSet<PrecomputeNodeId> = HashSet::new();
+    // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = BTreeMap::new();
+    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
 
-    for (arena, root_id) in precomputed_roots.values() {
-        queue.push_back(*root_id);
-        while let Some(node_id) = queue.pop_front() {
-            if visited_ids.insert(node_id) {
-                all_reachable_nodes.insert(node_id, node_id);
-                let node_guard = arena.get(node_id);
-                for dest_map in node_guard.children().values() {
-                    for &child_id in dest_map.keys() {
-                        queue.push_back(child_id);
-                    }
-                }
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read().unwrap();
+            let ptr = &*node_guard as *const PrecomputeNode;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map
+                        .keys()
+                        .filter_map(|wrapper| wrapper.upgrade())
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
             }
         }
     }
 
     stats.final_unique_nodes_count = all_reachable_nodes.len();
 
-    let root_node_ids: HashSet<PrecomputeNodeId> = precomputed_roots
+    let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
         .values()
-        .map(|(_arena, root_id)| *root_id)
+        .map(|arc| {
+            let guard = arc.read().unwrap();
+            &*guard as *const PrecomputeNode
+        })
         .collect();
-    stats.final_root_nodes_count = root_node_ids.len();
+    stats.final_root_nodes_count = root_node_pointers.len();
 
     // Initialize stats fields
     stats.final_total_occupancy_sum_for_some_keys = 0;
@@ -548,12 +574,11 @@ pub fn calculate_final_stats(
     stats.edges_pruned_by_terminal_sequence = 0;
     stats.final_total_ranges_in_bvs = 0;
 
-    for (node_id, _node_id_val) in &all_reachable_nodes {
-        let (arena, _root_id) = precomputed_roots.iter().next().unwrap().1; // Assuming all roots share the same arena for simplicity, or pass arena to this function.
-        let node_guard = arena.get(*node_id).expect("Node not found in arena during final stats calculation");
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read().expect("RwLock poisoned during final stats calculation");
 
         // New logic for non-root internal and leaf nodes
-        if !root_node_ids.contains(node_id) {
+        if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
                 stats.final_leaf_nodes_count += 1;
             } else {
@@ -845,4 +870,3 @@ mod tests {
         println!("--- Finished dump_precomputed2 test output ---");
     }
 }
-

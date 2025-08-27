@@ -2,7 +2,7 @@ use std::sync::{Mutex, RwLock};
 use crate::datastructures::ArcPtrWrapper;
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2Id, PrecomputedNodeContents};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -24,7 +24,7 @@ use crate::glr::automaton::compute_closure;
 use std::collections::HashMap;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce, stage_9};
-use crate::datastructures::trie::{Arena, NodeId, EdgeInserter, Trie};
+use crate::datastructures::trie::EdgeInserter;
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -366,7 +366,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_arena: Arena::new(),
         }
     }
 
@@ -377,7 +376,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_arena: Arena::new(),
         }
     }
 
@@ -389,7 +387,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_arena: Arena::new(),
         };
         parser_state
     }
@@ -401,7 +398,6 @@ impl GLRParser {
             accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            trie2_arena: Arena::new(),
         };
         parser_state
     }
@@ -421,7 +417,6 @@ impl GLRParser {
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
             accepted: false,
-            trie2_arena: Arena::new(),
         }
     }
 
@@ -447,7 +442,6 @@ impl GLRParser {
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
             accepted: false,
-            trie2_arena: Arena::new(),
         }
     }
 
@@ -732,16 +726,13 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode2Id, LLMTokenBV)>,
-    // Store the arena for Trie2 nodes directly within the GLRParserState
-    // This simplifies access in step/process functions.
-    pub(crate) trie2_arena: Arena<Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, (ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1092,7 +1083,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    fn build_below_bottom_accs(&mut self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
+    fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
         for (k, accs_by_edge) in popper.below_bottom() {
             for (last_edge_content, acc_arc) in accs_by_edge {
@@ -1104,29 +1095,31 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_bv = LLMTokenBV::max_ones();
 
                 // For each existing trie2 node: just create the edge directly to a fresh destination
-                let mut dest_agg: BTreeMap<PrecomputeNode2Id, LLMTokenBV> = BTreeMap::new();
+                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
                 let mut used = BTreeSet::new();
 
-                for &existing_id in &acc.trie2_nodes {
-                    let fallback_dest_id = self.trie2_arena.insert(Trie::new(PrecomputedNodeContents::internal()));
+                for existing in &acc.trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
+
+                    let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     let inserter = EdgeInserter::new(
-                        &mut self.trie2_arena,
-                        existing_id,
+                        source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                         |ev, t| *ev &= &t.live_tokens,
-                    ).try_destination(fallback_dest_id); // direct, strong insert
+                    ).try_destination(fallback_dest.clone()); // direct, strong insert
 
-                    let final_dst_id = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
-                    dest_agg.entry(final_dst_id).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
-                    used.insert(final_dst_id);
+                    let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
+                    let final_wr = ArcPtrWrapper::new(final_dst_arc.clone());
+                    dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
+                    used.insert(final_wr);
                 }
 
                 // Update destination live tokens
-                for (&dst_id, added) in &dest_agg {
-                    let mut g = self.trie2_arena.get_mut(dst_id);
+                for (dst_wr, added) in &dest_agg {
+                    let mut g = dst_wr.as_arc().write().expect("poison");
                     g.value.live_tokens |= added.clone();
                 }
 
@@ -1163,12 +1156,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     k: 0, // Sentinel for any k
                 };
 
-                let (dst_id, is_new) = if let Some((id, _)) = self.below_bottom_cache.get(&accept_cache_key) {
-                    (*id, false)
+                let (dst_arc, is_new) = if let Some((arc, _)) = self.below_bottom_cache.get(&accept_cache_key) {
+                    (arc.as_arc().clone(), false)
                 } else {
-                    let new_trie2_node_id = self.trie2_arena.insert(Trie::new(PrecomputedNodeContents::internal()));
-                    self.below_bottom_cache.insert(accept_cache_key.clone(), (new_trie2_node_id, LLMTokenBV::max_ones()));
-                    (new_trie2_node_id, true)
+                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    self.below_bottom_cache.insert(accept_cache_key.clone(), (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
+                    (new_trie2_node, true)
                 };
 
                 // Always use max-ones for the edge bitset
@@ -1178,10 +1171,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_key = (*k, Some(*source_state_id));
 
                 // For each existing trie2 source node, add an edge to the cached destination
-                for &existing_id in &trie2_nodes {
+                for existing in &trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.trie2_arena,
-                        existing_id,
+                        source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
@@ -1190,16 +1183,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     );
 
                     if is_new {
-                        inserter.try_destination(dst_id).expect("Cycle in below-bottom accept wiring");
+                        inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
                     } else {
-                        inserter.try_destination(dst_id); // No weak edges, so always try strong
+                        inserter.to_destination_weakly(dst_arc.clone());
                     }
                 }
 
                 // Create the GSS node for the accepted state.
                 // It should have the acc from the path, and a single predecessor edge for the source_state_id.
                 let mut acc_for_gss = acc.clone();
-                acc_for_gss.trie2_nodes.insert(dst_id);
+                acc_for_gss.trie2_nodes.insert(ArcPtrWrapper::new(dst_arc.clone()));
                 let gss0 = GSSNode::new(acc_for_gss);
                 let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                 accepted_stacks.push(Arc::new(gss1));
@@ -1237,18 +1230,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         merged_acc.trie2_nodes.clear();
 
-        if let Some((id, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
-            // Insert weak edges to the existing node id.
+        if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
+            // Insert weak edges to the existing node arc.
             for (k, mut acc) in below {
                 let trie2_nodes = &acc.trie2_nodes;
                 let edge_key = (k, None);
                 // Always use max-ones for the edge bitset
                 let edge_bv = LLMTokenBV::max_ones();
 
-                for &existing_id in trie2_nodes {
+                for existing in trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.trie2_arena,
-                        existing_id,
+                        source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
@@ -1256,7 +1249,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         |ev, t| {},
                     );
 
-                    inserter.try_destination(*id); // No weak edges, so always try strong
+                    inserter.to_destination_weakly(arc.as_arc().clone());
                 }
             }
 
@@ -1279,8 +1272,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Arc::new(GSSNode::new_fresh())
             }
         } else {
-            let new_trie2_node_id = self.trie2_arena.insert(Trie::new(PrecomputedNodeContents::internal()));
-            self.below_bottom_cache.insert(cache_key, (new_trie2_node_id, LLMTokenBV::max_ones()));
+            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            self.below_bottom_cache.insert(cache_key, (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
             let mut out = Vec::new();
             for (k, mut acc) in below {
                 let trie2_nodes = &acc.trie2_nodes;
@@ -1288,10 +1281,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // Always use max-ones for the edge bitset
                 let edge_bv = LLMTokenBV::max_ones();
 
-                for &existing_id in trie2_nodes {
+                for existing in trie2_nodes {
+                    let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.trie2_arena,
-                        existing_id,
+                        source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
@@ -1300,10 +1293,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     );
 
                     // Create a new cached destination node for this nonterminal
-                    inserter.try_destination(new_trie2_node_id);
+                    inserter.try_destination(new_trie2_node.clone());
                 }
             }
-            merged_acc.trie2_nodes.insert(new_trie2_node_id);
+            merged_acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
             for (goto_state_id, source_state_ids) in &gotos.gotos {
                 let mut edge_contents = Vec::new();
                 for source_state_id in source_state_ids {
