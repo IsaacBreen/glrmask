@@ -22,7 +22,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prallow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode2, PrecomputedNodeContents, TerminalBV};
+use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode2, PrecomputedNodeContents, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1669,7 +1669,6 @@ pub fn compress_trie2_edges(
         if changed {
             prune_dead_paths_trie2(roots);
             merge_nodes_trie2(roots);
-            // No weak edges, so no promotion needed.
         }
     }
     crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
@@ -2089,12 +2088,7 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = Self::compute_possible_matches_for_vocab_node(
-                        tokenizer,
-                        child_vocab_node, // Recurse with the child node
-                        TokenizerStateID(final_state_val),
-                        cache,
-                    );
+                    let next_results = self.possible_matches(child_vocab_node, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
@@ -3129,7 +3123,7 @@ impl<'a> GrammarConstraintState<'a> {
                         let mut glr_s = glr_s.clone();
                         allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
-                        // glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
+                        glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
                         crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
                         // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
@@ -3277,9 +3271,7 @@ impl<'a> GrammarConstraintState<'a> {
             print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
         }
 
-        crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
 
         let t_end = std::time::Instant::now();
         println!("get_mask took: {:>15?}", t_end.duration_since(t0));
