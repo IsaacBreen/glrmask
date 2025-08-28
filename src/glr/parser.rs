@@ -807,14 +807,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self
     }
 
-    pub fn god_mut(&self) -> Option<&mut Trie2God> {
-        if let Some(god_wrapper) = &self.active_state.god {
-            Some(&mut god_wrapper.0.write().unwrap())
-        } else {
-            None
-        }
-    }
-
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.
@@ -1144,7 +1136,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     let inserter = EdgeInserter::new(
-                        &mut self.god_mut().unwrap(),
+                        &mut self.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
@@ -1216,7 +1208,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in &trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.god_mut().unwrap(),
+                        &mut self.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
@@ -1330,7 +1322,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.god_mut().unwrap(),
+                        &mut self.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),

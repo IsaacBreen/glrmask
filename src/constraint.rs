@@ -832,7 +832,7 @@ impl GrammarConstraint {
                                 let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
-                                    &mut glr_s.god_mut().unwrap(),
+                                    &mut glr_s.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
                                     src_arc.clone(),
                                     edge_key,
                                     tokens_to_push.clone(),
