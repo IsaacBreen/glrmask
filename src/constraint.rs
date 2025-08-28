@@ -2833,6 +2833,9 @@ pub struct GrammarConstraintState<'a> {
     pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
+#[derive(Debug, Clone)]
+struct God {}
+
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
         // Compare parent by pointer to ensure they originate from the same constraint object.
