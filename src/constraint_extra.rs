@@ -261,7 +261,7 @@ pub fn dump_precompute_trie2_recursive(
                 (
                     edge_key.clone(),
                     edge_val.clone(),
-                    child_wrapper.upgrade().unwrap(),
+                    child_wrapper.as_arc().clone(),
                 )
             })
         }).collect::<Vec<_>>()

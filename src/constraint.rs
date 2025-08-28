@@ -211,7 +211,7 @@ fn sample_normalized_path(
             current_k = 0;
         }
 
-        current_node = dest_ptr.upgrade()?;
+        current_node = dest_ptr.as_arc().clone();
     }
 
     Some(path)
@@ -253,39 +253,38 @@ fn get_bv_for_normalized_path(
                 let new_bv = &bv & edge_bv;
                 if new_bv.is_empty() { continue; }
 
-                if let Some(child_arc) = dest_ptr.upgrade() {
-                    let (k, sid_opt) = ek;
-                    let new_k = k_so_far + *k;
+                let child_arc = dest_ptr.as_arc().clone();
+                let (k, sid_opt) = ek;
+                let new_k = k_so_far + *k;
 
-                    if let Some(sid) = sid_opt {
-                        if new_k == target_k && sid == &target_sid {
-                            // Matched a path segment. Advance.
-                            let visited_key = (Arc::as_ptr(&child_arc), path_idx + 1, 0);
-                            if let Some(existing_bv) = visited.get_mut(&visited_key) {
-                                let diff = &new_bv - &*existing_bv;
-                                if !diff.is_empty() {
-                                    *existing_bv |= &diff;
-                                    q.push_back((child_arc, path_idx + 1, 0, diff));
-                                }
-                            } else {
-                                visited.insert(visited_key, new_bv.clone());
-                                q.push_back((child_arc, path_idx + 1, 0, new_bv));
+                if let Some(sid) = sid_opt {
+                    if new_k == target_k && sid == &target_sid {
+                        // Matched a path segment. Advance.
+                        let visited_key = (Arc::as_ptr(&child_arc), path_idx + 1, 0);
+                        if let Some(existing_bv) = visited.get_mut(&visited_key) {
+                            let diff = &new_bv - &*existing_bv;
+                            if !diff.is_empty() {
+                                *existing_bv |= &diff;
+                                q.push_back((child_arc, path_idx + 1, 0, diff));
                             }
+                        } else {
+                            visited.insert(visited_key, new_bv.clone());
+                            q.push_back((child_arc, path_idx + 1, 0, new_bv));
                         }
-                    } else { // sid_opt is None
-                        if new_k <= target_k {
-                            // Continue accumulating k
-                            let visited_key = (Arc::as_ptr(&child_arc), path_idx, new_k);
-                            if let Some(existing_bv) = visited.get_mut(&visited_key) {
-                                let diff = &new_bv - &*existing_bv;
-                                if !diff.is_empty() {
-                                    *existing_bv |= &diff;
-                                    q.push_back((child_arc, path_idx, new_k, diff));
-                                }
-                            } else {
-                                visited.insert(visited_key, new_bv.clone());
-                                q.push_back((child_arc, path_idx, new_k, new_bv));
+                    }
+                } else { // sid_opt is None
+                    if new_k <= target_k {
+                        // Continue accumulating k
+                        let visited_key = (Arc::as_ptr(&child_arc), path_idx, new_k);
+                        if let Some(existing_bv) = visited.get_mut(&visited_key) {
+                            let diff = &new_bv - &*existing_bv;
+                            if !diff.is_empty() {
+                                *existing_bv |= &diff;
+                                q.push_back((child_arc, path_idx, new_k, diff));
                             }
+                        } else {
+                            visited.insert(visited_key, new_bv.clone());
+                            q.push_back((child_arc, path_idx, new_k, new_bv));
                         }
                     }
                 }
@@ -319,18 +318,17 @@ fn find_end_bv_from_node_via_none_edges(
                     let new_bv = &bv & edge_bv;
                     if new_bv.is_empty() { continue; }
 
-                    if let Some(child_arc) = dest_ptr.upgrade() {
-                        let child_ptr = Arc::as_ptr(&child_arc);
-                        if let Some(existing_bv) = visited.get_mut(&child_ptr) {
-                            let diff = &new_bv - &*existing_bv;
-                            if !diff.is_empty() {
-                                *existing_bv |= &diff;
-                                q.push_back((child_arc, diff));
-                            }
-                        } else {
-                            visited.insert(child_ptr, new_bv.clone());
-                            q.push_back((child_arc, new_bv));
+                    let child_arc = dest_ptr.as_arc().clone();
+                    let child_ptr = Arc::as_ptr(&child_arc);
+                    if let Some(existing_bv) = visited.get_mut(&child_ptr) {
+                        let diff = &new_bv - &*existing_bv;
+                        if !diff.is_empty() {
+                            *existing_bv |= &diff;
+                            q.push_back((child_arc, diff));
                         }
+                    } else {
+                        visited.insert(child_ptr, new_bv.clone());
+                        q.push_back((child_arc, new_bv));
                     }
                 }
             }
@@ -449,9 +447,9 @@ impl GrammarConstraint {
     pub fn new(
         tokenizer:        Regex,
         parser:           GLRParser,
-        llm_token_map:    LLMTokenMap, 
+        llm_token_map:    LLMTokenMap,
         token_name_map:   BiBTreeMap<Terminal, usize>,
-        max_original_llm_token_id: usize, 
+        max_original_llm_token_id: usize,
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
@@ -476,7 +474,7 @@ impl GrammarConstraint {
         // We need to use the parameter `tokenizer` for the computation.
         // Let's rename the parameter to avoid confusion, or be careful.
         // Assuming `tokenizer` in `Self { tokenizer, ... }` refers to the parameter, it's fine.
-        
+
         crate::debug!(2, "Building vocab prefix tree for possible_matches computation");
         let vocab_for_possible_matches = VocabPrefixTree::build(&internal_tokens_for_vocab);
         crate::debug!(2, "Done building vocab prefix tree for possible_matches computation");
@@ -592,7 +590,7 @@ impl GrammarConstraint {
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<Terminal, usize>,
-        internal_max_llm_token: usize,                       
+        internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -656,7 +654,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(Arc<RwLock<PrecomputeNode>>, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
- 
+
         // 1) Build a single base Trie2 root.
         let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
             PrecomputedNodeContents::root(internal_max_llm_token),
@@ -814,7 +812,7 @@ impl GrammarConstraint {
                                     src_w.value.live_tokens |= tokens_to_push.clone();
                                 }
                                 crate::debug!(4, "Trie2: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
- 
+
                                 let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
@@ -878,11 +876,6 @@ impl GrammarConstraint {
 
         Trie::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 
-        // After modifications, some nodes might only be reachable via weak pointers.
-        // We must start promotion from *all* nodes to ensure we can recover strong paths.
-        let promotions2 = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
-        crate::debug!(2, "Promoted {} weak edges to strong in precomputed trie 2.", promotions2);
-
         // Recompute depths again after promotions, as they can change the graph structure.
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
         Trie::recompute_all_max_depths(&roots2_final);
@@ -910,7 +903,7 @@ impl GrammarConstraint {
         self.llm_vocab.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
-    #[allow(dead_code)] 
+    #[allow(dead_code)]
     pub(crate) fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
@@ -968,7 +961,7 @@ impl GrammarConstraint {
 
             if let Some(final_state_val) = exec_result.end_state {
                 let final_tokenizer_state_id = TokenizerStateID(final_state_val);
-                
+
                 let matches_possible_from_new_tokenizer_state: BTreeSet<_> = tokenizer
                     .tokens_accessible_from_state(final_tokenizer_state_id)
                     .into_iter()
@@ -979,7 +972,7 @@ impl GrammarConstraint {
                     .iter()
                     .map(|m| GrammarTokenID(m.id))
                     .collect();
-                
+
                 let new_grammar_tokens_to_look_for = &matches_possible_from_new_tokenizer_state - &matches_from_current_segment;
 
                 if !new_grammar_tokens_to_look_for.is_empty() {
@@ -1026,10 +1019,9 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<
 
         for dest_map in guard.children().values() {
             for (child_wrap, edge_bv) in dest_map {
-                if let Some(child_arc) = child_wrap.upgrade() {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
-                }
+                let child_arc = child_wrap.as_arc().clone();
+                let child_ptr = Arc::as_ptr(&child_arc);
+                predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
             }
         }
     }
@@ -1059,18 +1051,15 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<
         let mut guard = node_arc.write().unwrap();
         guard.children_mut().retain(|_edge_key, dest_map| {
             dest_map.retain(|child_wrapper, edge_value_bv| {
-                if let Some(child_arc) = child_wrapper.upgrade() {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-                    let live_from_child = live.get(&child_ptr).unwrap();
-                    let live_on_edge = &*edge_value_bv & live_from_child;
-                    if live_on_edge.is_empty() {
-                        false
-                    } else {
-                        *edge_value_bv = live_on_edge;
-                        true
-                    }
+                let child_arc = child_wrapper.as_arc().clone();
+                let child_ptr = Arc::as_ptr(&child_arc);
+                let live_from_child = live.get(&child_ptr).unwrap();
+                let live_on_edge = &*edge_value_bv & live_from_child;
+                if live_on_edge.is_empty() {
+                    false
                 } else {
-                    false // Dangling weak pointer, prune it.
+                    *edge_value_bv = live_on_edge;
+                    true
                 }
             });
             !dest_map.is_empty()
@@ -1105,15 +1094,14 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
         let guard = src_arc.read().expect("poison");
         for (ek, dest_map) in guard.children() {
             for (dest_wrapper, bv) in dest_map {
-                if let Some(dest_arc) = dest_wrapper.upgrade() {
-                    let dest_ptr = Arc::as_ptr(&dest_arc);
-                    incoming_map
-                        .entry(dest_ptr)
-                        .or_default()
-                        .entry(ek.clone())
-                        .or_default()
-                        .push((src_ptr, bv.clone()));
-                }
+                let dest_arc = dest_wrapper.as_arc().clone();
+                let dest_ptr = Arc::as_ptr(&dest_arc);
+                incoming_map
+                    .entry(dest_ptr)
+                    .or_default()
+                    .entry(ek.clone())
+                    .or_default()
+                    .push((src_ptr, bv.clone()));
             }
         }
     }
@@ -1181,8 +1169,6 @@ pub fn optimize_trie2_size(
     compress_trie2_edges(roots);
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
-    let promotions = Trie::promote_weak_edges_to_strong(&all_nodes_pinner);
-    crate::debug!(2, "Promoted {} weak edges to strong during optimize_trie2_size", promotions);
     let final_roots: Vec<_> = roots.values().cloned().collect();
     Trie::recompute_all_max_depths(&final_roots);
 }
@@ -1191,44 +1177,45 @@ fn trie2_shape_hash(
     arc: &Arc<RwLock<PrecomputeNode2>>,
     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 ) -> u64 {
-    let ptr = Arc::as_ptr(arc);
-    if let Some(&h) = memo.get(&ptr) {
-        return h;
-    }
-
-    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
-    memo.insert(ptr, 0);
-
-    let node_guard = arc.read().unwrap();
-    let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-
-    // Hash shape-defining value fields
-    node_guard.value.end.hash(&mut hasher);
-
-    // Hash children structure
-    let mut edge_hashes = Vec::new();
-    for (ek, dest_map) in node_guard.children() {
-        for (np, ev) in dest_map {
-            let child = np.upgrade().expect("Dangling weak pointer in trie2_shape_hash");
-            let child_h = trie2_shape_hash(&child, memo);
-            let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            ek.hash(&mut pair_hasher);
-            ev.hash(&mut pair_hasher);
-            np.is_strong().hash(&mut pair_hasher);
-            child_h.hash(&mut pair_hasher);
-            edge_hashes.push(pair_hasher.finish());
-        }
-    }
-
-    edge_hashes.sort_unstable();
-    for h in edge_hashes {
-        h.hash(&mut hasher);
-    }
-
-    let final_hash = hasher.finish();
-    // Update the memo with the real hash.
-    memo.insert(ptr, final_hash);
-    final_hash
+    // let ptr = Arc::as_ptr(arc);
+    // if let Some(&h) = memo.get(&ptr) {
+    //     return h;
+    // }
+    //
+    // // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+    // memo.insert(ptr, 0);
+    //
+    // let node_guard = arc.read().unwrap();
+    // let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+    //
+    // // Hash shape-defining value fields
+    // node_guard.value.end.hash(&mut hasher);
+    //
+    // // Hash children structure
+    // let mut edge_hashes = Vec::new();
+    // for (ek, dest_map) in node_guard.children() {
+    //     for (np, ev) in dest_map {
+    //         let child = np.into_arc().expect("Dangling weak pointer in trie2_shape_hash");
+    //         let child_h = trie2_shape_hash(&child, memo);
+    //         let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+    //         ek.hash(&mut pair_hasher);
+    //         ev.hash(&mut pair_hasher);
+    //         np.is_strong().hash(&mut pair_hasher);
+    //         child_h.hash(&mut pair_hasher);
+    //         edge_hashes.push(pair_hasher.finish());
+    //     }
+    // }
+    //
+    // edge_hashes.sort_unstable();
+    // for h in edge_hashes {
+    //     h.hash(&mut hasher);
+    // }
+    //
+    // let final_hash = hasher.finish();
+    // // Update the memo with the real hash.
+    // memo.insert(ptr, final_hash);
+    // final_hash
+    todo!()
 }
 
 /// Cycle-safe, depth-bounded structural hash for Trie2 nodes.
@@ -1238,73 +1225,74 @@ fn trie2_skeleton_hash(
     arc: &Arc<RwLock<PrecomputeNode2>>,
     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 ) -> u64 {
-    const MAX_DEPTH: usize = 64; // generous, but bounded
-    fn inner(
-        node: &Arc<RwLock<PrecomputeNode2>>,
-        memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-        visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
-        depth_left: usize,
-    ) -> u64 {
-        let ptr = Arc::as_ptr(node);
-        if let Some(&h) = memo.get(&ptr) {
-            return h;
-        }
-        if depth_left == 0 {
-            // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
-            let guard = node.read().expect("poison");
-            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            (ptr as usize).hash(&mut h);
-            guard.value.end.hash(&mut h);
-            let out = h.finish();
-            memo.insert(ptr, out);
-            return out;
-        }
-        if !visiting.insert(ptr) {
-            // Cycle detected on current recursion path: fall back to pointer + end flag.
-            let guard = node.read().expect("poison");
-            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            (ptr as usize).hash(&mut h);
-            guard.value.end.hash(&mut h);
-            let out = h.finish();
-            memo.insert(ptr, out);
-            return out;
-        }
-
-        let guard = node.read().expect("poison");
-        let mut edge_hashes = Vec::new();
-        for (ek, dest_map) in guard.children() {
-            for (np, _ev) in dest_map {
-                let child = np.upgrade().expect("Dangling weak pointer in trie2_skeleton_hash");
-                let child_h = inner(&child, memo, visiting, depth_left - 1);
-                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-                // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
-                let (k, sid_opt) = ek;
-                k.hash(&mut pair_hasher);
-                sid_opt.is_some().hash(&mut pair_hasher);
-                np.is_strong().hash(&mut pair_hasher);
-                child_h.hash(&mut pair_hasher);
-                edge_hashes.push(pair_hasher.finish());
-            }
-        }
-        drop(guard);
-
-        edge_hashes.sort_unstable();
-        let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-        {
-            let guard2 = node.read().expect("poison");
-            guard2.value.end.hash(&mut hasher);
-        }
-        for h in edge_hashes {
-            h.hash(&mut hasher);
-        }
-        let out = hasher.finish();
-        visiting.remove(&ptr);
-        memo.insert(ptr, out);
-        out
-    }
-
-    let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
-    inner(arc, memo, &mut visiting, MAX_DEPTH)
+    // const MAX_DEPTH: usize = 64; // generous, but bounded
+    // fn inner(
+    //     node: &Arc<RwLock<PrecomputeNode2>>,
+    //     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+    //     visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
+    //     depth_left: usize,
+    // ) -> u64 {
+    //     let ptr = Arc::as_ptr(node);
+    //     if let Some(&h) = memo.get(&ptr) {
+    //         return h;
+    //     }
+    //     if depth_left == 0 {
+    //         // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
+    //         let guard = node.read().expect("poison");
+    //         let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+    //         (ptr as usize).hash(&mut h);
+    //         guard.value.end.hash(&mut h);
+    //         let out = h.finish();
+    //         memo.insert(ptr, out);
+    //         return out;
+    //     }
+    //     if !visiting.insert(ptr) {
+    //         // Cycle detected on current recursion path: fall back to pointer + end flag.
+    //         let guard = node.read().expect("poison");
+    //         let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+    //         (ptr as usize).hash(&mut h);
+    //         guard.value.end.hash(&mut h);
+    //         let out = h.finish();
+    //         memo.insert(ptr, out);
+    //         return out;
+    //     }
+    //
+    //     let guard = node.read().expect("poison");
+    //     let mut edge_hashes = Vec::new();
+    //     for (ek, dest_map) in guard.children() {
+    //         for (np, _ev) in dest_map {
+    //             let child = np.into_arc().expect("Dangling weak pointer in trie2_skeleton_hash");
+    //             let child_h = inner(&child, memo, visiting, depth_left - 1);
+    //             let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+    //             // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
+    //             let (k, sid_opt) = ek;
+    //             k.hash(&mut pair_hasher);
+    //             sid_opt.is_some().hash(&mut pair_hasher);
+    //             np.is_strong().hash(&mut pair_hasher);
+    //             child_h.hash(&mut pair_hasher);
+    //             edge_hashes.push(pair_hasher.finish());
+    //         }
+    //     }
+    //     drop(guard);
+    //
+    //     edge_hashes.sort_unstable();
+    //     let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+    //     {
+    //         let guard2 = node.read().expect("poison");
+    //         guard2.value.end.hash(&mut hasher);
+    //     }
+    //     for h in edge_hashes {
+    //         h.hash(&mut hasher);
+    //     }
+    //     let out = hasher.finish();
+    //     visiting.remove(&ptr);
+    //     memo.insert(ptr, out);
+    //     out
+    // }
+    //
+    // let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
+    // inner(arc, memo, &mut visiting, MAX_DEPTH)
+    todo!()
 }
 
 fn trie2_shape_eq(
@@ -1312,72 +1300,73 @@ fn trie2_shape_eq(
     b: &Arc<RwLock<PrecomputeNode2>>,
     cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
 ) -> bool {
-    if Arc::ptr_eq(a, b) {
-        return true;
-    }
-
-    let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
-        (Arc::as_ptr(a), Arc::as_ptr(b))
-    } else {
-        (Arc::as_ptr(b), Arc::as_ptr(a))
-    };
-
-    if let Some(&res) = cache.get(&(p1, p2)) {
-        return res;
-    }
-
-    cache.insert((p1, p2), true); // Optimistic insertion for cycles
-
-    let guard_a = a.read().unwrap();
-    let guard_b = b.read().unwrap();
-
-    // Compare shape-defining value fields
-    if guard_a.value.end != guard_b.value.end {
-        cache.insert((p1, p2), false);
-        return false;
-    }
-
-    // Compare children
-    if guard_a.children().len() != guard_b.children().len() {
-        cache.insert((p1, p2), false);
-        return false;
-    }
-
-    for (ek, dest_map_a) in guard_a.children() {
-        if let Some(dest_map_b) = guard_b.children().get(ek) {
-            if dest_map_a.len() != dest_map_b.len() {
-                cache.insert((p1, p2), false);
-                return false;
-            }
-
-            let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (np.is_strong(), ev, np.upgrade().expect("Dangling weak pointer in trie2_shape_eq (b)"))).collect();
-
-            for (np_a, ev_a) in dest_map_a.iter() {
-                let arc_a = np_a.upgrade().expect("Dangling weak pointer in trie2_shape_eq (a)");
-                let is_strong_a = np_a.is_strong();
-                let mut found_match = false;
-                for i in 0..pairs_b.len() {
-                    let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
-                    if is_strong_a == is_strong_b && ev_a == ev_b {
-                        if trie2_shape_eq(&arc_a, arc_b, cache) {
-                            pairs_b.remove(i);
-                            found_match = true;
-                            break;
-                        }
-                    }
-                }
-                if !found_match {
-                    cache.insert((p1, p2), false);
-                    return false;
-                }
-            }
-        } else {
-            cache.insert((p1, p2), false);
-            return false;
-        }
-    }
-
-    true
+    // if Arc::ptr_eq(a, b) {
+    //     return true;
+    // }
+    //
+    // let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
+    //     (Arc::as_ptr(a), Arc::as_ptr(b))
+    // } else {
+    //     (Arc::as_ptr(b), Arc::as_ptr(a))
+    // };
+    //
+    // if let Some(&res) = cache.get(&(p1, p2)) {
+    //     return res;
+    // }
+    //
+    // cache.insert((p1, p2), true); // Optimistic insertion for cycles
+    //
+    // let guard_a = a.read().unwrap();
+    // let guard_b = b.read().unwrap();
+    //
+    // // Compare shape-defining value fields
+    // if guard_a.value.end != guard_b.value.end {
+    //     cache.insert((p1, p2), false);
+    //     return false;
+    // }
+    //
+    // // Compare children
+    // if guard_a.children().len() != guard_b.children().len() {
+    //     cache.insert((p1, p2), false);
+    //     return false;
+    // }
+    //
+    // for (ek, dest_map_a) in guard_a.children() {
+    //     if let Some(dest_map_b) = guard_b.children().get(ek) {
+    //         if dest_map_a.len() != dest_map_b.len() {
+    //             cache.insert((p1, p2), false);
+    //             return false;
+    //         }
+    //
+    //         let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (np.is_strong(), ev, np.into_arc().expect("Dangling weak pointer in trie2_shape_eq (b)"))).collect();
+    //
+    //         for (np_a, ev_a) in dest_map_a.iter() {
+    //             let arc_a = np_a.into_arc().expect("Dangling weak pointer in trie2_shape_eq (a)");
+    //             let is_strong_a = np_a.is_strong();
+    //             let mut found_match = false;
+    //             for i in 0..pairs_b.len() {
+    //                 let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
+    //                 if is_strong_a == is_strong_b && ev_a == ev_b {
+    //                     if trie2_shape_eq(&arc_a, arc_b, cache) {
+    //                         pairs_b.remove(i);
+    //                         found_match = true;
+    //                         break;
+    //                     }
+    //                 }
+    //             }
+    //             if !found_match {
+    //                 cache.insert((p1, p2), false);
+    //                 return false;
+    //             }
+    //         }
+    //     } else {
+    //         cache.insert((p1, p2), false);
+    //         return false;
+    //     }
+    // }
+    //
+    // true
+    todo!()
 }
 
 pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
@@ -1451,7 +1440,7 @@ fn deduplicate_recursive_trie2(
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                let child_arc = node_ptr_wrapper.upgrade().expect("Dangling weak pointer in deduplicate_recursive_trie2");
+                let child_arc = node_ptr_wrapper.as_arc().clone();
                 let canonical_child_arc = deduplicate_recursive_trie2(
                     child_arc.clone(),
                     canonical_nodes,
@@ -1463,11 +1452,7 @@ fn deduplicate_recursive_trie2(
                 if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
                     children_changed = true;
                 }
-                let new_node_ptr_wrapper = if node_ptr_wrapper.is_strong() {
-                    ArcPtrWrapper::new(canonical_child_arc)
-                } else {
-                    ArcPtrWrapper::new(Arc::downgrade(&canonical_child_arc).upgrade().expect("Weak pointer to canonical child became dangling during deduplication"))
-                };
+                let new_node_ptr_wrapper = ArcPtrWrapper::new(canonical_child_arc);
                 new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
@@ -1543,10 +1528,9 @@ pub fn compress_trie2_edges(
             let guard = src_arc.read().expect("poison");
             for (_ek, dest_map) in guard.children() {
                 for (node_ptr, _ev) in dest_map {
-                    if let Some(child_arc) = node_ptr.upgrade() {
-                        let ptr = Arc::as_ptr(&child_arc);
-                        *incoming_count.entry(ptr).or_insert(0) += 1;
-                    }
+                    let child_arc = node_ptr.as_arc().clone();
+                    let ptr = Arc::as_ptr(&child_arc);
+                    *incoming_count.entry(ptr).or_insert(0) += 1;
                 }
             }
         }
@@ -1770,14 +1754,14 @@ impl<'r> Precomputer<'r> {
         parser:           Option<&'r GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        internal_max_llm_token: usize,                       
+        internal_max_llm_token: usize,
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
-        let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
+        let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
-            .map(|(bytes, id)| (id.0 as usize, bytes.clone())) 
+            .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
         crate::debug!(2, "Building vocab prefix tree");
@@ -2140,7 +2124,7 @@ impl<'r> Precomputer<'r> {
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
             let mut node_guard = node_arc.write().expect("poison");
-            
+
             // Check if there are any edges with the ignore token key.
             let ignore_key = Some(ignore_tid);
             if let Some(dest_map_for_ignore_token) = node_guard.children_mut().remove(&ignore_key) {
@@ -2305,7 +2289,7 @@ impl<'r> Precomputer<'r> {
 
         crate::debug!(2, "Done simplifying None edges.");
     }
-    
+
     fn prune_on_no_terminal_follow(&mut self) {
         crate::debug!(2, "Pruning based on terminal follow sets.");
 
@@ -2366,7 +2350,7 @@ impl<'r> Precomputer<'r> {
 
                 let node_ptr: NodePtr = node;
                 edges_to_keep.insert(node_ptr, keys_to_keep);
-    
+
                 true // Continue traversal
             },
         );
@@ -2848,7 +2832,7 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
- 
+
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
@@ -3051,7 +3035,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut num_end = 0;
                 let mut num_non_end = 0;
                 for child_node_trie_data in dest_map.keys() {
-                    if child_node_trie_data.upgrade().unwrap().read().unwrap().value.end {
+                    if child_node_trie_data.as_arc().read().unwrap().value.end {
                         num_end += 1;
                     } else {
                         num_non_end += 1;
@@ -3135,7 +3119,7 @@ impl<'a> GrammarConstraintState<'a> {
                             continue;
                         }
 
-                        if child_node_trie_data.upgrade().unwrap().read().unwrap().value.end {
+                        if child_node_trie_data.as_arc().read().unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                             crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
                             // timeit!("get_mask final_mask update", {
@@ -3176,7 +3160,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 num_outgoing_edges_that_lead_to_non_end_nodes += 1
                             } else {
                                 for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
-                                    if !child_node_trie_data.upgrade().unwrap().read().unwrap().value.end {
+                                    if !child_node_trie_data.as_arc().read().unwrap().value.end {
                                         num_outgoing_edges_that_lead_to_non_end_nodes += 1;
                                         break;
                                     }
