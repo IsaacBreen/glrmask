@@ -37,7 +37,6 @@ use std::io::{Read, Write};
 use kdam::{tqdm, BarBuilder, BarExt};
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
-use crate::datastructures::arc_wrapper::{NodePtr, WeakPtrWrapper};
 use crate::datastructures::gss::Acc;
 use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -1148,10 +1147,8 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 
                     let mut remove_ek = false;
                     if let Some(dest_map_for_ek) = src_guard.children_mut().get_mut(&edge_key) {
-                        let strong_key = NodePtr::Strong(ArcPtrWrapper::new(dest_arc.clone()));
-                        let weak_key = NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&dest_arc)));
+                        let strong_key = ArcPtrWrapper::new(dest_arc.clone());
                         dest_map_for_ek.remove(&strong_key);
-                        dest_map_for_ek.remove(&weak_key);
                         if dest_map_for_ek.is_empty() {
                             remove_ek = true;
                         }
@@ -1161,7 +1158,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
                     }
 
                     let mut edge_val_opt = Some(bv.clone());
-                    src_guard.try_insert_auto(identity_edge_key.clone(), &mut edge_val_opt, intermediate_node.clone());
+                    src_guard.try_insert_unchecked(identity_edge_key.clone(), &mut edge_val_opt, intermediate_node.clone()).ok(); // ignore cycle error, should not happen
                     src_guard.value.live_tokens |= bv;
                 }
             }
@@ -1751,13 +1748,8 @@ pub fn clone_trie2_graph(
                 for (old_node_ptr, ev) in entries {
                     let child_arc_old = old_node_ptr.upgrade().expect("Dangling weak pointer in clone_trie2_graph (wiring)");
                     let child_ptr_old = Arc::as_ptr(&child_arc_old);
-                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
-                    // Preserve strong/weak kind of the original key
-                    let new_key = if old_node_ptr.is_strong() {
-                        NodePtr::Strong(ArcPtrWrapper::new(child_arc_new))
-                    } else {
-                        NodePtr::Weak(WeakPtrWrapper::new(Arc::downgrade(&child_arc_new)))
-                    };
+                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone(); // With weak refs removed, all edges are strong.
+                    let new_key = ArcPtrWrapper::new(child_arc_new);
                     dest_map.insert(new_key, ev);
                 }
             }
@@ -2439,8 +2431,8 @@ impl<'r> Precomputer<'r> {
     /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
     fn get_live_tokens_and_prune(
         &self,
-        node_wrapper: NodePtr<RwLock<PrecomputeNode>>,
-        live_tokens_cache: &mut HashMap<NodePtr<RwLock<PrecomputeNode>>, LLMTokenBV>,
+        node_wrapper: ArcPtrWrapper<RwLock<PrecomputeNode>>,
+        live_tokens_cache: &mut HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>,
     ) -> LLMTokenBV {
         // If we've already computed the live tokens for this node, return the cached result.
         if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
@@ -2451,10 +2443,10 @@ impl<'r> Precomputer<'r> {
         // have been found through it yet.
         live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
 
-        let node_arc = node_wrapper.upgrade().unwrap();
+        let node_arc = node_wrapper.as_arc().clone();
 
         // We must collect children before recursing to avoid holding the lock.
-        let children_to_check: Vec<NodePtr<RwLock<PrecomputeNode>>> = {
+        let children_to_check: Vec<ArcPtrWrapper<RwLock<PrecomputeNode>>> = {
             let node_guard = node_arc.read().unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
@@ -2703,15 +2695,15 @@ impl<'r> Precomputer<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<
-            TokenizerStateID,
-            OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>,
-        >,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>>,
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<NodePtr<RwLock<PrecomputeNode>>>>> = BTreeMap::new();
+            let mut work_queue: BTreeMap<
+                usize,
+                BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<RwLock<PrecomputeNode>>>>,
+            > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
@@ -2745,7 +2737,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    src_node_wrapper.upgrade().unwrap().clone(),
+                                    src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,
@@ -2772,7 +2764,7 @@ impl<'r> Precomputer<'r> {
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
-                                src_node_wrapper.upgrade().unwrap().clone(),
+                                src_node_wrapper.as_arc().clone(),
                                 Some(terminal_id),
                                 edge_bv.clone(),
                                 |e, n| *e |= n,
@@ -2783,10 +2775,10 @@ impl<'r> Precomputer<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().filter_map(|w| w.upgrade()).filter(|w| !w.read().unwrap().value.end));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read().unwrap().value.end));
 
                             if true {
-                                let children_of_src: Vec<_> = src_node_wrapper.upgrade().unwrap().read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
+                                let children_of_src: Vec<_> = src_node_wrapper.as_arc().read().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                                 // let tags = self.tags.borrow(); // Removed
                                 let eligible_children = children_of_src.iter().map(|child_node_ptr| {
                                     child_node_ptr.upgrade().expect("Dangling weak pointer in Precomputer::dfs")
@@ -2798,7 +2790,7 @@ impl<'r> Precomputer<'r> {
                             }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::internal()).unwrap();
-                            let result_node_ptr = NodePtr::Strong(ArcPtrWrapper::new(result_node.clone()));
+                            let result_node_ptr = ArcPtrWrapper::new(result_node.clone());
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
                             // *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv; // Removed
                         }
@@ -2812,7 +2804,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    src_node_wrapper.upgrade().unwrap().clone(),
+                                    src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
                                     |e, n| *e |= n,

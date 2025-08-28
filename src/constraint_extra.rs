@@ -95,7 +95,7 @@ pub fn dump_precompute_trie_recursive(
                 (
                     edge_key.clone(),
                     edge_val.clone(),
-                    child_wrapper.upgrade().unwrap(),
+                    child_wrapper.as_arc().clone(),
                 )
             })
         }).collect::<Vec<_>>();
@@ -270,11 +270,7 @@ pub fn dump_precompute_trie2_recursive(
     for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
         let is_last = i == children_to_visit.len() - 1;
         let connector = if is_last { "└──" } else { "├──" };
-
-        let (pop_len, state_id_opt) = edge_key;
-        let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string()));
-        let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
-
+        let (pop_len, state_id_opt) = edge_key; let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string())); let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
         let (child_ptr, child_info, is_visited, is_end_node) = {
             let child_node = child_arc.read().unwrap();
             let ptr = Arc::as_ptr(child_arc) as *const PrecomputeNode2;
@@ -312,9 +308,9 @@ pub fn calculate_final_stats2(
             let children = node_guard.children()
                 .values()
                 .flat_map(|dest_map| {
-                    dest_map
-                        .keys()
-                        .filter_map(|wrapper| wrapper.upgrade())
+                    dest_map.keys().map(|wrapper| {
+                        wrapper.as_arc().clone()
+                    })
                 })
                 .collect::<Vec<_>>();
             (children, ptr)
@@ -529,9 +525,7 @@ pub fn calculate_final_stats(
             let children = node_guard.children()
                 .values()
                 .flat_map(|dest_map| {
-                    dest_map
-                        .keys()
-                        .filter_map(|wrapper| wrapper.upgrade())
+                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
                 })
                 .collect::<Vec<_>>();
             (children, ptr)

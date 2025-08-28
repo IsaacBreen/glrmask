@@ -1183,9 +1183,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     );
 
                     if is_new {
-                        inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
+                        let _ = inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
                     } else {
-                        inserter.to_destination_weakly(dst_arc.clone());
+                        // Replicate to_destination_weakly logic with strong edges
+                        let source_arc = existing.as_arc();
+                        let mut source_guard = source_arc.write().unwrap();
+                        if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), &dst_arc) {
+                            *existing_ev |= &edge_bv;
+                        } else {
+                            source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), &dst_arc);
+                        }
                     }
                 }
 
@@ -1239,17 +1246,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_bv = LLMTokenBV::max_ones();
 
                 for existing in trie2_nodes {
-                    let source_arc = existing.as_arc().clone();
-                    let inserter = EdgeInserter::new(
-                        source_arc.clone(),
-                        edge_key,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| {},
-                    );
-
-                    inserter.to_destination_weakly(arc.as_arc().clone());
+                    let source_arc = existing.as_arc();
+                    let mut source_guard = source_arc.write().unwrap();
+                    if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), arc.as_arc()) {
+                        *existing_ev |= &edge_bv;
+                    } else {
+                        source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), arc.as_arc());
+                    }
                 }
             }
 
