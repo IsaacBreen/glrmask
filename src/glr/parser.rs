@@ -1,30 +1,31 @@
-use std::sync::{Mutex, RwLock};
+use crate::constraint::{God, GodWrapper, LLMVocab, Trie2God, Trie2GodWrapper};
+use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, LLMTokenBV};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+use crate::tokenizer::LLMTokenID;
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
-use crate::tokenizer::LLMTokenID;
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGoto};
-use crate::constraint::{God, GodWrapper, LLMVocab, Trie2God, Trie2GodWrapper}; // Import LLMTokenInfo
+use std::sync::{Mutex, RwLock};
+// Import LLMTokenInfo
 
+use crate::datastructures::trie::EdgeInserter;
+use crate::debug;
+use crate::glr::automaton::compute_closure;
+use crate::glr::items::{Item, LRMode, LR_MODE};
+use crate::glr::table::{stage_9, DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::profiler::GSS_LOGGING_ENABLED;
 use bimap::BiBTreeMap;
+use deterministic_hash::DeterministicHasher;
+use profiler_macro::{time_it, timeit};
+use std::collections::BTreeMap as StdMap;
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-use crate::debug;
-use crate::profiler::GSS_LOGGING_ENABLED;
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
-use deterministic_hash::DeterministicHasher;
-use profiler_macro::{time_it, timeit};
-use crate::glr::automaton::compute_closure;
-use std::collections::HashMap;
-use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::table::{Reduce, ShiftsAndReducesWithoutDefaultReduce, ShiftsAndReducesFull, DefaultReduce, stage_9};
-use crate::datastructures::trie::EdgeInserter;
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -694,8 +695,6 @@ impl Display for GLRParser {
         let terminal_map = &self.terminal_map;
         let non_terminal_map = &self.non_terminal_map;
         let item_set_map = &self.item_set_map;
-
-        use crate::glr::grammar::{Production, Symbol, Terminal};
 
         writeln!(f, "Parse Table:")?;
         writeln!(f, "  Start State: {}", self.start_state_id.0)?;

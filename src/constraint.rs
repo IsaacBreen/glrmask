@@ -1,55 +1,55 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::sync::{Mutex, RwLock};
-use std::mem;
-use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
+use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
-use std::ops::{BitOr, BitOrAssign};
 use std::fmt::{self, Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
+use std::mem;
+use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
-use std::cell::RefCell;
+use std::sync::{Mutex, RwLock};
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+use crate::constraint_precompute2_utils;
+use crate::datastructures::arc_wrapper::ArcPtrWrapper;
+use crate::datastructures::entry_api::EntryApi;
+use crate::datastructures::gss::Acc;
 use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode2, PrecomputedNodeContents, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
-use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
-use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
-use std::io::{Read, Write};
-use kdam::{tqdm, BarBuilder, BarExt};
-use deterministic_hash::DeterministicHasher;
-use profiler_macro::{time_it, timeit};
-use crate::datastructures::gss::Acc;
-use crate::glr::table::StateID;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
-use std::ops::{BitAnd, Sub};
 use crate::glr::items::{Item, LRMode, LR_MODE};
+use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
+use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+use crate::glr::table::StateID;
 use crate::interface::CompiledGrammar;
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
-use crate::datastructures::entry_api::EntryApi;
+use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
+use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+use deterministic_hash::DeterministicHasher;
+use kdam::{tqdm, BarBuilder, BarExt};
+use profiler_macro::{time_it, timeit};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
 use serde_json::Value as SerdeValue;
-use crate::constraint_precompute2_utils;
+use std::collections::BTreeMap as StdMap;
+use std::io::{Read, Write};
+use std::ops::{BitAnd, Sub};
 
 const MERGE_THRESHOLD: usize = 20;
 

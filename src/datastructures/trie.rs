@@ -2,27 +2,32 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
+use std::sync::atomic::{AtomicUsize, Ordering};
 // Import TryLockError explicitly for matching
 use std::sync::{Arc, RwLock, TryLockError};
-use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
-use std::cmp::Reverse;          // min-heap helper
-use std::collections::BinaryHeap;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::cell::RefCell;
-use std::env;
+// Added for tests
+use std::cmp::Reverse;
 // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 use ordered_hash_map::OrderedHashMap;
+use std::cell::RefCell;
+// min-heap helper
+use std::collections::BinaryHeap;
+use std::env;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 
-use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
-use crate::datastructures::{ArcPtrWrapper}; // Import ArcPtrWrapper and WeakPtrWrapper
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use deterministic_hash::DeterministicHasher;
-use ordered_hash_map::OrderedHashSet;
-use kdam::{tqdm, BarExt};
-use profiler_macro::{time_it, timeit};
+use crate::datastructures::hybrid_bitset::HybridBitset;
+// Import HybridBitset
+use crate::datastructures::ArcPtrWrapper;
+// Import ArcPtrWrapper and WeakPtrWrapper
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::constraint::{God, GodWrapper};
 use crate::profiler::PROGRESS_BAR_ENABLED;
+// Added
+use deterministic_hash::DeterministicHasher;
+use kdam::{tqdm, BarExt};
+use ordered_hash_map::OrderedHashSet;
+use profiler_macro::{time_it, timeit};
 // Added for derive macro pattern
 
 

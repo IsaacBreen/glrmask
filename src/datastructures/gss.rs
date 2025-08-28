@@ -1,21 +1,21 @@
-use std::sync::{RwLock, OnceLock};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::fmt::{Debug, Write};
-use std::hash::{Hash, Hasher};
-use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
+use crate::datastructures::arc_wrapper::ArcPtrWrapper;
+use crate::datastructures::trie::{EdgeInserter, Trie};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::trie::{EdgeInserter, Trie};
+use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::fmt::{Debug, Write};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::{OnceLock, RwLock};
 
-use crate::glr::parser::ParseStateEdgeContent;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::grammar::Terminal;
+use crate::glr::parser::ParseStateEdgeContent;
 use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
@@ -55,9 +55,9 @@ impl PrecomputedNodeContents {
     }
 }
 
+use crate::constraint::{God, Trie2God, Trie2GodWrapper};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::constraint::{God, Trie2God, Trie2GodWrapper};
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
