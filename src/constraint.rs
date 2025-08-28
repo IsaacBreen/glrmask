@@ -792,7 +792,7 @@ impl GrammarConstraint {
                 crate::datastructures::gss::merge_trie2_nodes_if_needed(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
-                    &mut glr_s.active_state.god.clone().unwrap().0.write().unwrap(),
+                    glr_s.active_state.god.as_ref().unwrap(),
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
@@ -832,7 +832,7 @@ impl GrammarConstraint {
                                 let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
-                                    &mut glr_s.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
+                                    glr_s.active_state.god.as_ref().unwrap(),
                                     src_arc.clone(),
                                     edge_key,
                                     tokens_to_push.clone(),
@@ -1185,7 +1185,7 @@ pub fn optimize_trie2_size(
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
     simplify_trie2_factor_common_destinations(roots);
-    compress_trie2_edges(roots, god);
+    compress_trie2_edges(roots, &god);
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
     let final_roots: Vec<_> = roots.values().cloned().collect();
@@ -1516,7 +1516,7 @@ fn deduplicate_recursive_trie2(
 /// This reduces redundant intermediate nodes introduced during construction.
 pub fn compress_trie2_edges(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
-    god: Trie2GodWrapper,
+    god: &Trie2GodWrapper,
 ) {
     crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
     type EdgeKey2 = (usize, Option<StateID>);
@@ -1645,7 +1645,7 @@ pub fn compress_trie2_edges(
                     // 2) Add/merge src --merged_key--> grand with merged_bv
                     {
                         let inserter = EdgeInserter::new(
-                            &mut god.0.write().unwrap(),
+                            god,
                             src_arc.clone(),
                             merged_key.clone(),
                             merged_bv.clone(),
@@ -2713,7 +2713,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    &mut self.trie1_god.0.write().unwrap(),
+                                    &self.trie1_god,
                                     src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
@@ -2741,7 +2741,7 @@ impl<'r> Precomputer<'r> {
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
-                                &mut self.trie1_god.0.write().unwrap(),
+                                &self.trie1_god,
                                 src_node_wrapper.as_arc().clone(),
                                 Some(terminal_id),
                                 edge_bv.clone(),
@@ -2782,7 +2782,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    &mut self.trie1_god.0.write().unwrap(),
+                                    &self.trie1_god,
                                     src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,

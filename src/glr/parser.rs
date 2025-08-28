@@ -1136,7 +1136,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     let inserter = EdgeInserter::new(
-                        &mut self.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
+                        self.active_state.god.as_ref().unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
@@ -1208,7 +1208,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in &trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
+                        self.active_state.god.as_ref().unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
@@ -1322,7 +1322,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
-                        &mut self.active_state.god.as_ref().map(|god| &mut god.0.write().unwrap()).unwrap(),
+                        self.active_state.god.as_ref().unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),

@@ -21,7 +21,7 @@ use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
 use kdam::{tqdm, BarExt};
 use profiler_macro::{time_it, timeit};
-use crate::constraint::God;
+use crate::constraint::{God, GodWrapper};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 // Added for derive macro pattern
 
@@ -1395,7 +1395,7 @@ where
     ///   both by value, returning a merged value. This is only called if an edge with the same `edge_key` already
     ///   points to the `destination` being tried.
     pub fn new(
-        god: &mut God<EK, EV, T>,
+        god: &GodWrapper<EK, EV, T>,
         source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
         edge_value: EV,
@@ -1688,7 +1688,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
     /// ```
     pub fn insert_edge<FMergeEV, FUpdateT, FMergeEV_T>(
         &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<RwLock>.
-        god: &mut God<EK, EV, T>,
+        god: &GodWrapper<EK, EV, T>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
@@ -1717,7 +1717,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
 /// Returns `Some(Arc<RwLock<Trie<...>>>)` if merge or insert succeeded,
 /// or `None` if merge failed or a cycle was detected.
 pub fn try_destination<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
-    god: &mut God<EK, EV, T>,
+    god: &GodWrapper<EK, EV, T>,
     source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
@@ -1750,7 +1750,7 @@ where
 /// Attempts to establish an edge from `source` to any of the provided `destinations`,
 /// returning the first successful one (merge or insert), or `None` if all attempts failed.
 pub fn try_destination_with<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
-    god: &mut God<EK, EV, T>,
+    god: &GodWrapper<EK, EV, T>,
     source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
