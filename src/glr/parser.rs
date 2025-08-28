@@ -143,7 +143,7 @@ impl ParseState {
         }
     }
 
-    fn with_stack(stack: Arc<GSSNode>) -> Self {
+    pub(crate) fn with_stack(stack: Arc<GSSNode>) -> Self {
         ParseState {
             stack,
             accepted_state: Arc::new(GSSNode::new_fresh()),
