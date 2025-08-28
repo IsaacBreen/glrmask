@@ -1177,45 +1177,43 @@ fn trie2_shape_hash(
     arc: &Arc<RwLock<PrecomputeNode2>>,
     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 ) -> u64 {
-    // let ptr = Arc::as_ptr(arc);
-    // if let Some(&h) = memo.get(&ptr) {
-    //     return h;
-    // }
-    //
-    // // Insert a placeholder to break cycles. A fixed value like 0 is fine.
-    // memo.insert(ptr, 0);
-    //
-    // let node_guard = arc.read().unwrap();
-    // let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-    //
-    // // Hash shape-defining value fields
-    // node_guard.value.end.hash(&mut hasher);
-    //
-    // // Hash children structure
-    // let mut edge_hashes = Vec::new();
-    // for (ek, dest_map) in node_guard.children() {
-    //     for (np, ev) in dest_map {
-    //         let child = np.into_arc().expect("Dangling weak pointer in trie2_shape_hash");
-    //         let child_h = trie2_shape_hash(&child, memo);
-    //         let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-    //         ek.hash(&mut pair_hasher);
-    //         ev.hash(&mut pair_hasher);
-    //         np.is_strong().hash(&mut pair_hasher);
-    //         child_h.hash(&mut pair_hasher);
-    //         edge_hashes.push(pair_hasher.finish());
-    //     }
-    // }
-    //
-    // edge_hashes.sort_unstable();
-    // for h in edge_hashes {
-    //     h.hash(&mut hasher);
-    // }
-    //
-    // let final_hash = hasher.finish();
-    // // Update the memo with the real hash.
-    // memo.insert(ptr, final_hash);
-    // final_hash
-    todo!()
+    let ptr = Arc::as_ptr(arc);
+    if let Some(&h) = memo.get(&ptr) {
+        return h;
+    }
+
+    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
+    memo.insert(ptr, 0);
+
+    let node_guard = arc.read().unwrap();
+    let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+
+    // Hash shape-defining value fields
+    node_guard.value.end.hash(&mut hasher);
+
+    // Hash children structure
+    let mut edge_hashes = Vec::new();
+    for (ek, dest_map) in node_guard.children() {
+        for (np, ev) in dest_map {
+            let child = np.as_arc().clone();
+            let child_h = trie2_shape_hash(&child, memo);
+            let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+            ek.hash(&mut pair_hasher);
+            ev.hash(&mut pair_hasher);
+            child_h.hash(&mut pair_hasher);
+            edge_hashes.push(pair_hasher.finish());
+        }
+    }
+
+    edge_hashes.sort_unstable();
+    for h in edge_hashes {
+        h.hash(&mut hasher);
+    }
+
+    let final_hash = hasher.finish();
+    // Update the memo with the real hash.
+    memo.insert(ptr, final_hash);
+    final_hash
 }
 
 /// Cycle-safe, depth-bounded structural hash for Trie2 nodes.
@@ -1225,74 +1223,72 @@ fn trie2_skeleton_hash(
     arc: &Arc<RwLock<PrecomputeNode2>>,
     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 ) -> u64 {
-    // const MAX_DEPTH: usize = 64; // generous, but bounded
-    // fn inner(
-    //     node: &Arc<RwLock<PrecomputeNode2>>,
-    //     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-    //     visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
-    //     depth_left: usize,
-    // ) -> u64 {
-    //     let ptr = Arc::as_ptr(node);
-    //     if let Some(&h) = memo.get(&ptr) {
-    //         return h;
-    //     }
-    //     if depth_left == 0 {
-    //         // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
-    //         let guard = node.read().expect("poison");
-    //         let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-    //         (ptr as usize).hash(&mut h);
-    //         guard.value.end.hash(&mut h);
-    //         let out = h.finish();
-    //         memo.insert(ptr, out);
-    //         return out;
-    //     }
-    //     if !visiting.insert(ptr) {
-    //         // Cycle detected on current recursion path: fall back to pointer + end flag.
-    //         let guard = node.read().expect("poison");
-    //         let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-    //         (ptr as usize).hash(&mut h);
-    //         guard.value.end.hash(&mut h);
-    //         let out = h.finish();
-    //         memo.insert(ptr, out);
-    //         return out;
-    //     }
-    //
-    //     let guard = node.read().expect("poison");
-    //     let mut edge_hashes = Vec::new();
-    //     for (ek, dest_map) in guard.children() {
-    //         for (np, _ev) in dest_map {
-    //             let child = np.into_arc().expect("Dangling weak pointer in trie2_skeleton_hash");
-    //             let child_h = inner(&child, memo, visiting, depth_left - 1);
-    //             let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-    //             // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
-    //             let (k, sid_opt) = ek;
-    //             k.hash(&mut pair_hasher);
-    //             sid_opt.is_some().hash(&mut pair_hasher);
-    //             np.is_strong().hash(&mut pair_hasher);
-    //             child_h.hash(&mut pair_hasher);
-    //             edge_hashes.push(pair_hasher.finish());
-    //         }
-    //     }
-    //     drop(guard);
-    //
-    //     edge_hashes.sort_unstable();
-    //     let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-    //     {
-    //         let guard2 = node.read().expect("poison");
-    //         guard2.value.end.hash(&mut hasher);
-    //     }
-    //     for h in edge_hashes {
-    //         h.hash(&mut hasher);
-    //     }
-    //     let out = hasher.finish();
-    //     visiting.remove(&ptr);
-    //     memo.insert(ptr, out);
-    //     out
-    // }
-    //
-    // let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
-    // inner(arc, memo, &mut visiting, MAX_DEPTH)
-    todo!()
+    const MAX_DEPTH: usize = 64; // generous, but bounded
+    fn inner(
+        node: &Arc<RwLock<PrecomputeNode2>>,
+        memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+        visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
+        depth_left: usize,
+    ) -> u64 {
+        let ptr = Arc::as_ptr(node);
+        if let Some(&h) = memo.get(&ptr) {
+            return h;
+        }
+        if depth_left == 0 {
+            // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
+            let guard = node.read().expect("poison");
+            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+            (ptr as usize).hash(&mut h);
+            guard.value.end.hash(&mut h);
+            let out = h.finish();
+            memo.insert(ptr, out);
+            return out;
+        }
+        if !visiting.insert(ptr) {
+            // Cycle detected on current recursion path: fall back to pointer + end flag.
+            let guard = node.read().expect("poison");
+            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+            (ptr as usize).hash(&mut h);
+            guard.value.end.hash(&mut h);
+            let out = h.finish();
+            memo.insert(ptr, out);
+            return out;
+        }
+
+        let guard = node.read().expect("poison");
+        let mut edge_hashes = Vec::new();
+        for (ek, dest_map) in guard.children() {
+            for (np, _ev) in dest_map {
+                let child = np.as_arc().clone();
+                let child_h = inner(&child, memo, visiting, depth_left - 1);
+                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+                // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
+                let (k, sid_opt) = ek;
+                k.hash(&mut pair_hasher);
+                sid_opt.is_some().hash(&mut pair_hasher);
+                child_h.hash(&mut pair_hasher);
+                edge_hashes.push(pair_hasher.finish());
+            }
+        }
+        drop(guard);
+
+        edge_hashes.sort_unstable();
+        let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
+        {
+            let guard2 = node.read().expect("poison");
+            guard2.value.end.hash(&mut hasher);
+        }
+        for h in edge_hashes {
+            h.hash(&mut hasher);
+        }
+        let out = hasher.finish();
+        visiting.remove(&ptr);
+        memo.insert(ptr, out);
+        out
+    }
+
+    let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
+    inner(arc, memo, &mut visiting, MAX_DEPTH)
 }
 
 fn trie2_shape_eq(
@@ -1300,73 +1296,71 @@ fn trie2_shape_eq(
     b: &Arc<RwLock<PrecomputeNode2>>,
     cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
 ) -> bool {
-    // if Arc::ptr_eq(a, b) {
-    //     return true;
-    // }
-    //
-    // let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
-    //     (Arc::as_ptr(a), Arc::as_ptr(b))
-    // } else {
-    //     (Arc::as_ptr(b), Arc::as_ptr(a))
-    // };
-    //
-    // if let Some(&res) = cache.get(&(p1, p2)) {
-    //     return res;
-    // }
-    //
-    // cache.insert((p1, p2), true); // Optimistic insertion for cycles
-    //
-    // let guard_a = a.read().unwrap();
-    // let guard_b = b.read().unwrap();
-    //
-    // // Compare shape-defining value fields
-    // if guard_a.value.end != guard_b.value.end {
-    //     cache.insert((p1, p2), false);
-    //     return false;
-    // }
-    //
-    // // Compare children
-    // if guard_a.children().len() != guard_b.children().len() {
-    //     cache.insert((p1, p2), false);
-    //     return false;
-    // }
-    //
-    // for (ek, dest_map_a) in guard_a.children() {
-    //     if let Some(dest_map_b) = guard_b.children().get(ek) {
-    //         if dest_map_a.len() != dest_map_b.len() {
-    //             cache.insert((p1, p2), false);
-    //             return false;
-    //         }
-    //
-    //         let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (np.is_strong(), ev, np.into_arc().expect("Dangling weak pointer in trie2_shape_eq (b)"))).collect();
-    //
-    //         for (np_a, ev_a) in dest_map_a.iter() {
-    //             let arc_a = np_a.into_arc().expect("Dangling weak pointer in trie2_shape_eq (a)");
-    //             let is_strong_a = np_a.is_strong();
-    //             let mut found_match = false;
-    //             for i in 0..pairs_b.len() {
-    //                 let (is_strong_b, ev_b, ref arc_b) = pairs_b[i];
-    //                 if is_strong_a == is_strong_b && ev_a == ev_b {
-    //                     if trie2_shape_eq(&arc_a, arc_b, cache) {
-    //                         pairs_b.remove(i);
-    //                         found_match = true;
-    //                         break;
-    //                     }
-    //                 }
-    //             }
-    //             if !found_match {
-    //                 cache.insert((p1, p2), false);
-    //                 return false;
-    //             }
-    //         }
-    //     } else {
-    //         cache.insert((p1, p2), false);
-    //         return false;
-    //     }
-    // }
-    //
-    // true
-    todo!()
+    if Arc::ptr_eq(a, b) {
+        return true;
+    }
+
+    let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
+        (Arc::as_ptr(a), Arc::as_ptr(b))
+    } else {
+        (Arc::as_ptr(b), Arc::as_ptr(a))
+    };
+
+    if let Some(&res) = cache.get(&(p1, p2)) {
+        return res;
+    }
+
+    cache.insert((p1, p2), true); // Optimistic insertion for cycles
+
+    let guard_a = a.read().unwrap();
+    let guard_b = b.read().unwrap();
+
+    // Compare shape-defining value fields
+    if guard_a.value.end != guard_b.value.end {
+        cache.insert((p1, p2), false);
+        return false;
+    }
+
+    // Compare children
+    if guard_a.children().len() != guard_b.children().len() {
+        cache.insert((p1, p2), false);
+        return false;
+    }
+
+    for (ek, dest_map_a) in guard_a.children() {
+        if let Some(dest_map_b) = guard_b.children().get(ek) {
+            if dest_map_a.len() != dest_map_b.len() {
+                cache.insert((p1, p2), false);
+                return false;
+            }
+
+            let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (ev, np.as_arc().clone())).collect();
+
+            for (np_a, ev_a) in dest_map_a.iter() {
+                let arc_a = np_a.as_arc().clone();
+                let mut found_match = false;
+                for i in 0..pairs_b.len() {
+                    let (ev_b, ref arc_b) = pairs_b[i];
+                    if ev_a == ev_b {
+                        if trie2_shape_eq(&arc_a, arc_b, cache) {
+                            pairs_b.remove(i);
+                            found_match = true;
+                            break;
+                        }
+                    }
+                }
+                if !found_match {
+                    cache.insert((p1, p2), false);
+                    return false;
+                }
+            }
+        } else {
+            cache.insert((p1, p2), false);
+            return false;
+        }
+    }
+
+    true
 }
 
 pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
