@@ -152,6 +152,16 @@ impl ParseState {
             god: None,
         }
     }
+
+    pub(crate) fn with_god(mut self, god: GodWrapper) -> Self {
+        self.god = Some(god);
+        self
+    }
+
+    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<GodWrapper>) -> Self {
+        self.god = maybe_god;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -805,7 +815,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let isolated_state = ParseState {
                 stack: peek.isolated_parent(),
                 accepted_state: state.accepted_state.clone(),
-                    god: None,
+                god: state.god.clone(),
             };
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
@@ -888,7 +898,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_parse_state = ParseState {
                                     stack: s_new_arc,
                                     accepted_state: state.accepted_state.clone(),
-                                    god: None,
+                                    god: state.god.clone(),
                                 };
                                 if let Some(ref mut r_map) = reduce_map {
                                     Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
@@ -901,7 +911,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let accepted_parse_state = ParseState {
                                     stack: Arc::new(GSSNode::new_fresh()),
                                     accepted_state: accepted_s_new_arc,
-                                    god: None,
+                                    god: state.god.clone(),
                                 };
                                 accepted_states_todo.push_back(accepted_parse_state);
                             }
@@ -924,7 +934,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             let new_parse_state = ParseState {
                                                 stack: s_new_arc,
                                                 accepted_state: state.accepted_state.clone(),
-                                                god: None,
+                                                god: state.god.clone(),
                                             };
                                             if let Some(ref mut r_map) = reduce_map {
                                                 Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
@@ -937,7 +947,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             let accepted_parse_state = ParseState {
                                                 stack: Arc::new(GSSNode::new_fresh()),
                                                 accepted_state: accepted_s_new_arc,
-                                                god: None,
+                                                god: state.god.clone(),
                                             };
                                             accepted_states_todo.push_back(accepted_parse_state);
                                         }
@@ -985,7 +995,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                     let new_parse_state = ParseState {
                                                         stack: s_new_arc,
                                                         accepted_state: state.accepted_state.clone(),
-                                                        god: None,
+                                                        god: state.god.clone(),
                                                     };
                                                     if let Some(ref mut r_map) = reduce_map {
                                                         Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
@@ -998,7 +1008,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                     let accepted_parse_state = ParseState {
                                                         stack: Arc::new(GSSNode::new_fresh()),
                                                         accepted_state: accepted_s_new_arc,
-                                                        god: None,
+                                                        god: state.god.clone(),
                                                     };
                                                     accepted_states_todo.push_back(accepted_parse_state);
                                                 }
@@ -1512,7 +1522,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
-        let mut next_active = ParseState::new();
+        let mut next_active = ParseState::new().with_maybe_god(self.active_state.god.clone());
         for state in shifted_states_todo {
             next_active.merge(state);
         }
@@ -1563,7 +1573,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         );
 
         // Consolidate all survivors into the new active state.
-        let mut next_active = ParseState::new();
+        let mut next_active = ParseState::new().with_maybe_god(self.active_state.god.clone());
         for state in shifted_states_todo {
             next_active.merge(state);
         }
