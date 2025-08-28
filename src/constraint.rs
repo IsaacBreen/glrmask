@@ -778,6 +778,7 @@ impl GrammarConstraint {
                 crate::datastructures::gss::merge_trie2_nodes_if_needed(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
+                    &mut glr_s.active_state.god.clone().unwrap().0.write().unwrap(),
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
