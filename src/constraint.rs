@@ -2914,18 +2914,27 @@ impl<'a> PartialEq for GrammarConstraintState<'a> {
 }
 impl<EK, EV, T> JSONConvertible for GodWrapper<EK, EV, T> where EK: JSONConvertible, EV: JSONConvertible, T: JSONConvertible {
     fn to_json(&self) -> JSONNode {
-        todo!()
+        // The God object is stateless, so we just need a placeholder.
+        JSONNode::Null
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
+        // On deserialization, we just create a new GodWrapper.
+        match node {
+            JSONNode::Null => Ok(GodWrapper::new()),
+            _ => Err("Expected JSONNode::Null for GodWrapper".to_string()),
+        }
     }
 }
 impl<EK, EV, T> JSONConvertible for God<EK, EV, T> where EK: JSONConvertible, EV: JSONConvertible, T: JSONConvertible {
     fn to_json(&self) -> JSONNode {
-        todo!()
+        // God is a stateless marker struct.
+        JSONNode::Null
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
+        match node {
+            JSONNode::Null => Ok(God { _phantom: std::marker::PhantomData }),
+            _ => Err("Expected JSONNode::Null for God".to_string()),
+        }
     }
 }
 
