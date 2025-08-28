@@ -7,7 +7,7 @@ use crate::tokenizer::LLMTokenID;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek, LLMTokenBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID, SubstringGoto};
-use crate::constraint::{God, GodWrapper, LLMVocab}; // Import LLMTokenInfo
+use crate::constraint::{God, GodWrapper, LLMVocab, Trie2God, Trie2GodWrapper}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -133,7 +133,7 @@ impl JSONConvertible for ParseStateEdgeContent {
 pub struct ParseState {
     pub stack: Arc<GSSNode>,
     pub accepted_state: Arc<GSSNode>,
-    pub god: Option<GodWrapper>,
+    pub god: Option<Trie2GodWrapper>,
 }
 
 impl ParseState {
@@ -153,12 +153,12 @@ impl ParseState {
         }
     }
 
-    pub(crate) fn with_god(mut self, god: GodWrapper) -> Self {
+    pub(crate) fn with_god(mut self, god: Trie2GodWrapper) -> Self {
         self.god = Some(god);
         self
     }
 
-    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<GodWrapper>) -> Self {
+    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie2GodWrapper>) -> Self {
         self.god = maybe_god;
         self
     }
@@ -802,9 +802,17 @@ impl Ord for WorkMapKey {
 type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    pub fn with_god(mut self, god: GodWrapper) -> GLRParserState<'a> {
+    pub fn with_god(mut self, god: Trie2GodWrapper) -> GLRParserState<'a> {
         self.active_state.god = Some(god);
         self
+    }
+
+    pub fn god_mut(&self) -> Option<&mut Trie2God> {
+        if let Some(god_wrapper) = &self.active_state.god {
+            Some(&mut god_wrapper.0.write().unwrap())
+        } else {
+            None
+        }
     }
 
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
@@ -1136,6 +1144,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     let inserter = EdgeInserter::new(
+                        &mut self.god_mut().unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
@@ -1207,6 +1216,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in &trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
+                        &mut self.god_mut().unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),
@@ -1320,6 +1330,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in trie2_nodes {
                     let source_arc = existing.as_arc().clone();
                     let inserter = EdgeInserter::new(
+                        &mut self.god_mut().unwrap(),
                         source_arc.clone(),
                         edge_key,
                         edge_bv.clone(),

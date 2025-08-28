@@ -57,7 +57,7 @@ impl PrecomputedNodeContents {
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::constraint::God;
+use crate::constraint::{God, Trie2God};
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
@@ -1183,7 +1183,7 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
 pub(crate) fn merge_trie2_nodes_if_needed(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
-    god: &mut God,
+    god: &mut Trie2God,
 ) {
     let mut new_destinations = BTreeMap::new();
 
@@ -1207,6 +1207,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
             let source_arc = source_wrapper.as_arc().clone();
 
             let inserter = EdgeInserter::new(
+                &mut god,
                 source_arc,
                 edge_key,
                 tokens_for_edge.clone(),

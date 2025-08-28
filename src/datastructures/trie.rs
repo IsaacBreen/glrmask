@@ -21,6 +21,7 @@ use deterministic_hash::DeterministicHasher;
 use ordered_hash_map::OrderedHashSet;
 use kdam::{tqdm, BarExt};
 use profiler_macro::{time_it, timeit};
+use crate::constraint::God;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 // Added for derive macro pattern
 
@@ -1394,6 +1395,7 @@ where
     ///   both by value, returning a merged value. This is only called if an edge with the same `edge_key` already
     ///   points to the `destination` being tried.
     pub fn new(
+        god: &mut God<EK, EV, T>,
         source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
         edge_value: EV,
@@ -1686,6 +1688,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
     /// ```
     pub fn insert_edge<FMergeEV, FUpdateT, FMergeEV_T>(
         &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<RwLock>.
+        god: &mut God<EK, EV, T>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
@@ -1697,7 +1700,15 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
          FUpdateT: FnMut(&mut T, &EV),
          FMergeEV_T: FnMut(&mut EV, &T),
     {
-            EdgeInserter::new(Arc::new(RwLock::new(self.clone())), edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value)
+            EdgeInserter::new(
+                god,
+                Arc::new(RwLock::new(self.clone())),
+                edge_key,
+                edge_value,
+                merge_edge_value,
+                update_node_value,
+                merge_edge_value_and_source_node_value
+            )
         }
     }
 
@@ -1706,6 +1717,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
 /// Returns `Some(Arc<RwLock<Trie<...>>>)` if merge or insert succeeded,
 /// or `None` if merge failed or a cycle was detected.
 pub fn try_destination<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
+    god: &mut God<EK, EV, T>,
     source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
@@ -1722,7 +1734,15 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value)
+    EdgeInserter::new(
+        god,
+        source,
+        edge_key,
+        edge_value,
+        merge_edge_value,
+        update_node_value,
+        merge_edge_value_and_source_node_value
+    )
         .try_destination(destination)
         .into_option()
 }
@@ -1730,6 +1750,7 @@ where
 /// Attempts to establish an edge from `source` to any of the provided `destinations`,
 /// returning the first successful one (merge or insert), or `None` if all attempts failed.
 pub fn try_destination_with<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
+    god: &mut God<EK, EV, T>,
     source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
@@ -1746,7 +1767,15 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value, update_node_value, merge_edge_value_and_source_node_value)
+    EdgeInserter::new(
+        god,
+        source,
+        edge_key,
+        edge_value,
+        merge_edge_value,
+        update_node_value,
+        merge_edge_value_and_source_node_value
+    )
         .try_destinations(destinations)
         .into_option()
 }

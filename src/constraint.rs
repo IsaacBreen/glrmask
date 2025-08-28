@@ -75,6 +75,8 @@ pub struct GrammarConstraint {
     pub(crate) llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    pub(crate) trie1_god: Trie1GodWrapper,
+    pub(crate) trie2_god: Trie2GodWrapper,
 }
 
 impl GrammarConstraint {
@@ -101,6 +103,8 @@ impl GrammarConstraint {
         assert_eq!(self.llm_vocab.original_to_internal_id_bimap, other.llm_vocab.original_to_internal_id_bimap);
         assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
         assert_eq!(self.possible_matches, other.possible_matches);
+        assert_eq!(self.trie1_god, other.trie1_god);
+        assert_eq!(self.trie2_god, other.trie2_god);
     }
 }
 
@@ -117,6 +121,8 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("original_to_internal_id_bimap".to_string(), self.llm_vocab.original_to_internal_id_bimap.to_json());
         obj.insert("internal_max_llm_token".to_string(), self.llm_vocab.internal_max_llm_token.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
+        obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
+        obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         JSONNode::Object(obj)
     }
 
@@ -144,6 +150,10 @@ impl JSONConvertible for GrammarConstraint {
                                                   .and_then(usize::from_json)?;
                 let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
                                           .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
+                let trie1_god = obj.remove("trie1_god").ok_or_else(|| "Missing field trie1_god".to_string())
+                                    .and_then(|n| Trie1GodWrapper::from_json(n))?;
+                let trie2_god = obj.remove("trie2_god").ok_or_else(|| "Missing field trie2_god".to_string())
+                                    .and_then(|n| Trie2GodWrapper::from_json(n))?;
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
@@ -152,6 +162,8 @@ impl JSONConvertible for GrammarConstraint {
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
+                    trie1_god,
+                    trie2_god,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -579,6 +591,8 @@ impl GrammarConstraint {
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
+            trie1_god: Trie1GodWrapper::new(),
+            trie2_god: Trie2GodWrapper::new(),
         };
 
         gc
@@ -681,7 +695,7 @@ impl GrammarConstraint {
 
         // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
         let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
-        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(GodWrapper(Arc::new(RwLock::new(God {}))));
+        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(GodWrapper::new());
 
         // Optional: pre-warm once with default reductions (your idea)
         const PROCESS_DEFAULT_REDUCTIONS: bool = false;
@@ -818,6 +832,7 @@ impl GrammarConstraint {
                                 let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
+                                    &mut glr_s.god_mut().unwrap(),
                                     src_arc.clone(),
                                     edge_key,
                                     tokens_to_push.clone(),
@@ -892,7 +907,7 @@ impl GrammarConstraint {
             self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
         );
 
-        GrammarConstraintState { parent: self, state, god: GodWrapper(Arc::new(RwLock::new(God {}))) }
+        GrammarConstraintState { parent: self, state }
     }
 
     #[inline]
@@ -1159,6 +1174,8 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 
 pub fn optimize_trie2_size(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    god: Trie2GodWrapper,
+
 ) {
     crate::debug!(2, "Optimizing Trie 2 size...");
     // Pin all nodes to prevent dangling weak pointers while we rewire.
@@ -1168,7 +1185,7 @@ pub fn optimize_trie2_size(
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
     simplify_trie2_factor_common_destinations(roots);
-    compress_trie2_edges(roots);
+    compress_trie2_edges(roots, god);
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
     let final_roots: Vec<_> = roots.values().cloned().collect();
@@ -1498,7 +1515,8 @@ fn deduplicate_recursive_trie2(
 ///   - Not both s1 and s2 are Some(...) (i.e., at most one has a state ID).
 /// This reduces redundant intermediate nodes introduced during construction.
 pub fn compress_trie2_edges(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>
+    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    god: Trie2GodWrapper,
 ) {
     crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
     type EdgeKey2 = (usize, Option<StateID>);
@@ -1627,6 +1645,7 @@ pub fn compress_trie2_edges(
                     // 2) Add/merge src --merged_key--> grand with merged_bv
                     {
                         let inserter = EdgeInserter::new(
+                            &mut god.0.write().unwrap(),
                             src_arc.clone(),
                             merged_key.clone(),
                             merged_bv.clone(),
@@ -1742,6 +1761,7 @@ struct Precomputer<'r> {
     // Map each precompute node to the set of LLM tokens that can pass through it.
     // tags:             RefCell<HashMap<ArcPtrWrapper<RwLock<PrecomputeNode>>, LLMTokenBV>>, // Removed
     end_node:         ArcPtrWrapper<RwLock<PrecomputeNode>>,
+    trie1_god:        Trie1GodWrapper,
 }
 
 impl<'r> Precomputer<'r> {
@@ -1801,6 +1821,7 @@ impl<'r> Precomputer<'r> {
             ignore_terminal_id,
             // tags: RefCell::new(HashMap::new()), // Removed
             end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::leaf())))),
+            trie1_god: Trie1GodWrapper::new(),
         }
     }
 
@@ -2692,6 +2713,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
+                                    &mut self.trie1_god.0.write().unwrap(),
                                     src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
@@ -2719,6 +2741,7 @@ impl<'r> Precomputer<'r> {
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
+                                &mut self.trie1_god.0.write().unwrap(),
                                 src_node_wrapper.as_arc().clone(),
                                 Some(terminal_id),
                                 edge_bv.clone(),
@@ -2759,6 +2782,7 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
+                                    &mut self.trie1_god.0.write().unwrap(),
                                     src_node_wrapper.as_arc().clone(),
                                     Some(terminal_id),
                                     edge_bv,
@@ -2833,26 +2857,35 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
     pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-    pub(crate) god: GodWrapper,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct God {}
+pub struct God<EK, EV, T> {
+    _phantom: std::marker::PhantomData<(EK, EV, T)>,
+}
 #[derive(Debug, Clone)]
-pub struct GodWrapper(Arc<RwLock<God>>);
+pub struct GodWrapper<EK, EV, T>(pub Arc<RwLock<God<EK, EV, T>>>);
 
-impl PartialEq for GodWrapper {
+pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
+pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
+pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
+
+impl<EK, EV, T> PartialEq for GodWrapper<EK, EV, T> where EK: PartialEq, EV: PartialEq, T: PartialEq {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0) || self.0.read().unwrap().eq(&other.0.read().unwrap())
     }
 }
-impl Eq for GodWrapper {}
-impl PartialOrd for GodWrapper {
+impl<EK, EV, T> Eq for GodWrapper<EK, EV, T> where EK: Eq, EV: Eq, T: Eq {}
+impl<EK, EV, T> PartialOrd for GodWrapper<EK, EV, T> where EK: PartialOrd, EV: PartialOrd, T: PartialOrd {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return Some(Ordering::Equal);
+        }
+        self.0.read().unwrap().partial_cmp(&other.0.read().unwrap())
     }
 }
-impl Ord for GodWrapper {
+impl<EK, EV, T> Ord for GodWrapper<EK, EV, T> where EK: Ord, EV: Ord, T: Ord {
     fn cmp(&self, other: &Self) -> Ordering {
         if Arc::ptr_eq(&self.0, &other.0) {
             return Ordering::Equal;
@@ -2860,9 +2893,16 @@ impl Ord for GodWrapper {
         self.0.read().unwrap().cmp(&other.0.read().unwrap())
     }
 }
-impl Hash for GodWrapper {
+impl<EK, EV, T> Hash for GodWrapper<EK, EV, T> where EK: Hash, EV: Hash, T: Hash {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.read().unwrap().hash(state);
+    }
+}
+impl<EK, EV, T> GodWrapper<EK, EV, T> {
+    pub fn new() -> Self {
+        Self(Arc::new(RwLock::new(God {
+            _phantom: std::marker::PhantomData::<(EK, EV, T)>,
+        })))
     }
 }
 
@@ -2870,6 +2910,22 @@ impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
         // Compare parent by pointer to ensure they originate from the same constraint object.
         std::ptr::eq(self.parent, other.parent) && self.state == other.state
+    }
+}
+impl<EK, EV, T> JSONConvertible for GodWrapper<EK, EV, T> where EK: JSONConvertible, EV: JSONConvertible, T: JSONConvertible {
+    fn to_json(&self) -> JSONNode {
+        todo!()
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        todo!()
+    }
+}
+impl<EK, EV, T> JSONConvertible for God<EK, EV, T> where EK: JSONConvertible, EV: JSONConvertible, T: JSONConvertible {
+    fn to_json(&self) -> JSONNode {
+        todo!()
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        todo!()
     }
 }
 
