@@ -142,13 +142,6 @@ impl ParseState {
             accepted_state: Arc::new(GSSNode::new_fresh()),
         }
     }
-
-    pub fn with_stack(stack: Arc<GSSNode>) -> Self {
-        ParseState {
-            stack,
-            accepted_state: Arc::new(GSSNode::new_fresh()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1628,12 +1621,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    pub fn and_step(mut self, token_id: TerminalID) -> Self {
+    pub fn and_step(mut self, token_id: TerminalID) -> GLRParserState {
         self.step(token_id);
         self
     }
 
-    pub fn and_parse(mut self, input: &[TerminalID]) -> Self {
+    pub fn and_parse(mut self, input: &[TerminalID]) -> GLRParserState {
         self.parse(input);
         self
     }
