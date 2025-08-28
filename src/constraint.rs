@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::mem;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
@@ -2834,7 +2834,32 @@ pub struct GrammarConstraintState<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct God {}
+pub struct God {}
+
+#[derive(Debug, Clone)]
+pub struct GodWrapper(Arc<Mutex<God>>);
+
+impl PartialEq for GodWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for GodWrapper {}
+impl Hash for GodWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.lock().unwrap().hash(state);
+    }
+}
+impl PartialOrd for GodWrapper {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for GodWrapper {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.lock().unwrap().cmp(&other.0.lock().unwrap())
+    }
+}
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
