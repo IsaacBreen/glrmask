@@ -2833,23 +2833,17 @@ pub struct GrammarConstraintState<'a> {
     pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct God {}
-
 #[derive(Debug, Clone)]
-pub struct GodWrapper(Arc<Mutex<God>>);
+pub struct GodWrapper(Arc<RwLock<God>>);
 
 impl PartialEq for GodWrapper {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0) || self.0.read().unwrap().eq(&other.0.read().unwrap())
     }
 }
 impl Eq for GodWrapper {}
-impl Hash for GodWrapper {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.lock().unwrap().hash(state);
-    }
-}
 impl PartialOrd for GodWrapper {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -2857,7 +2851,15 @@ impl PartialOrd for GodWrapper {
 }
 impl Ord for GodWrapper {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.lock().unwrap().cmp(&other.0.lock().unwrap())
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return Ordering::Equal;
+        }
+        self.0.read().unwrap().cmp(&other.0.read().unwrap())
+    }
+}
+impl Hash for GodWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.read().unwrap().hash(state);
     }
 }
 
