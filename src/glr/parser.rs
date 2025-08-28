@@ -142,6 +142,13 @@ impl ParseState {
             accepted_state: Arc::new(GSSNode::new_fresh()),
         }
     }
+
+    pub fn with_stack(stack: Arc<GSSNode>) -> Self {
+        ParseState {
+            stack,
+            accepted_state: Arc::new(GSSNode::new_fresh()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +400,10 @@ impl GLRParser {
             below_bottom_cache: Default::default(),
         };
         parser_state
+    }
+
+    pub fn init_glr_parser_from_stack(&self, stack: Arc<GSSNode>) -> GLRParserState {
+        self.init_glr_parser_from_parse_state(ParseState::with_stack(stack))
     }
 
     /// Initializes a substring parser state. This seeds the active GSS with
@@ -1621,12 +1632,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    pub fn and_step(mut self, token_id: TerminalID) -> GLRParserState {
+    pub fn and_step(mut self, token_id: TerminalID) -> GLRParserState<'a> {
         self.step(token_id);
         self
     }
 
-    pub fn and_parse(mut self, input: &[TerminalID]) -> GLRParserState {
+    pub fn and_parse(mut self, input: &[TerminalID]) -> GLRParserState<'a> {
         self.parse(input);
         self
     }
