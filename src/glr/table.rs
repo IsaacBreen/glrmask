@@ -405,7 +405,6 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
         }
     }
 
-    crate::debug!(1, "Starting stage 1");
     while let Some(item_set) = worklist.pop_front() {
         let lalr_mode = match LR_MODE {
             LRMode::LALR => true,
