@@ -792,6 +792,11 @@ impl Ord for WorkMapKey {
 type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 
 impl<'a> GLRParserState<'a> { // No longer generic
+    pub fn with_god(mut self, god: GodWrapper) -> GLRParserState<'a> {
+        self.active_state.god = Some(god);
+        self
+    }
+
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.

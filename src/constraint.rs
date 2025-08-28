@@ -890,7 +890,7 @@ impl GrammarConstraint {
             self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
         );
 
-        GrammarConstraintState { parent: self, state }
+        GrammarConstraintState { parent: self, state, god: GodWrapper(Arc::new(RwLock::new(God {}))) }
     }
 
     #[inline]
@@ -2831,6 +2831,7 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
     pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+    pub(crate) god: GodWrapper,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
