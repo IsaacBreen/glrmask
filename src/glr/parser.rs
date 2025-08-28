@@ -1,5 +1,4 @@
 use std::sync::{Mutex, RwLock};
-use crate::datastructures::ArcPtrWrapper;
 use std::any::Any;
 use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
@@ -752,7 +751,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, (ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode2, LLMTokenBV)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1128,33 +1127,33 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_bv = LLMTokenBV::max_ones();
 
                 // For each existing trie2 node: just create the edge directly to a fresh destination
-                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                let mut dest_agg: BTreeMap<PrecomputeNode2, LLMTokenBV> = BTreeMap::new();
                 let mut used = BTreeSet::new();
 
+                let god = self.active_state.god.as_ref().unwrap();
                 for existing in &acc.trie2_nodes {
-                    let source_arc = existing.as_arc().clone();
+                    let source_ref = *existing;
 
-                    let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    let fallback_dest = god.0.write().unwrap().alloc_node(PrecomputedNodeContents::internal());
                     let inserter = EdgeInserter::new(
-                        self.active_state.god.as_ref().unwrap(),
-                        source_arc.clone(),
+                        god,
+                        source_ref,
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                         |ev, t| *ev &= &t.live_tokens,
-                    ).try_destination(fallback_dest.clone()); // direct, strong insert
+                    ).try_destination(fallback_dest); // direct, strong insert
 
-                    let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
-                    let final_wr = ArcPtrWrapper::new(final_dst_arc.clone());
-                    dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
-                    used.insert(final_wr);
+                    let final_dst_ref = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
+                    dest_agg.entry(final_dst_ref).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
+                    used.insert(final_dst_ref);
                 }
 
                 // Update destination live tokens
-                for (dst_wr, added) in &dest_agg {
-                    let mut g = dst_wr.as_arc().write().expect("poison");
-                    g.value.live_tokens |= added.clone();
+                let mut god_guard = god.0.write().unwrap();
+                for (dst_ref, added) in &dest_agg {
+                    god_guard.get_mut(*dst_ref).value.live_tokens |= added.clone();
                 }
 
                 // Update new_acc.trie2_nodes as before
@@ -1178,6 +1177,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut accepted_stacks: Vec<Arc<GSSNode>> = Vec::new();
 
+        let god = self.active_state.god.as_ref().unwrap();
         for (k, acc) in below {
             let mut acc = acc.clone();
             let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
@@ -1190,11 +1190,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     k: 0, // Sentinel for any k
                 };
 
-                let (dst_arc, is_new) = if let Some((arc, _)) = self.below_bottom_cache.get(&accept_cache_key) {
-                    (arc.as_arc().clone(), false)
+                let (dst_ref, is_new) = if let Some((node_ref, _)) = self.below_bottom_cache.get(&accept_cache_key) {
+                    (*node_ref, false)
                 } else {
-                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    self.below_bottom_cache.insert(accept_cache_key.clone(), (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
+                    let new_trie2_node = god.0.write().unwrap().alloc_node(PrecomputedNodeContents::internal());
+                    self.below_bottom_cache.insert(accept_cache_key.clone(), (new_trie2_node, LLMTokenBV::max_ones()));
                     (new_trie2_node, true)
                 };
 
@@ -1206,10 +1206,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 // For each existing trie2 source node, add an edge to the cached destination
                 for existing in &trie2_nodes {
-                    let source_arc = existing.as_arc().clone();
+                    let source_ref = *existing;
                     let inserter = EdgeInserter::new(
-                        self.active_state.god.as_ref().unwrap(),
-                        source_arc.clone(),
+                        god,
+                        source_ref,
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
@@ -1218,15 +1218,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     );
 
                     if is_new {
-                        let _ = inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
+                        let _ = inserter.try_destination(dst_ref).expect("Cycle in below-bottom accept wiring");
                     } else {
                         // Replicate to_destination_weakly logic with strong edges
-                        let source_arc = existing.as_arc();
-                        let mut source_guard = source_arc.write().unwrap();
-                        if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), &dst_arc) {
+                        let mut source_guard = god.0.write().unwrap().get_mut(source_ref);
+                        if let Some(existing_ev) = source_guard.children.get_mut(&edge_key).and_then(|m| m.get_mut(&dst_ref)) {
                             *existing_ev |= &edge_bv;
                         } else {
-                            source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), &dst_arc);
+                            source_guard.children.entry(edge_key.clone()).or_default().insert(dst_ref, edge_bv.clone());
                         }
                     }
                 }
@@ -1234,7 +1233,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // Create the GSS node for the accepted state.
                 // It should have the acc from the path, and a single predecessor edge for the source_state_id.
                 let mut acc_for_gss = acc.clone();
-                acc_for_gss.trie2_nodes.insert(ArcPtrWrapper::new(dst_arc.clone()));
+                acc_for_gss.trie2_nodes.insert(dst_ref);
                 let gss0 = GSSNode::new(acc_for_gss);
                 let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                 accepted_stacks.push(Arc::new(gss1));
@@ -1272,7 +1271,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         merged_acc.trie2_nodes.clear();
 
-        if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
+        let god = self.active_state.god.as_ref().unwrap();
+        if let Some((node_ref, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
             // Insert weak edges to the existing node arc.
             for (k, mut acc) in below {
                 let trie2_nodes = &acc.trie2_nodes;
@@ -1281,12 +1281,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_bv = LLMTokenBV::max_ones();
 
                 for existing in trie2_nodes {
-                    let source_arc = existing.as_arc();
-                    let mut source_guard = source_arc.write().unwrap();
-                    if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), arc.as_arc()) {
+                    let source_ref = *existing;
+                    let mut source_guard = god.0.write().unwrap().get_mut(source_ref);
+                    if let Some(existing_ev) = source_guard.children.get_mut(&edge_key).and_then(|m| m.get_mut(node_ref)) {
                         *existing_ev |= &edge_bv;
                     } else {
-                        source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), arc.as_arc());
+                        source_guard.children.entry(edge_key.clone()).or_default().insert(*node_ref, edge_bv.clone());
                     }
                 }
             }
@@ -1310,8 +1310,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Arc::new(GSSNode::new_fresh())
             }
         } else {
-            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-            self.below_bottom_cache.insert(cache_key, (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
+            let new_trie2_node = god.0.write().unwrap().alloc_node(PrecomputedNodeContents::internal());
+            self.below_bottom_cache.insert(cache_key, (new_trie2_node, LLMTokenBV::max_ones()));
             let mut out = Vec::new();
             for (k, mut acc) in below {
                 let trie2_nodes = &acc.trie2_nodes;
@@ -1320,10 +1320,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_bv = LLMTokenBV::max_ones();
 
                 for existing in trie2_nodes {
-                    let source_arc = existing.as_arc().clone();
+                    let source_ref = *existing;
                     let inserter = EdgeInserter::new(
-                        self.active_state.god.as_ref().unwrap(),
-                        source_arc.clone(),
+                        god,
+                        source_ref,
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
@@ -1332,10 +1332,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     );
 
                     // Create a new cached destination node for this nonterminal
-                    inserter.try_destination(new_trie2_node.clone());
+                    inserter.try_destination(new_trie2_node);
                 }
             }
-            merged_acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+            merged_acc.trie2_nodes.insert(new_trie2_node);
             for (goto_state_id, source_state_ids) in &gotos.gotos {
                 let mut edge_contents = Vec::new();
                 for source_state_id in source_state_ids {
