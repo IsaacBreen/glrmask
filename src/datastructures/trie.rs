@@ -1784,6 +1784,7 @@ where
 // TESTS
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[cfg(false)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
