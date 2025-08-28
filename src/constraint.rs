@@ -1340,8 +1340,7 @@ impl<'r> Precomputer<'r> {
                         let mut edge_val_opt = Some(union_bv.clone());
                         // No cycle possible since I is new. Use unchecked for speed.
                         // Depth will be propagated to D.
-                        intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone())
-                            .expect("Cycle detected when adding factored edge; this should not happen.");
+                        intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone());
                         intermediate_guard.value.live_tokens |= &union_bv; // Update live_tokens for intermediate node
                     }
 
@@ -1360,8 +1359,7 @@ impl<'r> Precomputer<'r> {
 
                         // Add S --(None)--> I
                         let mut edge_val_opt = Some(bv.clone());
-                        src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone())
-                            .expect("Cycle detected when adding None edge to intermediate node; this should not happen.");
+                        src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone());
                         src_guard.value.live_tokens |= bv; // Update live_tokens for source node
                     }
                 }

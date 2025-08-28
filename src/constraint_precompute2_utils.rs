@@ -382,8 +382,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
                 {
                     let mut intermediate_guard = intermediate_node.write().expect("poison");
                     let mut edge_val_opt = Some(union_bv.clone());
-                    intermediate_guard.try_insert_unchecked(edge_key.clone(), &mut edge_val_opt, dest_arc.clone())
-                        .expect("Cycle detected when adding factored edge; this should not happen.");
+                    intermediate_guard.try_insert_unchecked(edge_key.clone(), &mut edge_val_opt, dest_arc.clone());
                     intermediate_guard.value.live_tokens |= &union_bv;
                 }
 
@@ -405,7 +404,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
                     }
 
                     let mut edge_val_opt = Some(bv.clone());
-                    src_guard.try_insert_unchecked(identity_edge_key.clone(), &mut edge_val_opt, intermediate_node.clone()).ok(); // ignore cycle error, should not happen
+                    src_guard.try_insert_unchecked(identity_edge_key.clone(), &mut edge_val_opt, intermediate_node.clone()); // ignore cycle error, should not happen
                     src_guard.value.live_tokens |= bv;
                 }
             }
