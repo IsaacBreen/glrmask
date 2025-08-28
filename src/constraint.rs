@@ -681,7 +681,7 @@ impl GrammarConstraint {
 
         // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
         let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
-        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged);
+        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(GodWrapper(Arc::new(RwLock::new(God {}))));
 
         // Optional: pre-warm once with default reductions (your idea)
         const PROCESS_DEFAULT_REDUCTIONS: bool = false;
@@ -706,7 +706,8 @@ impl GrammarConstraint {
                 &base_glr_state.active_state.stack,
                 &trie2_map,
             );
-            let glr_state_for_sid = parser.init_glr_parser_from_stack(cloned_gss);
+            let mut glr_state_for_sid = base_glr_state.clone();
+            glr_state_for_sid.active_state.stack = cloned_gss;
 
             // Record per tokenizer state
             precomputed2.insert(*tokenizer_state_id, cloned_trie2_root);
