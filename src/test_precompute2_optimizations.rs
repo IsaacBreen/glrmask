@@ -9,19 +9,19 @@
 //! - Using small, explicit LLM vocabularies.
 //! - Factoring common logic into small helpers.
 
-use crate::constraint::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size, GrammarConstraint, Precomputed2, Trie2God, Trie2GodWrapper};
+use crate::constraint::{GrammarConstraint, Precomputed2, Trie2GodWrapper};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
-use crate::json_serialization::JSONConvertible;
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use reqwest::blocking;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Write};
 use std::path::Path;
 use std::sync::Arc;
 use bimap::BiBTreeMap;
 use crate::constraint_extra::PrecomputeStats;
+use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
 //
 // -------------------------------
 // Common helpers
