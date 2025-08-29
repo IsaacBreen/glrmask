@@ -11,14 +11,14 @@ mod tests {
     use std::iter::FromIterator; // For collect
 
     // Use concrete types for merge tests
-    type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+    type TestTrieMerge = Trie2<&'static str, Vec<i32>, String>;
     type TestNodeMerge = Arc<RwLock<TestTrieMerge>>;
     // Use simpler types for basic tests
-    type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+    type TestTrieBasic = Trie2<&'static str, &'static str, i32>;
     type TestNodeBasic = Arc<RwLock<TestTrieBasic>>;
 
     // Use concrete types for EdgeInserter tests
-    type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
+    type TestTrieEI = Trie2<&'static str, HybridBitset, String>; // Use HybridBitset here
     type TestNodeEI = Arc<RwLock<TestTrieEI>>;
 
     // Helper to get Arc pointer for tests
@@ -108,7 +108,7 @@ mod tests {
         } // root lock released
 
         // Check all_nodes - call *after* releasing lock
-        let all = Trie::all_nodes(&[root.clone()]);
+        let all = Trie2::all_nodes(&[root.clone()]);
         assert_eq!(all.len(), 3); // root, child1, child2
         let all_ptrs: HashSet<_> = all.iter().map(arc_ptr).collect();
         assert!(all_ptrs.contains(&arc_ptr(&root)));
@@ -120,7 +120,7 @@ mod tests {
         let mut computed_values = Vec::new();
         let mut edge_info_at_step = Vec::new(); // Store (EK, EV) seen by step
 
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)],
             // step: add one, ignore edge info
             |parent_val, ek, ev, _child_node| {
@@ -201,7 +201,7 @@ mod tests {
         let mut computed_values = Vec::new();
         let mut edge_info_at_step = Vec::new(); // Store (EK, EV) seen by step
 
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)],
             // step: add one, record edge info
             |parent_val, ek, ev, _child_node| {
@@ -276,7 +276,7 @@ mod tests {
             c2.try_insert("c2", &mut Some("e4"), grandchild.clone()).unwrap(); // Diamond
         }
 
-        let all_nodes = Trie::all_nodes(&[root.clone()]);
+        let all_nodes = Trie2::all_nodes(&[root.clone()]);
 
         // Should find 4 unique nodes.
         assert_eq!(all_nodes.len(), 4);
@@ -320,7 +320,7 @@ mod tests {
         let processed_nodes = Arc::new(RwLock::new(HashMap::<i32, i32>::new()));
         let process_count = Arc::new(AtomicUsize::new(0));
 
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)], // Start at root
             // step: increment value, ignore edges
             |p_val, _ek, _ev, _child_node| Some(p_val + 1),
@@ -351,13 +351,13 @@ mod tests {
     #[test]
     fn test_empty_trie() {
         let root: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(42)));
-        let nodes = Trie::all_nodes(&[root.clone()]);
+        let nodes = Trie2::all_nodes(&[root.clone()]);
         assert_eq!(nodes.len(), 1);
         assert!(Arc::ptr_eq(&nodes[0], &root));
         assert!(root.read().unwrap().is_leaf()); // Lock needed here
 
         let mut processed = false;
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)],
             |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
@@ -430,7 +430,7 @@ mod tests {
         root.write().unwrap().max_depth = 0;
         child.write().unwrap().max_depth = 1;
 
-        let all_nodes = Trie::all_nodes(&[root.clone()]);
+        let all_nodes = Trie2::all_nodes(&[root.clone()]);
 
         // Should detect both nodes exactly once.
         assert_eq!(all_nodes.len(), 2);
@@ -451,14 +451,14 @@ mod tests {
         root1.write().unwrap().force_insert_to_node("b", "e2", &child2);
         child1.write().unwrap().force_insert_to_node("c", "e3", &grandchild);
         child2.write().unwrap().force_insert_to_node("d", "e4", &grandchild); // Diamond
-        assert!(!Trie::has_any_cycle(root1.clone()));
+        assert!(!Trie2::has_any_cycle(root1.clone()));
 
         // Simple cycle: root2 -> child3 -> root2
         let root2: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(10)));
         let child3: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(11)));
         root2.write().unwrap().force_insert_to_node("x", "e5", &child3);
         child3.write().unwrap().force_insert_to_node("y", "e6", &root2);
-        assert!(Trie::has_any_cycle(root2.clone()));
+        assert!(Trie2::has_any_cycle(root2.clone()));
 
         // Larger cycle: root3 -> A -> B -> C -> A
         let root3: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(20)));
@@ -469,7 +469,7 @@ mod tests {
         node_a.write().unwrap().force_insert_to_node("a->b", "e8", &node_b);
         node_b.write().unwrap().force_insert_to_node("b->c", "e9", &node_c);
         node_c.write().unwrap().force_insert_to_node("c->a", "e10", &node_a); // Cycle C -> A
-        assert!(Trie::has_any_cycle(root3.clone()));
+        assert!(Trie2::has_any_cycle(root3.clone()));
 
         // Cycle with unconnected node: root4 -> A -> B -> A; C (unconnected)
         let root4: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(30)));
@@ -479,7 +479,7 @@ mod tests {
         root4.write().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
         node_a2.write().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
         node_b2.write().unwrap().force_insert_to_node("b->a", "e13", &node_a2); // Cycle B -> A
-        assert!(Trie::has_any_cycle(root4.clone()));
+        assert!(Trie2::has_any_cycle(root4.clone()));
 
         // Disconnected graph with a cycle: root5 (linear chain), root6 (cycle)
         let root5: TestNodeBasic = Arc::new(RwLock::new(TestTrieBasic::new(40)));
@@ -491,9 +491,9 @@ mod tests {
         root6_in_cycle.write().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
         node_e.write().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle); // Cycle
         // Checking from root5 should NOT find the cycle
-        assert!(!Trie::has_any_cycle(root5.clone()));
+        assert!(!Trie2::has_any_cycle(root5.clone()));
         // Checking from root6_in_cycle SHOULD find the cycle
-        assert!(Trie::has_any_cycle(root6_in_cycle.clone()));
+        assert!(Trie2::has_any_cycle(root6_in_cycle.clone()));
     }
 
 
@@ -514,7 +514,7 @@ mod tests {
         let mut processed_vals = Vec::new();
         let mut computed_vals = Vec::new();
 
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)], // Start at root
             |p, _ek, _ev, _n| Some(p + 1), // Step: increment
             |cur, new| *cur = (*cur).max(new), // Merge: max
@@ -568,7 +568,7 @@ mod tests {
         let processed_nodes = Arc::new(RwLock::new(HashSet::<i32>::new()));
         let computed_values = Arc::new(RwLock::new(HashMap::<i32, i32>::new()));
 
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)],
             |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value
             |current_v, new_v| *current_v = new_v, // merge: replace
@@ -631,7 +631,7 @@ mod tests {
         let processed_nodes = Arc::new(RwLock::new(HashSet::<i32>::new()));
         let computed_values = Arc::new(RwLock::new(HashMap::<i32, i32>::new()));
 
-        Trie::special_map(
+        Trie2::special_map(
             vec![(root.clone(), 100)],
             // step: increment value only if edge key is "keep"
             |p_val, ek, _ev, _child_node| {

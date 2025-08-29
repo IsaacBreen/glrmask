@@ -27,7 +27,7 @@ use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss::Acc;
 use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputedNodeContents, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::{EdgeInserter, Trie};
+use crate::datastructures::trie::{EdgeInserter, Trie2};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -54,8 +54,8 @@ use std::ops::{BitAnd, Sub};
 const MERGE_THRESHOLD: usize = 20;
 
 pub type PrecomputeNode =
-    Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+    Trie2<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode2 = Trie2<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>;
@@ -391,7 +391,7 @@ impl GrammarConstraint {
 
         // Recompute all max_depth values after major graph surgery.
         let roots_for_recompute: Vec<_> = helper.roots.values().cloned().collect();
-        Trie::recompute_all_max_depths(&roots_for_recompute);
+        Trie2::recompute_all_max_depths(&roots_for_recompute);
 
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
@@ -405,7 +405,7 @@ impl GrammarConstraint {
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
-    /// Build the "Trie 2" precomputation.
+    /// Build the "Trie2 2" precomputation.
     pub fn precompute2(
         precomputed: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
         tokenizer:        &Regex,
@@ -418,7 +418,7 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
-        crate::debug!(2, "Precomputing Trie 2...");
+        crate::debug!(2, "Precomputing Trie2 2...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
         const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             BelowBottomReductionMode::ContinueFromEverything
@@ -472,7 +472,7 @@ impl GrammarConstraint {
         }
 
         #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
+        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie2 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
         #[cfg(rustrover)]
         let it = precomputed.iter();
         for (tokenizer_state_id, trie1_root) in it {
@@ -494,8 +494,8 @@ impl GrammarConstraint {
 
         let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::leaf(), )));
 
-        crate::debug!(2, "Running special_map_grouped for Trie 2 precomputation");
-        Trie::special_map_grouped(
+        crate::debug!(2, "Running special_map_grouped for Trie2 2 precomputation");
+        Trie2::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
@@ -642,24 +642,24 @@ impl GrammarConstraint {
             },
         );
 
-        crate::debug!(2, "Finished precomputing Trie 2");
+        crate::debug!(2, "Finished precomputing Trie2 2");
 
         // To prevent dangling weak pointers, we collect strong references to all nodes
         // before performing modifications. These strong references are held until
         // weak edges have been promoted back to strong ones where possible.
         let roots_before_cleanup: Vec<_> = precomputed2.values().cloned().collect();
-        let all_nodes_pinner = Trie::all_nodes(&roots_before_cleanup);
+        let all_nodes_pinner = Trie2::all_nodes(&roots_before_cleanup);
 
         // Clean up after rewiring
         constraint_precompute2_utils::prune_dead_paths_trie2(&mut precomputed2);
         constraint_precompute2_utils::merge_nodes_trie2(&mut precomputed2);
         constraint_precompute2_utils::simplify_trie2_factor_common_destinations(&mut precomputed2);
 
-        Trie::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
+        Trie2::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 
         // Recompute depths again after promotions, as they can change the graph structure.
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
-        Trie::recompute_all_max_depths(&roots2_final);
+        Trie2::recompute_all_max_depths(&roots2_final);
 
         precomputed2
     }
@@ -925,7 +925,7 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all unique nodes.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie2::all_nodes(&roots_vec);
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
             let mut node_guard = node_arc.write().expect("poison");
@@ -968,7 +968,7 @@ impl<'r> Precomputer<'r> {
 
         // 1) Collect all unique nodes reachable from any root
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie2::all_nodes(&roots_vec);
         // Map pointer -> Arc for quick retrieval
         let mut arc_by_ptr: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
         for n in &all_nodes {
@@ -1108,7 +1108,7 @@ impl<'r> Precomputer<'r> {
         type NodePtr = *const PrecomputeNode;
         let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
 
-        Trie::special_map(
+        Trie2::special_map(
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
             |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
@@ -1162,7 +1162,7 @@ impl<'r> Precomputer<'r> {
 
         // Now, apply the pruning.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie2::all_nodes(&roots_vec);
         for node_arc in all_nodes {
             let node_ptr: NodePtr = {
                 let guard = node_arc.read().expect("poison");
@@ -1291,7 +1291,7 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all nodes in the graph.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie2::all_nodes(&roots_vec);
         let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
 
         // 2. Build an incoming edge map for every node.
@@ -1886,7 +1886,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::reset();
 
-        Trie::special_map_grouped(
+        Trie2::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |glr_s, grammar_token_opt, dest_map| {
@@ -2246,7 +2246,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::reset();
 
-        Trie::special_map_grouped(
+        Trie2::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
             |glr_s, (k, expected_state_id_opt ), dest_map| {

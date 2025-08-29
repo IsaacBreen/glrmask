@@ -19,7 +19,7 @@ use reqwest::blocking;
 use serde_json;
 use similar::TextDiff;
 use crate::constraint::{GrammarConstraint};
-use crate::datastructures::trie::Trie;
+use crate::datastructures::trie::Trie2;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
 // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
@@ -39,14 +39,14 @@ use crate::datastructures::gss::{gather_gss_stats, GSSNode, reset_llm_tokens, sa
 
 
 // Use concrete types for merge tests
-type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+type TestTrieMerge = Trie2<&'static str, Vec<i32>, String>;
 type TestNodeMerge = Arc<Mutex<TestTrieMerge>>;
 // Use simpler types for basic tests
-type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+type TestTrieBasic = Trie2<&'static str, &'static str, i32>;
 type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
 
 // Use concrete types for EdgeInserter tests
-type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
+type TestTrieEI = Trie2<&'static str, HybridBitset, String>; // Use HybridBitset here
 type TestNodeEI = Arc<Mutex<TestTrieEI>>;
 
 // Helper to get Arc pointer for tests

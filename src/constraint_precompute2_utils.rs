@@ -1,7 +1,7 @@
 use crate::constraint::{PrecomputeNode2, Trie2GodWrapper};
 use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::trie::{EdgeInserter, Trie};
+use crate::datastructures::trie::{EdgeInserter, Trie2};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::table::StateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
@@ -257,7 +257,7 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<
 
     // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
     // This correctly handles cycles, iterating until a fixed point is reached.
-    let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+    let all_nodes = Trie2::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
     let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
     let mut worklist = VecDeque::new();
     let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
@@ -336,7 +336,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
     const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(&roots_vec);
+    let all_nodes = Trie2::all_nodes(&roots_vec);
     let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
 
     type EdgeKey2 = (usize, Option<StateID>);
@@ -418,10 +418,10 @@ pub fn optimize_trie2_size(
     god: Trie2GodWrapper,
 
 ) {
-    crate::debug!(2, "Optimizing Trie 2 size...");
+    crate::debug!(2, "Optimizing Trie2 2 size...");
     // Pin all nodes to prevent dangling weak pointers while we rewire.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes_pinner = Trie::all_nodes(&roots_vec);
+    let all_nodes_pinner = Trie2::all_nodes(&roots_vec);
 
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
@@ -430,7 +430,7 @@ pub fn optimize_trie2_size(
     prune_dead_paths_trie2(roots);
     merge_nodes_trie2(roots);
     let final_roots: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(&final_roots);
+    Trie2::recompute_all_max_depths(&final_roots);
 }
 
 fn trie2_shape_hash(
@@ -627,7 +627,7 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Preco
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(&roots_vec);
+    let all_nodes = Trie2::all_nodes(&roots_vec);
 
     let pb = ProgressBar::new(all_nodes.len() as u64);
     pb.set_style(
@@ -660,9 +660,9 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Preco
 
     // Recompute depths after structural changes from merging
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(&final_roots_vec);
+    Trie2::recompute_all_max_depths(&final_roots_vec);
 
-    pb.finish_with_message("Finished merging Trie 2 nodes");
+    pb.finish_with_message("Finished merging Trie2 2 nodes");
     crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.values().map(|v| v.len()).sum::<usize>());
 }
 
@@ -759,19 +759,19 @@ pub fn compress_trie2_edges(
     roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
     god: &Trie2GodWrapper,
 ) {
-    crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
+    crate::debug!(2, "Compressing Trie2 2 by merging linear chains...");
     type EdgeKey2 = (usize, Option<StateID>);
 
     // Helper to count incoming edges for each node (both strong and weak).
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let mut changed = true;
     let mut iterations = 0usize;
-    let _all_nodes = Trie::all_nodes(&roots_vec);
+    let _all_nodes = Trie2::all_nodes(&roots_vec);
 
     while changed {
         iterations += 1;
         changed = false;
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie2::all_nodes(&roots_vec);
         let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
         for n in &all_nodes {
             arc_map.insert(Arc::as_ptr(n), n.clone());
@@ -911,7 +911,7 @@ pub fn compress_trie2_edges(
             merge_nodes_trie2(roots);
         }
     }
-    crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
+    crate::debug!(2, "Finished compressing Trie2 2 in {} iteration(s).", iterations);
 }
 
 pub fn clone_trie2_graph(
@@ -982,6 +982,6 @@ pub fn clone_trie2_graph(
     }
 
     // Recompute max_depths in the clone to keep invariants consistent.
-    Trie::recompute_all_max_depths(&[new_root.clone()]);
+    Trie2::recompute_all_max_depths(&[new_root.clone()]);
     (new_root, map)
 }

@@ -1,5 +1,5 @@
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::trie::{EdgeInserter, Trie};
+use crate::datastructures::trie::{EdgeInserter, Trie2};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
