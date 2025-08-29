@@ -1,13 +1,12 @@
 use std::cmp::Ordering;
-// #![deny(clippy::iter_over_hash_type)]
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
-use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::datastructures::ArcPtrWrapper;
-use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::constraint::GodWrapper;
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
@@ -20,14 +19,144 @@ use profiler_macro::time_it;
 /// EK: type of the edge key (must be Ord).
 /// EV: type of the edge value.
 /// T: type of the value stored within the node.
+///
+/// NOTE: This node no longer stores Arc/RwLock pointers to other nodes. Instead,
+/// children reference other nodes by their index (Trie2Index) in an Arena. Any access
+/// to nodes (read/write of value, children traversal, depth recomputation, etc.) now
+/// requires passing a reference to the Arena that owns the nodes.
 #[derive(Debug, Clone)]
 pub struct Trie2<EK: Ord, EV, T> {
     pub value: T,
-    /// Stores a map from EdgeKey to a map of destination nodes and edge values.
-    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, EV>>,
+    /// Stores a map from EdgeKey to a map of destination node indices and edge values.
+    children: BTreeMap<EK, OrderedHashMap<Trie2Index, EV>>,
     /// The “longest distance” from some source node (as computed by recompute_all_max_depths).
     /// Defaults to usize::MAX and is only updated when the user calls recompute_all_max_depths.
     pub max_depth: usize,
+}
+
+/// An index into the Arena for a Trie2 node.
+/// This is the light-weight replacement for Arc<RwLock<Trie2<...>>> in external code.
+///
+/// It provides `read(&arena)` and `write(&arena)` methods that mimic RwLock's API:
+/// both return Option<Guard>. In most code you'll immediately call `.expect(...)` or `.unwrap()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Trie2Index {
+    index: Index,
+}
+
+impl Trie2Index {
+    pub fn new(index: Index) -> Self {
+        Trie2Index { index }
+    }
+
+    pub fn as_usize(self) -> usize {
+        self.index.as_usize()
+    }
+
+    pub fn as_index(self) -> Index {
+        self.index
+    }
+
+    /// Read-locks the Arena and returns a guard that derefs to &Trie2 at this index.
+    /// Returns None if the index does not exist.
+    pub fn read<'a, EK: Ord, EV, T>(
+        self,
+        arena: &'a Arena<Trie2<EK, EV, T>>,
+    ) -> Option<Trie2ReadGuard<'a, EK, EV, T>> {
+        let guard = arena.values.read().ok()?;
+        if !guard.contains_key(&self.index.as_usize()) {
+            return None;
+        }
+        Some(Trie2ReadGuard {
+            guard,
+            index: self.index.as_usize(),
+        })
+    }
+
+    /// Write-locks the Arena and returns a guard that derefs to &mut Trie2 at this index.
+    /// Returns None if the index does not exist.
+    pub fn write<'a, EK: Ord, EV, T>(
+        self,
+        arena: &'a Arena<Trie2<EK, EV, T>>,
+    ) -> Option<Trie2WriteGuard<'a, EK, EV, T>> {
+        let guard = arena.values.write().ok()?;
+        if !guard.contains_key(&self.index.as_usize()) {
+            return None;
+        }
+        Some(Trie2WriteGuard {
+            guard,
+            index: self.index.as_usize(),
+        })
+    }
+
+    /// Convenience constructor from usize.
+    pub fn from_usize(i: usize) -> Self {
+        Trie2Index { index: Index::from(i) }
+    }
+}
+
+impl From<Index> for Trie2Index {
+    fn from(i: Index) -> Self {
+        Trie2Index { index: i }
+    }
+}
+
+impl From<Trie2Index> for Index {
+    fn from(ti: Trie2Index) -> Self {
+        ti.index
+    }
+}
+
+impl From<usize> for Trie2Index {
+    fn from(u: usize) -> Self {
+        Trie2Index { index: Index::from(u) }
+    }
+}
+
+impl From<Trie2Index> for usize {
+    fn from(ti: Trie2Index) -> usize {
+        ti.index.as_usize()
+    }
+}
+
+/// A read guard that keeps the Arena's internal RwLockReadGuard alive and provides
+/// immutable access to a Trie2 node at a given index via Deref.
+pub struct Trie2ReadGuard<'a, EK: Ord, EV, T> {
+    guard: RwLockReadGuard<'a, BTreeMap<usize, Trie2<EK, EV, T>>>,
+    index: usize,
+}
+
+impl<'a, EK: Ord, EV, T> Deref for Trie2ReadGuard<'a, EK, EV, T> {
+    type Target = Trie2<EK, EV, T>;
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .get(&self.index)
+            .expect("Trie2ReadGuard: index not found in arena map")
+    }
+}
+
+/// A write guard that keeps the Arena's internal RwLockWriteGuard alive and provides
+/// mutable access to a Trie2 node at a given index via Deref/DerefMut.
+pub struct Trie2WriteGuard<'a, EK: Ord, EV, T> {
+    guard: RwLockWriteGuard<'a, BTreeMap<usize, Trie2<EK, EV, T>>>,
+    index: usize,
+}
+
+impl<'a, EK: Ord, EV, T> Deref for Trie2WriteGuard<'a, EK, EV, T> {
+    type Target = Trie2<EK, EV, T>;
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .get(&self.index)
+            .expect("Trie2WriteGuard: index not found in arena map")
+    }
+}
+
+impl<'a, EK: Ord, EV, T> DerefMut for Trie2WriteGuard<'a, EK, EV, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .get_mut(&self.index)
+            .expect("Trie2WriteGuard: index not found in arena map")
+    }
 }
 
 impl<EK, EV, T> JSONConvertible for Trie2<EK, EV, T>
@@ -36,223 +165,100 @@ where
     EV: Clone + JSONConvertible,
     T: Clone + JSONConvertible,
 {
+    /// Note: With the index-based design, we only serialize this node's local data:
+    /// - value
+    /// - max_depth
+    /// - children: encoded as [EK_json, [[child_index, EV_json], ...]]
+    ///
+    /// We do NOT expand into a "nodes" array (no BFS). This format is concise and avoids
+    /// requiring access to the Arena during serialization.
     fn to_json(&self) -> JSONNode {
-        let mut nodes_json_list: Vec<JSONNode> = Vec::new();
-        // Maps the raw pointer of an Arc<RwLock<Trie2>> to its index in nodes_json_list
-        let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie2<EK, EV, T>>, usize> = HashMap::new();
-        // Queue for BFS traversal, storing Arcs to keep them alive and allow locking
-        let mut bfs_q: VecDeque<Arc<RwLock<Trie2<EK, EV, T>>>> = VecDeque::new();
-
-        // --- Step 1: Serialize `self` (the root node for this call) ---
-        // `self` is node at index 0.
-        // We need to store the JSON representation of `self`'s direct data.
-        // Since `self` is not an Arc here, we handle it specially as the first node.
-        // Its children, which are Arcs, will be processed via the BFS queue.
-        let root_idx = 0;
-        nodes_json_list.push(JSONNode::Null); // Placeholder for root, will be filled after processing its children.
-
-        let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
-
-        // Serialize children
+        let mut children_json = Vec::new();
         for (edge_key, destinations_map) in &self.children {
             let ek_json = edge_key.to_json();
             let mut dests_json = Vec::new();
-
-            for (node_ptr, edge_val) in destinations_map {
-                let child_arc = node_ptr.as_arc().clone();
-                let child_arc_ptr = Arc::as_ptr(&child_arc);
-                let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
-                    Some(idx) => *idx,
-                    None => {
-                        let new_idx = nodes_json_list.len();
-                        arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                        bfs_q.push_back(child_arc);
-                        nodes_json_list.push(JSONNode::Null);
-                        new_idx
-                    }
-                };
+            for (child_idx, edge_val) in destinations_map {
                 let dest_entry = JSONNode::Array(vec![
-                    child_idx.to_json(),
+                    usize::from((*child_idx).into()).to_json(),
                     edge_val.to_json(),
                 ]);
                 dests_json.push(dest_entry);
             }
             if !dests_json.is_empty() {
-                root_children_json_data.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(dests_json)]));
+                children_json.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dests_json)]));
             }
-        }
-
-        // Fill in the root node's (self's) data
-        nodes_json_list[root_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
-            ("value".to_string(), self.value.to_json()),
-            ("max_depth".to_string(), self.max_depth.to_json()),
-            ("children".to_string(), JSONNode::Array(root_children_json_data))
-        ]));
-
-        // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
-        while let Some(current_arc) = bfs_q.pop_front() {
-            let current_arc_ptr = Arc::as_ptr(&current_arc);
-            let current_node_json_idx = *arc_ptr_to_idx_map.get(&current_arc_ptr)
-                .expect("Node in BFS queue must have an assigned index");
-
-            let node_guard = current_arc.read().expect("RwLock poisoned during Trie2 serialization (BFS part)");
-            let mut current_node_children_json_bfs = Vec::new();
-
-            // Serialize children for the current node
-            for (edge_key, destinations_map) in &node_guard.children {
-                let ek_json = edge_key.to_json();
-                let mut dests_json_bfs = Vec::new();
-
-                for (node_ptr, edge_val) in destinations_map {
-                    let child_arc = node_ptr.as_arc().clone();
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
-                        Some(idx) => *idx,
-                        None => {
-                            let new_idx = nodes_json_list.len();
-                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
-                            bfs_q.push_back(child_arc);
-                            nodes_json_list.push(JSONNode::Null);
-                            new_idx
-                        }
-                    };
-                    let dest_entry = JSONNode::Array(vec![
-                        child_idx.to_json(),
-                        edge_val.to_json(),
-                    ]);
-                    dests_json_bfs.push(dest_entry);
-                }
-                if !dests_json_bfs.is_empty() {
-                    current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json.clone(), JSONNode::Array(dests_json_bfs)]));
-                }
-            }
-
-            // Fill in the data for the current node from the BFS queue
-            nodes_json_list[current_node_json_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
-                ("value".to_string(), node_guard.value.to_json()),
-                ("max_depth".to_string(), node_guard.max_depth.to_json()),
-                ("children".to_string(), JSONNode::Array(current_node_children_json_bfs))
-            ]));
         }
 
         JSONNode::Object(BTreeMap::from_iter(vec![
-            ("nodes".to_string(), JSONNode::Array(nodes_json_list)),
-            ("root_idx".to_string(), root_idx.to_json()),
+            ("value".to_string(), self.value.to_json()),
+            ("max_depth".to_string(), self.max_depth.to_json()),
+            ("children".to_string(), JSONNode::Array(children_json)),
         ]))
     }
 
+    /// Parses the local-node JSON format produced by to_json above.
+    /// This reconstructs a Trie2 node that references children by indices only.
+    /// The Arena is not created/returned here; the caller is expected to manage
+    /// nodes in an Arena externally.
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let nodes_json = obj.remove("nodes").ok_or_else(|| "Missing 'nodes' field for Trie2 deserialization".to_string())?;
-                let root_idx_json = obj.remove("root_idx").ok_or_else(|| "Missing 'root_idx' field for Trie2 deserialization".to_string())?;
+                let value_json = obj
+                    .remove("value")
+                    .ok_or_else(|| "Missing 'value' field for Trie2 deserialization".to_string())?;
+                let max_depth_json = obj
+                    .remove("max_depth")
+                    .ok_or_else(|| "Missing 'max_depth' field for Trie2 deserialization".to_string())?;
+                let children_json = obj
+                    .remove("children")
+                    .ok_or_else(|| "Missing 'children' field for Trie2 deserialization".to_string())?;
 
-                let nodes_array = match nodes_json {
-                    JSONNode::Array(arr) => arr,
-                    _ => return Err("'nodes' field is not an array".to_string()),
+                let value = T::from_json(value_json)?;
+                let max_depth = usize::from_json(max_depth_json)?;
+
+                let mut children: BTreeMap<EK, OrderedHashMap<Trie2Index, EV>> = BTreeMap::new();
+                let children_array = match children_json {
+                    JSONNode::Array(a) => a,
+                    _ => return Err("'children' must be an array".to_string()),
                 };
-                let root_idx = usize::from_json(root_idx_json)?;
+                for entry in children_array {
+                    match entry {
+                        JSONNode::Array(pair) if pair.len() == 2 => {
+                            let ek_json = &pair[0];
+                            let dests_json = &pair[1];
+                            let ek = EK::from_json(ek_json.clone())?;
+                            let mut map: OrderedHashMap<Trie2Index, EV> = OrderedHashMap::new();
 
-                if root_idx >= nodes_array.len() {
-                    return Err(format!("Root index {} is out of bounds for nodes array of length {}", root_idx, nodes_array.len()));
-                }
-
-                let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie2<EK, EV, T>>>> = HashMap::new();
-
-                let mut pb_pass1 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 1/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-                // Pass 1: Create node shells (value, max_depth, empty children)
-                for (i, node_data_json) in nodes_array.iter().enumerate() {
-                    match node_data_json {
-                        JSONNode::Object(n_obj) => {
-                            let value_json = n_obj.get("value").ok_or_else(|| format!("Node at index {} missing 'value'", i))?;
-                            let max_depth_json = n_obj.get("max_depth").ok_or_else(|| format!("Node at index {} missing 'max_depth'", i))?;
-
-                            let value = T::from_json(value_json.clone())?;
-                            let max_depth = usize::from_json(max_depth_json.clone())?;
-
-                            let new_node_arc = Arc::new(RwLock::new(Trie2 {
-                                value,
-                                children: BTreeMap::new(),
-                                max_depth,
-                            }));
-                            deserialized_arcs.insert(i, new_node_arc);
-                        }
-                        _ => return Err(format!("Node data at index {} is not an object", i)),
-                    }
-                    let _ = pb_pass1.update(1);
-                }
-
-                let mut pb_pass2 = tqdm!(total = nodes_array.len(), desc = "Linking nodes (pass 2/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-                // Pass 2: Link children by populating the `children` BTreeMaps
-                for (i, node_data_json) in nodes_array.iter().enumerate() {
-                    match node_data_json {
-                        JSONNode::Object(n_obj) => {
-                            let current_node_arc = deserialized_arcs.get(&i)
-                                .ok_or_else(|| format!("Failed to find node for index {} in Pass 2", i))?
-                                .clone();
-                            let mut current_node_guard = current_node_arc.write().unwrap();
-
-                            let children_json_outer_array = n_obj.get("children")
-                                .ok_or_else(|| format!("Node at index {} missing 'children' field in Pass 2", i))?;
-
-                            match children_json_outer_array {
-                                JSONNode::Array(children_ek_map_array) => {
-                                    for ek_entry_json in children_ek_map_array {
-                                        match ek_entry_json {
-                                            JSONNode::Array(ek_pair) if ek_pair.len() == 2 => {
-                                                let ek_json = &ek_pair[0];
-                                                let dest_map_json_array = &ek_pair[1];
-
-                                                let edge_key = EK::from_json(ek_json.clone())?;
-                                                let mut destinations_for_this_ek = OrderedHashMap::new();
-
-                                                match dest_map_json_array {
-                                                    JSONNode::Array(dest_array_inner) => {
-                                                        for child_ev_pair_json in dest_array_inner {
-                                                            match child_ev_pair_json {
-                                                                JSONNode::Array(child_ev_pair_inner) if child_ev_pair_inner.len() == 2 => {
-                                                                    let child_idx_json = &child_ev_pair_inner[0];
-                                                                    let ev_json = &child_ev_pair_inner[1];
-
-                                                                    let child_idx = usize::from_json(child_idx_json.clone())?;
-                                                                    let child_arc = deserialized_arcs.get(&child_idx)
-                                                                        .ok_or_else(|| format!("Child index {} not found for node {} in Pass 2", child_idx, i))?
-                                                                        .clone();
-                                                                    let edge_value = EV::from_json(ev_json.clone())?;
-                                                                    destinations_for_this_ek.insert(ArcPtrWrapper::new(child_arc), edge_value);
-                                                                }
-                                                                _ => return Err(format!("Invalid child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
-                                                            }
-                                                        }
-                                                    }
-                                                    _ => return Err(format!("Children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
-                                                }
-                                                current_node_guard.children.insert(edge_key, destinations_for_this_ek);
+                            match dests_json {
+                                JSONNode::Array(dests) => {
+                                    for d in dests {
+                                        match d {
+                                            JSONNode::Array(child_ev) if child_ev.len() == 2 => {
+                                                let child_idx = usize::from_json(child_ev[0].clone())?;
+                                                let ev = EV::from_json(child_ev[1].clone())?;
+                                                map.insert(Trie2Index::from(child_idx), ev);
                                             }
-                                            _ => return Err(format!("Invalid EK-children_map_array pair format for node {}", i)),
+                                            _ => {
+                                                return Err("Invalid [child_index, edge_value] pair".to_string());
+                                            }
                                         }
                                     }
                                 }
-                                _ => return Err(format!("'children' field for node {} is not an array of EK-entries", i)),
+                                _ => return Err("children[*][1] must be an array of [child_index, edge_value]".to_string()),
                             }
+                            children.insert(ek, map);
                         }
-                        _ => unreachable!("Node data should be an object, checked in Pass 1"),
+                        _ => return Err("Each children entry must be [edge_key, [[child_index, edge_value], ...]]".to_string()),
                     }
-                    let _ = pb_pass2.update(1);
                 }
 
-                let root_arc_final = deserialized_arcs.get(&root_idx)
-                    .ok_or_else(|| format!("Root index {} not found in deserialized_arcs map after linking", root_idx))?
-                    .clone();
-
-                // The trait requires returning Self, so we clone the content of the root Arc.
-                // The shared graph structure is maintained by the Arcs held within the children maps.
-                let root_trie_content = root_arc_final.read().unwrap().clone();
-                Ok(root_trie_content)
+                Ok(Trie2 {
+                    value,
+                    children,
+                    max_depth,
+                })
             }
-            _ => Err("Expected JSONNode::Object for Trie2 graph structure".to_string()),
+            _ => Err("Expected JSONNode::Object for Trie2 node".to_string()),
         }
     }
 }
@@ -271,46 +277,54 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
         }
     }
 
-    pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<RwLock<Trie2<EK, EV, T>>> {
-        let new_node = Arc::new(RwLock::new(Trie2::new(value)));
-        let new_node_comparable = ArcPtrWrapper::new(new_node.clone());
-        self.children.entry(edge_key).or_default().insert(new_node_comparable, edge_value);
-        new_node.clone()
+    /// Create a new destination node in the arena and insert an edge to it.
+    /// Returns the index of the newly created node.
+    pub fn force_insert_to_new_node(
+        &mut self,
+        arena: &Arena<Trie2<EK, EV, T>>,
+        edge_key: EK,
+        edge_value: EV,
+        value: T,
+    ) -> Trie2Index {
+        let new_index = arena.insert(Trie2::new(value));
+        self.children
+            .entry(edge_key)
+            .or_default()
+            .insert(new_index, edge_value);
+        new_index
     }
 
-    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<Trie2<EK, EV, T>>>) {
-        let dst_comparable = ArcPtrWrapper::new(dst.clone());
-        self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
+    /// Insert an edge to an existing destination node index.
+    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: Trie2Index) {
+        self.children.entry(edge_key).or_default().insert(dst, edge_value);
     }
 
-    pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<RwLock<Trie2<EK, EV, T>>>) -> bool {
-        let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
-        self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
+    pub fn already_has_dst(&self, edge_key: EK, dst: Trie2Index) -> bool {
+        self.children
+            .get(&edge_key)
+            .map_or(false, |dest_map| dest_map.contains_key(&dst))
     }
 
-    pub fn already_has_dst_for_any_key(&self, dst: &Arc<RwLock<Trie2<EK, EV, T>>>) -> bool {
-        let lookup_key = ArcPtrWrapper::new(dst.clone());
-        self.children.values().any(|dest_map| dest_map.contains_key(&lookup_key))
+    pub fn already_has_dst_for_any_key(&self, dst: Trie2Index) -> bool {
+        self.children.values().any(|dest_map| dest_map.contains_key(&dst))
     }
 
-    pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<Trie2<EK, EV, T>>>) -> Option<&EV> {
-        let lookup_key = ArcPtrWrapper::new(dst.clone());
-        self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
+    pub fn get_edge_value(&self, edge_key: EK, dst: Trie2Index) -> Option<&EV> {
+        self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&dst))
     }
 
-    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<RwLock<Trie2<EK, EV, T>>>) -> Option<&mut EV> {
-        let lookup_key = ArcPtrWrapper::new(dst.clone());
-        self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
+    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: Trie2Index) -> Option<&mut EV> {
+        self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&dst))
     }
 
-    /// Inserts an edge without any cycle checks or automatic depth updates.
+    /// Inserts an edge (no cycle checks).
     /// Depths can be recomputed later by calling `recompute_all_max_depths`.
     #[time_it]
     pub fn try_insert(
         &mut self,
         edge_key: EK,
         edge_value: &mut Option<EV>,
-        child: Arc<RwLock<Trie2<EK, EV, T>>>,
+        child: Trie2Index,
     ) {
         self.try_insert_unchecked(edge_key, edge_value, child)
     }
@@ -321,19 +335,18 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
         &mut self,
         edge_key: EK,
         edge_value: &mut Option<EV>,
-        child: Arc<RwLock<Trie2<EK, EV, T>>>,
+        child: Trie2Index,
     ) {
-        let child_comparable = ArcPtrWrapper::new(child.clone());
         self.children
             .entry(edge_key)
             .or_default()
-            .insert(child_comparable, edge_value.take().expect("edge_value must be Some when inserting"));
+            .insert(child, edge_value.take().expect("edge_value must be Some when inserting"));
     }
 
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&OrderedHashMap<ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, EV>>
+    ) -> Option<&OrderedHashMap<Trie2Index, EV>>
     {
         self.children.get(edge_key)
     }
@@ -341,16 +354,16 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, EV>>
+    ) -> Option<&mut OrderedHashMap<Trie2Index, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
-    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<Trie2Index, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<Trie2Index, EV>> {
         &mut self.children
     }
 
@@ -358,31 +371,35 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
         self.children.is_empty()
     }
 
-    /// Collects all unique nodes (by pointer) reachable from the given roots (BFS).
-    pub fn all_nodes(roots: &[Arc<RwLock<Trie2<EK, EV, T>>>]) -> Vec<Arc<RwLock<Trie2<EK, EV, T>>>> {
-        let mut visited_arcs: HashSet<*const RwLock<Trie2<EK, EV, T>>> = HashSet::new();
+    /// Collects all unique nodes (by index) reachable from the given roots (BFS).
+    pub fn all_nodes(
+        arena: &Arena<Trie2<EK, EV, T>>,
+        roots: &[Trie2Index],
+    ) -> Vec<Trie2Index> {
+        let mut visited: HashSet<usize> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
-        for root in roots {
-            if visited_arcs.insert(Arc::as_ptr(root)) {
-                queue.push_back(root.clone());
+        for &root in roots {
+            if visited.insert(root.as_usize()) {
+                queue.push_back(root);
             }
         }
 
-        while let Some(node_arc) = queue.pop_front() {
-            result.push(node_arc.clone()); // Add the node itself to the result
+        while let Some(node_idx) = queue.pop_front() {
+            result.push(node_idx);
 
-            // Lock the node to get its children
-            let node_guard = node_arc.read().expect("RwLock poisoned during BFS");
-            for children_map in node_guard.children.values() {
-                for node_ptr in children_map.keys() {
-                    let child_arc = node_ptr.as_arc().clone();
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    if visited_arcs.insert(child_arc_ptr) {
-                        queue.push_back(child_arc.clone());
+            if let Some(guard) = node_idx.read(arena) {
+                for children_map in guard.children.values() {
+                    for (child_idx, _) in children_map.iter() {
+                        let c_u = child_idx.as_usize();
+                        if visited.insert(c_u) {
+                            queue.push_back(*child_idx);
+                        }
                     }
                 }
+            } else {
+                panic!("Trie2::all_nodes: node index {} not found in arena", node_idx.as_usize());
             }
         }
         result
@@ -394,61 +411,67 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
     /// but not incorrect for traversal.
     ///
     /// Uses a topological order (Kahn's algorithm). Assumes the graph is acyclic.
-    pub fn recompute_all_max_depths(roots: &[Arc<RwLock<Self>>]) {
-        let all_nodes = Self::all_nodes(roots);
+    pub fn recompute_all_max_depths(
+        arena: &Arena<Trie2<EK, EV, T>>,
+        roots: &[Trie2Index],
+    ) {
+        let all_nodes = Self::all_nodes(arena, roots);
         if all_nodes.is_empty() {
             return;
         }
 
-        let mut node_map: HashMap<*const RwLock<Self>, Arc<RwLock<Self>>> = HashMap::new();
-        for node_arc in &all_nodes {
-            node_map.insert(Arc::as_ptr(node_arc), node_arc.clone());
-        }
+        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+        let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
 
-        let mut in_degree: HashMap<*const RwLock<Self>, usize> = HashMap::new();
-        let mut adj: HashMap<*const RwLock<Self>, Vec<*const RwLock<Self>>> = HashMap::new();
+        for node_idx in &all_nodes {
+            let u = node_idx.as_usize();
+            in_degree.entry(u).or_insert(0);
+            adj.entry(u).or_default();
 
-        for node_arc in &all_nodes {
-            let node_ptr = Arc::as_ptr(node_arc);
-            in_degree.entry(node_ptr).or_insert(0);
-            adj.entry(node_ptr).or_default();
-
-            let node_guard = node_arc.read().unwrap();
-            for child_arc in node_guard.children.values().flat_map(|m| m.keys()).map(|arc_wrapper| arc_wrapper.as_arc().clone()) {
-                let child_ptr = Arc::as_ptr(&child_arc);
-                adj.entry(node_ptr).or_default().push(child_ptr);
-                *in_degree.entry(child_ptr).or_default() += 1;
+            let guard = node_idx
+                .read(arena)
+                .expect("Arena read failed during recompute_all_max_depths");
+            for child_idx in guard
+                .children
+                .values()
+                .flat_map(|m| m.keys().cloned())
+            {
+                let v = child_idx.as_usize();
+                adj.entry(u).or_default().push(v);
+                *in_degree.entry(v).or_default() += 1;
             }
         }
 
-        // Initialize depths to 0 for sources and 0 for others (we'll compute actual values).
+        // Initialize depths to 0 for all nodes; sources will be processed first.
         let mut queue = VecDeque::new();
-        for node_arc in &all_nodes {
-            let node_ptr = Arc::as_ptr(node_arc);
-            if in_degree.get(&node_ptr).cloned().unwrap_or(0) == 0 {
-                queue.push_back(node_ptr);
-                node_arc.write().unwrap().max_depth = 0;
-            } else {
-                node_arc.write().unwrap().max_depth = 0;
+        for node_idx in &all_nodes {
+            let u = node_idx.as_usize();
+            if in_degree.get(&u).cloned().unwrap_or(0) == 0 {
+                queue.push_back(u);
             }
+            let mut w = node_idx
+                .write(arena)
+                .expect("Arena write failed when initializing depths");
+            w.max_depth = 0;
         }
 
-        while let Some(u_ptr) = queue.pop_front() {
-            let u_arc = node_map.get(&u_ptr).unwrap();
-            let u_depth = u_arc.read().unwrap().max_depth;
+        while let Some(u) = queue.pop_front() {
+            let u_depth = {
+                let g = Trie2Index::from(u).read(arena).expect("read");
+                g.max_depth
+            };
 
-            if let Some(children_ptrs) = adj.get(&u_ptr) {
-                for &v_ptr in children_ptrs {
-                    let v_arc = node_map.get(&v_ptr).unwrap();
+            if let Some(children) = adj.get(&u) {
+                for &v in children {
                     {
-                        let mut v_guard = v_arc.write().unwrap();
-                        v_guard.max_depth = v_guard.max_depth.max(u_depth + 1);
+                        let mut vg = Trie2Index::from(v).write(arena).expect("write");
+                        vg.max_depth = vg.max_depth.max(u_depth + 1);
                     }
 
-                    let v_in_degree = in_degree.get_mut(&v_ptr).unwrap();
-                    *v_in_degree -= 1;
-                    if *v_in_degree == 0 {
-                        queue.push_back(v_ptr);
+                    let deg = in_degree.get_mut(&v).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(v);
                     }
                 }
             }
@@ -457,13 +480,16 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
 
     /// Recomputes the max_depth of this node based on its children's depths.
     /// Returns true if the depth changed.
-    /// This does NOT propagate changes. The caller is responsible for propagation
-    /// if needed. This is typically safe to call in a post-order traversal where
-    /// children's depths are finalized first.
-    pub fn recompute_max_depth(&mut self) -> bool {
-        let new_max_depth = self.children.values()
-            .flat_map(|dest_map| dest_map.keys().map(|arc_wrapper| arc_wrapper.as_arc().clone()))
-            .map(|child_arc| child_arc.read().unwrap().max_depth + 1)
+    /// This does NOT propagate changes.
+    pub fn recompute_max_depth(&mut self, arena: &Arena<Trie2<EK, EV, T>>) -> bool {
+        let new_max_depth = self
+            .children
+            .values()
+            .flat_map(|dest_map| dest_map.keys().cloned())
+            .map(|child_idx| {
+                let g = child_idx.read(arena).expect("Arena read failed in recompute_max_depth");
+                g.max_depth + 1
+            })
             .max()
             .unwrap_or(0);
 
@@ -476,138 +502,103 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
     }
 }
 
-// Helper to get the raw pointer to the Trie2 data from an Arc<RwLock<Trie2>>.
-/// Panics if the mutex is poisoned. Returns None if lock fails (WouldBlock).
-/// Use with caution: Only use when you know a failed lock means the current thread holds it.
-/// Consider using `Arc::as_ptr` for identity checks instead if possible.
-#[allow(dead_code)]
-pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<Trie2<EK, EV, T>>>) -> Option<*const Trie2<EK, EV, T>> {
-    match node_arc.try_read() {
-        Ok(guard) => {
-            let ptr = &*guard as *const Trie2<EK, EV, T>;
-            Some(ptr)
-        }
-        Err(TryLockError::Poisoned(p)) => {
-            panic!("RwLock poisoned when trying to get node data pointer: {:?}", p);
-        }
-        Err(TryLockError::WouldBlock) => {
-            None
-        }
-    }
-}
-
-/// Helper to get the raw pointer to the Trie2 data from an Arc<RwLock<Trie2>>.
-/// Panics if the mutex is poisoned or if locking fails (blocking lock).
-#[allow(dead_code)]
-pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<Trie2<EK, EV, T>>>) -> *const Trie2<EK, EV, T> {
-    let guard = node_arc.read().expect("RwLock poisoned or lock failed when getting node pointer");
-    &*guard as *const _
-}
-
-// Add this impl block for the recursive comparison helper
+// Add this impl block for the recursive comparison helper (index-based)
 impl<EK, EV, T> Trie2<EK, EV, T>
 where
-    EK: Ord,
+    EK: Ord + Clone,
     EV: PartialEq + Clone,
     T: PartialEq,
 {
-    /// Recursively compares two Trie2 nodes wrapped in Arcs for equality.
+    /// Recursively compares two Trie2 nodes referenced by indices for equality across an Arena.
     ///
-    /// - `self_arc`, `other_arc`: The Arcs pointing to the Trie2 nodes to compare.
-    /// - `comparison_cache`: Tracks pairs of (self_node_ptr, other_node_ptr) and their comparison result (bool).
-    ///   This cache is important for efficiency on DAGs with shared subgraphs: it avoids re-comparing pairs
-    ///   already processed and ensures consistent topology checks.
-    fn compare_arcs_recursive(
-        self_arc: &Arc<RwLock<Trie2<EK, EV, T>>>,
-        other_arc: &Arc<RwLock<Trie2<EK, EV, T>>>,
-        comparison_cache: &mut HashMap<(*const RwLock<Self>, *const RwLock<Self>), bool>,
+    /// - `a_idx`, `b_idx`: The indices pointing to the Trie2 nodes to compare.
+    /// - `comparison_cache`: Tracks pairs of (a_usize, b_usize) and their comparison result (bool).
+    fn compare_indexes_recursive(
+        arena: &Arena<Trie2<EK, EV, T>>,
+        a_idx: Trie2Index,
+        b_idx: Trie2Index,
+        comparison_cache: &mut HashMap<(usize, usize), bool>,
     ) -> bool {
-        let self_ptr = Arc::as_ptr(self_arc);
-        let other_ptr = Arc::as_ptr(other_arc);
+        let a_u = a_idx.as_usize();
+        let b_u = b_idx.as_usize();
 
-        if self_ptr == other_ptr {
+        if a_u == b_u {
             return true;
         }
 
-        // Canonical cache key: (min_ptr, max_ptr).
-        let (cache_key_ptr1, cache_key_ptr2) = if self_ptr < other_ptr {
-            (self_ptr, other_ptr)
-        } else {
-            (other_ptr, self_ptr)
-        };
+        let (k1, k2) = if a_u < b_u { (a_u, b_u) } else { (b_u, a_u) };
 
-        if let Some(&cached_result) = comparison_cache.get(&(cache_key_ptr1, cache_key_ptr2)) {
-            return cached_result;
+        if let Some(&cached) = comparison_cache.get(&(k1, k2)) {
+            return cached;
         }
 
-        // Optimistically mark this pair as true; will be updated to false on mismatch.
-        comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), true);
+        // Optimistically assume true; update to false on mismatch.
+        comparison_cache.insert((k1, k2), true);
 
-        let self_node_guard = match self_arc.try_read() {
-            Ok(g) => g,
-            Err(_) => {
-                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+        let a_guard = match a_idx.read(arena) {
+            Some(g) => g,
+            None => {
+                comparison_cache.insert((k1, k2), false);
                 return false;
             }
         };
-        let other_node_guard = match other_arc.try_read() {
-            Ok(g) => g,
-            Err(_) => {
-                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+        let b_guard = match b_idx.read(arena) {
+            Some(g) => g,
+            None => {
+                comparison_cache.insert((k1, k2), false);
                 return false;
             }
         };
-
-        let self_node = &*self_node_guard;
-        let other_node = &*other_node_guard;
 
         // 1. Compare non-recursive fields: value and max_depth.
-        if self_node.value != other_node.value || self_node.max_depth != other_node.max_depth {
-            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+        if a_guard.value != b_guard.value || a_guard.max_depth != b_guard.max_depth {
+            comparison_cache.insert((k1, k2), false);
             return false;
         }
 
         // 2. Compare children structure (number of distinct edge keys).
-        if self_node.children.len() != other_node.children.len() {
-            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+        if a_guard.children.len() != b_guard.children.len() {
+            comparison_cache.insert((k1, k2), false);
             return false;
         }
 
         // 3. Compare children for each edge key.
-        for (self_ek, self_dest_map) in &self_node.children {
-            match other_node.children.get(self_ek) {
+        for (a_ek, a_dest_map) in &a_guard.children {
+            match b_guard.children.get(a_ek) {
                 None => {
-                    comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+                    comparison_cache.insert((k1, k2), false);
                     return false;
                 }
-                Some(other_dest_map) => {
-                    if self_dest_map.len() != other_dest_map.len() {
-                        comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+                Some(b_dest_map) => {
+                    if a_dest_map.len() != b_dest_map.len() {
+                        comparison_cache.insert((k1, k2), false);
                         return false;
                     }
 
-                    let self_child_pairs: Vec<(Arc<RwLock<Trie2<EK, EV, T>>>, EV)> = self_dest_map.iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                    let a_child_pairs: Vec<(Trie2Index, EV)> = a_dest_map
+                        .iter()
+                        .map(|(idx, ev)| (*idx, ev.clone()))
                         .collect();
 
-                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie2<EK, EV, T>>>, EV)> = other_dest_map.iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                    let mut b_child_pairs: Vec<(Trie2Index, EV)> = b_dest_map
+                        .iter()
+                        .map(|(idx, ev)| (*idx, ev.clone()))
                         .collect();
 
-                    'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
-                        let mut found_match_for_current_self_pair = false;
-                        for i in 0..other_child_pairs.len() {
-                            if s_ev == &other_child_pairs[i].1 {
-                                let o_arc_for_recursion = other_child_pairs[i].0.clone();
-                                if Trie2::compare_arcs_recursive(s_arc, &o_arc_for_recursion, comparison_cache) {
-                                    other_child_pairs.remove(i);
-                                    found_match_for_current_self_pair = true;
+                    'outer: for (a_child, a_ev) in &a_child_pairs {
+                        let mut found = false;
+                        for i in 0..b_child_pairs.len() {
+                            if &b_child_pairs[i].1 == a_ev {
+                                let b_child = b_child_pairs[i].0;
+                                if Trie2::compare_indexes_recursive(arena, *a_child, b_child, comparison_cache) {
+                                    b_child_pairs.remove(i);
+                                    found = true;
                                     break;
                                 }
                             }
                         }
-                        if !found_match_for_current_self_pair {
-                            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false);
+                        if !found {
+                            comparison_cache.insert((k1, k2), false);
                             return false;
                         }
                     }
@@ -622,23 +613,29 @@ where
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
-    fn count_all_edges(root_nodes: &[Arc<RwLock<Trie2<EK, EV, T>>>]) -> usize {
-        let mut visited_arcs: HashSet<*const RwLock<Trie2<EK, EV, T>>> = HashSet::new();
-        let mut queue: VecDeque<Arc<RwLock<Trie2<EK, EV, T>>>> = VecDeque::new();
+    fn count_all_edges(
+        arena: &Arena<Trie2<EK, EV, T>>,
+        root_nodes: &[Trie2Index],
+    ) -> usize {
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut queue: VecDeque<Trie2Index> = VecDeque::new();
         let mut total_edges = 0;
 
-        for root in root_nodes {
-            let root_arc_ptr = Arc::as_ptr(root);
-            if visited_arcs.insert(root_arc_ptr) {
-                queue.push_back(root.clone());
+        for &root in root_nodes {
+            if visited.insert(root.as_usize()) {
+                queue.push_back(root);
             }
         }
 
-        while let Some(node_arc) = queue.pop_front() {
-            let node_guard = node_arc.read().expect("RwLock poisoned during edge count");
-            for children_map in node_guard.children.values() {
-                for node_ptr in children_map.keys() {
-                    let child_arc = node_ptr.as_arc(); total_edges += 1; if visited_arcs.insert(Arc::as_ptr(&child_arc)) { queue.push_back(child_arc.clone()); }
+        while let Some(node_idx) = queue.pop_front() {
+            let guard = node_idx.read(arena).expect("RwLock poisoned during edge count");
+            for children_map in guard.children.values() {
+                for (child_idx, _) in children_map.iter() {
+                    total_edges += 1;
+                    let c_u = child_idx.as_usize();
+                    if visited.insert(c_u) {
+                        queue.push_back(*child_idx);
+                    }
                 }
             }
         }
@@ -656,7 +653,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     /// which is suboptimal but not incorrect.
     #[time_it]
     pub fn special_map<V: Clone>(
-        initial_nodes_and_values: Vec<(Arc<RwLock<Trie2<EK, EV, T>>>, V)>,
+        arena: &Arena<Trie2<EK, EV, T>>,
+        initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie2<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&Trie2<EK, EV, T>, &mut V) -> bool,
@@ -664,12 +662,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
         // ------------------------------------------------------------------
-        let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
-        let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
-        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
+        let mut values: HashMap<usize, V> = HashMap::new();
+        let mut stopped_nodes: HashSet<usize> = HashSet::new();
+        let mut todo: BTreeMap<usize, OrderedHashSet<Trie2Index>> = BTreeMap::new();
 
-        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
-        let total_edges = Self::count_all_edges(&initial_nodes);
+        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
+        let total_edges = Self::count_all_edges(arena, &initial_nodes);
         if PROGRESS_BAR_ENABLED {
             println!("Progress bar enabled");
         } else {
@@ -678,31 +676,32 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
         // Seed with the user-supplied starting set
-        for (node_arc, v0) in initial_nodes_and_values {
-            let ptr = Arc::as_ptr(&node_arc);
+        for (node_idx, v0) in initial_nodes_and_values {
+            let ptr = node_idx.as_usize();
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
-            let depth = node_arc.read().expect("poison").max_depth;
-            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+            let depth = node_idx.read(arena).expect("poison").max_depth;
+            todo.entry(depth).or_default().insert(node_idx);
         }
 
         // Main loop ---------------------------------------------------------
-        while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
-                if stopped_nodes.contains(&ptr) { continue; }
+        while let Some((_depth, node_indices)) = todo.pop_first() {
+            for node_idx in &node_indices {
+                let ptr = node_idx.as_usize();
+                if stopped_nodes.contains(&ptr) {
+                    continue;
+                }
 
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
                     None => continue,
                 };
-                let node_arc = node_ptr_wrapper.as_arc();
 
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
-                    let guard = node_arc.read().expect("poison");
+                    let guard = node_idx.read(arena).expect("poison");
                     process(&guard, &mut agg_v)
                 };
 
@@ -712,26 +711,30 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
                 }
 
                 // ---------- propagate to children -------------
-                let edges: Vec<(EK, EV, Arc<RwLock<Self>>)> = {
-                    let guard = node_arc.read().expect("poison");
-                    guard.children
+                let edges: Vec<(EK, EV, Trie2Index)> = {
+                    let guard = node_idx.read(arena).expect("poison");
+                    guard
+                        .children
                         .iter()
                         .flat_map(|(ek, dst_map)| {
-                            dst_map.iter().map(move |(node_ptr, ev)| (ek.clone(), ev.clone(), node_ptr.as_arc().clone()))
+                            let ekc = ek.clone();
+                            dst_map
+                                .iter()
+                                .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
                         })
                         .collect()
                 };
 
-                for (ek, ev, child_arc) in edges {
+                for (ek, ev, child_idx) in edges {
                     let _ = pb.update(1);
-                    let child_ptr = Arc::as_ptr(&child_arc);
+                    let child_ptr = child_idx.as_usize();
 
                     if stopped_nodes.contains(&child_ptr) {
                         continue;
                     }
 
                     let maybe_v = {
-                        let child_guard = child_arc.read().expect("poison");
+                        let child_guard = child_idx.read(arena).expect("poison");
                         step(&agg_v, &ek, &ev, &child_guard)
                     };
                     if let Some(new_v) = maybe_v {
@@ -740,8 +743,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
 
-                        let child_depth = child_arc.read().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                        let child_depth = child_idx.read(arena).expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(child_idx);
                     }
                 }
             }
@@ -756,7 +759,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     /// which is suboptimal but not incorrect.
     #[time_it]
     pub fn special_map_grouped<V, S, I>(
-        initial_nodes_and_values: Vec<(Arc<RwLock<Trie2<EK, EV, T>>>, V)>,
+        arena: &Arena<Trie2<EK, EV, T>>,
+        initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&Trie2<EK, EV, T>, &mut V) -> bool,
@@ -764,46 +768,45 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     where
         V: Clone,
         S: FnMut(
-            &V, &EK, &OrderedHashMap<ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, EV>
+            &V, &EK, &OrderedHashMap<Trie2Index, EV>
         ) -> I,
-        I: IntoIterator<Item = (ArcPtrWrapper<RwLock<Trie2<EK, EV, T>>>, V)>,
+        I: IntoIterator<Item = (Trie2Index, V)>,
     {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler. (Same as special_map)
         // ------------------------------------------------------------------
-        let mut values: HashMap<*const RwLock<Self>, V> = HashMap::new();
-        let mut stopped_nodes: HashSet<*const RwLock<Self>> = HashSet::new();
-        let mut todo: BTreeMap<usize, OrderedHashSet<ArcPtrWrapper<RwLock<Self>>>> = BTreeMap::new();
+        let mut values: HashMap<usize, V> = HashMap::new();
+        let mut stopped_nodes: HashSet<usize> = HashSet::new();
+        let mut todo: BTreeMap<usize, OrderedHashSet<Trie2Index>> = BTreeMap::new();
 
-        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| n.clone()).collect();
-        let total_edges = Self::count_all_edges(&initial_nodes);
+        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
+        let total_edges = Self::count_all_edges(arena, &initial_nodes);
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
         // Seed with the user-supplied starting set
-        for (node_arc, v0) in initial_nodes_and_values {
-            let ptr = Arc::as_ptr(&node_arc);
+        for (node_idx, v0) in initial_nodes_and_values {
+            let ptr = node_idx.as_usize();
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
-            let depth = node_arc.read().expect("poison").max_depth;
-            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+            let depth = node_idx.read(arena).expect("poison").max_depth;
+            todo.entry(depth).or_default().insert(node_idx);
         }
 
         // Main loop ---------------------------------------------------------
-        while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            for node_ptr_wrapper in &node_arc_ptr_wrappers {
-                let ptr = node_ptr_wrapper.as_ref() as *const RwLock<Self>;
+        while let Some((_depth, node_indices)) = todo.pop_first() {
+            for node_idx in &node_indices {
+                let ptr = node_idx.as_usize();
                 if stopped_nodes.contains(&ptr) { continue; }
 
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
                     None => continue,
                 };
-                let node_arc = node_ptr_wrapper.as_arc();
 
                 let proceed = {
-                    let guard = node_arc.read().expect("poison");
+                    let guard = node_idx.read(arena).expect("poison");
                     process(&guard, &mut agg_v)
                 };
 
@@ -813,8 +816,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
                 }
 
                 // ---------- propagate to children (grouped by edge key) -------------
-                let children_by_ek: Vec<(EK, OrderedHashMap<ArcPtrWrapper<RwLock<Self>>, EV>)> = {
-                    let guard = node_arc.read().expect("poison");
+                let children_by_ek: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = {
+                    let guard = node_idx.read(arena).expect("poison");
                     guard.children.iter()
                         .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
                         .collect()
@@ -828,9 +831,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
 
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
 
-                    for (child_node_ptr, new_v) in new_values_for_children {
-                        let child_arc_wrapper = child_node_ptr.clone();
-                        let child_ptr = child_arc_wrapper.as_ref() as *const RwLock<Self>;
+                    for (child_idx, new_v) in new_values_for_children {
+                        let child_ptr = child_idx.as_usize();
 
                         if stopped_nodes.contains(&child_ptr) {
                             continue;
@@ -840,8 +842,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
 
-                        let child_depth = child_arc_wrapper.as_arc().read().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(child_arc_wrapper);
+                        let child_depth = child_idx.read(arena).expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(child_idx);
                     }
                 }
             }
@@ -849,10 +851,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     }
 }
 
-// Implement PartialEq for Trie2
+// Implement PartialEq for Trie2 (shallow: compares value, max_depth, and immediate children lists)
 impl<EK, EV, T> PartialEq for Trie2<EK, EV, T>
 where
-    EK: Ord,
+    EK: Ord + PartialEq,
     EV: PartialEq + Clone,
     T: PartialEq,
 {
@@ -860,48 +862,26 @@ where
         if self.value != other.value || self.max_depth != other.max_depth {
             return false;
         }
-
         if self.children.len() != other.children.len() {
             return false;
         }
-
-        type NodeRwLockPtr<EKK, EVV, TT> = *const RwLock<Trie2<EKK, EVV, TT>>;
-        let mut comparison_cache: HashMap<(NodeRwLockPtr<EK, EV, T>, NodeRwLockPtr<EK, EV, T>), bool> = HashMap::new();
-
-        for (self_ek, self_dest_map) in &self.children {
-            match other.children.get(self_ek) {
+        for (ek, self_map) in &self.children {
+            match other.children.get(ek) {
                 None => return false,
-                Some(other_dest_map) => {
-                    if self_dest_map.len() != other_dest_map.len() {
+                Some(other_map) => {
+                    if self_map.len() != other_map.len() {
                         return false;
                     }
-
-                    let self_child_pairs: Vec<(Arc<RwLock<Trie2<EK, EV, T>>>, &EV)> = self_dest_map
-                        .iter()
-                        .map(|(np, ev)| (np.as_arc().clone(), ev))
-                        .collect();
-
-                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie2<EK, EV, T>>>, EV)> = other_dest_map
-                        .iter()
-                        .map(|(np, ev)| (np.as_arc().clone(), ev.clone()))
-                        .collect();
-
-                    'self_pair_loop: for (s_arc, s_ev) in self_child_pairs {
-                        for i in 0..other_child_pairs.len() {
-                            if s_ev == &other_child_pairs[i].1 {
-                                let o_arc_for_recursion = other_child_pairs[i].0.clone();
-                                if Trie2::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
-                                    other_child_pairs.remove(i);
-                                    continue 'self_pair_loop;
-                                }
-                            }
+                    // OrderedHashMap preserves insertion order; but we only need equality as sets of (idx, ev)
+                    for (idx, ev) in self_map {
+                        match other_map.get(idx) {
+                            Some(o_ev) if o_ev == ev => {}
+                            _ => return false,
                         }
-                        return false;
                     }
                 }
             }
         }
-
         true
     }
 }
@@ -909,13 +889,13 @@ where
 // Implement Eq for Trie2
 impl<EK, EV, T> Eq for Trie2<EK, EV, T>
 where
-    EK: Ord,
+    EK: Ord + Eq,
     EV: Eq + Clone,
     T: Eq,
 {
 }
 
-// Implement Hash for Trie2
+// Implement Hash for Trie2 (shallow: value, max_depth, and immediate children lists)
 impl<EK, EV, T> Hash for Trie2<EK, EV, T>
 where
     EK: Ord + Hash,
@@ -923,53 +903,21 @@ where
     T: PartialEq + Hash,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Cache to handle shared nodes during hashing.
-        // Maps the raw data pointer of a Trie2 node to a marker (depth) to break revisits.
-        let mut recursion_marker: HashMap<*const Trie2<EK, EV, T>, usize> = HashMap::new();
-        Self::hash_trie_recursive(self, state, &mut recursion_marker, 0);
-    }
-}
+        self.value.hash(state);
+        self.max_depth.hash(state);
 
-impl<EK, EV, T> Trie2<EK, EV, T>
-where
-    EK: Ord + Hash,
-    EV: PartialEq + Clone + Hash,
-    T: PartialEq + Hash,
-{
-    /// Helper function to hash a &Trie2 instance.
-    fn hash_trie_recursive<S: Hasher>(
-        node: &Trie2<EK, EV, T>,
-        state: &mut S,
-        recursion_marker: &mut HashMap<*const Trie2<EK, EV, T>, usize>,
-        current_depth: usize,
-    ) {
-        let node_ptr = node as *const _;
-        if let Some(visited_depth) = recursion_marker.get(&node_ptr) {
-            node_ptr.hash(state);
-            visited_depth.hash(state);
-            return;
-        }
-        recursion_marker.insert(node_ptr, current_depth);
-
-        // Hash non-recursive fields.
-        node.value.hash(state);
-        node.max_depth.hash(state);
-
-        // Hash children.
-        node.children.len().hash(state);
-        for (ek, dest_map) in &node.children {
+        self.children.len().hash(state);
+        for (ek, dest_map) in &self.children {
             ek.hash(state);
-
             dest_map.len().hash(state);
+
+            // To be order-independent with respect to child order, hash pairs and then sort.
             let mut pair_hashes = Vec::with_capacity(dest_map.len());
-            for (node_ptr, ev) in dest_map {
+            for (child_idx, ev) in dest_map {
                 let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
+                child_idx.as_usize().hash(&mut pair_hasher);
                 ev.hash(&mut pair_hasher);
-                let child_arc = node_ptr.as_arc().clone();
-                if let Ok(child_guard) = child_arc.read() {
-                    Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
-                    pair_hashes.push(pair_hasher.finish());
-                };
+                pair_hashes.push(pair_hasher.finish());
             }
             pair_hashes.sort_unstable();
             for h in pair_hashes {
@@ -982,7 +930,9 @@ where
 /// A helper struct to facilitate inserting an edge into a Trie2,
 /// trying multiple potential destinations and optionally creating a new node.
 /// Provides a chainable interface.
-pub struct EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+///
+/// This index-based version stores a reference to the Arena and a source Trie2Index.
+pub struct EdgeInserter<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
 where
     EK: Ord + Clone,
     EV: Clone + Debug,
@@ -991,16 +941,18 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    source_arc: Arc<RwLock<Trie2<EK, EV, T>>>, // The source node for the edge
-    edge_key: EK,                            // The key for the edge to be inserted
-    edge_value: Option<EV>,                  // The value for the edge to be inserted
-    merge_edge_value: FMergeEV,              // The function to merge edge values
+    arena: &'a Arena<Trie2<EK, EV, T>>,
+    source_idx: Trie2Index,                      // The source node for the edge
+    edge_key: EK,                                // The key for the edge to be inserted
+    edge_value: Option<EV>,                      // The value for the edge to be inserted
+    merge_edge_value: FMergeEV,                  // The function to merge edge values
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
-    result: Option<Arc<RwLock<Trie2<EK, EV, T>>>>, // Stores the successful destination node
+    result: Option<Trie2Index>,                  // Stores the successful destination node
 }
 
-impl<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T> EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+impl<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+    EdgeInserter<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
 where
     EK: Ord + Clone + Debug,
     EV: Clone + Debug,
@@ -1013,13 +965,15 @@ where
     ///
     /// # Arguments
     ///
-    /// * `source_arc`: The source node where the edge originates.
+    /// * `arena`: The arena holding Trie2 nodes.
+    /// * `source_idx`: The source node where the edge originates.
     /// * `edge_key`: The key for the new edge.
     /// * `edge_value`: The value for the new edge.
     /// * `merge_edge_value`: A closure that merges the existing edge value with the new edge value.
     pub fn new(
         god: &GodWrapper<EK, EV, T>,
-        source_arc: Arc<RwLock<Trie2<EK, EV, T>>>,
+        arena: &'a Arena<Trie2<EK, EV, T>>,
+        source_idx: Trie2Index,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
@@ -1031,12 +985,15 @@ where
 
         let mut edge_value = edge_value;
         {
-            let source_guard = source_arc.read().expect("RwLock poisoned while reading source node value for edge value merge");
+            let source_guard = source_idx
+                .read(arena)
+                .expect("Arena read poisoned while reading source node value for edge value merge");
             merge_edge_value_and_source_node_value(&mut edge_value, &source_guard.value);
         }
 
         EdgeInserter {
-            source_arc,
+            arena,
+            source_idx,
             edge_key,
             edge_value: Some(edge_value),
             merge_edge_value,
@@ -1046,7 +1003,7 @@ where
         }
     }
 
-    /// Tries to establish an edge to the given `destination`.
+    /// Tries to establish an edge to the given `destination` index.
     ///
     /// If an edge with the same `edge_key` already exists pointing to `destination`,
     /// it merges the `edge_value` using the `merge_edge_value` closure.
@@ -1054,36 +1011,42 @@ where
     ///
     /// Returns `self` to allow chaining.
     #[time_it]
-    pub fn try_destination(mut self, destination: Arc<RwLock<Trie2<EK, EV, T>>>) -> Self {
+    pub fn try_destination(mut self, destination: Trie2Index) -> Self {
         if self.result.is_some() {
             return self; // Already found a destination
         }
 
-        let mut update_info: Option<(Arc<RwLock<Trie2<EK, EV, T>>>, EV)> = None;
+        let mut update_info: Option<(Trie2Index, EV)> = None;
 
         { // Scope for source_guard
-            let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
-            let destination_wrapper = ArcPtrWrapper::new(destination.clone());
+            let mut source_guard = self.source_idx
+                .write(self.arena)
+                .expect("Arena write poisoned while locking source in try_destination");
 
-            if let Some(existing_ev_mut) = source_guard.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
+            if let Some(existing_ev_mut) = source_guard
+                .children
+                .get_mut(&self.edge_key)
+                .and_then(|dest_map| dest_map.get_mut(&destination))
+            {
                 let new_ev = self.edge_value.take().unwrap();
-                crate::debug!(7, "Merging edge value {:?} into existing edge value {:?} for edge {:?} to node {:p}", new_ev, existing_ev_mut, self.edge_key, Arc::as_ptr(&destination));
+                crate::debug!(7, "Merging edge value {:?} into existing edge value {:?} for edge {:?} to node {}", new_ev, existing_ev_mut, self.edge_key, destination.as_usize());
                 (self.merge_edge_value)(existing_ev_mut, new_ev);
                 let updated_ev = existing_ev_mut.clone();
-                self.result = Some(destination.clone());
+                self.result = Some(destination);
                 update_info = Some((destination, updated_ev));
             } else {
                 let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
-                crate::debug!(7, "Inserting edge {:?} with value {:?} to node {:p}", self.edge_key, edge_val_clone, Arc::as_ptr(&destination));
-                source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone());
-                self.result = Some(destination.clone());
+                crate::debug!(7, "Inserting edge {:?} with value {:?} to node {}", self.edge_key, edge_val_clone, destination.as_usize());
+                source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination);
+                self.result = Some(destination);
                 update_info = Some((destination, edge_val_clone));
             }
         }
 
-        if let Some((dest_arc, ev)) = update_info {
-            crate::debug!(7, "Updating node value for destination {:p} with edge value {:?}. self.edge_value: {:?}", Arc::as_ptr(&dest_arc), ev, self.edge_value);
-            (self.update_node_value)(&mut dest_arc.write().unwrap().value, &ev);
+        if let Some((dest_idx, ev)) = update_info {
+            crate::debug!(7, "Updating node value for destination {} with edge value {:?}. self.edge_value: {:?}", dest_idx.as_usize(), ev, self.edge_value);
+            let mut dest_w = dest_idx.write(self.arena).expect("Arena write");
+            (self.update_node_value)(&mut dest_w.value, &ev);
         }
 
         self
@@ -1093,23 +1056,23 @@ where
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
     /// Returns `self` to allow chaining.
     #[time_it]
-    pub fn try_destinations(mut self, destinations: &[Arc<RwLock<Trie2<EK, EV, T>>>]) -> Self {
-        for destination in destinations {
+    pub fn try_destinations(mut self, destinations: &[Trie2Index]) -> Self {
+        for &destination in destinations {
             if self.result.is_some() {
                 break; // Stop trying once a destination is found
             }
-            self = self.try_destination(destination.clone());
+            self = self.try_destination(destination);
         }
         self
     }
 
     #[time_it]
-    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<Trie2<EK, EV, T>>>>) -> Self {
+    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Trie2Index>) -> Self {
         for destination in destinations {
             if self.result.is_some() {
                 break; // Stop trying once a destination is found
             }
-            self = self.try_destination(destination.clone());
+            self = self.try_destination(destination);
         }
         self
     }
@@ -1118,13 +1081,13 @@ where
     pub fn try_destinations_iter_with<F, R>(mut self, destinations: F) -> Self
     where
         F: Fn() -> R,
-        R: Iterator<Item = Arc<RwLock<Trie2<EK, EV, T>>>>,
+        R: Iterator<Item = Trie2Index>,
     {
         for destination in destinations() {
             if self.result.is_some() {
                 break;
             }
-            self = self.try_destination(destination.clone());
+            self = self.try_destination(destination);
         }
         self
     }
@@ -1136,12 +1099,12 @@ where
             return self;
         }
 
-        let children_for_this_key: Vec<Arc<RwLock<Trie2<EK, EV, T>>>> = {
-            let source_guard = self.source_arc.read().expect("RwLock poisoned while locking source in try_children");
+        let children_for_this_key: Vec<Trie2Index> = {
+            let source_guard = self.source_idx
+                .read(self.arena)
+                .expect("Arena read poisoned while locking source in try_children");
             if let Some(dest_map) = source_guard.children.get(&self.edge_key) {
-                dest_map.keys()
-                    .map(|arc_wrapper| arc_wrapper.as_arc().clone())
-                    .collect()
+                dest_map.keys().cloned().collect()
             } else {
                 Vec::new()
             }
@@ -1162,17 +1125,20 @@ where
             return self;
         }
 
-        let new_node_arc = Arc::new(RwLock::new(Trie2::new(value)));
+        let new_node_idx = self.arena.insert(Trie2::new(value));
         let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
 
         { // Scope for source_guard
-            let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in else_create_with_value");
-            source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone());
-            self.result = Some(new_node_arc.clone());
+            let mut source_guard = self.source_idx
+                .write(self.arena)
+                .expect("Arena write poisoned while locking source in else_create_with_value");
+            source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_idx);
+            self.result = Some(new_node_idx);
         }
 
-        if self.result.is_some() {
-            (self.update_node_value)(&mut new_node_arc.write().unwrap().value, &edge_val_clone);
+        if let Some(dest_idx) = self.result {
+            let mut dest_w = dest_idx.write(self.arena).expect("Arena write");
+            (self.update_node_value)(&mut dest_w.value, &edge_val_clone);
         }
 
         self
@@ -1204,8 +1170,8 @@ where
         self.else_create_destination_with_value(T::default())
     }
 
-    /// Returns the resulting destination node, if one was found or created.
-    pub fn into_option(self) -> Option<Arc<RwLock<Trie2<EK, EV, T>>>> {
+    /// Returns the resulting destination node index, if one was found or created.
+    pub fn into_option(self) -> Option<Trie2Index> {
         self.result
     }
 
@@ -1213,94 +1179,84 @@ where
         self.result.is_some()
     }
 
-    pub fn clone_into_option(&self) -> Option<Arc<RwLock<Trie2<EK, EV, T>>>> {
-        self.result.clone()
+    pub fn clone_into_option(&self) -> Option<Trie2Index> {
+        self.result
     }
 
-    /// Returns the resulting destination node, panicking if none was found or created.
-    pub fn unwrap(self) -> Arc<RwLock<Trie2<EK, EV, T>>> {
+    /// Returns the resulting destination node index, panicking if none was found or created.
+    pub fn unwrap(self) -> Trie2Index {
         self.result.expect("EdgeInserter::unwrap() called but no destination was found or created")
     }
 
-    /// Returns the resulting destination node, panicking with the given message if none was found or created.
-    pub fn expect(self, msg: &str) -> Arc<RwLock<Trie2<EK, EV, T>>> {
+    /// Returns the resulting destination node index, panicking with the given message if none was found or created.
+    pub fn expect(self, msg: &str) -> Trie2Index {
         self.result.expect(msg)
     }
 }
 
-// Optional: Add a convenience method to Trie2 to create an EdgeInserter easily.
-impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie2<EK, EV, T> {
-    /// Creates an `EdgeInserter` to help add an edge starting from this node.
+// Optional: Add a convenience method to Trie2Index to create an EdgeInserter easily.
+impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie2Index {
+    /// Creates an `EdgeInserter` to help add an edge starting from this node index.
     ///
-    /// This provides a convenient entry point for the chainable insertion pattern.
-    ///
-    /// # Example
+    /// # Example (after migration)
     ///
     /// ```ignore
-    /// use std::sync::{Arc, RwLock};
-    /// use crate::datastructures::trie::Trie2;
-    /// use crate::datastructures::trie::EdgeInserter;
-    ///
-    /// #[derive(Debug, Clone, Default)]
-    /// struct NodeValue { /* ... */ }
-    ///
-    /// // Example merge function for edge values
-    /// fn merge_ev(existing: &mut i32, new: i32) {
-    ///     *existing += new;
-    /// }
-    ///
-    /// let root_node: Arc<RwLock<Trie2<String, i32, NodeValue>>> = Arc::new(RwLock::new(Trie2::new(NodeValue::default())));
-    ///
-    /// let potential_destinations: Vec<Arc<RwLock<Trie2<String, i32, NodeValue>>>> = vec![/* ... */];
-    ///
-    /// let new_or_existing_node = {
-    ///     let root_guard = root_node.write().unwrap();
-    ///     let god = /* obtain GodWrapper */ unimplemented!();
-    ///     root_guard.insert_edge(&god, "key".to_string(), 1, merge_ev, |_t, _ev| {}, |_ev, _t| {})
-    ///         .try_destinations(&potential_destinations)
-    ///         .else_create_destination()
-    ///         .unwrap()
-    /// };
+    /// let root_idx: Trie2Index = ...;
+    /// let arena: Arena<Trie2<String, i32, NodeValue>> = ...;
+    /// let god = /* obtain GodWrapper */ unimplemented!();
+    /// let new_or_existing_node_idx = root_idx
+    ///     .insert_edge(
+    ///         &arena, &god, "key".to_string(), 1,
+    ///         |ev_old, ev_new| *ev_old += ev_new,        // merge edge value
+    ///         |_node_value, _ev| {},                     // update node value from edge value
+    ///         |_edge_value, _source_node_value| {},      // merge edge value with source node value
+    ///     )
+    ///     .try_children()
+    ///     .else_create_destination()
+    ///     .unwrap();
     /// ```
     pub fn insert_edge<FMergeEV, FUpdateT, FMergeEV_T>(
-        &self,
+        self,
+        arena: &Arena<Trie2<EK, EV, T>>,
         god: &GodWrapper<EK, EV, T>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
         update_node_value: FUpdateT,
         merge_edge_value_and_source_node_value: FMergeEV_T,
-    ) -> EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+    ) -> EdgeInserter<'_, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
     where
-         FMergeEV: FnMut(&mut EV, EV),
-         FUpdateT: FnMut(&mut T, &EV),
-         FMergeEV_T: FnMut(&mut EV, &T),
+        FMergeEV: FnMut(&mut EV, EV),
+        FUpdateT: FnMut(&mut T, &EV),
+        FMergeEV_T: FnMut(&mut EV, &T),
     {
         EdgeInserter::new(
             god,
-            Arc::new(RwLock::new(self.clone())),
+            arena,
+            self,
             edge_key,
             edge_value,
             merge_edge_value,
             update_node_value,
-            merge_edge_value_and_source_node_value
+            merge_edge_value_and_source_node_value,
         )
     }
 }
 
 /// Attempts to establish an edge from `source` to a single `destination`,
 /// optionally merging edge values if an edge already exists.
-/// Returns `Some(Arc<RwLock<Trie2<...>>>)` if merge or insert succeeded.
-pub fn try_destination<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
+/// Returns `Some(Trie2Index)` if merge or insert succeeded.
+pub fn try_destination<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
+    arena: &'a Arena<Trie2<EK, EV, T>>,
     god: &GodWrapper<EK, EV, T>,
-    source: Arc<RwLock<Trie2<EK, EV, T>>>,
+    source: Trie2Index,
     edge_key: EK,
     edge_value: EV,
-    destination: Arc<RwLock<Trie2<EK, EV, T>>>,
+    destination: Trie2Index,
     merge_edge_value: FMergeEV,
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
-) -> Option<Arc<RwLock<Trie2<EK, EV, T>>>>
+) -> Option<Trie2Index>
 where
     EK: Ord + Clone + Debug,
     EV: Clone + Debug,
@@ -1311,29 +1267,31 @@ where
 {
     EdgeInserter::new(
         god,
+        arena,
         source,
         edge_key,
         edge_value,
         merge_edge_value,
         update_node_value,
-        merge_edge_value_and_source_node_value
+        merge_edge_value_and_source_node_value,
     )
-        .try_destination(destination)
-        .into_option()
+    .try_destination(destination)
+    .into_option()
 }
 
 /// Attempts to establish an edge from `source` to any of the provided `destinations`,
 /// returning the first successful one (merge or insert), or `None` if none matched.
-pub fn try_destination_with<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
+pub fn try_destination_with<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
+    arena: &'a Arena<Trie2<EK, EV, T>>,
     god: &GodWrapper<EK, EV, T>,
-    source: Arc<RwLock<Trie2<EK, EV, T>>>,
+    source: Trie2Index,
     edge_key: EK,
     edge_value: EV,
-    destinations: &[Arc<RwLock<Trie2<EK, EV, T>>>],
+    destinations: &[Trie2Index],
     merge_edge_value: FMergeEV,
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
-) -> Option<Arc<RwLock<Trie2<EK, EV, T>>>>
+) -> Option<Trie2Index>
 where
     EK: Ord + Clone + Debug,
     EV: Clone + Debug,
@@ -1344,17 +1302,17 @@ where
 {
     EdgeInserter::new(
         god,
+        arena,
         source,
         edge_key,
         edge_value,
         merge_edge_value,
         update_node_value,
-        merge_edge_value_and_source_node_value
+        merge_edge_value_and_source_node_value,
     )
-        .try_destinations(destinations)
-        .into_option()
+    .try_destinations(destinations)
+    .into_option()
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Index {
@@ -1381,7 +1339,7 @@ impl Index {
 
 #[derive(Debug, Clone)]
 pub struct Arena<T> {
-    values: Arc<RwLock<BTreeMap<usize, T>>>,
+    pub(crate) values: Arc<RwLock<BTreeMap<usize, T>>>,
 }
 
 impl<T> PartialEq for Arena<T>
