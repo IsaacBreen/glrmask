@@ -1,3 +1,4 @@
+// #![deny(clippy::iter_over_hash_type)]
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
@@ -22,13 +23,13 @@ use profiler_macro::time_it;
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to a map of destination nodes and edge values.
-    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV>>,
+    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed by recompute_all_max_depths).
     /// Defaults to usize::MAX and is only updated when the user calls recompute_all_max_depths.
     pub max_depth: usize,
 }
 
-impl<EK, EV, T> JSONConvertible for crate::datastructures::trie_new::Trie<EK, EV, T>
+impl<EK, EV, T> JSONConvertible for Trie<EK, EV, T>
 where
     EK: Ord + Clone + JSONConvertible + Debug,
     EV: Clone + JSONConvertible,
@@ -37,9 +38,9 @@ where
     fn to_json(&self) -> JSONNode {
         let mut nodes_json_list: Vec<JSONNode> = Vec::new();
         // Maps the raw pointer of an Arc<RwLock<Trie>> to its index in nodes_json_list
-        let mut arc_ptr_to_idx_map: HashMap<*const RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>, usize> = HashMap::new();
+        let mut arc_ptr_to_idx_map: HashMap<*const RwLock<Trie<EK, EV, T>>, usize> = HashMap::new();
         // Queue for BFS traversal, storing Arcs to keep them alive and allow locking
-        let mut bfs_q: VecDeque<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> = VecDeque::new();
+        let mut bfs_q: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
 
         // --- Step 1: Serialize `self` (the root node for this call) ---
         // `self` is node at index 0.
@@ -155,7 +156,7 @@ where
                     return Err(format!("Root index {} is out of bounds for nodes array of length {}", root_idx, nodes_array.len()));
                 }
 
-                let mut deserialized_arcs: HashMap<usize, Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> = HashMap::new();
+                let mut deserialized_arcs: HashMap<usize, Arc<RwLock<Trie<EK, EV, T>>>> = HashMap::new();
 
                 let mut pb_pass1 = tqdm!(total = nodes_array.len(), desc = "Deserializing nodes (pass 1/2)", disable = !PROGRESS_BAR_ENABLED, leave=false);
 
@@ -169,7 +170,7 @@ where
                             let value = T::from_json(value_json.clone())?;
                             let max_depth = usize::from_json(max_depth_json.clone())?;
 
-                            let new_node_arc = Arc::new(RwLock::new(crate::datastructures::trie_new::Trie {
+                            let new_node_arc = Arc::new(RwLock::new(Trie {
                                 value,
                                 children: BTreeMap::new(),
                                 max_depth,
@@ -272,46 +273,46 @@ where
 
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in insertion and others
-impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
+impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// Creates a new trie node with the given value and no children.
     /// The max_depth is initialized to usize::MAX and will be updated later
     /// when recompute_all_max_depths is called.
-    pub fn new(value: T) -> Self {
-        crate::datastructures::trie_new::Trie {
+    pub fn new(value: T, arena: &Arena<Self>) -> Self {
+        Trie {
             value,
             children: BTreeMap::new(),
             max_depth: usize::MAX,
         }
     }
 
-    pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>> {
-        let new_node = Arc::new(RwLock::new(crate::datastructures::trie_new::Trie::new(value)));
+    pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T, arena: &Arena<Self>) -> Arc<RwLock<Trie<EK, EV, T>>> {
+        let new_node = Arc::new(RwLock::new(Trie::new(value)));
         let new_node_comparable = ArcPtrWrapper::new(new_node.clone());
         self.children.entry(edge_key).or_default().insert(new_node_comparable, edge_value);
         new_node.clone()
     }
 
-    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) {
+    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<RwLock<Trie<EK, EV, T>>>) {
         let dst_comparable = ArcPtrWrapper::new(dst.clone());
         self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
     }
 
-    pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> bool {
+    pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
         let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
         self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
     }
 
-    pub fn already_has_dst_for_any_key(&self, dst: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> bool {
+    pub fn already_has_dst_for_any_key(&self, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> bool {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.values().any(|dest_map| dest_map.contains_key(&lookup_key))
     }
 
-    pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> Option<&EV> {
+    pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&EV> {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
     }
 
-    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> Option<&mut EV> {
+    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<&mut EV> {
         let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
     }
@@ -323,7 +324,7 @@ impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
         &mut self,
         edge_key: EK,
         edge_value: &mut Option<EV>,
-        child: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+        child: Arc<RwLock<Trie<EK, EV, T>>>,
     ) {
         self.try_insert_unchecked(edge_key, edge_value, child)
     }
@@ -334,7 +335,7 @@ impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
         &mut self,
         edge_key: EK,
         edge_value: &mut Option<EV>,
-        child: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+        child: Arc<RwLock<Trie<EK, EV, T>>>,
     ) {
         let child_comparable = ArcPtrWrapper::new(child.clone());
         self.children
@@ -346,7 +347,7 @@ impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&OrderedHashMap<ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get(edge_key)
     }
@@ -354,16 +355,16 @@ impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
-    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>> {
         &mut self.children
     }
 
@@ -372,8 +373,8 @@ impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
     }
 
     /// Collects all unique nodes (by pointer) reachable from the given roots (BFS).
-    pub fn all_nodes(roots: &[Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>]) -> Vec<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> {
-        let mut visited_arcs: HashSet<*const RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>> = HashSet::new();
+    pub fn all_nodes(roots: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Vec<Arc<RwLock<Trie<EK, EV, T>>>> {
+        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
@@ -494,10 +495,10 @@ impl<EK: Ord + Clone, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T> {
 /// Use with caution: Only use when you know a failed lock means the current thread holds it.
 /// Consider using `Arc::as_ptr` for identity checks instead if possible.
 #[allow(dead_code)]
-pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> Option<*const crate::datastructures::trie_new::Trie<EK, EV, T>> {
+pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<Trie<EK, EV, T>>>) -> Option<*const Trie<EK, EV, T>> {
     match node_arc.try_read() {
         Ok(guard) => {
-            let ptr = &*guard as *const crate::datastructures::trie_new::Trie<EK, EV, T>;
+            let ptr = &*guard as *const Trie<EK, EV, T>;
             Some(ptr)
         }
         Err(TryLockError::Poisoned(p)) => {
@@ -512,13 +513,13 @@ pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<crate:
 /// Helper to get the raw pointer to the Trie data from an Arc<RwLock<Trie>>.
 /// Panics if the mutex is poisoned or if locking fails (blocking lock).
 #[allow(dead_code)]
-pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> *const crate::datastructures::trie_new::Trie<EK, EV, T> {
+pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<RwLock<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
     let guard = node_arc.read().expect("RwLock poisoned or lock failed when getting node pointer");
     &*guard as *const _
 }
 
 // Add this impl block for the recursive comparison helper
-impl<EK, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T>
+impl<EK, EV, T> Trie<EK, EV, T>
 where
     EK: Ord,
     EV: PartialEq + Clone,
@@ -531,8 +532,8 @@ where
     ///   This cache is important for efficiency on DAGs with shared subgraphs: it avoids re-comparing pairs
     ///   already processed and ensures consistent topology checks.
     fn compare_arcs_recursive(
-        self_arc: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
-        other_arc: &Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+        self_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
+        other_arc: &Arc<RwLock<Trie<EK, EV, T>>>,
         comparison_cache: &mut HashMap<(*const RwLock<Self>, *const RwLock<Self>), bool>,
     ) -> bool {
         let self_ptr = Arc::as_ptr(self_arc);
@@ -599,11 +600,11 @@ where
                         return false;
                     }
 
-                    let self_child_pairs: Vec<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV)> = self_dest_map.iter()
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = self_dest_map.iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
-                    let mut other_child_pairs: Vec<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV)> = other_dest_map.iter()
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map.iter()
                         .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
                         .collect();
 
@@ -612,7 +613,7 @@ where
                         for i in 0..other_child_pairs.len() {
                             if s_ev == &other_child_pairs[i].1 {
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
-                                if crate::datastructures::trie_new::Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, comparison_cache) {
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, comparison_cache) {
                                     other_child_pairs.remove(i);
                                     found_match_for_current_self_pair = true;
                                     break;
@@ -634,10 +635,10 @@ where
 
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
-impl<T: Clone, EK: Ord + Clone, EV: Clone> crate::datastructures::trie_new::Trie<EK, EV, T> {
-    fn count_all_edges(root_nodes: &[Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>]) -> usize {
-        let mut visited_arcs: HashSet<*const RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>> = HashSet::new();
-        let mut queue: VecDeque<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> = VecDeque::new();
+impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+    fn count_all_edges(root_nodes: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> usize {
+        let mut visited_arcs: HashSet<*const RwLock<Trie<EK, EV, T>>> = HashSet::new();
+        let mut queue: VecDeque<Arc<RwLock<Trie<EK, EV, T>>>> = VecDeque::new();
         let mut total_edges = 0;
 
         for root in root_nodes {
@@ -669,10 +670,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> crate::datastructures::trie_new::Trie
     /// which is suboptimal but not incorrect.
     #[time_it]
     pub fn special_map<V: Clone>(
-        initial_nodes_and_values: Vec<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &crate::datastructures::trie_new::Trie<EK, EV, T>) -> Option<V>,
+        initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&crate::datastructures::trie_new::Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
@@ -769,17 +770,17 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> crate::datastructures::trie_new::Trie
     /// which is suboptimal but not incorrect.
     #[time_it]
     pub fn special_map_grouped<V, S, I>(
-        initial_nodes_and_values: Vec<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, V)>,
+        initial_nodes_and_values: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&crate::datastructures::trie_new::Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     )
     where
         V: Clone,
         S: FnMut(
-            &V, &EK, &OrderedHashMap<ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV>
+            &V, &EK, &OrderedHashMap<ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, EV>
         ) -> I,
-        I: IntoIterator<Item = (ArcPtrWrapper<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, V)>,
+        I: IntoIterator<Item = (ArcPtrWrapper<RwLock<Trie<EK, EV, T>>>, V)>,
     {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler. (Same as special_map)
@@ -863,7 +864,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> crate::datastructures::trie_new::Trie
 }
 
 // Implement PartialEq for Trie
-impl<EK, EV, T> PartialEq for crate::datastructures::trie_new::Trie<EK, EV, T>
+impl<EK, EV, T> PartialEq for Trie<EK, EV, T>
 where
     EK: Ord,
     EV: PartialEq + Clone,
@@ -878,7 +879,7 @@ where
             return false;
         }
 
-        type NodeRwLockPtr<EKK, EVV, TT> = *const RwLock<crate::datastructures::trie_new::Trie<EKK, EVV, TT>>;
+        type NodeRwLockPtr<EKK, EVV, TT> = *const RwLock<Trie<EKK, EVV, TT>>;
         let mut comparison_cache: HashMap<(NodeRwLockPtr<EK, EV, T>, NodeRwLockPtr<EK, EV, T>), bool> = HashMap::new();
 
         for (self_ek, self_dest_map) in &self.children {
@@ -889,12 +890,12 @@ where
                         return false;
                     }
 
-                    let self_child_pairs: Vec<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, &EV)> = self_dest_map
+                    let self_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, &EV)> = self_dest_map
                         .iter()
                         .map(|(np, ev)| (np.as_arc().clone(), ev))
                         .collect();
 
-                    let mut other_child_pairs: Vec<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV)> = other_dest_map
+                    let mut other_child_pairs: Vec<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = other_dest_map
                         .iter()
                         .map(|(np, ev)| (np.as_arc().clone(), ev.clone()))
                         .collect();
@@ -903,7 +904,7 @@ where
                         for i in 0..other_child_pairs.len() {
                             if s_ev == &other_child_pairs[i].1 {
                                 let o_arc_for_recursion = other_child_pairs[i].0.clone();
-                                if crate::datastructures::trie_new::Trie::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
+                                if Trie::compare_arcs_recursive(&s_arc, &o_arc_for_recursion, &mut comparison_cache) {
                                     other_child_pairs.remove(i);
                                     continue 'self_pair_loop;
                                 }
@@ -920,7 +921,7 @@ where
 }
 
 // Implement Eq for Trie
-impl<EK, EV, T> Eq for crate::datastructures::trie_new::Trie<EK, EV, T>
+impl<EK, EV, T> Eq for Trie<EK, EV, T>
 where
     EK: Ord,
     EV: Eq + Clone,
@@ -929,7 +930,7 @@ where
 }
 
 // Implement Hash for Trie
-impl<EK, EV, T> Hash for crate::datastructures::trie_new::Trie<EK, EV, T>
+impl<EK, EV, T> Hash for Trie<EK, EV, T>
 where
     EK: Ord + Hash,
     EV: PartialEq + Clone + Hash,
@@ -938,12 +939,12 @@ where
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Cache to handle shared nodes during hashing.
         // Maps the raw data pointer of a Trie node to a marker (depth) to break revisits.
-        let mut recursion_marker: HashMap<*const crate::datastructures::trie_new::Trie<EK, EV, T>, usize> = HashMap::new();
+        let mut recursion_marker: HashMap<*const Trie<EK, EV, T>, usize> = HashMap::new();
         Self::hash_trie_recursive(self, state, &mut recursion_marker, 0);
     }
 }
 
-impl<EK, EV, T> crate::datastructures::trie_new::Trie<EK, EV, T>
+impl<EK, EV, T> Trie<EK, EV, T>
 where
     EK: Ord + Hash,
     EV: PartialEq + Clone + Hash,
@@ -951,9 +952,9 @@ where
 {
     /// Helper function to hash a &Trie instance.
     fn hash_trie_recursive<S: Hasher>(
-        node: &crate::datastructures::trie_new::Trie<EK, EV, T>,
+        node: &Trie<EK, EV, T>,
         state: &mut S,
-        recursion_marker: &mut HashMap<*const crate::datastructures::trie_new::Trie<EK, EV, T>, usize>,
+        recursion_marker: &mut HashMap<*const Trie<EK, EV, T>, usize>,
         current_depth: usize,
     ) {
         let node_ptr = node as *const _;
@@ -1004,16 +1005,16 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    source_arc: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, // The source node for the edge
+    source_arc: Arc<RwLock<Trie<EK, EV, T>>>, // The source node for the edge
     edge_key: EK,                            // The key for the edge to be inserted
     edge_value: Option<EV>,                  // The value for the edge to be inserted
     merge_edge_value: FMergeEV,              // The function to merge edge values
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
-    result: Option<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>>, // Stores the successful destination node
+    result: Option<Arc<RwLock<Trie<EK, EV, T>>>>, // Stores the successful destination node
 }
 
-impl<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T> crate::datastructures::trie_new::EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+impl<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T> EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
 where
     EK: Ord + Clone + Debug,
     EV: Clone + Debug,
@@ -1032,7 +1033,7 @@ where
     /// * `merge_edge_value`: A closure that merges the existing edge value with the new edge value.
     pub fn new(
         god: &GodWrapper<EK, EV, T>,
-        source_arc: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+        source_arc: Arc<RwLock<Trie<EK, EV, T>>>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
@@ -1048,7 +1049,7 @@ where
             merge_edge_value_and_source_node_value(&mut edge_value, &source_guard.value);
         }
 
-        crate::datastructures::trie_new::EdgeInserter {
+        EdgeInserter {
             source_arc,
             edge_key,
             edge_value: Some(edge_value),
@@ -1067,12 +1068,12 @@ where
     ///
     /// Returns `self` to allow chaining.
     #[time_it]
-    pub fn try_destination(mut self, destination: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>) -> Self {
+    pub fn try_destination(mut self, destination: Arc<RwLock<Trie<EK, EV, T>>>) -> Self {
         if self.result.is_some() {
             return self; // Already found a destination
         }
 
-        let mut update_info: Option<(Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>, EV)> = None;
+        let mut update_info: Option<(Arc<RwLock<Trie<EK, EV, T>>>, EV)> = None;
 
         { // Scope for source_guard
             let mut source_guard = self.source_arc.write().expect("RwLock poisoned while locking source in try_destination");
@@ -1106,7 +1107,7 @@ where
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
     /// Returns `self` to allow chaining.
     #[time_it]
-    pub fn try_destinations(mut self, destinations: &[Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>]) -> Self {
+    pub fn try_destinations(mut self, destinations: &[Arc<RwLock<Trie<EK, EV, T>>>]) -> Self {
         for destination in destinations {
             if self.result.is_some() {
                 break; // Stop trying once a destination is found
@@ -1117,7 +1118,7 @@ where
     }
 
     #[time_it]
-    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>>) -> Self {
+    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>) -> Self {
         for destination in destinations {
             if self.result.is_some() {
                 break; // Stop trying once a destination is found
@@ -1131,7 +1132,7 @@ where
     pub fn try_destinations_iter_with<F, R>(mut self, destinations: F) -> Self
     where
         F: Fn() -> R,
-        R: Iterator<Item = Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>>,
+        R: Iterator<Item = Arc<RwLock<Trie<EK, EV, T>>>>,
     {
         for destination in destinations() {
             if self.result.is_some() {
@@ -1149,7 +1150,7 @@ where
             return self;
         }
 
-        let children_for_this_key: Vec<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> = {
+        let children_for_this_key: Vec<Arc<RwLock<Trie<EK, EV, T>>>> = {
             let source_guard = self.source_arc.read().expect("RwLock poisoned while locking source in try_children");
             if let Some(dest_map) = source_guard.children.get(&self.edge_key) {
                 dest_map.keys()
@@ -1175,7 +1176,7 @@ where
             return self;
         }
 
-        let new_node_arc = Arc::new(RwLock::new(crate::datastructures::trie_new::Trie::new(value)));
+        let new_node_arc = Arc::new(RwLock::new(Trie::new(value)));
         let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
 
         { // Scope for source_guard
@@ -1218,7 +1219,7 @@ where
     }
 
     /// Returns the resulting destination node, if one was found or created.
-    pub fn into_option(self) -> Option<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> {
+    pub fn into_option(self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
         self.result
     }
 
@@ -1226,23 +1227,23 @@ where
         self.result.is_some()
     }
 
-    pub fn clone_into_option(&self) -> Option<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>> {
+    pub fn clone_into_option(&self) -> Option<Arc<RwLock<Trie<EK, EV, T>>>> {
         self.result.clone()
     }
 
     /// Returns the resulting destination node, panicking if none was found or created.
-    pub fn unwrap(self) -> Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>> {
+    pub fn unwrap(self) -> Arc<RwLock<Trie<EK, EV, T>>> {
         self.result.expect("EdgeInserter::unwrap() called but no destination was found or created")
     }
 
     /// Returns the resulting destination node, panicking with the given message if none was found or created.
-    pub fn expect(self, msg: &str) -> Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>> {
+    pub fn expect(self, msg: &str) -> Arc<RwLock<Trie<EK, EV, T>>> {
         self.result.expect(msg)
     }
 }
 
 // Optional: Add a convenience method to Trie to create an EdgeInserter easily.
-impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> crate::datastructures::trie_new::Trie<EK, EV, T> {
+impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie<EK, EV, T> {
     /// Creates an `EdgeInserter` to help add an edge starting from this node.
     ///
     /// This provides a convenient entry point for the chainable insertion pattern.
@@ -1283,13 +1284,13 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> crate::datastructures
         merge_edge_value: FMergeEV,
         update_node_value: FUpdateT,
         merge_edge_value_and_source_node_value: FMergeEV_T,
-    ) -> crate::datastructures::trie_new::EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+    ) -> EdgeInserter<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
     where
          FMergeEV: FnMut(&mut EV, EV),
          FUpdateT: FnMut(&mut T, &EV),
          FMergeEV_T: FnMut(&mut EV, &T),
     {
-        crate::datastructures::trie_new::EdgeInserter::new(
+        EdgeInserter::new(
             god,
             Arc::new(RwLock::new(self.clone())),
             edge_key,
@@ -1306,14 +1307,14 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> crate::datastructures
 /// Returns `Some(Arc<RwLock<Trie<...>>>)` if merge or insert succeeded.
 pub fn try_destination<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
     god: &GodWrapper<EK, EV, T>,
-    source: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+    source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
-    destination: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+    destination: Arc<RwLock<Trie<EK, EV, T>>>,
     merge_edge_value: FMergeEV,
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
-) -> Option<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>>
+) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
     EV: Clone + Debug,
@@ -1322,7 +1323,7 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    crate::datastructures::trie_new::EdgeInserter::new(
+    EdgeInserter::new(
         god,
         source,
         edge_key,
@@ -1339,14 +1340,14 @@ where
 /// returning the first successful one (merge or insert), or `None` if none matched.
 pub fn try_destination_with<EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
     god: &GodWrapper<EK, EV, T>,
-    source: Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>,
+    source: Arc<RwLock<Trie<EK, EV, T>>>,
     edge_key: EK,
     edge_value: EV,
-    destinations: &[Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>],
+    destinations: &[Arc<RwLock<Trie<EK, EV, T>>>],
     merge_edge_value: FMergeEV,
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
-) -> Option<Arc<RwLock<crate::datastructures::trie_new::Trie<EK, EV, T>>>>
+) -> Option<Arc<RwLock<Trie<EK, EV, T>>>>
 where
     EK: Ord + Clone + Debug,
     EV: Clone + Debug,
@@ -1355,7 +1356,7 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    crate::datastructures::trie_new::EdgeInserter::new(
+    EdgeInserter::new(
         god,
         source,
         edge_key,
@@ -1367,3 +1368,6 @@ where
         .try_destinations(destinations)
         .into_option()
 }
+
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+pub struct Arena<T> {}// #![deny(clippy::iter_over_hash_type)]
