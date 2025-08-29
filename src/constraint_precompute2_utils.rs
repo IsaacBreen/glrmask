@@ -709,7 +709,7 @@ fn deduplicate_recursive_trie2(
     let mut children_changed = false;
 
     {
-        let node_guard = node_arc.read(trie2_god).unwrap();
+        let node_guard = node_arc.read(trie2_god).unwrap().clone();
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
