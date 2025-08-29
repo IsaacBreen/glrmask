@@ -208,52 +208,62 @@ fn find_end_bv_from_node_via_none_edges(
 ///
 /// # Returns
 /// `true` if the tries are semantically equivalent, `false` otherwise.
-pub fn are_precompute2_trees_equivalent(a: &Trie2Index, b: &Trie2Index) -> bool {
-    todo!()
-    // // Stochastic version
-    // if Arc::ptr_eq(a, b) { return true; }
-    //
-    // const NUM_SAMPLES: usize = 100;
-    // const MAX_PATH_LEN: usize = 32;
-    // let mut rng = rand::thread_rng();
-    //
-    // // Sample from A, check in B
-    // for i in 0..NUM_SAMPLES {
-    //     if let Some(path) = sample_normalized_path(a, &mut rng, MAX_PATH_LEN) {
-    //         let bv_a = get_bv_for_normalized_path(a, &path);
-    //         if bv_a.is_empty() && i > 0 { continue; } // Skip trivial paths, but always check the empty path
-    //         let bv_b = get_bv_for_normalized_path(b, &path);
-    //         if bv_a != bv_b {
-    //             println!("\n--- Precompute2 Equivalence Mismatch ---");
-    //             println!("Path sampled from Tree A:");
-    //             println!("  Path: {:?}", path);
-    //             println!("  BV from A: {:?}", bv_a);
-    //             println!("  BV from B: {:?}", bv_b);
-    //             println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
-    //             return false;
-    //         }
-    //     }
-    // }
-    //
-    // // Sample from B, check in A
-    // for i in 0..NUM_SAMPLES {
-    //     if let Some(path) = sample_normalized_path(b, &mut rng, MAX_PATH_LEN) {
-    //         let bv_b = get_bv_for_normalized_path(b, &path);
-    //         if bv_b.is_empty() && i > 0 { continue; } // Skip trivial paths, but always check the empty path
-    //         let bv_a = get_bv_for_normalized_path(a, &path);
-    //         if bv_a != bv_b {
-    //             println!("\n--- Precompute2 Equivalence Mismatch ---");
-    //             println!("Path sampled from Tree B:");
-    //             println!("  Path: {:?}", path);
-    //             println!("  BV from A: {:?}", bv_a);
-    //             println!("  BV from B: {:?}", bv_b);
-    //             println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
-    //             return false;
-    //         }
-    //     }
-    // }
-    //
-    // true
+pub fn are_precompute2_trees_equivalent(
+    a: &Trie2Index,
+    trie2_god_a: &Trie2GodWrapper,
+    b: &Trie2Index,
+    trie2_god_b: &Trie2GodWrapper,
+) -> bool {
+    // Stochastic version
+    if a == b && Arc::ptr_eq(&trie2_god_a.values, &trie2_god_b.values) {
+        return true;
+    }
+
+    const NUM_SAMPLES: usize = 100;
+    const MAX_PATH_LEN: usize = 32;
+    let mut rng = rand::thread_rng();
+
+    // Sample from A, check in B
+    for i in 0..NUM_SAMPLES {
+        if let Some(path) = sample_normalized_path(a, &mut rng, MAX_PATH_LEN, trie2_god_a) {
+            let bv_a = get_bv_for_normalized_path(a, &path, trie2_god_a);
+            if bv_a.is_empty() && i > 0 {
+                continue;
+            } // Skip trivial paths, but always check the empty path
+            let bv_b = get_bv_for_normalized_path(b, &path, trie2_god_b);
+            if bv_a != bv_b {
+                println!("\n--- Precompute2 Equivalence Mismatch ---");
+                println!("Path sampled from Tree A:");
+                println!("  Path: {:?}", path);
+                println!("  BV from A: {:?}", bv_a);
+                println!("  BV from B: {:?}", bv_b);
+                println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
+                return false;
+            }
+        }
+    }
+
+    // Sample from B, check in A
+    for i in 0..NUM_SAMPLES {
+        if let Some(path) = sample_normalized_path(b, &mut rng, MAX_PATH_LEN, trie2_god_b) {
+            let bv_b = get_bv_for_normalized_path(b, &path, trie2_god_b);
+            if bv_b.is_empty() && i > 0 {
+                continue;
+            } // Skip trivial paths, but always check the empty path
+            let bv_a = get_bv_for_normalized_path(a, &path, trie2_god_a);
+            if bv_a != bv_b {
+                println!("\n--- Precompute2 Equivalence Mismatch ---");
+                println!("Path sampled from Tree B:");
+                println!("  Path: {:?}", path);
+                println!("  BV from A: {:?}", bv_a);
+                println!("  BV from B: {:?}", bv_b);
+                println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>, trie2_god: &Trie2GodWrapper) {
@@ -560,9 +570,10 @@ fn trie2_shape_eq(
     a: &Trie2Index,
     b: &Trie2Index,
     cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
-    trie2_god: &Trie2GodWrapper,
+    trie2_god_a: &Trie2GodWrapper,
+    trie2_god_b: &Trie2GodWrapper,
 ) -> bool {
-    if a == b {
+    if a == b && Arc::ptr_eq(&trie2_god_a.values, &trie2_god_b.values) {
         return true;
     }
 
@@ -578,8 +589,8 @@ fn trie2_shape_eq(
 
     cache.insert((p1, p2), true); // Optimistic insertion for cycles
 
-    let guard_a = a.read(trie2_god).unwrap();
-    let guard_b = b.read(trie2_god).unwrap();
+    let guard_a = a.read(trie2_god_a).unwrap();
+    let guard_b = b.read(trie2_god_b).unwrap();
 
     // Compare shape-defining value fields
     if guard_a.value.end != guard_b.value.end {
@@ -608,7 +619,7 @@ fn trie2_shape_eq(
                 for i in 0..pairs_b.len() {
                     let (ev_b, ref arc_b) = pairs_b[i];
                     if ev_a == ev_b {
-                        if trie2_shape_eq(&arc_a, arc_b, cache, trie2_god) {
+                        if trie2_shape_eq(&arc_a, arc_b, cache, trie2_god_a, trie2_god_b) {
                             pairs_b.remove(i);
                             found_match = true;
                             break;
@@ -735,7 +746,7 @@ fn deduplicate_recursive_trie2(
     let bucket = canonical_nodes.entry(fp).or_default();
 
     for candidate_arc in bucket.iter() {
-        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache, trie2_god) {
+        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache, trie2_god, trie2_god) {
             // Found a match. Merge live_tokens and return the canonical version.
             let node_live_tokens = { node_arc.read(trie2_god).unwrap().value.live_tokens.clone() };
             if !node_live_tokens.is_empty() {
