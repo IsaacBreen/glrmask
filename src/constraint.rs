@@ -483,7 +483,7 @@ impl GrammarConstraint {
         let it = precomputed.iter();
         for (tokenizer_state_id, trie1_root) in it {
             // Deep clone Trie
-            let (cloned_trie2_root, trie2_map) = constraint_precompute2_utils::clone_trie2_graph(&base_trie2_root);
+            let (cloned_trie2_root, trie2_map) = constraint_precompute2_utils::clone_trie2_graph(&base_trie2_root, &trie2_god);
 
             // Deep clone the base GSS, remapping trie2_nodes
             let cloned_gss = crate::datastructures::gss::deep_clone_gss_with_trie2_map(
@@ -658,9 +658,9 @@ impl GrammarConstraint {
         let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_before_cleanup);
 
         // Clean up after rewiring
-        constraint_precompute2_utils::prune_dead_paths_trie2(&mut precomputed2);
-        constraint_precompute2_utils::merge_nodes_trie2(&mut precomputed2);
-        constraint_precompute2_utils::simplify_trie2_factor_common_destinations(&mut precomputed2);
+        constraint_precompute2_utils::prune_dead_paths_trie2(&mut precomputed2, &trie2_god);
+        constraint_precompute2_utils::merge_nodes_trie2(&mut precomputed2, &trie2_god);
+        constraint_precompute2_utils::simplify_trie2_factor_common_destinations(&mut precomputed2, &trie2_god);
 
         Trie::all_nodes(&trie2_god, &roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 

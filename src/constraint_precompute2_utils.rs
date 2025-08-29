@@ -1,4 +1,4 @@
-use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, Trie2GodWrapper};
+use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, PrecomputeNodeIndex, Trie2GodWrapper};
 use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie2::{EdgeInserter, Trie, Trie2Index};
@@ -23,15 +23,16 @@ fn sample_normalized_path(
     root: &Trie2Index,
     rng: &mut impl Rng,
     max_len: usize,
+    trie2_god: &Trie2GodWrapper,
 ) -> Option<NormalizedPath> {
     let mut current_node = root.clone();
     let mut path = NormalizedPath::new();
     let mut current_k = 0;
-    let mut bv = root.read().unwrap().value.live_tokens.clone();
+    let mut bv = root.read(trie2_god).unwrap().value.live_tokens.clone();
 
     while path.len() < max_len {
-        let can_terminate = current_node.read().unwrap().value.end;
-        let can_continue = !current_node.read().unwrap().children().is_empty();
+        let can_terminate = current_node.read(trie2_god).unwrap().value.end;
+        let can_continue = !current_node.read(trie2_god).unwrap().children().is_empty();
 
         if !can_continue {
             return if can_terminate { Some(path) } else { None };
@@ -41,7 +42,7 @@ fn sample_normalized_path(
             return Some(path);
         }
 
-        let all_outgoing_edges: Vec<_> = current_node.read().unwrap()
+        let all_outgoing_edges: Vec<_> = current_node.read(trie2_god).unwrap()
             .children()
             .iter()
             .flat_map(|(ek, dest_map)| {
@@ -50,7 +51,7 @@ fn sample_normalized_path(
             .collect();
 
         if all_outgoing_edges.is_empty() {
-            return if current_node.read().unwrap().value.end { Some(path) } else { None };
+            return if current_node.read(trie2_god).unwrap().value.end { Some(path) } else { None };
         }
 
         let (ek, dest_ptr, edge_bv) = all_outgoing_edges.choose(rng)?;
@@ -78,24 +79,25 @@ fn sample_normalized_path(
 fn get_bv_for_normalized_path(
     root: &Trie2Index,
     path: &NormalizedPath,
+    trie2_god: &Trie2GodWrapper,
 ) -> LLMTokenBV {
     // State: (current_node, path_segment_index, accumulated_k, current_bv)
     let mut q: VecDeque<(Trie2Index, usize, usize, LLMTokenBV)> = VecDeque::new();
     let mut final_bv = LLMTokenBV::zeros();
 
-    let initial_bv = root.read().unwrap().value.live_tokens.clone();
+    let initial_bv = root.read(trie2_god).unwrap().value.live_tokens.clone();
     q.push_back((root.clone(), 0, 0, initial_bv.clone()));
 
     // To handle cycles and redundant exploration
     let mut visited: HashMap<(PrecomputeNode2Index, usize, usize), LLMTokenBV> = HashMap::new();
-    visited.insert((Arc::as_ptr(root), 0, 0), initial_bv);
+    visited.insert((*root, 0, 0), initial_bv);
 
     while let Some((node, path_idx, k_so_far, bv)) = q.pop_front() {
         // Check if we've completed the path
         if path_idx == path.len() {
             // We have successfully traversed the path. Now we need to reach an `end` node from here
             // with only `(k, None)` edges.
-            let end_bv = find_end_bv_from_node_via_none_edges(node, bv);
+            let end_bv = find_end_bv_from_node_via_none_edges(node, bv, &trie2_god);
             final_bv |= &end_bv;
             continue;
         }
@@ -103,7 +105,7 @@ fn get_bv_for_normalized_path(
         let (target_k, target_sid) = path[path_idx];
 
         // Explore children
-        let guard = node.read().unwrap();
+        let guard = node.read(trie2_god).unwrap();
         for (ek, dest_map) in guard.children() {
             for (dest_ptr, edge_bv) in dest_map {
                 let new_bv = &bv & edge_bv;
@@ -116,7 +118,7 @@ fn get_bv_for_normalized_path(
                 if let Some(sid) = sid_opt {
                     if new_k == target_k && sid == &target_sid {
                         // Matched a path segment. Advance.
-                        let visited_key = (Arc::as_ptr(&child_arc), path_idx + 1, 0);
+                        let visited_key = (child_arc, path_idx + 1, 0);
                         if let Some(existing_bv) = visited.get_mut(&visited_key) {
                             let diff = &new_bv - &*existing_bv;
                             if !diff.is_empty() {
@@ -131,7 +133,7 @@ fn get_bv_for_normalized_path(
                 } else { // sid_opt is None
                     if new_k <= target_k {
                         // Continue accumulating k
-                        let visited_key = (Arc::as_ptr(&child_arc), path_idx, new_k);
+                        let visited_key = (child_arc, path_idx, new_k);
                         if let Some(existing_bv) = visited.get_mut(&visited_key) {
                             let diff = &new_bv - &*existing_bv;
                             if !diff.is_empty() {
@@ -155,6 +157,7 @@ fn get_bv_for_normalized_path(
 fn find_end_bv_from_node_via_none_edges(
     start_node: Trie2Index,
     initial_bv: LLMTokenBV,
+    trie2_god: &Trie2GodWrapper,
 ) -> LLMTokenBV {
     let mut end_bv = LLMTokenBV::zeros();
     let mut q = VecDeque::new();
@@ -162,7 +165,7 @@ fn find_end_bv_from_node_via_none_edges(
     let mut visited: HashMap<PrecomputeNode2Index, LLMTokenBV> = HashMap::new();
 
     while let Some((node, bv)) = q.pop_front() {
-        let guard = node.read().unwrap();
+        let guard = node.read(trie2_god).unwrap();
         if guard.value.end {
             end_bv |= &bv;
         }
@@ -175,7 +178,7 @@ fn find_end_bv_from_node_via_none_edges(
                     if new_bv.is_empty() { continue; }
 
                     let child_arc = dest_ptr.as_arc().clone();
-                    let child_ptr = Arc::as_ptr(&child_arc);
+                    let child_ptr = child_arc;
                     if let Some(existing_bv) = visited.get_mut(&child_ptr) {
                         let diff = &new_bv - &*existing_bv;
                         if !diff.is_empty() {
@@ -206,68 +209,69 @@ fn find_end_bv_from_node_via_none_edges(
 /// # Returns
 /// `true` if the tries are semantically equivalent, `false` otherwise.
 pub fn are_precompute2_trees_equivalent(a: &Trie2Index, b: &Trie2Index) -> bool {
-    // Stochastic version
-    if Arc::ptr_eq(a, b) { return true; }
-
-    const NUM_SAMPLES: usize = 100;
-    const MAX_PATH_LEN: usize = 32;
-    let mut rng = rand::thread_rng();
-
-    // Sample from A, check in B
-    for i in 0..NUM_SAMPLES {
-        if let Some(path) = sample_normalized_path(a, &mut rng, MAX_PATH_LEN) {
-            let bv_a = get_bv_for_normalized_path(a, &path);
-            if bv_a.is_empty() && i > 0 { continue; } // Skip trivial paths, but always check the empty path
-            let bv_b = get_bv_for_normalized_path(b, &path);
-            if bv_a != bv_b {
-                println!("\n--- Precompute2 Equivalence Mismatch ---");
-                println!("Path sampled from Tree A:");
-                println!("  Path: {:?}", path);
-                println!("  BV from A: {:?}", bv_a);
-                println!("  BV from B: {:?}", bv_b);
-                println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
-                return false;
-            }
-        }
-    }
-
-    // Sample from B, check in A
-    for i in 0..NUM_SAMPLES {
-        if let Some(path) = sample_normalized_path(b, &mut rng, MAX_PATH_LEN) {
-            let bv_b = get_bv_for_normalized_path(b, &path);
-            if bv_b.is_empty() && i > 0 { continue; } // Skip trivial paths, but always check the empty path
-            let bv_a = get_bv_for_normalized_path(a, &path);
-            if bv_a != bv_b {
-                println!("\n--- Precompute2 Equivalence Mismatch ---");
-                println!("Path sampled from Tree B:");
-                println!("  Path: {:?}", path);
-                println!("  BV from A: {:?}", bv_a);
-                println!("  BV from B: {:?}", bv_b);
-                println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
-                return false;
-            }
-        }
-    }
-
-    true
+    todo!()
+    // // Stochastic version
+    // if Arc::ptr_eq(a, b) { return true; }
+    //
+    // const NUM_SAMPLES: usize = 100;
+    // const MAX_PATH_LEN: usize = 32;
+    // let mut rng = rand::thread_rng();
+    //
+    // // Sample from A, check in B
+    // for i in 0..NUM_SAMPLES {
+    //     if let Some(path) = sample_normalized_path(a, &mut rng, MAX_PATH_LEN) {
+    //         let bv_a = get_bv_for_normalized_path(a, &path);
+    //         if bv_a.is_empty() && i > 0 { continue; } // Skip trivial paths, but always check the empty path
+    //         let bv_b = get_bv_for_normalized_path(b, &path);
+    //         if bv_a != bv_b {
+    //             println!("\n--- Precompute2 Equivalence Mismatch ---");
+    //             println!("Path sampled from Tree A:");
+    //             println!("  Path: {:?}", path);
+    //             println!("  BV from A: {:?}", bv_a);
+    //             println!("  BV from B: {:?}", bv_b);
+    //             println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
+    //             return false;
+    //         }
+    //     }
+    // }
+    //
+    // // Sample from B, check in A
+    // for i in 0..NUM_SAMPLES {
+    //     if let Some(path) = sample_normalized_path(b, &mut rng, MAX_PATH_LEN) {
+    //         let bv_b = get_bv_for_normalized_path(b, &path);
+    //         if bv_b.is_empty() && i > 0 { continue; } // Skip trivial paths, but always check the empty path
+    //         let bv_a = get_bv_for_normalized_path(a, &path);
+    //         if bv_a != bv_b {
+    //             println!("\n--- Precompute2 Equivalence Mismatch ---");
+    //             println!("Path sampled from Tree B:");
+    //             println!("  Path: {:?}", path);
+    //             println!("  BV from A: {:?}", bv_a);
+    //             println!("  BV from B: {:?}", bv_b);
+    //             println!("  Difference (A ^ B): {:?}", bv_a.symmetric_difference(&bv_b));
+    //             return false;
+    //         }
+    //     }
+    // }
+    //
+    // true
 }
 
-pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>) {
+pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>, trie2_god: &Trie2GodWrapper) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
     // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
     // This correctly handles cycles, iterating until a fixed point is reached.
-    let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
+    let all_nodes = Trie::all_nodes(trie2_god, &roots.values().cloned().collect::<Vec<_>>());
     let mut predecessors: HashMap<PrecomputeNode2Index, Vec<(PrecomputeNode2Index, LLMTokenBV)>> = HashMap::new();
     let mut worklist = VecDeque::new();
     let mut live: HashMap<PrecomputeNode2Index, LLMTokenBV> = HashMap::new();
 
     // 1. Initialize live sets and build predecessor map.
     for node_arc in &all_nodes {
-        let node_ptr = Arc::as_ptr(node_arc);
+        let node_ptr = *node_arc;
         live.insert(node_ptr, LLMTokenBV::zeros());
 
-        let guard = node_arc.read().unwrap();
+        let guard = node_arc.read(trie2_god).unwrap();
         if guard.value.end {
             let initial_live = guard.value.live_tokens.clone();
             if !initial_live.is_empty() {
@@ -279,7 +283,7 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
         for dest_map in guard.children().values() {
             for (child_wrap, edge_bv) in dest_map {
                 let child_arc = child_wrap.as_arc().clone();
-                let child_ptr = Arc::as_ptr(&child_arc);
+                let child_ptr = child_arc;
                 predecessors.entry(child_ptr).or_default().push((node_ptr, edge_bv.clone()));
             }
         }
@@ -307,11 +311,11 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
 
     // 3. Prune the graph based on the computed live sets.
     for node_arc in &all_nodes {
-        let mut guard = node_arc.write().unwrap();
+        let mut guard = node_arc.write(trie2_god).unwrap();
         guard.children_mut().retain(|_edge_key, dest_map| {
             dest_map.retain(|child_wrapper, edge_value_bv| {
                 let child_arc = child_wrapper.as_arc().clone();
-                let child_ptr = Arc::as_ptr(&child_arc);
+                let child_ptr = child_arc;
                 let live_from_child = live.get(&child_ptr).unwrap();
                 let live_on_edge = &*edge_value_bv & live_from_child;
                 if live_on_edge.is_empty() {
@@ -324,20 +328,20 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
             !dest_map.is_empty()
         });
         // Update the node's own live_tokens field with the final computed value.
-        let node_ptr = Arc::as_ptr(node_arc);
+        let node_ptr = *node_arc;
         guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
     }
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
 }
 
-pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>) {
+pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>, trie2_god: &Trie2GodWrapper) {
     crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
 
     const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(&roots_vec);
-    let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
+    let all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
+    let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (*n, n.clone())).collect();
 
     type EdgeKey2 = (usize, Option<StateID>);
     let mut incoming_map: HashMap<
@@ -349,12 +353,12 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
     > = HashMap::new();
 
     for src_arc in &all_nodes {
-        let src_ptr = Arc::as_ptr(src_arc);
-        let guard = src_arc.read().expect("poison");
+        let src_ptr = *src_arc;
+        let guard = src_arc.read(trie2_god).expect("poison");
         for (ek, dest_map) in guard.children() {
             for (dest_wrapper, bv) in dest_map {
                 let dest_arc = dest_wrapper.as_arc().clone();
-                let dest_ptr = Arc::as_ptr(&dest_arc);
+                let dest_ptr = dest_arc;
                 incoming_map
                     .entry(dest_ptr)
                     .or_default()
@@ -370,9 +374,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
             if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
                 let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
 
-                let intermediate_node = Arc::new(RwLock::new(PrecomputeNode2::new(
-                    PrecomputedNodeContents::internal(),
-                )));
+                let intermediate_node = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
                 let mut union_bv = LLMTokenBV::zeros();
                 for (_, bv) in &sources {
@@ -380,7 +382,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
                 }
 
                 {
-                    let mut intermediate_guard = intermediate_node.write().expect("poison");
+                    let mut intermediate_guard = intermediate_node.write(trie2_god).expect("poison");
                     let mut edge_val_opt = Some(union_bv.clone());
                     intermediate_guard.try_insert_unchecked(edge_key.clone(), &mut edge_val_opt, dest_arc.clone());
                     intermediate_guard.value.live_tokens |= &union_bv;
@@ -389,11 +391,11 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
                 let identity_edge_key = (0, None);
                 for (src_ptr, bv) in &sources {
                     let src_arc = arc_map.get(src_ptr).unwrap();
-                    let mut src_guard = src_arc.write().expect("poison");
+                    let mut src_guard = src_arc.write(trie2_god).expect("poison");
 
                     let mut remove_ek = false;
                     if let Some(dest_map_for_ek) = src_guard.children_mut().get_mut(&edge_key) {
-                        let strong_key = ArcPtrWrapper::new(dest_arc.clone());
+                        let strong_key = dest_arc.clone();
                         dest_map_for_ek.remove(&strong_key);
                         if dest_map_for_ek.is_empty() {
                             remove_ek = true;
@@ -415,29 +417,30 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 
 pub fn optimize_trie2_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
-    god: Trie2GodWrapper,
+    trie2_god: Trie2GodWrapper,
 
 ) {
     crate::debug!(2, "Optimizing Trie 2 size...");
     // Pin all nodes to prevent dangling weak pointers while we rewire.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes_pinner = Trie::all_nodes(&roots_vec);
+    let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_vec);
 
-    prune_dead_paths_trie2(roots);
-    merge_nodes_trie2(roots);
-    simplify_trie2_factor_common_destinations(roots);
-    compress_trie2_edges(roots, &god);
-    prune_dead_paths_trie2(roots);
-    merge_nodes_trie2(roots);
+    prune_dead_paths_trie2(roots, &trie2_god);
+    merge_nodes_trie2(roots, &trie2_god);
+    simplify_trie2_factor_common_destinations(roots, &trie2_god);
+    compress_trie2_edges(roots, &trie2_god);
+    prune_dead_paths_trie2(roots, &trie2_god);
+    merge_nodes_trie2(roots, &trie2_god);
     let final_roots: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(&final_roots);
+    Trie::recompute_all_max_depths(&trie2_god, &final_roots);
 }
 
 fn trie2_shape_hash(
     arc: &Trie2Index,
     memo: &mut HashMap<PrecomputeNode2Index, u64>,
+    trie2_god: &Trie2GodWrapper
 ) -> u64 {
-    let ptr = Arc::as_ptr(arc);
+    let ptr = *arc;
     if let Some(&h) = memo.get(&ptr) {
         return h;
     }
@@ -445,7 +448,7 @@ fn trie2_shape_hash(
     // Insert a placeholder to break cycles. A fixed value like 0 is fine.
     memo.insert(ptr, 0);
 
-    let node_guard = arc.read().unwrap();
+    let node_guard = arc.read(trie2_god).unwrap();
     let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
 
     // Hash shape-defining value fields
@@ -456,7 +459,7 @@ fn trie2_shape_hash(
     for (ek, dest_map) in node_guard.children() {
         for (np, ev) in dest_map {
             let child = np.as_arc().clone();
-            let child_h = trie2_shape_hash(&child, memo);
+            let child_h = trie2_shape_hash(&child, memo, trie2_god);
             let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
             ek.hash(&mut pair_hasher);
             ev.hash(&mut pair_hasher);
@@ -482,6 +485,7 @@ fn trie2_shape_hash(
 fn trie2_skeleton_hash(
     arc: &Trie2Index,
     memo: &mut HashMap<PrecomputeNode2Index, u64>,
+    trie2_god: &Trie2GodWrapper,
 ) -> u64 {
     const MAX_DEPTH: usize = 64; // generous, but bounded
     fn inner(
@@ -489,16 +493,17 @@ fn trie2_skeleton_hash(
         memo: &mut HashMap<PrecomputeNode2Index, u64>,
         visiting: &mut HashSet<PrecomputeNode2Index>,
         depth_left: usize,
+        trie2_god: &Trie2GodWrapper,
     ) -> u64 {
-        let ptr = Arc::as_ptr(node);
+        let ptr = *node;
         if let Some(&h) = memo.get(&ptr) {
             return h;
         }
         if depth_left == 0 {
             // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
-            let guard = node.read().expect("poison");
+            let guard = node.read(trie2_god).expect("poison");
             let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            (ptr as usize).hash(&mut h);
+            (ptr).hash(&mut h);
             guard.value.end.hash(&mut h);
             let out = h.finish();
             memo.insert(ptr, out);
@@ -506,21 +511,21 @@ fn trie2_skeleton_hash(
         }
         if !visiting.insert(ptr) {
             // Cycle detected on current recursion path: fall back to pointer + end flag.
-            let guard = node.read().expect("poison");
+            let guard = node.read(trie2_god).expect("poison");
             let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            (ptr as usize).hash(&mut h);
+            (ptr).hash(&mut h);
             guard.value.end.hash(&mut h);
             let out = h.finish();
             memo.insert(ptr, out);
             return out;
         }
 
-        let guard = node.read().expect("poison");
+        let guard = node.read(trie2_god).expect("poison");
         let mut edge_hashes = Vec::new();
         for (ek, dest_map) in guard.children() {
             for (np, _ev) in dest_map {
                 let child = np.as_arc().clone();
-                let child_h = inner(&child, memo, visiting, depth_left - 1);
+                let child_h = inner(&child, memo, visiting, depth_left - 1, trie2_god);
                 let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
                 // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
                 let (k, sid_opt) = ek;
@@ -535,7 +540,7 @@ fn trie2_skeleton_hash(
         edge_hashes.sort_unstable();
         let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
         {
-            let guard2 = node.read().expect("poison");
+            let guard2 = node.read(trie2_god).expect("poison");
             guard2.value.end.hash(&mut hasher);
         }
         for h in edge_hashes {
@@ -548,22 +553,23 @@ fn trie2_skeleton_hash(
     }
 
     let mut visiting: HashSet<PrecomputeNode2Index> = HashSet::new();
-    inner(arc, memo, &mut visiting, MAX_DEPTH)
+    inner(arc, memo, &mut visiting, MAX_DEPTH, trie2_god)
 }
 
 fn trie2_shape_eq(
     a: &Trie2Index,
     b: &Trie2Index,
     cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
+    trie2_god: &Trie2GodWrapper,
 ) -> bool {
-    if Arc::ptr_eq(a, b) {
+    if a == b {
         return true;
     }
 
-    let (p1, p2) = if Arc::as_ptr(a) < Arc::as_ptr(b) {
-        (Arc::as_ptr(a), Arc::as_ptr(b))
+    let (p1, p2) = if *a < *b {
+        (*a, *b)
     } else {
-        (Arc::as_ptr(b), Arc::as_ptr(a))
+        (*b, *a)
     };
 
     if let Some(&res) = cache.get(&(p1, p2)) {
@@ -572,8 +578,8 @@ fn trie2_shape_eq(
 
     cache.insert((p1, p2), true); // Optimistic insertion for cycles
 
-    let guard_a = a.read().unwrap();
-    let guard_b = b.read().unwrap();
+    let guard_a = a.read(trie2_god).unwrap();
+    let guard_b = b.read(trie2_god).unwrap();
 
     // Compare shape-defining value fields
     if guard_a.value.end != guard_b.value.end {
@@ -602,7 +608,7 @@ fn trie2_shape_eq(
                 for i in 0..pairs_b.len() {
                     let (ev_b, ref arc_b) = pairs_b[i];
                     if ev_a == ev_b {
-                        if trie2_shape_eq(&arc_a, arc_b, cache) {
+                        if trie2_shape_eq(&arc_a, arc_b, cache, trie2_god) {
                             pairs_b.remove(i);
                             found_match = true;
                             break;
@@ -623,11 +629,11 @@ fn trie2_shape_eq(
     true
 }
 
-pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>) {
+pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>, trie2_god: &Trie2GodWrapper) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(&roots_vec);
+    let all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
 
     let pb = ProgressBar::new(all_nodes.len() as u64);
     pb.set_style(
@@ -653,6 +659,7 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2I
             &mut shape_hash_memo,
             &mut shape_eq_cache,
             &pb,
+            trie2_god
         );
         new_roots.insert(*sid, canonical_root);
     }
@@ -660,7 +667,7 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2I
 
     // Recompute depths after structural changes from merging
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(&final_roots_vec);
+    Trie::recompute_all_max_depths(trie2_god, &final_roots_vec);
 
     pb.finish_with_message("Finished merging Trie 2 nodes");
     crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.values().map(|v| v.len()).sum::<usize>());
@@ -673,8 +680,9 @@ fn deduplicate_recursive_trie2(
     shape_hash_memo: &mut HashMap<PrecomputeNode2Index, u64>,
     shape_eq_cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
     pb: &ProgressBar,
+    trie2_god: &Trie2GodWrapper,
 ) -> Trie2Index {
-    let node_ptr = Arc::as_ptr(&node_arc);
+    let node_ptr = node_arc;
     if let Some(cached_node) = visited.get(&node_ptr) {
         return cached_node.clone();
     }
@@ -690,7 +698,7 @@ fn deduplicate_recursive_trie2(
     let mut children_changed = false;
 
     {
-        let node_guard = node_arc.read().unwrap();
+        let node_guard = node_arc.read(trie2_god).unwrap();
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
@@ -702,11 +710,12 @@ fn deduplicate_recursive_trie2(
                     shape_hash_memo,
                     shape_eq_cache,
                     pb,
+                    trie2_god,
                 );
-                if !Arc::ptr_eq(&child_arc, &canonical_child_arc) {
+                if child_arc != canonical_child_arc {
                     children_changed = true;
                 }
-                let new_node_ptr_wrapper = ArcPtrWrapper::new(canonical_child_arc);
+                let new_node_ptr_wrapper = canonical_child_arc;
                 new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
             }
             if !new_dest_map.is_empty() {
@@ -716,21 +725,21 @@ fn deduplicate_recursive_trie2(
     }
 
     if children_changed {
-        let mut node_guard = node_arc.write().unwrap();
+        let mut node_guard = node_arc.write(trie2_god).unwrap();
         *node_guard.children_mut() = new_children_map;
         // max_depth will be recomputed globally at the end
     }
 
     // Now find a canonical representative for the current node using cycle-safe skeleton hash
-    let fp = trie2_skeleton_hash(&node_arc, shape_hash_memo);
+    let fp = trie2_skeleton_hash(&node_arc, shape_hash_memo, trie2_god);
     let bucket = canonical_nodes.entry(fp).or_default();
 
     for candidate_arc in bucket.iter() {
-        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache) {
+        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache, trie2_god) {
             // Found a match. Merge live_tokens and return the canonical version.
-            let node_live_tokens = { node_arc.read().unwrap().value.live_tokens.clone() };
+            let node_live_tokens = { node_arc.read(trie2_god).unwrap().value.live_tokens.clone() };
             if !node_live_tokens.is_empty() {
-                let mut candidate_guard = candidate_arc.write().unwrap();
+                let mut candidate_guard = candidate_arc.write(trie2_god).unwrap();
                 candidate_guard.value.live_tokens |= node_live_tokens;
             }
             // Update visited map with the true canonical node.
@@ -757,7 +766,7 @@ fn deduplicate_recursive_trie2(
 /// This reduces redundant intermediate nodes introduced during construction.
 pub fn compress_trie2_edges(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
-    god: &Trie2GodWrapper,
+    trie2_god: &Trie2GodWrapper,
 ) {
     crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
     type EdgeKey2 = (usize, Option<StateID>);
@@ -766,25 +775,25 @@ pub fn compress_trie2_edges(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let mut changed = true;
     let mut iterations = 0usize;
-    let _all_nodes = Trie::all_nodes(&roots_vec);
+    let _all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
 
     while changed {
         iterations += 1;
         changed = false;
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
         let mut arc_map: HashMap<PrecomputeNode2Index, PrecomputeNode2Index> = HashMap::new();
         for n in &all_nodes {
-            arc_map.insert(Arc::as_ptr(n), n.clone());
+            arc_map.insert(*n, n.clone());
         }
 
         // Build incoming counts
         let mut incoming_count: HashMap<PrecomputeNode2Index, usize> = HashMap::new();
         for src_arc in &all_nodes {
-            let guard = src_arc.read().expect("poison");
+            let guard = src_arc.read(trie2_god).expect("poison");
             for (_ek, dest_map) in guard.children() {
                 for (node_ptr, _ev) in dest_map {
                     let child_arc = node_ptr.as_arc().clone();
-                    let ptr = Arc::as_ptr(&child_arc);
+                    let ptr = child_arc;
                     *incoming_count.entry(ptr).or_insert(0) += 1;
                 }
             }
@@ -794,7 +803,7 @@ pub fn compress_trie2_edges(
         'src_loop: for src_arc in &all_nodes {
             // Snapshot children
             let children_snapshot: Vec<(EdgeKey2, Vec<(PrecomputeNode2Index, LLMTokenBV)>)> = {
-                let g = src_arc.read().expect("poison");
+                let g = src_arc.read(trie2_god).expect("poison");
                 g.children()
                     .iter()
                     .map(|(ek, dest_map)| {
@@ -810,14 +819,14 @@ pub fn compress_trie2_edges(
             for (ek1, entries) in children_snapshot {
                 for (child_ptr, bv1) in entries {
                     let child_arc = child_ptr.as_arc().clone();
-                    let child_ptr_raw = Arc::as_ptr(&child_arc);
+                    let child_ptr_raw = child_arc;
 
                     // Preconditions: B has in-degree 1, not end, and exactly one outgoing edge overall.
                     if incoming_count.get(&child_ptr_raw).cloned().unwrap_or(0) != 1 {
                         continue;
                     }
                     let (is_end, child_outgoing): (bool, Vec<(EdgeKey2, Vec<(PrecomputeNode2Index, LLMTokenBV)>)>) = {
-                        let cg = child_arc.read().expect("poison");
+                        let cg = child_arc.read(trie2_god).expect("poison");
                         let mut out = Vec::new();
                         for (ek, dest_map) in cg.children() {
                             let mut v = Vec::new();
@@ -865,10 +874,10 @@ pub fn compress_trie2_edges(
 
                     // Perform rewire on src: subtract moved tokens from src->child edge, add/merge src->grand edge
                     {
-                        let mut src_w = src_arc.write().expect("poison");
+                        let mut src_w = src_arc.write(trie2_god).expect("poison");
                         // 1) Reduce/remove src --ek1--> child by merged_bv
                         if let Some(dest_map_for_ek1) = src_w.children_mut().get_mut(&ek1) {
-                            let child_key_in_map = ArcPtrWrapper::new(child_arc.clone());
+                            let child_key_in_map = child_arc.clone();
                             let mut removed = false;
                             if let Some(ev) = dest_map_for_ek1.get_mut(&child_key_in_map) {
                                 *ev -= &merged_bv;
@@ -886,7 +895,7 @@ pub fn compress_trie2_edges(
                     // 2) Add/merge src --merged_key--> grand with merged_bv
                     {
                         let inserter = EdgeInserter::new(
-                            god,
+                            trie2_god,
                             src_arc.clone(),
                             merged_key.clone(),
                             merged_bv.clone(),
@@ -907,8 +916,8 @@ pub fn compress_trie2_edges(
 
         // After a full pass, prune trivial dead ends introduced by compression.
         if changed {
-            prune_dead_paths_trie2(roots);
-            merge_nodes_trie2(roots);
+            prune_dead_paths_trie2(roots, trie2_god);
+            merge_nodes_trie2(roots, trie2_god);
         }
     }
     crate::debug!(2, "Finished compressing Trie 2 in {} iteration(s).", iterations);
@@ -916,6 +925,7 @@ pub fn compress_trie2_edges(
 
 pub fn clone_trie2_graph(
     root: &Trie2Index,
+    trie2_god: &Trie2GodWrapper,
 ) -> (
     Trie2Index,
     HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
@@ -924,19 +934,19 @@ pub fn clone_trie2_graph(
     let mut map: HashMap<PrecomputeNode2Index, PrecomputeNode2Index> = HashMap::new();
     let mut q: VecDeque<PrecomputeNode2Index> = VecDeque::new();
 
-    let root_ptr = Arc::as_ptr(root);
-    let root_value = { root.read().expect("poison").value.clone() };
-    let new_root = Arc::new(RwLock::new(PrecomputeNode2::new(root_value)));
+    let root_ptr = *root;
+    let root_value = { root.read(trie2_god).expect("poison").value.clone() };
+    let new_root = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(root_value)));
     map.insert(root_ptr, new_root.clone());
     q.push_back(root.clone());
 
     while let Some(old_arc) = q.pop_front() {
-        let old_ptr = Arc::as_ptr(&old_arc);
+        let old_ptr = old_arc;
         let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
 
         // Snapshot children outside of lock to avoid recursive lock explosion.
         let children_snapshot: Vec<( (usize, Option<StateID>), Vec<(PrecomputeNode2Index, LLMTokenBV)> )> = {
-            let g = old_arc.read().expect("poison");
+            let g = old_arc.read(trie2_god).expect("poison");
             g.children()
                 .iter()
                 .map(|(ek, dest_map)| {
@@ -955,10 +965,10 @@ pub fn clone_trie2_graph(
         for (_ek, entries) in &children_snapshot {
             for (node_ptr, _ev) in entries {
                 let child_arc_old = node_ptr.as_arc().clone();
-                let child_ptr_old = Arc::as_ptr(&child_arc_old);
+                let child_ptr_old = child_arc_old;
                 if !map.contains_key(&child_ptr_old) {
-                    let child_value = { child_arc_old.read().expect("poison").value.clone() };
-                    let child_arc_new = Arc::new(RwLock::new(PrecomputeNode2::new(child_value)));
+                    let child_value = { child_arc_old.read(trie2_god).expect("poison").value.clone() };
+                    let child_arc_new = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(child_value)));
                     map.insert(child_ptr_old, child_arc_new);
                     q.push_back(child_arc_old);
                 }
@@ -967,14 +977,14 @@ pub fn clone_trie2_graph(
 
         // Now wire edges on new_arc
         {
-            let mut new_g = new_arc.write().expect("poison");
+            let mut new_g = new_arc.write(trie2_god).expect("poison");
             for (ek, entries) in children_snapshot {
                 let dest_map = new_g.children_mut().entry(ek).or_default();
                 for (old_node_ptr, ev) in entries {
                     let child_arc_old = old_node_ptr.as_arc().clone();
-                    let child_ptr_old = Arc::as_ptr(&child_arc_old);
+                    let child_ptr_old = child_arc_old;
                     let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone(); // With weak refs removed, all edges are strong.
-                    let new_key = ArcPtrWrapper::new(child_arc_new);
+                    let new_key = child_arc_new;
                     dest_map.insert(new_key, ev);
                 }
             }
@@ -982,6 +992,6 @@ pub fn clone_trie2_graph(
     }
 
     // Recompute max_depths in the clone to keep invariants consistent.
-    Trie::recompute_all_max_depths(&[new_root.clone()]);
+    Trie::recompute_all_max_depths(trie2_god, &[new_root.clone()]);
     (new_root, map)
 }
