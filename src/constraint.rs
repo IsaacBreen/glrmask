@@ -562,7 +562,7 @@ impl GrammarConstraint {
                 crate::datastructures::gss::merge_trie2_nodes_if_needed(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
-                    glr_s.active_state.god.as_ref().unwrap(),
+                    glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
@@ -602,7 +602,7 @@ impl GrammarConstraint {
                                 let edge_key = (0, Some(last_edge.state_id));
 
                                 let mut inserter = EdgeInserter::new(
-                                    glr_s.active_state.god.as_ref().unwrap(),
+                                    glr_s.active_state.trie2_god.as_ref().unwrap(),
                                     src_arc.clone(),
                                     edge_key,
                                     tokens_to_push.clone(),

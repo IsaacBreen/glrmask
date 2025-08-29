@@ -1181,7 +1181,7 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
 pub(crate) fn merge_trie2_nodes_if_needed(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
-    god: &Trie2GodWrapper,
+    trie2_god: &Trie2GodWrapper,
 ) {
     let mut new_destinations = BTreeMap::new();
 
@@ -1189,14 +1189,14 @@ pub(crate) fn merge_trie2_nodes_if_needed(
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         if !root.acc.trie2_nodes.iter().any(
             // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read(god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            |n| n.as_arc().read(trie2_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
         ) {
             return Some(root.acc.clone());
         }
         let mut new_acc = (*root.acc).clone();
         // Create a single new destination for this merge operation.
         let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone()))
-            .or_insert_with(|| PrecomputeNode2Index::new(god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+            .or_insert_with(|| PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
             .clone();
         let edge_key = (0, None);
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
@@ -1205,7 +1205,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
             let source_arc = source_wrapper.as_arc().clone();
 
             let inserter = EdgeInserter::new(
-                &god,
+                &trie2_god,
                 source_arc,
                 edge_key,
                 tokens_for_edge.clone(),
@@ -1218,7 +1218,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
         }
 
         // Update the live tokens on the new destination node.
-        new_destination.write(god).expect("poison").value.live_tokens |= &tokens_for_edge;
+        new_destination.write(trie2_god).expect("poison").value.live_tokens |= &tokens_for_edge;
 
         // The acc now points only to this new merged destination.
         new_acc.trie2_nodes = BTreeSet::from([new_destination]);
