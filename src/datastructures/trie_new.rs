@@ -1355,9 +1355,11 @@ where
         .into_option()
 }
 
+
+
 #[derive(Debug, Clone)]
 pub struct Arena<T> {
-    values: Arc<RwLock<Vec<T>>>,
+    values: Arc<RwLock<BTreeMap<usize, T>>>,
 }
 impl<T> PartialEq for Arena<T> where T: PartialEq {
     fn eq(&self, other: &Self) -> bool {
@@ -1370,7 +1372,7 @@ impl<T> PartialOrd for Arena<T> where T: PartialOrd {
         if Arc::ptr_eq(&self.values, &other.values) {
             return Some(Ordering::Equal);
         }
-        self.values.read().unwrap().partial_cmp(&other.values.read().unwrap())
+        PartialOrd::partial_cmp(&*self.values.read().unwrap(), &*other.values.read().unwrap())
     }
 }
 impl<T> Ord for Arena<T> where T: Ord {
@@ -1378,12 +1380,11 @@ impl<T> Ord for Arena<T> where T: Ord {
         if Arc::ptr_eq(&self.values, &other.values) {
             return Ordering::Equal;
         }
-        self.values.read().unwrap().cmp(&other.values.read().unwrap())
+        Ord::cmp(&*self.values.read().unwrap(), &*other.values.read().unwrap())
     }
 }
 impl<T> Hash for Arena<T> where T: Hash {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let values_guard = self.values.read().unwrap();
-        values_guard.hash(state);
+        Hash::hash(&Arc::as_ptr(&self.values), state);
     }
 }
