@@ -178,7 +178,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
     println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
     const FORCE_RECOMPUTE: bool = true;
-    const SAVE_TO_CACHE: bool = false;
+    const SAVE_TO_CACHE: bool = true;
     use crate::{constraint, json_serialization};
     use flate2::read::GzDecoder;
     use flate2::write::GzEncoder;
