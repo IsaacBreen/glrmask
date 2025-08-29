@@ -1134,7 +1134,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in &acc.trie2_nodes {
                     let source_arc = existing.as_arc().clone();
 
-                    let fallback_dest = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    let fallback_dest = PrecomputeNode2Index::new(self.active_state.god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     let inserter = EdgeInserter::new(
                         self.active_state.god.as_ref().unwrap(),
                         source_arc.clone(),
@@ -1146,7 +1146,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     ).try_destination(fallback_dest.clone()); // direct, strong insert
 
                     let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
-                    let final_wr = ArcPtrWrapper::new(final_dst_arc.clone());
+                    let final_wr = final_dst_arc.clone();
                     dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
                     used.insert(final_wr);
                 }
@@ -1193,7 +1193,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let (dst_arc, is_new) = if let Some((arc, _)) = self.below_bottom_cache.get(&accept_cache_key) {
                     (arc.as_arc().clone(), false)
                 } else {
-                    let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+                    let new_trie2_node = PrecomputeNode2Index::new(self.active_state.god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
                     self.below_bottom_cache.insert(accept_cache_key.clone(), (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
                     (new_trie2_node, true)
                 };
@@ -1310,7 +1310,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Arc::new(GSSNode::new_fresh())
             }
         } else {
-            let new_trie2_node = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+            let new_trie2_node = PrecomputeNode2Index::new(self.active_state.god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
             self.below_bottom_cache.insert(cache_key, (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
             let mut out = Vec::new();
             for (k, mut acc) in below {
