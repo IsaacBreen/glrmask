@@ -237,6 +237,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
             optimize_trie2_merge_nodes: false,
             optimize_trie2_factor_common_destinations: false,
             optimize_trie2_compress_edges: false,
+            optimize_trie2_gc: true,
         };
         let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
             compiled_grammar.clone(),
