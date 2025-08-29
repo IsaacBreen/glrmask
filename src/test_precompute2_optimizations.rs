@@ -189,7 +189,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
     let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
 
     // 1. Load and compile the JavaScript grammar.
-    let grammar_path = "src/js_simplified.ebnf";
+    let grammar_path = "src/js_simplified2.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
