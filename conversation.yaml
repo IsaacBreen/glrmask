@@ -6,6 +6,7 @@ local_system:
     - src/test_precompute_optimizations.rs
     - src/constraint_precompute2_utils.rs
     - src/precompute3_schema.json
+    - load_and_print_trie.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -4563,7 +4564,7 @@ local_system:
       use std::io::{BufReader, BufWriter, Write};
       use std::path::Path;
       use std::sync::Arc;
-      use bimap::{BiBTreeMap};
+      use bimap::BiBTreeMap;
       use crate::constraint_extra::PrecomputeStats;
       use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
       use crate::json_serialization::JSONConvertible;
@@ -4588,47 +4589,32 @@ local_system:
           (map, max_id)
       }
 
-      fn assert_optimized_equivalent(
+      fn assert_trees_are_equivalent(
           original_precomputed2: &Precomputed2,
+          original_god: &Trie2GodWrapper,
+          optimized_precomputed2: &Precomputed2,
+          optimized_god: &Trie2GodWrapper,
           original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
           llm_token_map: &LLMTokenMap,
-          trie2_god: Trie2GodWrapper,
       ) {
-          // Deep clone the original precomputed2 tree(s)
-          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
-          for (sid, root_arc) in original_precomputed2.iter() {
-              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
-              optimized_precomputed2.insert(*sid, cloned_root);
-          }
-
-          // Apply optimization passes
-          let mut optimization_config = GrammarConstraintConfig::default();
-          optimization_config.optimize_trie2_gc = false;
-          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
-
-          println!("\n--- Stats for Optimized Precompute2 Tree ---");
-          let mut stats_optimized = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
-
-          println!("\n--- Dumping Optimized Precompute2 Tree ---");
-          GrammarConstraint::_dump_precomputed2(
-              &optimized_precomputed2,
-              original_to_internal_id_bimap,
-              llm_token_map,
-              &trie2_god,
-          );
-
           println!("\n--- Final Stats Comparison ---");
           println!("\n--- Stats for Original Precompute2 Tree ---");
           let mut stats_original = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, original_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, original_god);
 
-          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
-          let mut stats_optimized_final = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(optimized_precomputed2, &mut stats_optimized, optimized_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, optimized_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              optimized_god,
+          );
           println!("--- Finished Dumping Optimized Tree ---\n");
 
           // Compare the original and optimized trees for semantic equivalence
@@ -4641,7 +4627,7 @@ local_system:
           for sid in original_precomputed2.keys() {
               let original_root = original_precomputed2.get(sid).unwrap();
               let optimized_root = optimized_precomputed2.get(sid).unwrap();
-              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+              if !are_precompute2_trees_equivalent(original_root, original_god, optimized_root, optimized_god) {
                   // Detailed info is now printed inside are_precompute2_trees_equivalent
                   panic!(
                       "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
@@ -4662,18 +4648,33 @@ local_system:
               optimize_trie2_compress_edges: false,
               optimize_trie2_gc: true,
           };
-          let gc = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled,
-              llm_token_map,
+          println!("\n--- Building baseline GrammarConstraint (optimizations OFF) ---");
+          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled.clone(),
+              llm_token_map.clone(),
               LLMTokenID(0), // dummy EOF placeholder
               max_original_llm_token_id,
               &no_opt_config,
           );
-          assert_optimized_equivalent(
-              &gc.precomputed2,
-              &gc.llm_vocab.original_to_internal_id_bimap,
-              &gc.llm_vocab.llm_token_map,
-              gc.trie2_god.clone(),
+
+          // Create with optimizations ON
+          let opt_config = GrammarConstraintConfig::default(); // Now defaults to ON
+          println!("\n--- Building optimized GrammarConstraint (optimizations ON) ---");
+          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map.clone(),
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &opt_config,
+          );
+
+          assert_trees_are_equivalent(
+              &gc_baseline.precomputed2,
+              &gc_baseline.trie2_god,
+              &gc_optimized.precomputed2,
+              &gc_optimized.trie2_god,
+              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
+              &llm_token_map,
           );
           Ok(())
       }
@@ -4721,17 +4722,6 @@ local_system:
           // --- Setup Phase ---
           println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
-          const FORCE_RECOMPUTE: bool = true;
-          const SAVE_TO_CACHE: bool = true;
-          use crate::{constraint, json_serialization};
-          use flate2::read::GzDecoder;
-          use flate2::write::GzEncoder;
-          use flate2::Compression;
-
-          let cache_dir = Path::new(".cache/test_precompute2");
-          fs::create_dir_all(cache_dir)?;
-          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
-
           // 1. Load and compile the JavaScript grammar.
           let grammar_path = "src/js_simplified3.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
@@ -4760,58 +4750,42 @@ local_system:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
 
-          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-          let original_precomputed2: Precomputed2;
-          let original_god;
-          let llm_vocab;
+          // 3. Construct baseline GrammarConstraint (optimizations OFF)
+          println!("\nConstructing baseline GrammarConstraint with optimizations OFF...");
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+          };
+          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(0),
+              max_original_llm_token_id_val,
+              &no_opt_config,
+          );
 
-          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
-              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
-              let file = File::open(&precomputed2_cache_path)?;
-              let decompressor = GzDecoder::new(BufReader::new(file));
-              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
-              // This path is problematic as the cached version is likely optimized.
-              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
-              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
-              llm_vocab = gc_for_vocab.llm_vocab;
-              println!("Successfully loaded Precomputed2 from cache.");
-          } else {
-              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
-              let no_opt_config = GrammarConstraintConfig {
-                  optimize_trie2_prune_dead_paths: false,
-                  optimize_trie2_merge_nodes: false,
-                  optimize_trie2_factor_common_destinations: false,
-                  optimize_trie2_compress_edges: false,
-                  optimize_trie2_gc: true,
-              };
-              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
-                  compiled_grammar.clone(),
-                  llm_token_map.clone(),
-                  LLMTokenID(0), // dummy_eof_placeholder
-                  max_original_llm_token_id_val,
-                  &no_opt_config,
-              );
-              println!("GrammarConstraint constructed successfully.");
-              original_precomputed2 = grammar_constraint.precomputed2;
-              original_god = grammar_constraint.trie2_god;
-              llm_vocab = grammar_constraint.llm_vocab;
+          // 4. Construct optimized GrammarConstraint (optimizations ON)
+          println!("\nConstructing optimized GrammarConstraint with optimizations ON...");
+          let opt_config = GrammarConstraintConfig::default();
+          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(0),
+              max_original_llm_token_id_val,
+              &opt_config,
+          );
 
-              if SAVE_TO_CACHE {
-                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
-                  let file = File::create(&precomputed2_cache_path)?;
-                  let writer = BufWriter::new(file);
-                  let mut encoder = GzEncoder::new(writer, Compression::default());
-                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
-                  println!("Successfully saved Precomputed2 to cache.");
-              }
-          }
-
-          // 4. Assert that the optimized result is equivalent to the baseline.
-          assert_optimized_equivalent(
-              &original_precomputed2,
-              &llm_vocab.original_to_internal_id_bimap,
+          // 5. Assert equivalence
+          assert_trees_are_equivalent(
+              &gc_baseline.precomputed2,
+              &gc_baseline.trie2_god,
+              &gc_optimized.precomputed2,
+              &gc_optimized.trie2_god,
+              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
               &llm_token_map,
-              original_god,
           );
 
           println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
@@ -6064,31 +6038,192 @@ local_system:
     src/precompute3_schema.json: |-
       {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "JSON data structure schema",
-        "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+        "title": "Grammar Constraint Precomputed2 Data",
+        "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
         "type": "array",
         "items": [
           {
-            "$ref": "#/$defs/NumberPairArray"
+            "$ref": "#/$defs/Precomputed2Map",
+            "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
           },
           {
+            "$ref": "#/$defs/TrieArena",
+            "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "$defs": {
+          "Precomputed2Entry": {
+            "type": "array",
+            "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
+            "items": [
+              {
+                "type": "integer",
+                "description": "TokenizerStateID"
+              },
+              {
+                "type": "integer",
+                "description": "TrieNodeIndex (index into the arena's values)"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "Precomputed2Map": {
+            "type": "array",
+            "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
+            "items": {
+              "$ref": "#/$defs/Precomputed2Entry"
+            }
+          },
+          "HybridBitset": {
+            "type": "array",
+            "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Start of range (inclusive)"
+                },
+                {
+                  "type": "integer",
+                  "description": "End of range (inclusive)"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "TrieNodeValue": {
             "type": "object",
+            "description": "The value stored within a Trie node (PrecomputedNodeContents).",
+            "properties": {
+              "end": {
+                "type": "boolean",
+                "description": "True if this node can be a terminal state in the precomputed trie."
+              },
+              "live_tokens": {
+                "$ref": "#/$defs/HybridBitset",
+                "description": "A bitset of LLM tokens that can pass through or end at this node."
+              }
+            },
+            "required": [
+              "end",
+              "live_tokens"
+            ]
+          },
+          "EdgeKey": {
+            "type": "array",
+            "description": "An edge key of type (usize, Option<StateID>).",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Number of items to pop from the GLR stack."
+                },
+                {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "An optional GLR StateID to check after popping."
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "EdgeDestination": {
+            "type": "array",
+            "description": "A pair of [TrieNodeIndex, EdgeValue].",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Destination TrieNodeIndex."
+                },
+                {
+                  "$ref": "#/$defs/HybridBitset",
+                  "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "EdgeDestinationMap": {
+            "type": "array",
+            "description": "A map from destination node index to the edge value (LLMTokenBV).",
+            "items": {
+              "$ref": "#/$defs/EdgeDestination"
+            }
+          },
+          "TrieChildrenMapEntry": {
+            "type": "array",
+            "description": "A [EdgeKey, EdgeDestinationMap] pair.",
+            "items": [
+              {
+                "$ref": "#/$defs/EdgeKey"
+              },
+              {
+                "$ref": "#/$defs/EdgeDestinationMap"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "TrieChildrenMap": {
+            "type": "array",
+            "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
+            "items": {
+              "$ref": "#/$defs/TrieChildrenMapEntry"
+            }
+          },
+          "TrieNode": {
+            "type": "object",
+            "description": "A single node in the Precompute2 Trie.",
+            "properties": {
+              "children": {
+                "$ref": "#/$defs/TrieChildrenMap"
+              },
+              "max_depth": {
+                "type": "integer",
+                "description": "The longest path from a root to this node."
+              },
+              "value": {
+                "$ref": "#/$defs/TrieNodeValue"
+              }
+            },
+            "required": [
+              "children",
+              "max_depth",
+              "value"
+            ]
+          },
+          "TrieArena": {
+            "type": "object",
+            "description": "An arena storing all Trie nodes for Precompute2.",
             "properties": {
               "counter": {
                 "type": "integer",
-                "description": "A counter value."
+                "description": "The next available index in the arena."
               },
               "values": {
                 "type": "array",
-                "description": "An array of value entries, each identified by an integer key.",
+                "description": "A sparse array of [index, TrieNode] pairs.",
                 "items": {
                   "type": "array",
                   "items": [
                     {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "The index of the node in the arena."
                     },
                     {
-                      "$ref": "#/$defs/ValueObject"
+                      "$ref": "#/$defs/TrieNode"
                     }
                   ],
                   "minItems": 2,
@@ -6101,110 +6236,129 @@ local_system:
               "values"
             ]
           }
-        ],
-        "minItems": 2,
-        "maxItems": 2,
-        "$defs": {
-          "NumberPair": {
-            "type": "array",
-            "items": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "NumberPairArray": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/NumberPair"
-            }
-          },
-          "ValueDetails": {
-            "type": "object",
-            "properties": {
-              "clean_end": {
-                "type": "boolean"
-              },
-              "live_tokens": {
-                "$ref": "#/$defs/NumberPairArray"
-              }
-            },
-            "required": [
-              "clean_end",
-              "live_tokens"
-            ]
-          },
-          "ChildDetailArray": {
-            "type": "array",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "$ref": "#/$defs/NumberPairArray"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "ChildrenArray": {
-            "type": "array",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "array",
-                  "items": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    }
-                  ],
-                  "minItems": 2,
-                  "maxItems": 2
-                },
-                {
-                  "$ref": "#/$defs/ChildDetailArray"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "ValueObject": {
-            "type": "object",
-            "properties": {
-              "children": {
-                "$ref": "#/$defs/ChildrenArray"
-              },
-              "max_depth": {
-                "type": "integer"
-              },
-              "value": {
-                "$ref": "#/$defs/ValueDetails"
-              }
-            },
-            "required": [
-              "children",
-              "max_depth",
-              "value"
-            ]
-          }
         }
       }
+    load_and_print_trie.py: |
+      import gzip
+      import json
+      from typing import Dict, List, Any, Set, Tuple
+
+      # Type aliases for clarity, matching the Rust/JSON structure
+      TrieNodeIndex = int
+      TokenizerStateID = int
+      LLMTokenBV = List[List[int]]
+      StateID = int
+      EdgeKey = Tuple[int, StateID | None]
+      TrieNode = Dict[str, Any]
+      Arena = Dict[TrieNodeIndex, TrieNode]
+
+      def format_bitvector(bv: LLMTokenBV) -> str:
+          """Formats a bitvector (list of ranges) into a readable string."""
+          if not bv:
+              return "{}"
+          parts = []
+          for start, end in bv:
+              if start == end:
+                  parts.append(str(start))
+              else:
+                  parts.append(f"{start}-{end}")
+          return f"{{{', '.join(parts)}}}"
+
+      def print_trie_recursive(
+          node_index: TrieNodeIndex,
+          arena: Arena,
+          indent: str = "",
+          visited: Set[TrieNodeIndex] = None
+      ):
+          """Recursively prints the structure of a Trie from a given node index."""
+          if visited is None:
+              visited = set()
+
+          if node_index in visited:
+              print(f"{indent}Node {node_index} (visited, cycle)")
+              return
+
+          visited.add(node_index)
+
+          node = arena.get(node_index)
+          if not node:
+              print(f"{indent}Node {node_index} (not found in arena)")
+              return
+
+          # Print node value
+          node_value = node.get("value", {})
+          end_str = "END" if node_value.get("end") else "internal"
+          live_tokens_str = format_bitvector(node_value.get("live_tokens", []))
+          print(f"{indent}Node {node_index} [{end_str}] (live_tokens: {live_tokens_str})")
+
+          # Print children
+          children = node.get("children", [])
+          if not children:
+              # It's a leaf if it has no children. The 'end' flag marks valid termination points.
+              return
+
+          for edge_key_json, dest_map_json in children:
+              pop_count, state_id_opt = edge_key_json
+              edge_key_str = f"pop={pop_count}, state_id={state_id_opt if state_id_opt is not None else 'Any'}"
+              
+              print(f"{indent}  - Edge({edge_key_str}):")
+              
+              for dest_index, edge_bv in dest_map_json:
+                  edge_bv_str = format_bitvector(edge_bv)
+                  print(f"{indent}    -> Dest: {dest_index} (tokens: {edge_bv_str})")
+                  print_trie_recursive(dest_index, arena, indent + "       | ", visited.copy())
+
+
+      def main():
+          """
+          Loads a precomputed trie from a gzipped JSON file and prints its structure.
+          """
+          # The user requested loading a precompute3 tree, but the file path and schema
+          # indicate it's a precompute2 tree. This script is written for the precompute2 format.
+          file_path = "/Users/isaacbreen/Projects2/grammars2024/.cache/test_precompute2/precomputed2_js_gpt2_small.json.gz"
+
+          print(f"Loading precomputed trie from: {file_path}")
+
+          try:
+              with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                  data = json.load(f)
+          except FileNotFoundError:
+              print(f"Error: File not found at {file_path}")
+              print("Please ensure the path is correct and the file exists.")
+              return
+          except Exception as e:
+              print(f"An error occurred while loading or parsing the file: {e}")
+              return
+
+          if not isinstance(data, list) or len(data) != 2:
+              print("Error: Expected top-level JSON to be a list of two elements: [roots_map, arena_data]")
+              return
+
+          roots_map_json, arena_data = data
+          
+          # Parse the arena into a dictionary for easy lookup by integer index
+          try:
+              arena: Arena = {
+                  int(index): node_data for index, node_data in arena_data.get("values", [])
+              }
+          except (ValueError, TypeError) as e:
+              print(f"Error parsing arena data: {e}")
+              return
+          
+          print(f"\nSuccessfully loaded trie data.")
+          print(f"Arena contains {len(arena)} nodes.")
+          print(f"Found {len(roots_map_json)} root entries for different tokenizer states.")
+          print("-" * 40)
+
+          # Print the trie structure for each root
+          for tokenizer_state_id, root_node_index in roots_map_json:
+              print(f"\n\n=== Trie for Tokenizer State ID: {tokenizer_state_id} (Root Node: {root_node_index}) ===")
+              print_trie_recursive(root_node_index, arena)
+              print("-" * 40)
+
+
+      if __name__ == "__main__":
+          main()
   prev_file_contents:
     src/datastructures/trie.rs: |-
       use std::cmp::Ordering;
@@ -10760,7 +10914,7 @@ local_system:
       use std::io::{BufReader, BufWriter, Write};
       use std::path::Path;
       use std::sync::Arc;
-      use bimap::{BiBTreeMap};
+      use bimap::BiBTreeMap;
       use crate::constraint_extra::PrecomputeStats;
       use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
       use crate::json_serialization::JSONConvertible;
@@ -10785,47 +10939,32 @@ local_system:
           (map, max_id)
       }
 
-      fn assert_optimized_equivalent(
+      fn assert_trees_are_equivalent(
           original_precomputed2: &Precomputed2,
+          original_god: &Trie2GodWrapper,
+          optimized_precomputed2: &Precomputed2,
+          optimized_god: &Trie2GodWrapper,
           original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
           llm_token_map: &LLMTokenMap,
-          trie2_god: Trie2GodWrapper,
       ) {
-          // Deep clone the original precomputed2 tree(s)
-          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
-          for (sid, root_arc) in original_precomputed2.iter() {
-              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
-              optimized_precomputed2.insert(*sid, cloned_root);
-          }
-
-          // Apply optimization passes
-          let mut optimization_config = GrammarConstraintConfig::default();
-          optimization_config.optimize_trie2_gc = false;
-          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
-
-          println!("\n--- Stats for Optimized Precompute2 Tree ---");
-          let mut stats_optimized = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
-
-          println!("\n--- Dumping Optimized Precompute2 Tree ---");
-          GrammarConstraint::_dump_precomputed2(
-              &optimized_precomputed2,
-              original_to_internal_id_bimap,
-              llm_token_map,
-              &trie2_god,
-          );
-
           println!("\n--- Final Stats Comparison ---");
           println!("\n--- Stats for Original Precompute2 Tree ---");
           let mut stats_original = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, original_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, original_god);
 
-          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
-          let mut stats_optimized_final = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(optimized_precomputed2, &mut stats_optimized, optimized_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, optimized_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              optimized_god,
+          );
           println!("--- Finished Dumping Optimized Tree ---\n");
 
           // Compare the original and optimized trees for semantic equivalence
@@ -10838,7 +10977,7 @@ local_system:
           for sid in original_precomputed2.keys() {
               let original_root = original_precomputed2.get(sid).unwrap();
               let optimized_root = optimized_precomputed2.get(sid).unwrap();
-              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+              if !are_precompute2_trees_equivalent(original_root, original_god, optimized_root, optimized_god) {
                   // Detailed info is now printed inside are_precompute2_trees_equivalent
                   panic!(
                       "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
@@ -10859,18 +10998,33 @@ local_system:
               optimize_trie2_compress_edges: false,
               optimize_trie2_gc: true,
           };
-          let gc = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled,
-              llm_token_map,
+          println!("\n--- Building baseline GrammarConstraint (optimizations OFF) ---");
+          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled.clone(),
+              llm_token_map.clone(),
               LLMTokenID(0), // dummy EOF placeholder
               max_original_llm_token_id,
               &no_opt_config,
           );
-          assert_optimized_equivalent(
-              &gc.precomputed2,
-              &gc.llm_vocab.original_to_internal_id_bimap,
-              &gc.llm_vocab.llm_token_map,
-              gc.trie2_god.clone(),
+
+          // Create with optimizations ON
+          let opt_config = GrammarConstraintConfig::default(); // Now defaults to ON
+          println!("\n--- Building optimized GrammarConstraint (optimizations ON) ---");
+          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map.clone(),
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &opt_config,
+          );
+
+          assert_trees_are_equivalent(
+              &gc_baseline.precomputed2,
+              &gc_baseline.trie2_god,
+              &gc_optimized.precomputed2,
+              &gc_optimized.trie2_god,
+              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
+              &llm_token_map,
           );
           Ok(())
       }
@@ -10918,17 +11072,6 @@ local_system:
           // --- Setup Phase ---
           println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
-          const FORCE_RECOMPUTE: bool = true;
-          const SAVE_TO_CACHE: bool = true;
-          use crate::{constraint, json_serialization};
-          use flate2::read::GzDecoder;
-          use flate2::write::GzEncoder;
-          use flate2::Compression;
-
-          let cache_dir = Path::new(".cache/test_precompute2");
-          fs::create_dir_all(cache_dir)?;
-          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
-
           // 1. Load and compile the JavaScript grammar.
           let grammar_path = "src/js_simplified3.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
@@ -10957,58 +11100,42 @@ local_system:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
 
-          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-          let original_precomputed2: Precomputed2;
-          let original_god;
-          let llm_vocab;
+          // 3. Construct baseline GrammarConstraint (optimizations OFF)
+          println!("\nConstructing baseline GrammarConstraint with optimizations OFF...");
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+          };
+          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(0),
+              max_original_llm_token_id_val,
+              &no_opt_config,
+          );
 
-          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
-              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
-              let file = File::open(&precomputed2_cache_path)?;
-              let decompressor = GzDecoder::new(BufReader::new(file));
-              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
-              // This path is problematic as the cached version is likely optimized.
-              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
-              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
-              llm_vocab = gc_for_vocab.llm_vocab;
-              println!("Successfully loaded Precomputed2 from cache.");
-          } else {
-              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
-              let no_opt_config = GrammarConstraintConfig {
-                  optimize_trie2_prune_dead_paths: false,
-                  optimize_trie2_merge_nodes: false,
-                  optimize_trie2_factor_common_destinations: false,
-                  optimize_trie2_compress_edges: false,
-                  optimize_trie2_gc: true,
-              };
-              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
-                  compiled_grammar.clone(),
-                  llm_token_map.clone(),
-                  LLMTokenID(0), // dummy_eof_placeholder
-                  max_original_llm_token_id_val,
-                  &no_opt_config,
-              );
-              println!("GrammarConstraint constructed successfully.");
-              original_precomputed2 = grammar_constraint.precomputed2;
-              original_god = grammar_constraint.trie2_god;
-              llm_vocab = grammar_constraint.llm_vocab;
+          // 4. Construct optimized GrammarConstraint (optimizations ON)
+          println!("\nConstructing optimized GrammarConstraint with optimizations ON...");
+          let opt_config = GrammarConstraintConfig::default();
+          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(0),
+              max_original_llm_token_id_val,
+              &opt_config,
+          );
 
-              if SAVE_TO_CACHE {
-                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
-                  let file = File::create(&precomputed2_cache_path)?;
-                  let writer = BufWriter::new(file);
-                  let mut encoder = GzEncoder::new(writer, Compression::default());
-                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
-                  println!("Successfully saved Precomputed2 to cache.");
-              }
-          }
-
-          // 4. Assert that the optimized result is equivalent to the baseline.
-          assert_optimized_equivalent(
-              &original_precomputed2,
-              &llm_vocab.original_to_internal_id_bimap,
+          // 5. Assert equivalence
+          assert_trees_are_equivalent(
+              &gc_baseline.precomputed2,
+              &gc_baseline.trie2_god,
+              &gc_optimized.precomputed2,
+              &gc_optimized.trie2_god,
+              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
               &llm_token_map,
-              original_god,
           );
 
           println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
@@ -12261,31 +12388,192 @@ local_system:
     src/precompute3_schema.json: |-
       {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "JSON data structure schema",
-        "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+        "title": "Grammar Constraint Precomputed2 Data",
+        "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
         "type": "array",
         "items": [
           {
-            "$ref": "#/$defs/NumberPairArray"
+            "$ref": "#/$defs/Precomputed2Map",
+            "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
           },
           {
+            "$ref": "#/$defs/TrieArena",
+            "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "$defs": {
+          "Precomputed2Entry": {
+            "type": "array",
+            "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
+            "items": [
+              {
+                "type": "integer",
+                "description": "TokenizerStateID"
+              },
+              {
+                "type": "integer",
+                "description": "TrieNodeIndex (index into the arena's values)"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "Precomputed2Map": {
+            "type": "array",
+            "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
+            "items": {
+              "$ref": "#/$defs/Precomputed2Entry"
+            }
+          },
+          "HybridBitset": {
+            "type": "array",
+            "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Start of range (inclusive)"
+                },
+                {
+                  "type": "integer",
+                  "description": "End of range (inclusive)"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "TrieNodeValue": {
             "type": "object",
+            "description": "The value stored within a Trie node (PrecomputedNodeContents).",
+            "properties": {
+              "end": {
+                "type": "boolean",
+                "description": "True if this node can be a terminal state in the precomputed trie."
+              },
+              "live_tokens": {
+                "$ref": "#/$defs/HybridBitset",
+                "description": "A bitset of LLM tokens that can pass through or end at this node."
+              }
+            },
+            "required": [
+              "end",
+              "live_tokens"
+            ]
+          },
+          "EdgeKey": {
+            "type": "array",
+            "description": "An edge key of type (usize, Option<StateID>).",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Number of items to pop from the GLR stack."
+                },
+                {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "An optional GLR StateID to check after popping."
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "EdgeDestination": {
+            "type": "array",
+            "description": "A pair of [TrieNodeIndex, EdgeValue].",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Destination TrieNodeIndex."
+                },
+                {
+                  "$ref": "#/$defs/HybridBitset",
+                  "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "EdgeDestinationMap": {
+            "type": "array",
+            "description": "A map from destination node index to the edge value (LLMTokenBV).",
+            "items": {
+              "$ref": "#/$defs/EdgeDestination"
+            }
+          },
+          "TrieChildrenMapEntry": {
+            "type": "array",
+            "description": "A [EdgeKey, EdgeDestinationMap] pair.",
+            "items": [
+              {
+                "$ref": "#/$defs/EdgeKey"
+              },
+              {
+                "$ref": "#/$defs/EdgeDestinationMap"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "TrieChildrenMap": {
+            "type": "array",
+            "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
+            "items": {
+              "$ref": "#/$defs/TrieChildrenMapEntry"
+            }
+          },
+          "TrieNode": {
+            "type": "object",
+            "description": "A single node in the Precompute2 Trie.",
+            "properties": {
+              "children": {
+                "$ref": "#/$defs/TrieChildrenMap"
+              },
+              "max_depth": {
+                "type": "integer",
+                "description": "The longest path from a root to this node."
+              },
+              "value": {
+                "$ref": "#/$defs/TrieNodeValue"
+              }
+            },
+            "required": [
+              "children",
+              "max_depth",
+              "value"
+            ]
+          },
+          "TrieArena": {
+            "type": "object",
+            "description": "An arena storing all Trie nodes for Precompute2.",
             "properties": {
               "counter": {
                 "type": "integer",
-                "description": "A counter value."
+                "description": "The next available index in the arena."
               },
               "values": {
                 "type": "array",
-                "description": "An array of value entries, each identified by an integer key.",
+                "description": "A sparse array of [index, TrieNode] pairs.",
                 "items": {
                   "type": "array",
                   "items": [
                     {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "The index of the node in the arena."
                     },
                     {
-                      "$ref": "#/$defs/ValueObject"
+                      "$ref": "#/$defs/TrieNode"
                     }
                   ],
                   "minItems": 2,
@@ -12298,113 +12586,132 @@ local_system:
               "values"
             ]
           }
-        ],
-        "minItems": 2,
-        "maxItems": 2,
-        "$defs": {
-          "NumberPair": {
-            "type": "array",
-            "items": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "NumberPairArray": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/NumberPair"
-            }
-          },
-          "ValueDetails": {
-            "type": "object",
-            "properties": {
-              "clean_end": {
-                "type": "boolean"
-              },
-              "live_tokens": {
-                "$ref": "#/$defs/NumberPairArray"
-              }
-            },
-            "required": [
-              "clean_end",
-              "live_tokens"
-            ]
-          },
-          "ChildDetailArray": {
-            "type": "array",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "$ref": "#/$defs/NumberPairArray"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "ChildrenArray": {
-            "type": "array",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "array",
-                  "items": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    }
-                  ],
-                  "minItems": 2,
-                  "maxItems": 2
-                },
-                {
-                  "$ref": "#/$defs/ChildDetailArray"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "ValueObject": {
-            "type": "object",
-            "properties": {
-              "children": {
-                "$ref": "#/$defs/ChildrenArray"
-              },
-              "max_depth": {
-                "type": "integer"
-              },
-              "value": {
-                "$ref": "#/$defs/ValueDetails"
-              }
-            },
-            "required": [
-              "children",
-              "max_depth",
-              "value"
-            ]
-          }
         }
       }
+    load_and_print_trie.py: |
+      import gzip
+      import json
+      from typing import Dict, List, Any, Set, Tuple
+
+      # Type aliases for clarity, matching the Rust/JSON structure
+      TrieNodeIndex = int
+      TokenizerStateID = int
+      LLMTokenBV = List[List[int]]
+      StateID = int
+      EdgeKey = Tuple[int, StateID | None]
+      TrieNode = Dict[str, Any]
+      Arena = Dict[TrieNodeIndex, TrieNode]
+
+      def format_bitvector(bv: LLMTokenBV) -> str:
+          """Formats a bitvector (list of ranges) into a readable string."""
+          if not bv:
+              return "{}"
+          parts = []
+          for start, end in bv:
+              if start == end:
+                  parts.append(str(start))
+              else:
+                  parts.append(f"{start}-{end}")
+          return f"{{{', '.join(parts)}}}"
+
+      def print_trie_recursive(
+          node_index: TrieNodeIndex,
+          arena: Arena,
+          indent: str = "",
+          visited: Set[TrieNodeIndex] = None
+      ):
+          """Recursively prints the structure of a Trie from a given node index."""
+          if visited is None:
+              visited = set()
+
+          if node_index in visited:
+              print(f"{indent}Node {node_index} (visited, cycle)")
+              return
+
+          visited.add(node_index)
+
+          node = arena.get(node_index)
+          if not node:
+              print(f"{indent}Node {node_index} (not found in arena)")
+              return
+
+          # Print node value
+          node_value = node.get("value", {})
+          end_str = "END" if node_value.get("end") else "internal"
+          live_tokens_str = format_bitvector(node_value.get("live_tokens", []))
+          print(f"{indent}Node {node_index} [{end_str}] (live_tokens: {live_tokens_str})")
+
+          # Print children
+          children = node.get("children", [])
+          if not children:
+              # It's a leaf if it has no children. The 'end' flag marks valid termination points.
+              return
+
+          for edge_key_json, dest_map_json in children:
+              pop_count, state_id_opt = edge_key_json
+              edge_key_str = f"pop={pop_count}, state_id={state_id_opt if state_id_opt is not None else 'Any'}"
+              
+              print(f"{indent}  - Edge({edge_key_str}):")
+              
+              for dest_index, edge_bv in dest_map_json:
+                  edge_bv_str = format_bitvector(edge_bv)
+                  print(f"{indent}    -> Dest: {dest_index} (tokens: {edge_bv_str})")
+                  print_trie_recursive(dest_index, arena, indent + "       | ", visited.copy())
+
+
+      def main():
+          """
+          Loads a precomputed trie from a gzipped JSON file and prints its structure.
+          """
+          # The user requested loading a precompute3 tree, but the file path and schema
+          # indicate it's a precompute2 tree. This script is written for the precompute2 format.
+          file_path = "/Users/isaacbreen/Projects2/grammars2024/.cache/test_precompute2/precomputed2_js_gpt2_small.json.gz"
+
+          print(f"Loading precomputed trie from: {file_path}")
+
+          try:
+              with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                  data = json.load(f)
+          except FileNotFoundError:
+              print(f"Error: File not found at {file_path}")
+              print("Please ensure the path is correct and the file exists.")
+              return
+          except Exception as e:
+              print(f"An error occurred while loading or parsing the file: {e}")
+              return
+
+          if not isinstance(data, list) or len(data) != 2:
+              print("Error: Expected top-level JSON to be a list of two elements: [roots_map, arena_data]")
+              return
+
+          roots_map_json, arena_data = data
+          
+          # Parse the arena into a dictionary for easy lookup by integer index
+          try:
+              arena: Arena = {
+                  int(index): node_data for index, node_data in arena_data.get("values", [])
+              }
+          except (ValueError, TypeError) as e:
+              print(f"Error parsing arena data: {e}")
+              return
+          
+          print(f"\nSuccessfully loaded trie data.")
+          print(f"Arena contains {len(arena)} nodes.")
+          print(f"Found {len(roots_map_json)} root entries for different tokenizer states.")
+          print("-" * 40)
+
+          # Print the trie structure for each root
+          for tokenizer_state_id, root_node_index in roots_map_json:
+              print(f"\n\n=== Trie for Tokenizer State ID: {tokenizer_state_id} (Root Node: {root_node_index}) ===")
+              print_trie_recursive(root_node_index, arena)
+              print("-" * 40)
+
+
+      if __name__ == "__main__":
+          main()
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: simple
 system:
   message: |-
     You are a helpful assistant.
@@ -12419,7 +12726,7 @@ system:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: simple
 messages:
   - user: |-
       Developer note (core guidance):
@@ -17006,7 +17313,7 @@ messages:
       use std::io::{BufReader, BufWriter, Write};
       use std::path::Path;
       use std::sync::Arc;
-      use bimap::{BiBTreeMap};
+      use bimap::BiBTreeMap;
       use crate::constraint_extra::PrecomputeStats;
       use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
       use crate::json_serialization::JSONConvertible;
@@ -17031,47 +17338,32 @@ messages:
           (map, max_id)
       }
 
-      fn assert_optimized_equivalent(
+      fn assert_trees_are_equivalent(
           original_precomputed2: &Precomputed2,
+          original_god: &Trie2GodWrapper,
+          optimized_precomputed2: &Precomputed2,
+          optimized_god: &Trie2GodWrapper,
           original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
           llm_token_map: &LLMTokenMap,
-          trie2_god: Trie2GodWrapper,
       ) {
-          // Deep clone the original precomputed2 tree(s)
-          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
-          for (sid, root_arc) in original_precomputed2.iter() {
-              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
-              optimized_precomputed2.insert(*sid, cloned_root);
-          }
-
-          // Apply optimization passes
-          let mut optimization_config = GrammarConstraintConfig::default();
-          optimization_config.optimize_trie2_gc = false;
-          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
-
-          println!("\n--- Stats for Optimized Precompute2 Tree ---");
-          let mut stats_optimized = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
-
-          println!("\n--- Dumping Optimized Precompute2 Tree ---");
-          GrammarConstraint::_dump_precomputed2(
-              &optimized_precomputed2,
-              original_to_internal_id_bimap,
-              llm_token_map,
-              &trie2_god,
-          );
-
           println!("\n--- Final Stats Comparison ---");
           println!("\n--- Stats for Original Precompute2 Tree ---");
           let mut stats_original = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, original_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, original_god);
 
-          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
-          let mut stats_optimized_final = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(optimized_precomputed2, &mut stats_optimized, optimized_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, optimized_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              optimized_god,
+          );
           println!("--- Finished Dumping Optimized Tree ---\n");
 
           // Compare the original and optimized trees for semantic equivalence
@@ -17084,7 +17376,7 @@ messages:
           for sid in original_precomputed2.keys() {
               let original_root = original_precomputed2.get(sid).unwrap();
               let optimized_root = optimized_precomputed2.get(sid).unwrap();
-              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+              if !are_precompute2_trees_equivalent(original_root, original_god, optimized_root, optimized_god) {
                   // Detailed info is now printed inside are_precompute2_trees_equivalent
                   panic!(
                       "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
@@ -17105,18 +17397,33 @@ messages:
               optimize_trie2_compress_edges: false,
               optimize_trie2_gc: true,
           };
-          let gc = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled,
-              llm_token_map,
+          println!("\n--- Building baseline GrammarConstraint (optimizations OFF) ---");
+          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled.clone(),
+              llm_token_map.clone(),
               LLMTokenID(0), // dummy EOF placeholder
               max_original_llm_token_id,
               &no_opt_config,
           );
-          assert_optimized_equivalent(
-              &gc.precomputed2,
-              &gc.llm_vocab.original_to_internal_id_bimap,
-              &gc.llm_vocab.llm_token_map,
-              gc.trie2_god.clone(),
+
+          // Create with optimizations ON
+          let opt_config = GrammarConstraintConfig::default(); // Now defaults to ON
+          println!("\n--- Building optimized GrammarConstraint (optimizations ON) ---");
+          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map.clone(),
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &opt_config,
+          );
+
+          assert_trees_are_equivalent(
+              &gc_baseline.precomputed2,
+              &gc_baseline.trie2_god,
+              &gc_optimized.precomputed2,
+              &gc_optimized.trie2_god,
+              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
+              &llm_token_map,
           );
           Ok(())
       }
@@ -17164,17 +17471,6 @@ messages:
           // --- Setup Phase ---
           println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
-          const FORCE_RECOMPUTE: bool = true;
-          const SAVE_TO_CACHE: bool = true;
-          use crate::{constraint, json_serialization};
-          use flate2::read::GzDecoder;
-          use flate2::write::GzEncoder;
-          use flate2::Compression;
-
-          let cache_dir = Path::new(".cache/test_precompute2");
-          fs::create_dir_all(cache_dir)?;
-          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
-
           // 1. Load and compile the JavaScript grammar.
           let grammar_path = "src/js_simplified3.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
@@ -17203,58 +17499,42 @@ messages:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
 
-          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-          let original_precomputed2: Precomputed2;
-          let original_god;
-          let llm_vocab;
+          // 3. Construct baseline GrammarConstraint (optimizations OFF)
+          println!("\nConstructing baseline GrammarConstraint with optimizations OFF...");
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+          };
+          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(0),
+              max_original_llm_token_id_val,
+              &no_opt_config,
+          );
 
-          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
-              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
-              let file = File::open(&precomputed2_cache_path)?;
-              let decompressor = GzDecoder::new(BufReader::new(file));
-              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
-              // This path is problematic as the cached version is likely optimized.
-              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
-              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
-              llm_vocab = gc_for_vocab.llm_vocab;
-              println!("Successfully loaded Precomputed2 from cache.");
-          } else {
-              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
-              let no_opt_config = GrammarConstraintConfig {
-                  optimize_trie2_prune_dead_paths: false,
-                  optimize_trie2_merge_nodes: false,
-                  optimize_trie2_factor_common_destinations: false,
-                  optimize_trie2_compress_edges: false,
-                  optimize_trie2_gc: true,
-              };
-              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
-                  compiled_grammar.clone(),
-                  llm_token_map.clone(),
-                  LLMTokenID(0), // dummy_eof_placeholder
-                  max_original_llm_token_id_val,
-                  &no_opt_config,
-              );
-              println!("GrammarConstraint constructed successfully.");
-              original_precomputed2 = grammar_constraint.precomputed2;
-              original_god = grammar_constraint.trie2_god;
-              llm_vocab = grammar_constraint.llm_vocab;
+          // 4. Construct optimized GrammarConstraint (optimizations ON)
+          println!("\nConstructing optimized GrammarConstraint with optimizations ON...");
+          let opt_config = GrammarConstraintConfig::default();
+          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled_grammar.clone(),
+              llm_token_map.clone(),
+              LLMTokenID(0),
+              max_original_llm_token_id_val,
+              &opt_config,
+          );
 
-              if SAVE_TO_CACHE {
-                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
-                  let file = File::create(&precomputed2_cache_path)?;
-                  let writer = BufWriter::new(file);
-                  let mut encoder = GzEncoder::new(writer, Compression::default());
-                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
-                  println!("Successfully saved Precomputed2 to cache.");
-              }
-          }
-
-          // 4. Assert that the optimized result is equivalent to the baseline.
-          assert_optimized_equivalent(
-              &original_precomputed2,
-              &llm_vocab.original_to_internal_id_bimap,
+          // 5. Assert equivalence
+          assert_trees_are_equivalent(
+              &gc_baseline.precomputed2,
+              &gc_baseline.trie2_god,
+              &gc_optimized.precomputed2,
+              &gc_optimized.trie2_god,
+              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
               &llm_token_map,
-              original_god,
           );
 
           println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
@@ -18515,31 +18795,192 @@ messages:
       ```text 'src/precompute3_schema.json'
       {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "JSON data structure schema",
-        "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+        "title": "Grammar Constraint Precomputed2 Data",
+        "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
         "type": "array",
         "items": [
           {
-            "$ref": "#/$defs/NumberPairArray"
+            "$ref": "#/$defs/Precomputed2Map",
+            "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
           },
           {
+            "$ref": "#/$defs/TrieArena",
+            "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "$defs": {
+          "Precomputed2Entry": {
+            "type": "array",
+            "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
+            "items": [
+              {
+                "type": "integer",
+                "description": "TokenizerStateID"
+              },
+              {
+                "type": "integer",
+                "description": "TrieNodeIndex (index into the arena's values)"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "Precomputed2Map": {
+            "type": "array",
+            "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
+            "items": {
+              "$ref": "#/$defs/Precomputed2Entry"
+            }
+          },
+          "HybridBitset": {
+            "type": "array",
+            "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Start of range (inclusive)"
+                },
+                {
+                  "type": "integer",
+                  "description": "End of range (inclusive)"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "TrieNodeValue": {
             "type": "object",
+            "description": "The value stored within a Trie node (PrecomputedNodeContents).",
+            "properties": {
+              "end": {
+                "type": "boolean",
+                "description": "True if this node can be a terminal state in the precomputed trie."
+              },
+              "live_tokens": {
+                "$ref": "#/$defs/HybridBitset",
+                "description": "A bitset of LLM tokens that can pass through or end at this node."
+              }
+            },
+            "required": [
+              "end",
+              "live_tokens"
+            ]
+          },
+          "EdgeKey": {
+            "type": "array",
+            "description": "An edge key of type (usize, Option<StateID>).",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Number of items to pop from the GLR stack."
+                },
+                {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "An optional GLR StateID to check after popping."
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "EdgeDestination": {
+            "type": "array",
+            "description": "A pair of [TrieNodeIndex, EdgeValue].",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer",
+                  "description": "Destination TrieNodeIndex."
+                },
+                {
+                  "$ref": "#/$defs/HybridBitset",
+                  "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "EdgeDestinationMap": {
+            "type": "array",
+            "description": "A map from destination node index to the edge value (LLMTokenBV).",
+            "items": {
+              "$ref": "#/$defs/EdgeDestination"
+            }
+          },
+          "TrieChildrenMapEntry": {
+            "type": "array",
+            "description": "A [EdgeKey, EdgeDestinationMap] pair.",
+            "items": [
+              {
+                "$ref": "#/$defs/EdgeKey"
+              },
+              {
+                "$ref": "#/$defs/EdgeDestinationMap"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "TrieChildrenMap": {
+            "type": "array",
+            "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
+            "items": {
+              "$ref": "#/$defs/TrieChildrenMapEntry"
+            }
+          },
+          "TrieNode": {
+            "type": "object",
+            "description": "A single node in the Precompute2 Trie.",
+            "properties": {
+              "children": {
+                "$ref": "#/$defs/TrieChildrenMap"
+              },
+              "max_depth": {
+                "type": "integer",
+                "description": "The longest path from a root to this node."
+              },
+              "value": {
+                "$ref": "#/$defs/TrieNodeValue"
+              }
+            },
+            "required": [
+              "children",
+              "max_depth",
+              "value"
+            ]
+          },
+          "TrieArena": {
+            "type": "object",
+            "description": "An arena storing all Trie nodes for Precompute2.",
             "properties": {
               "counter": {
                 "type": "integer",
-                "description": "A counter value."
+                "description": "The next available index in the arena."
               },
               "values": {
                 "type": "array",
-                "description": "An array of value entries, each identified by an integer key.",
+                "description": "A sparse array of [index, TrieNode] pairs.",
                 "items": {
                   "type": "array",
                   "items": [
                     {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "The index of the node in the arena."
                     },
                     {
-                      "$ref": "#/$defs/ValueObject"
+                      "$ref": "#/$defs/TrieNode"
                     }
                   ],
                   "minItems": 2,
@@ -18552,448 +18993,174 @@ messages:
               "values"
             ]
           }
-        ],
-        "minItems": 2,
-        "maxItems": 2,
-        "$defs": {
-          "NumberPair": {
-            "type": "array",
-            "items": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "integer"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "NumberPairArray": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/NumberPair"
-            }
-          },
-          "ValueDetails": {
-            "type": "object",
-            "properties": {
-              "clean_end": {
-                "type": "boolean"
-              },
-              "live_tokens": {
-                "$ref": "#/$defs/NumberPairArray"
-              }
-            },
-            "required": [
-              "clean_end",
-              "live_tokens"
-            ]
-          },
-          "ChildDetailArray": {
-            "type": "array",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "$ref": "#/$defs/NumberPairArray"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "ChildrenArray": {
-            "type": "array",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "array",
-                  "items": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    }
-                  ],
-                  "minItems": 2,
-                  "maxItems": 2
-                },
-                {
-                  "$ref": "#/$defs/ChildDetailArray"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "ValueObject": {
-            "type": "object",
-            "properties": {
-              "children": {
-                "$ref": "#/$defs/ChildrenArray"
-              },
-              "max_depth": {
-                "type": "integer"
-              },
-              "value": {
-                "$ref": "#/$defs/ValueDetails"
-              }
-            },
-            "required": [
-              "children",
-              "max_depth",
-              "value"
-            ]
-          }
         }
       }
       ```
     metadata:
       filename: src/precompute3_schema.json
-  - user: Improve the JSON schema for the dump of eg `(original_precomputed2.clone(),
-      original_god.clone()).to_writer(&mut encoder)?;`. It's currently lacking clarity.
+  - user: Write Python code that loads a precompute3 tree in from 
+      `/Users/isaacbreen/Projects2/grammars2024/.cache/test_precompute2/precomputed2_js_gpt2_small.json.gz`
+      and prints it.
     metadata:
   - user: |-
-      Mode instruction: For this turn, output git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
+      Mode instruction: For this turn, output the full, final contents of any created or modified files.
+                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
+                    ```python "path/to/your_file.py"
+                    ... full code ...
+                    ```
+                  - Do not include placeholders; the code must be complete and immediately usable.
+                  - Do NOT output git diffs in this mode.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
+      mode: simple
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I'm ready to assist you. Here are the changes you requested.
+      ```python "load_and_print_trie.py"
+      import gzip
+      import json
+      from typing import Dict, List, Any, Set, Tuple
 
-      ```diff
-      diff --git a/src/precompute3_schema.json b/src/precompute2_schema.json
-      similarity index 68%
-      rename from src/precompute3_schema.json
-      rename to src/precompute2_schema.json
-      index 261114c..141114b 100644
-      --- a/src/precompute3_schema.json
-      +++ b/src/precompute2_schema.json
-      @@ -1,153 +1,181 @@
-       {
-         "$schema": "http://json-schema.org/draft-07/schema#",
-      -  "title": "JSON data structure schema",
-      -  "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
-      +  "title": "Grammar Constraint Precomputed2 Data",
-      +  "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
-         "type": "array",
-         "items": [
-           {
-      -      "$ref": "#/$defs/NumberPairArray"
-      +      "$ref": "#/$defs/Precomputed2Map",
-      +      "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
-           },
-           {
-      -      "type": "object",
-      -      "properties": {
-      -        "counter": {
-      -          "type": "integer",
-      -          "description": "A counter value."
-      -        },
-      -        "values": {
-      -          "type": "array",
-      -          "description": "An array of value entries, each identified by an integer key.",
-      -          "items": {
-      -            "type": "array",
-      -            "items": [
-      -              {
-      -                "type": "integer"
-      -              },
-      -              {
-      -                "$ref": "#/$defs/ValueObject"
-      -              }
-      -            ],
-      -            "minItems": 2,
-      -            "maxItems": 2
-      -          }
-      -        }
-      -      },
-      -      "required": [
-      -        "counter",
-      -        "values"
-      -      ]
-      +      "$ref": "#/$defs/TrieArena",
-      +      "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
-           }
-         ],
-         "minItems": 2,
-         "maxItems": 2,
-         "$defs": {
-      -    "NumberPair": {
-      +    "Precomputed2Entry": {
-             "type": "array",
-      +      "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
-             "items": [
-               {
-      -          "type": "integer"
-      +          "type": "integer",
-      +          "description": "TokenizerStateID"
-               },
-               {
-      -          "type": "integer"
-      +          "type": "integer",
-      +          "description": "TrieNodeIndex (index into the arena's values)"
-               }
-             ],
-             "minItems": 2,
-             "maxItems": 2
-           },
-      -    "NumberPairArray": {
-      +    "Precomputed2Map": {
-             "type": "array",
-      +      "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
-             "items": {
-      -        "$ref": "#/$defs/NumberPair"
-      +        "$ref": "#/$defs/Precomputed2Entry"
-             }
-           },
-      -    "ValueDetails": {
-      +    "HybridBitset": {
-      +      "type": "array",
-      +      "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
-      +      "items": {
-      +        "type": "array",
-      +        "items": [
-      +          {
-      +            "type": "integer",
-      +            "description": "Start of range (inclusive)"
-      +          },
-      +          {
-      +            "type": "integer",
-      +            "description": "End of range (inclusive)"
-      +          }
-      +        ],
-      +        "minItems": 2,
-      +        "maxItems": 2
-      +      }
-      +    },
-      +    "TrieNodeValue": {
-             "type": "object",
-      +      "description": "The value stored within a Trie node (PrecomputedNodeContents).",
-             "properties": {
-      -        "clean_end": {
-      -          "type": "boolean"
-      +        "end": {
-      +          "type": "boolean",
-      +          "description": "True if this node can be a terminal state in the precomputed trie."
-               },
-               "live_tokens": {
-      -          "$ref": "#/$defs/NumberPairArray"
-      +          "$ref": "#/$defs/HybridBitset",
-      +          "description": "A bitset of LLM tokens that can pass through or end at this node."
-               }
-             },
-             "required": [
-      -        "clean_end",
-      +        "end",
-               "live_tokens"
-             ]
-           },
-      -    "ChildDetailArray": {
-      +    "EdgeKey": {
-             "type": "array",
-      +      "description": "An edge key of type (usize, Option<StateID>).",
-             "items": {
-               "type": "array",
-               "items": [
-                 {
-      -            "type": "integer"
-      +            "type": "integer",
-      +            "description": "Number of items to pop from the GLR stack."
-                 },
-                 {
-      -            "$ref": "#/$defs/NumberPairArray"
-      +            "type": [
-      +              "integer",
-      +              "null"
-      +            ],
-      +            "description": "An optional GLR StateID to check after popping."
-                 }
-               ],
-               "minItems": 2,
-               "maxItems": 2
-             }
-           },
-      -    "ChildrenArray": {
-      +    "EdgeDestination": {
-             "type": "array",
-      +      "description": "A pair of [TrieNodeIndex, EdgeValue].",
-             "items": {
-               "type": "array",
-               "items": [
-                 {
-      -            "type": "array",
-      -            "items": [
-      -              {
-      -                "type": "integer"
-      -              },
-      -              {
-      -                "type": [
-      -                  "integer",
-      -                  "null"
-      -                ]
-      -              }
-      -            ],
-      -            "minItems": 2,
-      -            "maxItems": 2
-      +            "type": "integer",
-      +            "description": "Destination TrieNodeIndex."
-                 },
-                 {
-      -            "$ref": "#/$defs/ChildDetailArray"
-      +            "$ref": "#/$defs/HybridBitset",
-      +            "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
-                 }
-               ],
-               "minItems": 2,
-               "maxItems": 2
-             }
-           },
-      -    "ValueObject": {
-      +    "EdgeDestinationMap": {
-      +      "type": "array",
-      +      "description": "A map from destination node index to the edge value (LLMTokenBV).",
-      +      "items": {
-      +        "$ref": "#/$defs/EdgeDestination"
-      +      }
-      +    },
-      +    "TrieChildrenMapEntry": {
-      +      "type": "array",
-      +      "description": "A [EdgeKey, EdgeDestinationMap] pair.",
-      +      "items": [
-      +        {
-      +          "$ref": "#/$defs/EdgeKey"
-      +        },
-      +        {
-      +          "$ref": "#/$defs/EdgeDestinationMap"
-      +        }
-      +      ],
-      +      "minItems": 2,
-      +      "maxItems": 2
-      +    },
-      +    "TrieChildrenMap": {
-      +      "type": "array",
-      +      "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
-      +      "items": {
-      +        "$ref": "#/$defs/TrieChildrenMapEntry"
-      +      }
-      +    },
-      +    "TrieNode": {
-             "type": "object",
-      +      "description": "A single node in the Precompute2 Trie.",
-             "properties": {
-               "children": {
-      -          "$ref": "#/$defs/ChildrenArray"
-      +          "$ref": "#/$defs/TrieChildrenMap"
-               },
-               "max_depth": {
-      -          "type": "integer"
-      +          "type": "integer",
-      +          "description": "The longest path from a root to this node."
-               },
-               "value": {
-      -          "$ref": "#/$defs/ValueDetails"
-      +          "$ref": "#/$defs/TrieNodeValue"
-               }
-             },
-             "required": [
-               "children",
-               "max_depth",
-               "value"
-             ]
-      +    },
-      +    "TrieArena": {
-      +      "type": "object",
-      +      "description": "An arena storing all Trie nodes for Precompute2.",
-      +      "properties": {
-      +        "counter": {
-      +          "type": "integer",
-      +          "description": "The next available index in the arena."
-      +        },
-      +        "values": {
-      +          "type": "array",
-      +          "description": "A sparse array of [index, TrieNode] pairs.",
-      +          "items": {
-      +            "type": "array",
-      +            "items": [
-      +              {
-      +                "type": "integer",
-      +                "description": "The index of the node in the arena."
-      +              },
-      +              {
-      +                "$ref": "#/$defs/TrieNode"
-      +              }
-      +            ],
-      +            "minItems": 2,
-      +            "maxItems": 2
-      +          }
-      +        }
-      +      },
-      +      "required": [
-      +        "counter",
-      +        "values"
-      +      ]
-           }
-         }
-       }
+      # Type aliases for clarity, matching the Rust/JSON structure
+      TrieNodeIndex = int
+      TokenizerStateID = int
+      LLMTokenBV = List[List[int]]
+      StateID = int
+      EdgeKey = Tuple[int, StateID | None]
+      TrieNode = Dict[str, Any]
+      Arena = Dict[TrieNodeIndex, TrieNode]
 
+      def format_bitvector(bv: LLMTokenBV) -> str:
+          """Formats a bitvector (list of ranges) into a readable string."""
+          if not bv:
+              return "{}"
+          parts = []
+          for start, end in bv:
+              if start == end:
+                  parts.append(str(start))
+              else:
+                  parts.append(f"{start}-{end}")
+          return f"{{{', '.join(parts)}}}"
+
+      def print_trie_recursive(
+          node_index: TrieNodeIndex,
+          arena: Arena,
+          indent: str = "",
+          visited: Set[TrieNodeIndex] = None
+      ):
+          """Recursively prints the structure of a Trie from a given node index."""
+          if visited is None:
+              visited = set()
+
+          if node_index in visited:
+              print(f"{indent}Node {node_index} (visited, cycle)")
+              return
+
+          visited.add(node_index)
+
+          node = arena.get(node_index)
+          if not node:
+              print(f"{indent}Node {node_index} (not found in arena)")
+              return
+
+          # Print node value
+          node_value = node.get("value", {})
+          end_str = "END" if node_value.get("end") else "internal"
+          live_tokens_str = format_bitvector(node_value.get("live_tokens", []))
+          print(f"{indent}Node {node_index} [{end_str}] (live_tokens: {live_tokens_str})")
+
+          # Print children
+          children = node.get("children", [])
+          if not children:
+              # It's a leaf if it has no children. The 'end' flag marks valid termination points.
+              return
+
+          for edge_key_json, dest_map_json in children:
+              pop_count, state_id_opt = edge_key_json
+              edge_key_str = f"pop={pop_count}, state_id={state_id_opt if state_id_opt is not None else 'Any'}"
+              
+              print(f"{indent}  - Edge({edge_key_str}):")
+              
+              for dest_index, edge_bv in dest_map_json:
+                  edge_bv_str = format_bitvector(edge_bv)
+                  print(f"{indent}    -> Dest: {dest_index} (tokens: {edge_bv_str})")
+                  print_trie_recursive(dest_index, arena, indent + "       | ", visited.copy())
+
+
+      def main():
+          """
+          Loads a precomputed trie from a gzipped JSON file and prints its structure.
+          """
+          # The user requested loading a precompute3 tree, but the file path and schema
+          # indicate it's a precompute2 tree. This script is written for the precompute2 format.
+          file_path = "/Users/isaacbreen/Projects2/grammars2024/.cache/test_precompute2/precomputed2_js_gpt2_small.json.gz"
+
+          print(f"Loading precomputed trie from: {file_path}")
+
+          try:
+              with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                  data = json.load(f)
+          except FileNotFoundError:
+              print(f"Error: File not found at {file_path}")
+              print("Please ensure the path is correct and the file exists.")
+              return
+          except Exception as e:
+              print(f"An error occurred while loading or parsing the file: {e}")
+              return
+
+          if not isinstance(data, list) or len(data) != 2:
+              print("Error: Expected top-level JSON to be a list of two elements: [roots_map, arena_data]")
+              return
+
+          roots_map_json, arena_data = data
+          
+          # Parse the arena into a dictionary for easy lookup by integer index
+          try:
+              arena: Arena = {
+                  int(index): node_data for index, node_data in arena_data.get("values", [])
+              }
+          except (ValueError, TypeError) as e:
+              print(f"Error parsing arena data: {e}")
+              return
+          
+          print(f"\nSuccessfully loaded trie data.")
+          print(f"Arena contains {len(arena)} nodes.")
+          print(f"Found {len(roots_map_json)} root entries for different tokenizer states.")
+          print("-" * 40)
+
+          # Print the trie structure for each root
+          for tokenizer_state_id, root_node_index in roots_map_json:
+              print(f"\n\n=== Trie for Tokenizer State ID: {tokenizer_state_id} (Root Node: {root_node_index}) ===")
+              print_trie_recursive(root_node_index, arena)
+              print("-" * 40)
+
+
+      if __name__ == "__main__":
+          main()
       ```
     metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute2_schema.json
-      Warning: Attempting to modify non-existent file src/precompute2_schema.json which is not marked as new. Applying patch to empty content.
-      Applying patch to 'src/precompute2_schema.json' using custom patcher...
-      Error applying patch to src/precompute2_schema.json: Hunk #1 (header: `@@ -1,153 +1,181 @@`) failed: context not found.
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
-    metadata:
   - user: |
-      Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute2_schema.json
-      Warning: Attempting to modify non-existent file src/precompute2_schema.json which is not marked as new. Applying patch to empty content.
-      Applying patch to 'src/precompute2_schema.json' using custom patcher...
-      Error applying patch to src/precompute2_schema.json: Hunk #1 (header: `@@ -1,153 +1,181 @@`) failed: context not found.
-
-
-      LLM apply output:
-      Using model 'cp' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      No JSON action block found, but no file actions seem required based on context. Proceeding.
-      Found 0 code blocks with filepaths in attempt 1.
-      No file actions specified in JSON. Nothing to apply.
+      Identified target file 'load_and_print_trie.py' on fence open line 1:
+      ```python "load_and_print_trie.py"
+      Found 1 code blocks.
+      Matching against available files:
+        1: src/datastructures/trie.rs
+        2: src/constraint.rs
+        3: src/precompute3_schema.json
+        4: src/constraint_precompute2_utils.rs
+        5: src/test_precompute_optimizations.rs
+        6: src/datastructures/mod.rs
+      --- Phase 1: Processing explicit file paths in fences ---
+      Assigned block to NEW file load_and_print_trie.py based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 6
+      --- Phase 6: Applying changes to assigned files ---
+      Successfully created new file: load_and_print_trie.py
     metadata:
-  - user: 'Changes committed with message: "Refactor precompute2 optimization test
-      to compare baseline vs optimized versions; add JSON schema for Precomputed2/Trie2GodWrapper"'
+  - user: 'Changes committed with message: "feat: Add script to load and print precomputed
+      trie data"'
     metadata:
   - user: 'Changes committed with message: "Refactor: Test grammar constraint optimizations
       by comparing explicit optimized vs. unoptimized constructions, and enable optimizations
