@@ -427,6 +427,17 @@ impl GrammarConstraint {
             config,
         );
 
+        let mut stats3 = PrecomputeStats::default();
+        crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
+        crate::constraint_extra::print_precompute_stats3(&stats3, &trie3_god);
+
+        Self::_dump_precomputed3(
+            &precomputed3,
+            &llm_vocab.original_to_internal_id_bimap,
+            &llm_vocab.llm_token_map,
+            &trie3_god,
+        );
+
         let mut gc = Self {
             tokenizer,
             parser,
