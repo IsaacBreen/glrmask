@@ -1361,33 +1361,80 @@ pub struct Index {
     index: usize,
 }
 
+impl From<usize> for Index {
+    fn from(index: usize) -> Self {
+        Index { index }
+    }
+}
+
+impl From<Index> for usize {
+    fn from(idx: Index) -> usize {
+        idx.index
+    }
+}
+
+impl Index {
+    pub fn as_usize(self) -> usize {
+        self.index
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Arena<T> {
     values: Arc<RwLock<BTreeMap<usize, T>>>,
 }
-impl<T> PartialEq for Arena<T> where T: PartialEq {
+
+impl<T> PartialEq for Arena<T>
+where
+    T: PartialEq,
+{
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.values, &other.values) || PartialEq::eq(&*self.values.read().unwrap(), &*other.values.read().unwrap())
+        Arc::ptr_eq(&self.values, &other.values)
+            || PartialEq::eq(
+                &*self.values.read().unwrap(),
+                &*other.values.read().unwrap(),
+            )
     }
 }
 impl<T> Eq for Arena<T> where T: Eq {}
-impl<T> PartialOrd for Arena<T> where T: PartialOrd {
+
+impl<T> PartialOrd for Arena<T>
+where
+    T: PartialOrd,
+{
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if Arc::ptr_eq(&self.values, &other.values) {
             return Some(Ordering::Equal);
         }
-        PartialOrd::partial_cmp(&*self.values.read().unwrap(), &*other.values.read().unwrap())
+        PartialOrd::partial_cmp(
+            &*self.values.read().unwrap(),
+            &*other.values.read().unwrap(),
+        )
     }
 }
-impl<T> Ord for Arena<T> where T: Ord {
+
+impl<T> Ord for Arena<T>
+where
+    T: Ord,
+{
     fn cmp(&self, other: &Self) -> Ordering {
         if Arc::ptr_eq(&self.values, &other.values) {
             return Ordering::Equal;
         }
-        Ord::cmp(&*self.values.read().unwrap(), &*other.values.read().unwrap())
+        Ord::cmp(
+            &*self.values.read().unwrap(),
+            &*other.values.read().unwrap(),
+        )
     }
 }
-impl<T> Hash for Arena<T> where T: Hash {
+
+// Note: hashing only the pointer means two Arenas with equal content but different Arcs
+// will not hash equal even though `eq` may return true. If you need Eq/Hash consistency,
+// hash the map contents instead.
+impl<T> Hash for Arena<T>
+where
+    T: Hash,
+{
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(&Arc::as_ptr(&self.values), state);
     }
@@ -1400,23 +1447,51 @@ impl<T> Arena<T> {
         }
     }
 
+    // Inserts `value` at the next free index (max_index + 1) and returns the Index.
     pub fn insert(&self, value: T) -> Index {
-        let mut guard = self.values.write().unwrap();
-        let new_index = guard.len();
-        guard.insert(new_index, value);
-        Index { index: new_index }
+        let mut map = self.values.write().unwrap();
+        let next = match map.keys().next_back().copied() {
+            Some(k) => k.checked_add(1).expect("Arena index overflow"),
+            None => 0,
+        };
+        let old = map.insert(next, value);
+        debug_assert!(old.is_none());
+        Index { index: next }
     }
 
+    // Replace or set a value at a specific index. Returns the old value if any.
+    pub fn insert_at(&self, index: Index, value: T) -> Option<T> {
+        self.values.write().unwrap().insert(index.index, value)
+    }
+
+    // Remove a value at index, returning it if present.
+    pub fn remove(&self, index: Index) -> Option<T> {
+        self.values.write().unwrap().remove(&index.index)
+    }
+
+    // Returns true if the index exists in the arena.
+    pub fn contains(&self, index: Index) -> bool {
+        self.values.read().unwrap().contains_key(&index.index)
+    }
+
+    // Returns a clone of the value at index (requires T: Clone).
     pub fn get(&self, index: Index) -> Option<T>
     where
         T: Clone,
     {
-        let guard = self.values.read().unwrap();
-        guard.get(&index.index).cloned()
+        self.values.read().unwrap().get(&index.index).cloned()
     }
 
-    pub fn get_mut(&self, index: Index) -> Option<std::sync::RwLockWriteGuard<'_, T>> {
- 
+    // Read access via a closure (no Clone bound required).
+    pub fn with<R>(&self, index: Index, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let guard = self.values.read().unwrap();
+        guard.get(&index.index).map(f)
+    }
+
+    // Mutable access via a closure (no Clone bound required).
+    pub fn with_mut<R>(&self, index: Index, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let mut guard = self.values.write().unwrap();
+        guard.get_mut(&index.index).map(f)
     }
 
     pub fn len(&self) -> usize {
@@ -1424,6 +1499,34 @@ impl<T> Arena<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.values.read().unwrap().is_empty()
+    }
+
+    pub fn clear(&self) {
+        self.values.write().unwrap().clear();
+    }
+
+    // Snapshot of all indices.
+    pub fn indices(&self) -> Vec<Index> {
+        self.values
+            .read()
+            .unwrap()
+            .keys()
+            .copied()
+            .map(Index::from)
+            .collect()
+    }
+
+    // Snapshot of all entries as (Index, T) pairs (requires T: Clone).
+    pub fn to_vec(&self) -> Vec<(Index, T)>
+    where
+        T: Clone,
+    {
+        self.values
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(&k, v)| (Index::from(k), v.clone()))
+            .collect()
     }
 }
