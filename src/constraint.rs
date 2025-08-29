@@ -25,7 +25,7 @@ use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss::Acc;
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode2, PrecomputedNodeContents, TerminalBV};
+use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputedNodeContents, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -55,6 +55,7 @@ const MERGE_THRESHOLD: usize = 20;
 
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>;

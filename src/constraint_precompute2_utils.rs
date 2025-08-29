@@ -1,5 +1,5 @@
-use crate::constraint::Trie2GodWrapper;
-use crate::datastructures::gss::{LLMTokenBV, PrecomputeNode2, PrecomputedNodeContents};
+use crate::constraint::{PrecomputeNode2, Trie2GodWrapper};
+use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::ArcPtrWrapper;

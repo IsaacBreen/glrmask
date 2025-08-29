@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
-use crate::datastructures::gss::PrecomputeNode2;
+use crate::constraint::PrecomputeNode2;
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};

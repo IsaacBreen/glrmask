@@ -1,6 +1,6 @@
-use crate::constraint::{God, GodWrapper, LLMVocab, Trie2God, Trie2GodWrapper};
+use crate::constraint::{God, GodWrapper, LLMVocab, PrecomputeNode2, Trie2God, Trie2GodWrapper};
 use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, LLMTokenBV};
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputeNode2, PrecomputedNodeContents};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};

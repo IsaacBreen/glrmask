@@ -55,7 +55,7 @@ impl PrecomputedNodeContents {
     }
 }
 
-use crate::constraint::{God, Trie2God, Trie2GodWrapper};
+use crate::constraint::{God, PrecomputeNode2, Trie2God, Trie2GodWrapper};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 
@@ -79,9 +79,6 @@ impl JSONConvertible for PrecomputedNodeContents {
         }
     }
 }
-
-pub(crate) type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-
 
 // --- Accumulator (Acc) ---
 
