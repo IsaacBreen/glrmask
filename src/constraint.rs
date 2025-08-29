@@ -668,6 +668,8 @@ impl GrammarConstraint {
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
         Trie::recompute_all_max_depths(&trie2_god, &roots2_final);
 
+        Trie::gc(&trie2_god, &roots2_final);
+
         (precomputed2, trie2_god)
     }
 
