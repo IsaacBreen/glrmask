@@ -215,7 +215,7 @@ pub fn are_precompute2_trees_equivalent(
     trie2_god_b: &Trie2GodWrapper,
 ) -> bool {
     // Stochastic version
-    if a == b && Arc::ptr_eq(&trie2_god_a.values, &trie2_god_b.values) {
+    if a == b && trie2_god_a == trie2_god_b {
         return true;
     }
 
