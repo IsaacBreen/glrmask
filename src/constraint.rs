@@ -715,7 +715,7 @@ impl GrammarConstraint {
         // Clean up after rewiring
         optimize_trie2_size(&mut precomputed2, &trie2_god, config);
 
-        Trie::all_nodes(&trie2_god, &roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
+        // Trie::all_nodes(&trie2_god, &roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 
         // Recompute depths again after promotions, as they can change the graph structure.
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
