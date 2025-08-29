@@ -50,6 +50,7 @@ use serde_json::Value as SerdeValue;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
+use crate::constraint_precompute2_utils::optimize_trie2_size;
 use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
@@ -658,9 +659,7 @@ impl GrammarConstraint {
         let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_before_cleanup);
 
         // Clean up after rewiring
-        constraint_precompute2_utils::prune_dead_paths_trie2(&mut precomputed2, &trie2_god);
-        constraint_precompute2_utils::merge_nodes_trie2(&mut precomputed2, &trie2_god);
-        constraint_precompute2_utils::simplify_trie2_factor_common_destinations(&mut precomputed2, &trie2_god);
+        optimize_trie2_size(&mut precomputed2, &trie2_god);
 
         Trie::all_nodes(&trie2_god, &roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 

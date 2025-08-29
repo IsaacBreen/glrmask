@@ -16,12 +16,13 @@ use reqwest::blocking;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use bimap::BiBTreeMap;
 use crate::constraint_extra::PrecomputeStats;
 use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+use crate::json_serialization::JSONConvertible;
 //
 // -------------------------------
 // Common helpers
@@ -154,7 +155,6 @@ fn load_or_download_gpt2_vocab(
     Ok(vocab_map.into_keys().collect())
 }
 
-#[cfg(false)]
 #[test]
 fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(rustrover) {
@@ -211,8 +211,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
         println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
         let file = File::open(&precomputed2_cache_path)?;
         let decompressor = GzDecoder::new(BufReader::new(file));
-        (original_precomputed2, original_god) = Precomputed2::from_json_reader(decompressor)?;
-        original_god = todo!();
+        (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
         println!("\nConstructing GrammarConstraint (will generate Precomputed2)...");
@@ -231,7 +230,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
             let file = File::create(&precomputed2_cache_path)?;
             let writer = BufWriter::new(file);
             let mut encoder = GzEncoder::new(writer, Compression::default());
-            constraint::write_precomputed2_to_stream(&original_precomputed2, &mut encoder)?;
+            original_precomputed2.to_writer(&mut encoder)?;
             println!("Successfully saved Precomputed2 to cache.");
         }
     }
