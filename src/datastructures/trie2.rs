@@ -1569,13 +1569,5 @@ where
     }
 }
 
-// #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-// pub struct God<EK, EV, T> {
-//     _phantom: std::marker::PhantomData<(EK, EV, T)>,
-// }
-//
-// #[derive(Debug, Clone)]
-// pub struct GodWrapper<EK, EV, T>(pub Arc<RwLock<God<EK, EV, T>>>);
-
 pub type GodWrapper<EK, EV, T> = Arena<Trie2<EK, EV, T>>;
 pub type God<EK, EV, T> = Arena<Trie2<EK, EV, T>>;
