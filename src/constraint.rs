@@ -325,6 +325,7 @@ impl GrammarConstraint {
 
         let (precomputed2, trie2_god) = Self::precompute2(
             &precomputed,
+            &trie1_god,
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -407,6 +408,7 @@ impl GrammarConstraint {
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
         precomputed: &BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
+        trie1_god: &Trie1GodWrapper,
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
@@ -494,10 +496,11 @@ impl GrammarConstraint {
             initial_values_for_map.push((trie1_root.clone(), glr_state_for_sid));
         }
 
-        let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::leaf(), )));
+        let trie2_end = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::leaf())));
 
         crate::debug!(2, "Running special_map_grouped for Trie 2 precomputation");
         Trie::special_map_grouped(
+            &trie1_god,
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
@@ -582,7 +585,7 @@ impl GrammarConstraint {
 
                             for src_wr in gss_root_acc.trie2_nodes.iter() {
                                 let src_arc = src_wr.as_arc().clone();
-                                let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
+                                let src_live = { src_arc.read(&trie2_god).expect("poison").value.live_tokens.clone() };
                                 let tokens_to_push = &active_llm_tokens_for_root & &src_live;
                                 if tokens_to_push.is_empty() {
                                     crate::debug!(4, "Trie: No tokens to push from this source node");
@@ -590,10 +593,10 @@ impl GrammarConstraint {
                                 }
                                 {
                                     // Mark the source node as live for these tokens so the backward pass can see them.
-                                    let mut src_w = src_arc.write().expect("poison");
+                                    let mut src_w = src_arc.write(&trie2_god).expect("poison");
                                     src_w.value.live_tokens |= tokens_to_push.clone();
                                 }
-                                crate::debug!(4, "Trie: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
+                                crate::debug!(4, "Trie: Pushing tokens {:?} from source node {:?}", tokens_to_push, src_arc);
 
                                 let edge_key = (0, Some(last_edge.state_id));
 
@@ -616,7 +619,7 @@ impl GrammarConstraint {
                         }
                     }
                     for (dst_wr, added) in &dest_agg {
-                        let mut g = dst_wr.as_arc().write().expect("poison");
+                        let mut g = dst_wr.as_arc().write(&trie2_god).expect("poison");
                         g.value.live_tokens |= added.clone();
                     }
                 }
@@ -650,20 +653,20 @@ impl GrammarConstraint {
         // before performing modifications. These strong references are held until
         // weak edges have been promoted back to strong ones where possible.
         let roots_before_cleanup: Vec<_> = precomputed2.values().cloned().collect();
-        let all_nodes_pinner = Trie::all_nodes(&roots_before_cleanup);
+        let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_before_cleanup);
 
         // Clean up after rewiring
         constraint_precompute2_utils::prune_dead_paths_trie2(&mut precomputed2);
         constraint_precompute2_utils::merge_nodes_trie2(&mut precomputed2);
         constraint_precompute2_utils::simplify_trie2_factor_common_destinations(&mut precomputed2);
 
-        Trie::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
+        Trie::all_nodes(&trie2_god, &roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 
         // Recompute depths again after promotions, as they can change the graph structure.
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
-        Trie::recompute_all_max_depths(&roots2_final);
+        Trie::recompute_all_max_depths(&trie2_god, &roots2_final);
 
-        precomputed2
+        (precomputed2, trie2_god)
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -819,9 +822,7 @@ impl<'r> Precomputer<'r> {
         for sid in tokenizer.iter_states() {
             roots.insert(
                 sid,
-                Arc::new(RwLock::new(PrecomputeNode::new(
-                    PrecomputedNodeContents::root(internal_max_llm_token)
-                ))),
+                PrecomputeNodeIndex::new(Trie1GodWrapper::new().insert(PrecomputeNode::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
             );
         }
 
@@ -838,7 +839,7 @@ impl<'r> Precomputer<'r> {
         }
 
         let trie1_god = Trie1GodWrapper::new();
-        let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::leaf())));
+        let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode::new(PrecomputedNodeContents::leaf())));
 
         Self {
             tokenizer,
@@ -905,13 +906,13 @@ impl<'r> Precomputer<'r> {
             assoc
                 .entry(*sid)
                 .or_default()
-                .insert(ArcPtrWrapper::new(arc.clone()));
+                .insert(arc.clone());
         }
 
         crate::debug!(2, "Starting precompute DFS");
         crate::debug!(3, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
-            crate::debug!(6, "  {}: {:p}", sid.0, Arc::as_ptr(root));
+            crate::debug!(6, "  {}: {}", sid.0, root);
         }
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
@@ -930,10 +931,10 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all unique nodes.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
-            let mut node_guard = node_arc.write().expect("poison");
+            let mut node_guard = node_arc.write(&self.trie1_god).expect("poison");
 
             // Check if there are any edges with the ignore token key.
             let ignore_key = Some(ignore_tid);
@@ -969,15 +970,15 @@ impl<'r> Precomputer<'r> {
     fn simplify_none_edges(&mut self) {
         crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
 
-        let root_node_ptrs: HashSet<*const RwLock<PrecomputeNode>> = self.roots.values().map(|arc| Arc::as_ptr(arc)).collect();
+        let root_node_ptrs: HashSet<PrecomputeNodeIndex> = self.roots.values().cloned().collect();
 
         // 1) Collect all unique nodes reachable from any root
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
         // Map pointer -> Arc for quick retrieval
-        let mut arc_by_ptr: HashMap<*const RwLock<PrecomputeNode>, PrecomputeNodeIndex> = HashMap::new();
+        let mut arc_by_ptr: HashMap<PrecomputeNodeIndex, PrecomputeNodeIndex> = HashMap::new();
         for n in &all_nodes {
-            arc_by_ptr.insert(Arc::as_ptr(n), n.clone());
+            arc_by_ptr.insert(*n, n.clone());
         }
 
         // 2) Build:
@@ -985,23 +986,23 @@ impl<'r> Precomputer<'r> {
         //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
         //    - none_union[B] = union of all bv2 for None edges from B
         let mut incoming: HashMap<
-            *const RwLock<PrecomputeNode>,
+            PrecomputeNodeIndex,
             Vec<(PrecomputeNodeIndex, Option<GrammarTokenID>, LLMTokenBV)>
         > = HashMap::new();
         let mut none_edges_from: HashMap<
-            *const RwLock<PrecomputeNode>,
+            PrecomputeNodeIndex,
             Vec<(PrecomputeNodeIndex, LLMTokenBV)>
         > = HashMap::new();
-        let mut none_union: HashMap<*const RwLock<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+        let mut none_union: HashMap<PrecomputeNodeIndex, LLMTokenBV> = HashMap::new();
 
         for src_arc in &all_nodes {
-            let src_ptr = Arc::as_ptr(src_arc);
-            let guard = src_arc.read().expect("poison");
+            let src_ptr = src_arc;
+            let guard = src_arc.read(&self.trie1_god).expect("poison");
             // Record all outgoing edges for incoming map
             for (ek, dest_map) in guard.children().iter() {
                 for (child_wrap, ev_bv) in dest_map.iter() {
                     let child_arc = child_wrap.as_arc().clone();
-                    let child_ptr = Arc::as_ptr(&child_arc);
+                    let child_ptr = child_arc;
                     incoming.entry(child_ptr)
                         .or_default()
                         .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
@@ -1009,10 +1010,10 @@ impl<'r> Precomputer<'r> {
             }
             // Record None edges out of src_arc (B -> C)
             if let Some(dest_map_none) = guard.children().get(&None) {
-                let list = none_edges_from.entry(src_ptr).or_default();
+                let list = none_edges_from.entry(*src_ptr).or_default();
                 for (child_wrap, ev_bv) in dest_map_none.iter() {
                     list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
-                    let entry = none_union.entry(src_ptr).or_insert_with(LLMTokenBV::zeros);
+                    let entry = none_union.entry(*src_ptr).or_insert_with(LLMTokenBV::zeros);
                     *entry |= ev_bv;
                 }
             }
@@ -1038,7 +1039,7 @@ impl<'r> Precomputer<'r> {
                     // Not a root and no predecessors means it's an unreachable internal node.
                     // It's safe to remove its outgoing None edges.
                     if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-                        let mut b_guard = b_arc.write().expect("poison");
+                        let mut b_guard = b_arc.write(&self.trie1_god).expect("poison");
                         b_guard.children_mut().remove(&None);
                     }
                     continue;
@@ -1049,7 +1050,7 @@ impl<'r> Precomputer<'r> {
                 Some(a) => a.clone(),
                 None => continue,
             };
-            let b_key = ArcPtrWrapper::new(b_arc.clone());
+            let b_key = b_arc.clone();
 
             // For each incoming edge A -(x; bv1)-> B, split tokens:
             //   move:    to C with mask (bv1 ∩ bv2)
@@ -1061,7 +1062,7 @@ impl<'r> Precomputer<'r> {
                     continue;
                 }
 
-                let mut a_guard = a_arc.write().expect("poison");
+                let mut a_guard = a_arc.write(&self.trie1_god).expect("poison");
                 let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
 
                 // Add/merge edges to each C with per-child mask
@@ -1071,7 +1072,7 @@ impl<'r> Precomputer<'r> {
                     if to_move_for_c.is_empty() {
                         continue;
                     }
-                    let c_key = ArcPtrWrapper::new(c_arc.clone());
+                    let c_key = c_arc.clone();
                     if let Some(existing_ev) = dest_map.get_mut(&c_key) {
                         *existing_ev |= &to_move_for_c;
                     } else {
@@ -1092,7 +1093,7 @@ impl<'r> Precomputer<'r> {
 
             // Finally, remove all None edges out of B
             {
-                let mut b_guard = b_arc.write().expect("poison");
+                let mut b_guard = b_arc.write(&self.trie1_god).expect("poison");
                 b_guard.children_mut().remove(&None);
             }
         }
@@ -1116,7 +1117,7 @@ impl<'r> Precomputer<'r> {
         Trie::special_map(
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
-            |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
+            |predecessors, edge_terminal_opt: Option<_>, _edge_bv, _child_node| {
                 match edge_terminal_opt {
                     Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
                     Some(t) => Some(Some(BTreeSet::from([*t]))),
@@ -1451,12 +1452,12 @@ impl<'r> Precomputer<'r> {
         token_name_map: &BiBTreeMap<Terminal, usize>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         internal_max_llm_token: usize,
-    ) -> BTreeMap<TokenizerStateID, PrecomputeNodeIndex> {
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
 
         calculate_final_stats(&self.roots, &mut self.stats);
         print_precompute_stats(&self.stats, token_name_map);
 
-        self.roots
+        (self.roots, self.trie1_god)
     }
 
     fn dfs(
