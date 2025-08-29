@@ -12,7 +12,7 @@ use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
 
-/// Represents a node in a Trie2–like structure (allowing shared subtrees and DAGs).
+/// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).
 /// Multiple children can exist for the same edge key. Each edge instance has a value.
 ///
 /// EK: type of the edge key (must be Ord).
@@ -24,7 +24,7 @@ use profiler_macro::time_it;
 /// to nodes (read/write of value, children traversal, depth recomputation, etc.) now
 /// requires passing a reference to the Arena that owns the nodes.
 #[derive(Debug, Clone)]
-pub struct Trie2<EK: Ord, EV, T> {
+pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to a map of destination node indices and edge values.
     children: BTreeMap<EK, OrderedHashMap<Trie2Index, EV>>,
@@ -33,8 +33,8 @@ pub struct Trie2<EK: Ord, EV, T> {
     pub max_depth: usize,
 }
 
-/// An index into the Arena for a Trie2 node.
-/// This is the light-weight replacement for Arc<RwLock<Trie2<...>>> in external code.
+/// An index into the Arena for a Trie node.
+/// This is the light-weight replacement for Arc<RwLock<Trie<...>>> in external code.
 ///
 /// It provides `read(&arena)` and `write(&arena)` methods that mimic RwLock's API:
 /// both return Option<Guard>. In most code you'll immediately call `.expect(...)` or `.unwrap()`.
@@ -56,11 +56,11 @@ impl Trie2Index {
         self.index
     }
 
-    /// Read-locks the Arena and returns a guard that derefs to &Trie2 at this index.
+    /// Read-locks the Arena and returns a guard that derefs to &Trie at this index.
     /// Returns None if the index does not exist.
     pub fn read<'a, EK: Ord, EV, T>(
         self,
-        arena: &'a Arena<Trie2<EK, EV, T>>,
+        arena: &'a Arena<Trie<EK, EV, T>>,
     ) -> Option<Trie2ReadGuard<'a, EK, EV, T>> {
         let guard = arena.values.read().ok()?;
         if !guard.contains_key(&self.index.as_usize()) {
@@ -72,11 +72,11 @@ impl Trie2Index {
         })
     }
 
-    /// Write-locks the Arena and returns a guard that derefs to &mut Trie2 at this index.
+    /// Write-locks the Arena and returns a guard that derefs to &mut Trie at this index.
     /// Returns None if the index does not exist.
     pub fn write<'a, EK: Ord, EV, T>(
         self,
-        arena: &'a Arena<Trie2<EK, EV, T>>,
+        arena: &'a Arena<Trie<EK, EV, T>>,
     ) -> Option<Trie2WriteGuard<'a, EK, EV, T>> {
         let guard = arena.values.write().ok()?;
         if !guard.contains_key(&self.index.as_usize()) {
@@ -119,14 +119,14 @@ impl From<Trie2Index> for usize {
 }
 
 /// A read guard that keeps the Arena's internal RwLockReadGuard alive and provides
-/// immutable access to a Trie2 node at a given index via Deref.
+/// immutable access to a Trie node at a given index via Deref.
 pub struct Trie2ReadGuard<'a, EK: Ord, EV, T> {
-    guard: RwLockReadGuard<'a, BTreeMap<usize, Trie2<EK, EV, T>>>,
+    guard: RwLockReadGuard<'a, BTreeMap<usize, Trie<EK, EV, T>>>,
     index: usize,
 }
 
 impl<'a, EK: Ord, EV, T> Deref for Trie2ReadGuard<'a, EK, EV, T> {
-    type Target = Trie2<EK, EV, T>;
+    type Target = Trie<EK, EV, T>;
     fn deref(&self) -> &Self::Target {
         self.guard
             .get(&self.index)
@@ -135,14 +135,14 @@ impl<'a, EK: Ord, EV, T> Deref for Trie2ReadGuard<'a, EK, EV, T> {
 }
 
 /// A write guard that keeps the Arena's internal RwLockWriteGuard alive and provides
-/// mutable access to a Trie2 node at a given index via Deref/DerefMut.
+/// mutable access to a Trie node at a given index via Deref/DerefMut.
 pub struct Trie2WriteGuard<'a, EK: Ord, EV, T> {
-    guard: RwLockWriteGuard<'a, BTreeMap<usize, Trie2<EK, EV, T>>>,
+    guard: RwLockWriteGuard<'a, BTreeMap<usize, Trie<EK, EV, T>>>,
     index: usize,
 }
 
 impl<'a, EK: Ord, EV, T> Deref for Trie2WriteGuard<'a, EK, EV, T> {
-    type Target = Trie2<EK, EV, T>;
+    type Target = Trie<EK, EV, T>;
     fn deref(&self) -> &Self::Target {
         self.guard
             .get(&self.index)
@@ -158,7 +158,7 @@ impl<'a, EK: Ord, EV, T> DerefMut for Trie2WriteGuard<'a, EK, EV, T> {
     }
 }
 
-impl<EK, EV, T> JSONConvertible for Trie2<EK, EV, T>
+impl<EK, EV, T> JSONConvertible for Trie<EK, EV, T>
 where
     EK: Ord + Clone + JSONConvertible + Debug,
     EV: Clone + JSONConvertible,
@@ -193,7 +193,7 @@ where
     }
 
     /// Parses the local-node JSON format produced by to_json above.
-    /// This reconstructs a Trie2 node that references children by indices only.
+    /// This reconstructs a Trie node that references children by indices only.
     /// The Arena is not created/returned here; the caller is expected to manage
     /// nodes in an Arena externally.
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -242,7 +242,7 @@ where
             children.insert(ek, dest_map);
         }
 
-        Ok(Trie2 {
+        Ok(Trie {
             value,
             children,
             max_depth,
@@ -250,14 +250,14 @@ where
     }
 }
 
-// Implementation block for core Trie2 functionality
+// Implementation block for core Trie functionality
 // Added Clone bound for EK needed in insertion and others
-impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
+impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// Creates a new trie node with the given value and no children.
     /// The max_depth is initialized to usize::MAX and will be updated later
     /// when recompute_all_max_depths is called.
     pub fn new(value: T) -> Self {
-        Trie2 {
+        Trie {
             value,
             children: BTreeMap::new(),
             max_depth: usize::MAX,
@@ -268,12 +268,12 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
     /// Returns the index of the newly created node.
     pub fn force_insert_to_new_node(
         &mut self,
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         edge_key: EK,
         edge_value: EV,
         value: T,
     ) -> Trie2Index {
-        let new_index = Trie2Index::new(arena.insert(Trie2::new(value)));
+        let new_index = Trie2Index::new(arena.insert(Trie::new(value)));
         self.children
             .entry(edge_key)
             .or_default()
@@ -360,7 +360,7 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
 
     /// Collects all unique nodes (by index) reachable from the given roots (BFS).
     pub fn all_nodes(
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         roots: &[Trie2Index],
     ) -> Vec<Trie2Index> {
         let mut visited: HashSet<usize> = HashSet::new();
@@ -386,7 +386,7 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
                     }
                 }
             } else {
-                panic!("Trie2::all_nodes: node index {} not found in arena", node_idx.as_usize());
+                panic!("Trie::all_nodes: node index {} not found in arena", node_idx.as_usize());
             }
         }
         result
@@ -399,7 +399,7 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
     ///
     /// Uses a topological order (Kahn's algorithm). Assumes the graph is acyclic.
     pub fn recompute_all_max_depths(
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         roots: &[Trie2Index],
     ) {
         let all_nodes = Self::all_nodes(arena, roots);
@@ -468,7 +468,7 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
     /// Recomputes the max_depth of this node based on its children's depths.
     /// Returns true if the depth changed.
     /// This does NOT propagate changes.
-    pub fn recompute_max_depth(&mut self, arena: &Arena<Trie2<EK, EV, T>>) -> bool {
+    pub fn recompute_max_depth(&mut self, arena: &Arena<Trie<EK, EV, T>>) -> bool {
         let new_max_depth = self
             .children
             .values()
@@ -490,18 +490,18 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
 }
 
 // Add this impl block for the recursive comparison helper (index-based)
-impl<EK, EV, T> Trie2<EK, EV, T>
+impl<EK, EV, T> Trie<EK, EV, T>
 where
     EK: Ord + Clone,
     EV: PartialEq + Clone,
     T: PartialEq,
 {
-    /// Recursively compares two Trie2 nodes referenced by indices for equality across an Arena.
+    /// Recursively compares two Trie nodes referenced by indices for equality across an Arena.
     ///
-    /// - `a_idx`, `b_idx`: The indices pointing to the Trie2 nodes to compare.
+    /// - `a_idx`, `b_idx`: The indices pointing to the Trie nodes to compare.
     /// - `comparison_cache`: Tracks pairs of (a_usize, b_usize) and their comparison result (bool).
     fn compare_indexes_recursive(
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         a_idx: Trie2Index,
         b_idx: Trie2Index,
         comparison_cache: &mut HashMap<(usize, usize), bool>,
@@ -577,7 +577,7 @@ where
                         for i in 0..b_child_pairs.len() {
                             if &b_child_pairs[i].1 == a_ev {
                                 let b_child = b_child_pairs[i].0;
-                                if Trie2::compare_indexes_recursive(arena, *a_child, b_child, comparison_cache) {
+                                if Trie::compare_indexes_recursive(arena, *a_child, b_child, comparison_cache) {
                                     b_child_pairs.remove(i);
                                     found = true;
                                     break;
@@ -599,9 +599,9 @@ where
 
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
-impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
+impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     fn count_all_edges(
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         root_nodes: &[Trie2Index],
     ) -> usize {
         let mut visited: HashSet<usize> = HashSet::new();
@@ -640,11 +640,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     /// which is suboptimal but not incorrect.
     #[time_it]
     pub fn special_map<V: Clone>(
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         initial_nodes_and_values: Vec<(Trie2Index, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie2<EK, EV, T>) -> Option<V>,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie2<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
@@ -746,11 +746,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     /// which is suboptimal but not incorrect.
     #[time_it]
     pub fn special_map_grouped<V, S, I>(
-        arena: &Arena<Trie2<EK, EV, T>>,
+        arena: &Arena<Trie<EK, EV, T>>,
         initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie2<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     )
     where
         V: Clone,
@@ -838,8 +838,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie2<EK, EV, T> {
     }
 }
 
-// Implement PartialEq for Trie2 (shallow: compares value, max_depth, and immediate children lists)
-impl<EK, EV, T> PartialEq for Trie2<EK, EV, T>
+// Implement PartialEq for Trie (shallow: compares value, max_depth, and immediate children lists)
+impl<EK, EV, T> PartialEq for Trie<EK, EV, T>
 where
     EK: Ord + PartialEq,
     EV: PartialEq,
@@ -873,8 +873,8 @@ where
     }
 }
 
-// Implement Eq for Trie2
-impl<EK, EV, T> Eq for Trie2<EK, EV, T>
+// Implement Eq for Trie
+impl<EK, EV, T> Eq for Trie<EK, EV, T>
 where
     EK: Ord + Eq,
     EV: Eq + Clone,
@@ -882,8 +882,8 @@ where
 {
 }
 
-// Implement PartialOrd for Trie2
-impl<EK, EV, T> PartialOrd for Trie2<EK, EV, T>
+// Implement PartialOrd for Trie
+impl<EK, EV, T> PartialOrd for Trie<EK, EV, T>
 where
     EK: Ord,
     EV: Ord + Clone,
@@ -894,8 +894,8 @@ where
     }
 }
 
-// Implement Ord for Trie2
-impl<EK, EV, T> Ord for Trie2<EK, EV, T>
+// Implement Ord for Trie
+impl<EK, EV, T> Ord for Trie<EK, EV, T>
 where
     EK: Ord,
     EV: Ord + Clone,
@@ -931,8 +931,8 @@ where
     }
 }
 
-// Implement Hash for Trie2 (shallow: value, max_depth, and immediate children lists)
-impl<EK, EV, T> Hash for Trie2<EK, EV, T>
+// Implement Hash for Trie (shallow: value, max_depth, and immediate children lists)
+impl<EK, EV, T> Hash for Trie<EK, EV, T>
 where
     EK: Ord + Hash,
     EV: PartialEq + Clone + Hash,
@@ -963,7 +963,7 @@ where
     }
 }
 
-/// A helper struct to facilitate inserting an edge into a Trie2,
+/// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
 /// Provides a chainable interface.
 ///
@@ -977,7 +977,7 @@ where
     FUpdateT: FnMut(&mut T, &EV),
     FMergeEV_T: FnMut(&mut EV, &T),
 {
-    arena: &'a Arena<Trie2<EK, EV, T>>,
+    arena: &'a Arena<Trie<EK, EV, T>>,
     source_idx: Trie2Index,                      // The source node for the edge
     edge_key: EK,                                // The key for the edge to be inserted
     edge_value: Option<EV>,                      // The value for the edge to be inserted
@@ -1001,14 +1001,14 @@ where
     ///
     /// # Arguments
     ///
-    /// * `arena`: The arena holding Trie2 nodes.
+    /// * `arena`: The arena holding Trie nodes.
     /// * `source_idx`: The source node where the edge originates.
     /// * `edge_key`: The key for the new edge.
     /// * `edge_value`: The value for the new edge.
     /// * `merge_edge_value`: A closure that merges the existing edge value with the new edge value.
     pub fn new(
         god: &GodWrapper<EK, EV, T>,
-        arena: &'a Arena<Trie2<EK, EV, T>>,
+        arena: &'a Arena<Trie<EK, EV, T>>,
         source_idx: Trie2Index,
         edge_key: EK,
         edge_value: EV,
@@ -1161,7 +1161,7 @@ where
             return self;
         }
 
-        let new_node_idx = Trie2Index::new(self.arena.insert(Trie2::new(value)));
+        let new_node_idx = Trie2Index::new(self.arena.insert(Trie::new(value)));
         let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
 
         { // Scope for source_guard
@@ -1238,7 +1238,7 @@ impl Trie2Index {
     ///
     /// ```ignore
     /// let root_idx: Trie2Index = ...;
-    /// let arena: Arena<Trie2<String, i32, NodeValue>> = ...;
+    /// let arena: Arena<Trie<String, i32, NodeValue>> = ...;
     /// let god = /* obtain GodWrapper */ unimplemented!();
     /// let new_or_existing_node_idx = root_idx
     ///     .insert_edge(
@@ -1253,7 +1253,7 @@ impl Trie2Index {
     /// ```
     pub fn insert_edge<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
         self,
-        arena: &'a Arena<Trie2<EK, EV, T>>,
+        arena: &'a Arena<Trie<EK, EV, T>>,
         god: &'a GodWrapper<EK, EV, T>,
         edge_key: EK,
         edge_value: EV,
@@ -1286,7 +1286,7 @@ impl Trie2Index {
 /// optionally merging edge values if an edge already exists.
 /// Returns `Some(Trie2Index)` if merge or insert succeeded.
 pub fn try_destination<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
-    arena: &'a Arena<Trie2<EK, EV, T>>,
+    arena: &'a Arena<Trie<EK, EV, T>>,
     god: &GodWrapper<EK, EV, T>,
     source: Trie2Index,
     edge_key: EK,
@@ -1321,7 +1321,7 @@ where
 /// Attempts to establish an edge from `source` to any of the provided `destinations`,
 /// returning the first successful one (merge or insert), or `None` if none matched.
 pub fn try_destination_with<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
-    arena: &'a Arena<Trie2<EK, EV, T>>,
+    arena: &'a Arena<Trie<EK, EV, T>>,
     god: &GodWrapper<EK, EV, T>,
     source: Trie2Index,
     edge_key: EK,
@@ -1569,5 +1569,5 @@ where
     }
 }
 
-pub type GodWrapper<EK, EV, T> = Arena<Trie2<EK, EV, T>>;
-pub type God<EK, EV, T> = Arena<Trie2<EK, EV, T>>;
+pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
+pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;

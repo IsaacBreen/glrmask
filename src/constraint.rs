@@ -27,7 +27,7 @@ use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss::Acc;
 use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputedNodeContents, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie1::{EdgeInserter, Trie1};
+use crate::datastructures::trie1::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -55,8 +55,8 @@ use crate::datastructures::trie2::{God, GodWrapper};
 const MERGE_THRESHOLD: usize = 20;
 
 pub type PrecomputeNode =
-    Trie1<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode2 = Trie1<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+    Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>;
@@ -392,7 +392,7 @@ impl GrammarConstraint {
 
         // Recompute all max_depth values after major graph surgery.
         let roots_for_recompute: Vec<_> = helper.roots.values().cloned().collect();
-        Trie1::recompute_all_max_depths(&roots_for_recompute);
+        Trie::recompute_all_max_depths(&roots_for_recompute);
 
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
@@ -406,7 +406,7 @@ impl GrammarConstraint {
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
-    /// Build the "Trie1 2" precomputation.
+    /// Build the "Trie 2" precomputation.
     pub fn precompute2(
         precomputed: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
         tokenizer:        &Regex,
@@ -419,7 +419,7 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> Precomputed2 {
-        crate::debug!(2, "Precomputing Trie1 2...");
+        crate::debug!(2, "Precomputing Trie 2...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
         const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             BelowBottomReductionMode::ContinueFromEverything
@@ -434,7 +434,7 @@ impl GrammarConstraint {
             Vec::new();
         let parser = parser.unwrap();
 
-        // 1) Build a single base Trie1 root.
+        // 1) Build a single base Trie root.
         let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
             PrecomputedNodeContents::root(internal_max_llm_token),
         )));
@@ -473,11 +473,11 @@ impl GrammarConstraint {
         }
 
         #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie1 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
+        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 2", disable = !PROGRESS_BAR_ENABLED, leave=false);
         #[cfg(rustrover)]
         let it = precomputed.iter();
         for (tokenizer_state_id, trie1_root) in it {
-            // Deep clone Trie1
+            // Deep clone Trie
             let (cloned_trie2_root, trie2_map) = constraint_precompute2_utils::clone_trie2_graph(&base_trie2_root);
 
             // Deep clone the base GSS, remapping trie2_nodes
@@ -495,12 +495,12 @@ impl GrammarConstraint {
 
         let trie2_end = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::leaf(), )));
 
-        crate::debug!(2, "Running special_map_grouped for Trie1 2 precomputation");
-        Trie1::special_map_grouped(
+        crate::debug!(2, "Running special_map_grouped for Trie 2 precomputation");
+        Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
-                crate::debug!(3, "Trie1: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
+                crate::debug!(3, "Trie: Processing GLR state with {} destinations for edge grammar token: {:?}", destinations_map.len(), edge_grammar_token_opt);
                 let mut glr_s = current_glr_state.clone();
 
                 let mut edge_bv = LLMTokenBV::zeros();
@@ -521,14 +521,14 @@ impl GrammarConstraint {
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
                     // Restrict the GLR state to the LLM tokens allowed on this edge.
-                    crate::debug!(5, "Trie1: Restricting GLR state to edge bitset: {:?}", edge_bv);
+                    crate::debug!(5, "Trie: Restricting GLR state to edge bitset: {:?}", edge_bv);
                     allow_only_llm_tokens_and_prune_arc(
                         &mut glr_s_copy.active_state.stack,
                         edge_bv,
                         &mut HashMap::new(),
                     );
                     glr_s_copy.log_gss(
-                        "Trie1: After restricting GLR state to edge bitset",
+                        "Trie: After restricting GLR state to edge bitset",
                         TerminalID(0),
                         false,
                         false,
@@ -541,7 +541,7 @@ impl GrammarConstraint {
                 out
             },
             |glr_s1, glr_s2| {
-                crate::debug!(4, "Trie1: Merging GLR states");
+                crate::debug!(4, "Trie: Merging GLR states");
                 glr_s1.log_gss("Before merge...", TerminalID(0), false, false);
                 glr_s2.log_gss("...with", TerminalID(0), false, false);
                 glr_s1.merge_with(glr_s2);
@@ -549,7 +549,7 @@ impl GrammarConstraint {
             },
             // process_fn
             |precomputed_node_data, glr_s| {
-                crate::debug!(3, "Trie1: At precomputed node {:p}, processing GLR state", precomputed_node_data);
+                crate::debug!(3, "Trie: At precomputed node {:p}, processing GLR state", precomputed_node_data);
                 // Dump precomputed2
                 // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
                 // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
@@ -561,9 +561,9 @@ impl GrammarConstraint {
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
-                    crate::debug!(3, "Trie1: Found end state for GLR state");
+                    crate::debug!(3, "Trie: Found end state for GLR state");
                     glr_s.log_gss(
-                        "Trie1: Found end state for GLR state",
+                        "Trie: Found end state for GLR state",
                         TerminalID(0),
                         false,
                         false,
@@ -577,14 +577,14 @@ impl GrammarConstraint {
                     for (last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
-                            crate::debug!(4, "Trie1: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
+                            crate::debug!(4, "Trie: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
 
                             for src_wr in gss_root_acc.trie2_nodes.iter() {
                                 let src_arc = src_wr.as_arc().clone();
                                 let src_live = { src_arc.read().expect("poison").value.live_tokens.clone() };
                                 let tokens_to_push = &active_llm_tokens_for_root & &src_live;
                                 if tokens_to_push.is_empty() {
-                                    crate::debug!(4, "Trie1: No tokens to push from this source node");
+                                    crate::debug!(4, "Trie: No tokens to push from this source node");
                                     continue;
                                 }
                                 {
@@ -592,7 +592,7 @@ impl GrammarConstraint {
                                     let mut src_w = src_arc.write().expect("poison");
                                     src_w.value.live_tokens |= tokens_to_push.clone();
                                 }
-                                crate::debug!(4, "Trie1: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
+                                crate::debug!(4, "Trie: Pushing tokens {:?} from source node {:p}", tokens_to_push, src_arc);
 
                                 let edge_key = (0, Some(last_edge.state_id));
 
@@ -608,7 +608,7 @@ impl GrammarConstraint {
 
                                 inserter = inserter.try_destination(trie2_end.clone());
 
-                                let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie1 node");
+                                let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie node");
                                 let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
                                 dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                             }
@@ -643,24 +643,24 @@ impl GrammarConstraint {
             },
         );
 
-        crate::debug!(2, "Finished precomputing Trie1 2");
+        crate::debug!(2, "Finished precomputing Trie 2");
 
         // To prevent dangling weak pointers, we collect strong references to all nodes
         // before performing modifications. These strong references are held until
         // weak edges have been promoted back to strong ones where possible.
         let roots_before_cleanup: Vec<_> = precomputed2.values().cloned().collect();
-        let all_nodes_pinner = Trie1::all_nodes(&roots_before_cleanup);
+        let all_nodes_pinner = Trie::all_nodes(&roots_before_cleanup);
 
         // Clean up after rewiring
         constraint_precompute2_utils::prune_dead_paths_trie2(&mut precomputed2);
         constraint_precompute2_utils::merge_nodes_trie2(&mut precomputed2);
         constraint_precompute2_utils::simplify_trie2_factor_common_destinations(&mut precomputed2);
 
-        Trie1::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
+        Trie::all_nodes(&roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 
         // Recompute depths again after promotions, as they can change the graph structure.
         let roots2_final: Vec<_> = precomputed2.values().cloned().collect();
-        Trie1::recompute_all_max_depths(&roots2_final);
+        Trie::recompute_all_max_depths(&roots2_final);
 
         precomputed2
     }
@@ -926,7 +926,7 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all unique nodes.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie1::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(&roots_vec);
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
             let mut node_guard = node_arc.write().expect("poison");
@@ -969,7 +969,7 @@ impl<'r> Precomputer<'r> {
 
         // 1) Collect all unique nodes reachable from any root
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie1::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(&roots_vec);
         // Map pointer -> Arc for quick retrieval
         let mut arc_by_ptr: HashMap<*const RwLock<PrecomputeNode>, Arc<RwLock<PrecomputeNode>>> = HashMap::new();
         for n in &all_nodes {
@@ -1109,7 +1109,7 @@ impl<'r> Precomputer<'r> {
         type NodePtr = *const PrecomputeNode;
         let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
 
-        Trie1::special_map(
+        Trie::special_map(
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
             |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
@@ -1163,7 +1163,7 @@ impl<'r> Precomputer<'r> {
 
         // Now, apply the pruning.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie1::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(&roots_vec);
         for node_arc in all_nodes {
             let node_ptr: NodePtr = {
                 let guard = node_arc.read().expect("poison");
@@ -1292,7 +1292,7 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all nodes in the graph.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie1::all_nodes(&roots_vec);
+        let all_nodes = Trie::all_nodes(&roots_vec);
         let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (Arc::as_ptr(n), n.clone())).collect();
 
         // 2. Build an incoming edge map for every node.
@@ -1820,7 +1820,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::reset();
 
-        Trie1::special_map_grouped(
+        Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
             |glr_s, grammar_token_opt, dest_map| {
@@ -2180,7 +2180,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::reset();
 
-        Trie1::special_map_grouped(
+        Trie::special_map_grouped(
             initial_values_for_map,
             // step_fn: (current_glr_state, (k, option state ID), destinations_map)
             |glr_s, (k, expected_state_id_opt ), dest_map| {

@@ -1,5 +1,5 @@
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::trie1::{EdgeInserter, Trie1};
+use crate::datastructures::trie1::{EdgeInserter, Trie};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
@@ -1945,7 +1945,7 @@ pub(crate) fn format_acc(
                 .iter()
                 .map(|wrapper| format!("{:p}", { let ptr = Arc::as_ptr(wrapper.as_arc()) as *const PrecomputeNode2; ptr}))
                 .collect();
-            Some(format!("Trie1(n={}, [{}])", n, ptrs.join(", ")))
+            Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
         } else {
             let ptrs_sample: Vec<String> = acc
                 .trie2_nodes
@@ -1954,7 +1954,7 @@ pub(crate) fn format_acc(
                 .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
                 .collect();
             let remaining = n - MAX_PTRS_TO_SHOW;
-            Some(format!("Trie1(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
+            Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
         }
     };
 
@@ -2504,7 +2504,7 @@ mod tests {
         // of the trie2_nodes instead of the union of all of them.
         //
         // Structure for each tower:
-        // Root -> (edge 2) -> ... -> Leaf [Trie1={unique}]
+        // Root -> (edge 2) -> ... -> Leaf [Trie={unique}]
         //
         // After merging two such towers, the single leaf should contain the union of the two distinct
         // trie2 nodes.

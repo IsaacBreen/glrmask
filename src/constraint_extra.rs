@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
 use crate::constraint::PrecomputeNode2;
 use crate::types::{TerminalID as GrammarTokenID};
-use crate::datastructures::trie1::Trie1;
+use crate::datastructures::trie1::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -76,7 +76,7 @@ fn format_bv_with_tokens(
     format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
 }
 
-/// Helper function to recursively dump the structure of a PrecomputeNode Trie1.
+/// Helper function to recursively dump the structure of a PrecomputeNode Trie.
 pub fn dump_precompute_trie_recursive(
     node_arc: &Arc<RwLock<PrecomputeNode>>,
     prefix: String,
@@ -158,7 +158,7 @@ pub fn dump_precompute_trie_recursive(
 }
 
 impl GrammarConstraint { // This is in constraint_extra.rs
-    /// Dumps the structure of the precomputed Trie1 map for visualization.
+    /// Dumps the structure of the precomputed Trie map for visualization.
     pub fn dump_precomputed(&self) {
         GrammarConstraint::_dump_precomputed(
             &self.precomputed,
@@ -174,7 +174,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     ) {
-        println!("Dumping Precomputed Trie1 1 Structure (showing original LLM Token IDs):");
+        println!("Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
         let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
@@ -202,7 +202,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         println!("Dump Complete.");
     }
 
-    /// Dumps the structure of the precomputed Trie1 2 map for visualization.
+    /// Dumps the structure of the precomputed Trie 2 map for visualization.
     pub fn dump_precomputed2(&self) {
         GrammarConstraint::_dump_precomputed2(
             &self.precomputed2,
@@ -212,7 +212,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     }
 
     pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
-        println!("Dumping Precomputed Trie1 2 Structure (showing original LLM Token IDs):");
+        println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
         let mut visited: HashSet<*const PrecomputeNode2> = HashSet::new();

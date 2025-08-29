@@ -18,7 +18,7 @@ use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
 use crate::constraint::{GrammarConstraint};
-use crate::datastructures::trie1::Trie1;
+use crate::datastructures::trie1::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
 // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
