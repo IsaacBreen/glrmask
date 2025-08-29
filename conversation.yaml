@@ -5,6 +5,7 @@ local_system:
     - src/datastructures/mod.rs
     - src/test_precompute_optimizations.rs
     - src/constraint_precompute2_utils.rs
+    - src/precompute3_schema.json
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -6060,6 +6061,150 @@ local_system:
           Trie::recompute_all_max_depths(trie2_god, &[new_root.clone()]);
           (new_root, map)
       }
+    src/precompute3_schema.json: |-
+      {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "JSON data structure schema",
+        "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+        "type": "array",
+        "items": [
+          {
+            "$ref": "#/$defs/NumberPairArray"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "counter": {
+                "type": "integer",
+                "description": "A counter value."
+              },
+              "values": {
+                "type": "array",
+                "description": "An array of value entries, each identified by an integer key.",
+                "items": {
+                  "type": "array",
+                  "items": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "$ref": "#/$defs/ValueObject"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "counter",
+              "values"
+            ]
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "$defs": {
+          "NumberPair": {
+            "type": "array",
+            "items": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "NumberPairArray": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/NumberPair"
+            }
+          },
+          "ValueDetails": {
+            "type": "object",
+            "properties": {
+              "clean_end": {
+                "type": "boolean"
+              },
+              "live_tokens": {
+                "$ref": "#/$defs/NumberPairArray"
+              }
+            },
+            "required": [
+              "clean_end",
+              "live_tokens"
+            ]
+          },
+          "ChildDetailArray": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "$ref": "#/$defs/NumberPairArray"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "ChildrenArray": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "array",
+                  "items": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                {
+                  "$ref": "#/$defs/ChildDetailArray"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "ValueObject": {
+            "type": "object",
+            "properties": {
+              "children": {
+                "$ref": "#/$defs/ChildrenArray"
+              },
+              "max_depth": {
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "#/$defs/ValueDetails"
+              }
+            },
+            "required": [
+              "children",
+              "max_depth",
+              "value"
+            ]
+          }
+        }
+      }
   prev_file_contents:
     src/datastructures/trie.rs: |-
       use std::cmp::Ordering;
@@ -7853,20 +7998,20 @@ local_system:
 
       impl Default for GrammarConstraintConfig {
           fn default() -> Self {
-              Self {
-                  optimize_trie2_prune_dead_paths: true,
-                  optimize_trie2_merge_nodes: true,
-                  optimize_trie2_factor_common_destinations: false,
-                  optimize_trie2_compress_edges: true,
-                  optimize_trie2_gc: true,
-              }
               // Self {
-              //     optimize_trie2_prune_dead_paths: false,
-              //     optimize_trie2_merge_nodes: false,
+              //     optimize_trie2_prune_dead_paths: true,
+              //     optimize_trie2_merge_nodes: true,
               //     optimize_trie2_factor_common_destinations: false,
-              //     optimize_trie2_compress_edges: false,
-              //     optimize_trie2_gc: false,
+              //     optimize_trie2_compress_edges: true,
+              //     optimize_trie2_gc: true,
               // }
+              Self {
+                  optimize_trie2_prune_dead_paths: false,
+                  optimize_trie2_merge_nodes: false,
+                  optimize_trie2_factor_common_destinations: false,
+                  optimize_trie2_compress_edges: false,
+                  optimize_trie2_gc: false,
+              }
           }
       }
 
@@ -10615,7 +10760,7 @@ local_system:
       use std::io::{BufReader, BufWriter, Write};
       use std::path::Path;
       use std::sync::Arc;
-      use bimap::BiBTreeMap;
+      use bimap::{BiBTreeMap};
       use crate::constraint_extra::PrecomputeStats;
       use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
       use crate::json_serialization::JSONConvertible;
@@ -10640,32 +10785,47 @@ local_system:
           (map, max_id)
       }
 
-      fn assert_trees_are_equivalent(
+      fn assert_optimized_equivalent(
           original_precomputed2: &Precomputed2,
-          original_god: &Trie2GodWrapper,
-          optimized_precomputed2: &Precomputed2,
-          optimized_god: &Trie2GodWrapper,
           original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
           llm_token_map: &LLMTokenMap,
+          trie2_god: Trie2GodWrapper,
       ) {
-          println!("\n--- Final Stats Comparison ---");
-          println!("\n--- Stats for Original Precompute2 Tree ---");
-          let mut stats_original = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, original_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_original, original_god);
+          // Deep clone the original precomputed2 tree(s)
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+
+          // Apply optimization passes
+          let mut optimization_config = GrammarConstraintConfig::default();
+          optimization_config.optimize_trie2_gc = false;
+          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
 
           println!("\n--- Stats for Optimized Precompute2 Tree ---");
           let mut stats_optimized = PrecomputeStats::default();
-          crate::constraint_extra::calculate_final_stats2(optimized_precomputed2, &mut stats_optimized, optimized_god);
-          crate::constraint_extra::print_precompute_stats2(&stats_optimized, optimized_god);
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
 
           println!("\n--- Dumping Optimized Precompute2 Tree ---");
           GrammarConstraint::_dump_precomputed2(
-              optimized_precomputed2,
+              &optimized_precomputed2,
               original_to_internal_id_bimap,
               llm_token_map,
-              optimized_god,
+              &trie2_god,
           );
+
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
           println!("--- Finished Dumping Optimized Tree ---\n");
 
           // Compare the original and optimized trees for semantic equivalence
@@ -10678,7 +10838,7 @@ local_system:
           for sid in original_precomputed2.keys() {
               let original_root = original_precomputed2.get(sid).unwrap();
               let optimized_root = optimized_precomputed2.get(sid).unwrap();
-              if !are_precompute2_trees_equivalent(original_root, original_god, optimized_root, optimized_god) {
+              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
                   // Detailed info is now printed inside are_precompute2_trees_equivalent
                   panic!(
                       "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
@@ -10699,33 +10859,18 @@ local_system:
               optimize_trie2_compress_edges: false,
               optimize_trie2_gc: true,
           };
-          println!("\n--- Building baseline GrammarConstraint (optimizations OFF) ---");
-          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled.clone(),
-              llm_token_map.clone(),
+          let gc = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map,
               LLMTokenID(0), // dummy EOF placeholder
               max_original_llm_token_id,
               &no_opt_config,
           );
-
-          // Create with optimizations ON
-          let opt_config = GrammarConstraintConfig::default(); // Now defaults to ON
-          println!("\n--- Building optimized GrammarConstraint (optimizations ON) ---");
-          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled,
-              llm_token_map.clone(),
-              LLMTokenID(0), // dummy EOF placeholder
-              max_original_llm_token_id,
-              &opt_config,
-          );
-
-          assert_trees_are_equivalent(
-              &gc_baseline.precomputed2,
-              &gc_baseline.trie2_god,
-              &gc_optimized.precomputed2,
-              &gc_optimized.trie2_god,
-              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
-              &llm_token_map,
+          assert_optimized_equivalent(
+              &gc.precomputed2,
+              &gc.llm_vocab.original_to_internal_id_bimap,
+              &gc.llm_vocab.llm_token_map,
+              gc.trie2_god.clone(),
           );
           Ok(())
       }
@@ -10773,6 +10918,17 @@ local_system:
           // --- Setup Phase ---
           println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
+          const FORCE_RECOMPUTE: bool = true;
+          const SAVE_TO_CACHE: bool = true;
+          use crate::{constraint, json_serialization};
+          use flate2::read::GzDecoder;
+          use flate2::write::GzEncoder;
+          use flate2::Compression;
+
+          let cache_dir = Path::new(".cache/test_precompute2");
+          fs::create_dir_all(cache_dir)?;
+          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
+
           // 1. Load and compile the JavaScript grammar.
           let grammar_path = "src/js_simplified3.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
@@ -10801,42 +10957,58 @@ local_system:
               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
           }
 
-          // 3. Construct baseline GrammarConstraint (optimizations OFF)
-          println!("\nConstructing baseline GrammarConstraint with optimizations OFF...");
-          let no_opt_config = GrammarConstraintConfig {
-              optimize_trie2_prune_dead_paths: false,
-              optimize_trie2_merge_nodes: false,
-              optimize_trie2_factor_common_destinations: false,
-              optimize_trie2_compress_edges: false,
-              optimize_trie2_gc: true,
-          };
-          let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled_grammar.clone(),
-              llm_token_map.clone(),
-              LLMTokenID(0),
-              max_original_llm_token_id_val,
-              &no_opt_config,
-          );
+          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+          let original_precomputed2: Precomputed2;
+          let original_god;
+          let llm_vocab;
 
-          // 4. Construct optimized GrammarConstraint (optimizations ON)
-          println!("\nConstructing optimized GrammarConstraint with optimizations ON...");
-          let opt_config = GrammarConstraintConfig::default();
-          let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
-              compiled_grammar.clone(),
-              llm_token_map.clone(),
-              LLMTokenID(0),
-              max_original_llm_token_id_val,
-              &opt_config,
-          );
+          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+              let file = File::open(&precomputed2_cache_path)?;
+              let decompressor = GzDecoder::new(BufReader::new(file));
+              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
+              // This path is problematic as the cached version is likely optimized.
+              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
+              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+              llm_vocab = gc_for_vocab.llm_vocab;
+              println!("Successfully loaded Precomputed2 from cache.");
+          } else {
+              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
+              let no_opt_config = GrammarConstraintConfig {
+                  optimize_trie2_prune_dead_paths: false,
+                  optimize_trie2_merge_nodes: false,
+                  optimize_trie2_factor_common_destinations: false,
+                  optimize_trie2_compress_edges: false,
+                  optimize_trie2_gc: true,
+              };
+              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
+                  compiled_grammar.clone(),
+                  llm_token_map.clone(),
+                  LLMTokenID(0), // dummy_eof_placeholder
+                  max_original_llm_token_id_val,
+                  &no_opt_config,
+              );
+              println!("GrammarConstraint constructed successfully.");
+              original_precomputed2 = grammar_constraint.precomputed2;
+              original_god = grammar_constraint.trie2_god;
+              llm_vocab = grammar_constraint.llm_vocab;
 
-          // 5. Assert equivalence
-          assert_trees_are_equivalent(
-              &gc_baseline.precomputed2,
-              &gc_baseline.trie2_god,
-              &gc_optimized.precomputed2,
-              &gc_optimized.trie2_god,
-              &gc_baseline.llm_vocab.original_to_internal_id_bimap,
+              if SAVE_TO_CACHE {
+                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+                  let file = File::create(&precomputed2_cache_path)?;
+                  let writer = BufWriter::new(file);
+                  let mut encoder = GzEncoder::new(writer, Compression::default());
+                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
+                  println!("Successfully saved Precomputed2 to cache.");
+              }
+          }
+
+          // 4. Assert that the optimized result is equivalent to the baseline.
+          assert_optimized_equivalent(
+              &original_precomputed2,
+              &llm_vocab.original_to_internal_id_bimap,
               &llm_token_map,
+              original_god,
           );
 
           println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
@@ -12085,6 +12257,150 @@ local_system:
           // Recompute max_depths in the clone to keep invariants consistent.
           Trie::recompute_all_max_depths(trie2_god, &[new_root.clone()]);
           (new_root, map)
+      }
+    src/precompute3_schema.json: |-
+      {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "JSON data structure schema",
+        "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+        "type": "array",
+        "items": [
+          {
+            "$ref": "#/$defs/NumberPairArray"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "counter": {
+                "type": "integer",
+                "description": "A counter value."
+              },
+              "values": {
+                "type": "array",
+                "description": "An array of value entries, each identified by an integer key.",
+                "items": {
+                  "type": "array",
+                  "items": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "$ref": "#/$defs/ValueObject"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "counter",
+              "values"
+            ]
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "$defs": {
+          "NumberPair": {
+            "type": "array",
+            "items": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "NumberPairArray": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/NumberPair"
+            }
+          },
+          "ValueDetails": {
+            "type": "object",
+            "properties": {
+              "clean_end": {
+                "type": "boolean"
+              },
+              "live_tokens": {
+                "$ref": "#/$defs/NumberPairArray"
+              }
+            },
+            "required": [
+              "clean_end",
+              "live_tokens"
+            ]
+          },
+          "ChildDetailArray": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "$ref": "#/$defs/NumberPairArray"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "ChildrenArray": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "array",
+                  "items": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                {
+                  "$ref": "#/$defs/ChildDetailArray"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "ValueObject": {
+            "type": "object",
+            "properties": {
+              "children": {
+                "$ref": "#/$defs/ChildrenArray"
+              },
+              "max_depth": {
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "#/$defs/ValueDetails"
+              }
+            },
+            "required": [
+              "children",
+              "max_depth",
+              "value"
+            ]
+          }
+        }
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -18195,9 +18511,156 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute2_utils.rs
-  - user: Modify this so that instead of doing a separate optimization pass after
-      making the grammar constraint, we simply construct the grammar constraint twice,
-      once with the optimizations and once without.
+  - user: |-
+      ```text 'src/precompute3_schema.json'
+      {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "JSON data structure schema",
+        "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+        "type": "array",
+        "items": [
+          {
+            "$ref": "#/$defs/NumberPairArray"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "counter": {
+                "type": "integer",
+                "description": "A counter value."
+              },
+              "values": {
+                "type": "array",
+                "description": "An array of value entries, each identified by an integer key.",
+                "items": {
+                  "type": "array",
+                  "items": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "$ref": "#/$defs/ValueObject"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "counter",
+              "values"
+            ]
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2,
+        "$defs": {
+          "NumberPair": {
+            "type": "array",
+            "items": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "NumberPairArray": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/NumberPair"
+            }
+          },
+          "ValueDetails": {
+            "type": "object",
+            "properties": {
+              "clean_end": {
+                "type": "boolean"
+              },
+              "live_tokens": {
+                "$ref": "#/$defs/NumberPairArray"
+              }
+            },
+            "required": [
+              "clean_end",
+              "live_tokens"
+            ]
+          },
+          "ChildDetailArray": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "$ref": "#/$defs/NumberPairArray"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "ChildrenArray": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": [
+                {
+                  "type": "array",
+                  "items": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                {
+                  "$ref": "#/$defs/ChildDetailArray"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "ValueObject": {
+            "type": "object",
+            "properties": {
+              "children": {
+                "$ref": "#/$defs/ChildrenArray"
+              },
+              "max_depth": {
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "#/$defs/ValueDetails"
+              }
+            },
+            "required": [
+              "children",
+              "max_depth",
+              "value"
+            ]
+          }
+        }
+      }
+      ```
+    metadata:
+      filename: src/precompute3_schema.json
+  - user: Improve the JSON schema for the dump of eg `(original_precomputed2.clone(),
+      original_god.clone()).to_writer(&mut encoder)?;`. It's currently lacking clarity.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -18214,312 +18677,323 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've updated the test suite to construct two separate `GrammarConstraint` instances—one with optimizations enabled and one without—and then compare their resulting `precomputed2` tries for semantic equivalence. This provides a more robust validation of the optimization passes as they are integrated into the main construction pipeline.
-
-      Here are the changes:
+      Hello! As a helpful assistant, I'm ready to assist you. Here are the changes you requested.
 
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -148,19 +148,19 @@
-       
-       impl Default for GrammarConstraintConfig {
-           fn default() -> Self {
-      -        // Self {
-      -        //     optimize_trie2_prune_dead_paths: true,
-      -        //     optimize_trie2_merge_nodes: true,
-      -        //     optimize_trie2_factor_common_destinations: false,
-      -        //     optimize_trie2_compress_edges: true,
-      -        //     optimize_trie2_gc: true,
-      -        // }
-               Self {
-      -            optimize_trie2_prune_dead_paths: false,
-      -            optimize_trie2_merge_nodes: false,
-      +            optimize_trie2_prune_dead_paths: true,
-      +            optimize_trie2_merge_nodes: true,
-                   optimize_trie2_factor_common_destinations: false,
-      -            optimize_trie2_compress_edges: false,
-      -            optimize_trie2_gc: false,
-      +            optimize_trie2_compress_edges: true,
-      +            optimize_trie2_gc: true,
-               }
-      +        // Self {
-      +        //     optimize_trie2_prune_dead_paths: false,
-      +        //     optimize_trie2_merge_nodes: false,
-      +        //     optimize_trie2_factor_common_destinations: false,
-      +        //     optimize_trie2_compress_edges: false,
-      +        //     optimize_trie2_gc: false,
-      +        // }
-           }
-       }
-       
-
-      ```
-      ```diff
-      diff --git a/src/test_precompute_optimizations.rs b/src/test_precompute_optimizations.rs
-      --- a/src/test_precompute_optimizations.rs
-      +++ b/src/test_precompute_optimizations.rs
-      @@ -11,7 +11,7 @@
-       use std::io::{BufReader, BufWriter, Write};
-       use std::path::Path;
-       use std::sync::Arc;
-      -use bimap::{BiBTreeMap};
-      +use bimap::BiBTreeMap;
-       use crate::constraint_extra::PrecomputeStats;
-       use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
-       use crate::json_serialization::JSONConvertible;
-      @@ -34,50 +34,46 @@
-           (map, max_id)
-       }
-       
-      -fn assert_optimized_equivalent(
-      +fn assert_trees_are_equivalent(
-           original_precomputed2: &Precomputed2,
-      +    original_god: &Trie2GodWrapper,
-      +    optimized_precomputed2: &Precomputed2,
-      +    optimized_god: &Trie2GodWrapper,
-           original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
-           llm_token_map: &LLMTokenMap,
-      -    trie2_god: Trie2GodWrapper,
-       ) {
-      -    // Deep clone the original precomputed2 tree(s)
-      -    let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
-      -    for (sid, root_arc) in original_precomputed2.iter() {
-      -        let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
-      -        optimized_precomputed2.insert(*sid, cloned_root);
-      -    }
-      -
-      -    // Apply optimization passes
-      -    let mut optimization_config = GrammarConstraintConfig::default();
-      -    optimization_config.optimize_trie2_gc = false;
-      -    optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
-      -
-      -    println!("\n--- Stats for Optimized Precompute2 Tree ---");
-      -    let mut stats_optimized = PrecomputeStats::default();
-      -    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
-      -    crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
-      -
-      -    println!("\n--- Dumping Optimized Precompute2 Tree ---");
-      -    GrammarConstraint::_dump_precomputed2(
-      -        &optimized_precomputed2,
-      -        original_to_internal_id_bimap,
-      -        llm_token_map,
-      -        &trie2_god,
-      -    );
-      -
-           println!("\n--- Final Stats Comparison ---");
-           println!("\n--- Stats for Original Precompute2 Tree ---");
-           let mut stats_original = PrecomputeStats::default();
-      -    crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
-      -    crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
-      -
-      -    println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
-      -    let mut stats_optimized_final = PrecomputeStats::default();
-      -    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
-      -    crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
-      +    crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, original_god);
-      +    crate::constraint_extra::print_precompute_stats2(&stats_original, original_god);
-      +
-      +    println!("\n--- Stats for Optimized Precompute2 Tree ---");
-      +    let mut stats_optimized = PrecomputeStats::default();
-      +    crate::constraint_extra::calculate_final_stats2(optimized_precomputed2, &mut stats_optimized, optimized_god);
-      +    crate::constraint_extra::print_precompute_stats2(&stats_optimized, optimized_god);
-      +
-      +    println!("\n--- Dumping Optimized Precompute2 Tree ---");
-      +    GrammarConstraint::_dump_precomputed2(
-      +        optimized_precomputed2,
-      +        original_to_internal_id_bimap,
-      +        llm_token_map,
-      +        optimized_god,
-      +    );
-           println!("--- Finished Dumping Optimized Tree ---\n");
-       
-           // Compare the original and optimized trees for semantic equivalence
-           assert_eq!(
-               original_precomputed2.len(),
-               optimized_precomputed2.len(),
-               "Number of tokenizer states with trees differs."
-           );
-       
-           for sid in original_precomputed2.keys() {
-               let original_root = original_precomputed2.get(sid).unwrap();
-               let optimized_root = optimized_precomputed2.get(sid).unwrap();
-      -        if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
-      +        if !are_precompute2_trees_equivalent(original_root, original_god, optimized_root, optimized_god) {
-                   // Detailed info is now printed inside are_precompute2_trees_equivalent
-                   panic!(
-                       "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
-      @@ -100,20 +96,31 @@
-               optimize_trie2_compress_edges: false,
-               optimize_trie2_gc: true,
-           };
-      -    let gc = GrammarConstraint::from_compiled_grammar_with_config(
-      -        compiled,
-      -        llm_token_map,
-      +    println!("\n--- Building baseline GrammarConstraint (optimizations OFF) ---");
-      +    let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
-      +        compiled.clone(),
-      +        llm_token_map.clone(),
-               LLMTokenID(0), // dummy EOF placeholder
-               max_original_llm_token_id,
-               &no_opt_config,
-           );
-      -    assert_optimized_equivalent(
-      -        &gc.precomputed2,
-      -        &gc.llm_vocab.original_to_internal_id_bimap,
-      -        &gc.llm_vocab.llm_token_map,
-      -        gc.trie2_god.clone(),
-      +
-      +    // Create with optimizations ON
-      +    let opt_config = GrammarConstraintConfig::default(); // Now defaults to ON
-      +    println!("\n--- Building optimized GrammarConstraint (optimizations ON) ---");
-      +    let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
-      +        compiled,
-      +        llm_token_map.clone(),
-      +        LLMTokenID(0), // dummy EOF placeholder
-      +        max_original_llm_token_id,
-      +        &opt_config,
-      +    );
-      +
-      +    assert_trees_are_equivalent(
-      +        &gc_baseline.precomputed2,
-      +        &gc_baseline.trie2_god,
-      +        &gc_optimized.precomputed2,
-      +        &gc_optimized.trie2_god,
-      +        &gc_baseline.llm_vocab.original_to_internal_id_bimap,
-      +        &llm_token_map,
-           );
-           Ok(())
-       }
-      @@ -160,16 +167,6 @@
-           // --- Setup Phase ---
-           println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
-       
-      -    const FORCE_RECOMPUTE: bool = true;
-      -    const SAVE_TO_CACHE: bool = true;
-      -    use crate::{constraint, json_serialization};
-      -    use flate2::read::GzDecoder;
-      -    use flate2::write::GzEncoder;
-      -    use flate2::Compression;
-      -
-      -    let cache_dir = Path::new(".cache/test_precompute2");
-      -    fs::create_dir_all(cache_dir)?;
-      -    let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
-      -
-           // 1. Load and compile the JavaScript grammar.
-           let grammar_path = "src/js_simplified3.ebnf";
-           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
-      @@ -196,53 +193,40 @@
-               max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
-           }
-       
-      -    // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
-      -    let original_precomputed2: Precomputed2;
-      -    let original_god;
-      -    let llm_vocab;
-      -
-      -    if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
-      -        println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
-      -        let file = File::open(&precomputed2_cache_path)?;
-      -        let decompressor = GzDecoder::new(BufReader::new(file));
-      -        (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
-      -        // This path is problematic as the cached version is likely optimized.
-      -        // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
-      -        let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
-      -        llm_vocab = gc_for_vocab.llm_vocab;
-      -        println!("Successfully loaded Precomputed2 from cache.");
-      -    } else {
-      -        println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
-      -        let no_opt_config = GrammarConstraintConfig {
-      -            optimize_trie2_prune_dead_paths: false,
-      -            optimize_trie2_merge_nodes: false,
-      -            optimize_trie2_factor_common_destinations: false,
-      -            optimize_trie2_compress_edges: false,
-      -            optimize_trie2_gc: true,
-      -        };
-      -        let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
-      -            compiled_grammar.clone(),
-      -            llm_token_map.clone(),
-      -            LLMTokenID(0), // dummy_eof_placeholder
-      -            max_original_llm_token_id_val,
-      -            &no_opt_config,
-      -        );
-      -        println!("GrammarConstraint constructed successfully.");
-      -        original_precomputed2 = grammar_constraint.precomputed2;
-      -        original_god = grammar_constraint.trie2_god;
-      -        llm_vocab = grammar_constraint.llm_vocab;
-      -
-      -        if SAVE_TO_CACHE {
-      -            println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
-      -            let file = File::create(&precomputed2_cache_path)?;
-      -            let writer = BufWriter::new(file);
-      -            let mut encoder = GzEncoder::new(writer, Compression::default());
-      -            (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
-      -            println!("Successfully saved Precomputed2 to cache.");
+      diff --git a/src/precompute3_schema.json b/src/precompute2_schema.json
+      similarity index 68%
+      rename from src/precompute3_schema.json
+      rename to src/precompute2_schema.json
+      index 261114c..141114b 100644
+      --- a/src/precompute3_schema.json
+      +++ b/src/precompute2_schema.json
+      @@ -1,153 +1,181 @@
+       {
+         "$schema": "http://json-schema.org/draft-07/schema#",
+      -  "title": "JSON data structure schema",
+      -  "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+      +  "title": "Grammar Constraint Precomputed2 Data",
+      +  "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
+         "type": "array",
+         "items": [
+           {
+      -      "$ref": "#/$defs/NumberPairArray"
+      +      "$ref": "#/$defs/Precomputed2Map",
+      +      "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
+           },
+           {
+      -      "type": "object",
+      -      "properties": {
+      -        "counter": {
+      -          "type": "integer",
+      -          "description": "A counter value."
+      -        },
+      -        "values": {
+      -          "type": "array",
+      -          "description": "An array of value entries, each identified by an integer key.",
+      -          "items": {
+      -            "type": "array",
+      -            "items": [
+      -              {
+      -                "type": "integer"
+      -              },
+      -              {
+      -                "$ref": "#/$defs/ValueObject"
+      -              }
+      -            ],
+      -            "minItems": 2,
+      -            "maxItems": 2
+      -          }
       -        }
-      -    }
-      -
-      -    // 4. Assert that the optimized result is equivalent to the baseline.
-      -    assert_optimized_equivalent(
-      -        &original_precomputed2,
-      -        &llm_vocab.original_to_internal_id_bimap,
-      +    // 3. Construct baseline GrammarConstraint (optimizations OFF)
-      +    println!("\nConstructing baseline GrammarConstraint with optimizations OFF...");
-      +    let no_opt_config = GrammarConstraintConfig {
-      +        optimize_trie2_prune_dead_paths: false,
-      +        optimize_trie2_merge_nodes: false,
-      +        optimize_trie2_factor_common_destinations: false,
-      +        optimize_trie2_compress_edges: false,
-      +        optimize_trie2_gc: true,
-      +    };
-      +    let gc_baseline = GrammarConstraint::from_compiled_grammar_with_config(
-      +        compiled_grammar.clone(),
-      +        llm_token_map.clone(),
-      +        LLMTokenID(0),
-      +        max_original_llm_token_id_val,
-      +        &no_opt_config,
-      +    );
-      +
-      +    // 4. Construct optimized GrammarConstraint (optimizations ON)
-      +    println!("\nConstructing optimized GrammarConstraint with optimizations ON...");
-      +    let opt_config = GrammarConstraintConfig::default();
-      +    let gc_optimized = GrammarConstraint::from_compiled_grammar_with_config(
-      +        compiled_grammar.clone(),
-      +        llm_token_map.clone(),
-      +        LLMTokenID(0),
-      +        max_original_llm_token_id_val,
-      +        &opt_config,
-      +    );
-      +
-      +    // 5. Assert equivalence
-      +    assert_trees_are_equivalent(
-      +        &gc_baseline.precomputed2,
-      +        &gc_baseline.trie2_god,
-      +        &gc_optimized.precomputed2,
-      +        &gc_optimized.trie2_god,
-      +        &gc_baseline.llm_vocab.original_to_internal_id_bimap,
-               &llm_token_map,
-      -        original_god,
-           );
-       
-           println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
+      -      },
+      -      "required": [
+      -        "counter",
+      -        "values"
+      -      ]
+      +      "$ref": "#/$defs/TrieArena",
+      +      "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
+           }
+         ],
+         "minItems": 2,
+         "maxItems": 2,
+         "$defs": {
+      -    "NumberPair": {
+      +    "Precomputed2Entry": {
+             "type": "array",
+      +      "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
+             "items": [
+               {
+      -          "type": "integer"
+      +          "type": "integer",
+      +          "description": "TokenizerStateID"
+               },
+               {
+      -          "type": "integer"
+      +          "type": "integer",
+      +          "description": "TrieNodeIndex (index into the arena's values)"
+               }
+             ],
+             "minItems": 2,
+             "maxItems": 2
+           },
+      -    "NumberPairArray": {
+      +    "Precomputed2Map": {
+             "type": "array",
+      +      "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
+             "items": {
+      -        "$ref": "#/$defs/NumberPair"
+      +        "$ref": "#/$defs/Precomputed2Entry"
+             }
+           },
+      -    "ValueDetails": {
+      +    "HybridBitset": {
+      +      "type": "array",
+      +      "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
+      +      "items": {
+      +        "type": "array",
+      +        "items": [
+      +          {
+      +            "type": "integer",
+      +            "description": "Start of range (inclusive)"
+      +          },
+      +          {
+      +            "type": "integer",
+      +            "description": "End of range (inclusive)"
+      +          }
+      +        ],
+      +        "minItems": 2,
+      +        "maxItems": 2
+      +      }
+      +    },
+      +    "TrieNodeValue": {
+             "type": "object",
+      +      "description": "The value stored within a Trie node (PrecomputedNodeContents).",
+             "properties": {
+      -        "clean_end": {
+      -          "type": "boolean"
+      +        "end": {
+      +          "type": "boolean",
+      +          "description": "True if this node can be a terminal state in the precomputed trie."
+               },
+               "live_tokens": {
+      -          "$ref": "#/$defs/NumberPairArray"
+      +          "$ref": "#/$defs/HybridBitset",
+      +          "description": "A bitset of LLM tokens that can pass through or end at this node."
+               }
+             },
+             "required": [
+      -        "clean_end",
+      +        "end",
+               "live_tokens"
+             ]
+           },
+      -    "ChildDetailArray": {
+      +    "EdgeKey": {
+             "type": "array",
+      +      "description": "An edge key of type (usize, Option<StateID>).",
+             "items": {
+               "type": "array",
+               "items": [
+                 {
+      -            "type": "integer"
+      +            "type": "integer",
+      +            "description": "Number of items to pop from the GLR stack."
+                 },
+                 {
+      -            "$ref": "#/$defs/NumberPairArray"
+      +            "type": [
+      +              "integer",
+      +              "null"
+      +            ],
+      +            "description": "An optional GLR StateID to check after popping."
+                 }
+               ],
+               "minItems": 2,
+               "maxItems": 2
+             }
+           },
+      -    "ChildrenArray": {
+      +    "EdgeDestination": {
+             "type": "array",
+      +      "description": "A pair of [TrieNodeIndex, EdgeValue].",
+             "items": {
+               "type": "array",
+               "items": [
+                 {
+      -            "type": "array",
+      -            "items": [
+      -              {
+      -                "type": "integer"
+      -              },
+      -              {
+      -                "type": [
+      -                  "integer",
+      -                  "null"
+      -                ]
+      -              }
+      -            ],
+      -            "minItems": 2,
+      -            "maxItems": 2
+      +            "type": "integer",
+      +            "description": "Destination TrieNodeIndex."
+                 },
+                 {
+      -            "$ref": "#/$defs/ChildDetailArray"
+      +            "$ref": "#/$defs/HybridBitset",
+      +            "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
+                 }
+               ],
+               "minItems": 2,
+               "maxItems": 2
+             }
+           },
+      -    "ValueObject": {
+      +    "EdgeDestinationMap": {
+      +      "type": "array",
+      +      "description": "A map from destination node index to the edge value (LLMTokenBV).",
+      +      "items": {
+      +        "$ref": "#/$defs/EdgeDestination"
+      +      }
+      +    },
+      +    "TrieChildrenMapEntry": {
+      +      "type": "array",
+      +      "description": "A [EdgeKey, EdgeDestinationMap] pair.",
+      +      "items": [
+      +        {
+      +          "$ref": "#/$defs/EdgeKey"
+      +        },
+      +        {
+      +          "$ref": "#/$defs/EdgeDestinationMap"
+      +        }
+      +      ],
+      +      "minItems": 2,
+      +      "maxItems": 2
+      +    },
+      +    "TrieChildrenMap": {
+      +      "type": "array",
+      +      "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
+      +      "items": {
+      +        "$ref": "#/$defs/TrieChildrenMapEntry"
+      +      }
+      +    },
+      +    "TrieNode": {
+             "type": "object",
+      +      "description": "A single node in the Precompute2 Trie.",
+             "properties": {
+               "children": {
+      -          "$ref": "#/$defs/ChildrenArray"
+      +          "$ref": "#/$defs/TrieChildrenMap"
+               },
+               "max_depth": {
+      -          "type": "integer"
+      +          "type": "integer",
+      +          "description": "The longest path from a root to this node."
+               },
+               "value": {
+      -          "$ref": "#/$defs/ValueDetails"
+      +          "$ref": "#/$defs/TrieNodeValue"
+               }
+             },
+             "required": [
+               "children",
+               "max_depth",
+               "value"
+             ]
+      +    },
+      +    "TrieArena": {
+      +      "type": "object",
+      +      "description": "An arena storing all Trie nodes for Precompute2.",
+      +      "properties": {
+      +        "counter": {
+      +          "type": "integer",
+      +          "description": "The next available index in the arena."
+      +        },
+      +        "values": {
+      +          "type": "array",
+      +          "description": "A sparse array of [index, TrieNode] pairs.",
+      +          "items": {
+      +            "type": "array",
+      +            "items": [
+      +              {
+      +                "type": "integer",
+      +                "description": "The index of the node in the arena."
+      +              },
+      +              {
+      +                "$ref": "#/$defs/TrieNode"
+      +              }
+      +            ],
+      +            "minItems": 2,
+      +            "maxItems": 2
+      +          }
+      +        }
+      +      },
+      +      "required": [
+      +        "counter",
+      +        "values"
+      +      ]
+           }
+         }
+       }
 
       ```
     metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+  - user: |-
+      Git apply attempt failed (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Identified target file: src/precompute2_schema.json
+      Warning: Attempting to modify non-existent file src/precompute2_schema.json which is not marked as new. Applying patch to empty content.
+      Applying patch to 'src/precompute2_schema.json' using custom patcher...
+      Error applying patch to src/precompute2_schema.json: Hunk #1 (header: `@@ -1,153 +1,181 @@`) failed: context not found.
 
-      --- Processing Diff Block 2 ---
-      Identified target file: src/test_precompute_optimizations.rs
-      Applying patch to 'src/test_precompute_optimizations.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_precompute_optimizations.rs.
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute2_schema.json
+      Warning: Attempting to modify non-existent file src/precompute2_schema.json which is not marked as new. Applying patch to empty content.
+      Applying patch to 'src/precompute2_schema.json' using custom patcher...
+      Error applying patch to src/precompute2_schema.json: Hunk #1 (header: `@@ -1,153 +1,181 @@`) failed: context not found.
+
+
+      LLM apply output:
+      Using model 'cp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      No JSON action block found, but no file actions seem required based on context. Proceeding.
+      Found 0 code blocks with filepaths in attempt 1.
+      No file actions specified in JSON. Nothing to apply.
+    metadata:
+  - user: 'Changes committed with message: "Refactor precompute2 optimization test
+      to compare baseline vs optimized versions; add JSON schema for Precomputed2/Trie2GodWrapper"'
     metadata:
   - user: 'Changes committed with message: "Refactor: Test grammar constraint optimizations
       by comparing explicit optimized vs. unoptimized constructions, and enable optimizations
