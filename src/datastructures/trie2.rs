@@ -885,9 +885,9 @@ where
 // Implement PartialOrd for Trie2
 impl<EK, EV, T> PartialOrd for Trie2<EK, EV, T>
 where
-    EK: Ord + PartialOrd,
-    EV: PartialOrd + Clone,
-    T: PartialOrd,
+    EK: Ord,
+    EV: Ord + Clone,
+    T: Ord,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
