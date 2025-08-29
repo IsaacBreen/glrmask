@@ -427,7 +427,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 
 pub fn optimize_trie2_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
-    trie2_god: Trie2GodWrapper,
+    trie2_god: &Trie2GodWrapper,
 
 ) {
     crate::debug!(2, "Optimizing Trie 2 size...");

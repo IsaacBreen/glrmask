@@ -57,31 +57,31 @@ fn assert_optimized_equivalent(
     }
 
     // Apply optimization passes
-    optimize_trie2_size(&mut optimized_precomputed2, trie2_god);
+    optimize_trie2_size(&mut optimized_precomputed2, &trie2_god);
 
     println!("\n--- Stats for Optimized Precompute2 Tree ---");
     let mut stats_optimized = PrecomputeStats::default();
-    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, trie2_god);
-    crate::constraint_extra::print_precompute_stats2(&stats_optimized, trie2_god);
+    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+    crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
 
     println!("\n--- Dumping Optimized Precompute2 Tree ---");
     GrammarConstraint::_dump_precomputed2(
         &optimized_precomputed2,
         original_to_internal_id_bimap,
         llm_token_map,
-        trie2_god,
+        &trie2_god,
     );
 
     println!("\n--- Final Stats Comparison ---");
     println!("\n--- Stats for Original Precompute2 Tree ---");
     let mut stats_original = PrecomputeStats::default();
-    crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, trie2_god);
-    crate::constraint_extra::print_precompute_stats2(&stats_original, trie2_god);
+    crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+    crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
 
     println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
     let mut stats_optimized_final = PrecomputeStats::default();
-    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, trie2_god);
-    crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, trie2_god);
+    crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+    crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
     println!("--- Finished Dumping Optimized Tree ---\n");
 
     // Compare the original and optimized trees for semantic equivalence
@@ -94,7 +94,7 @@ fn assert_optimized_equivalent(
     for sid in original_precomputed2.keys() {
         let original_root = original_precomputed2.get(sid).unwrap();
         let optimized_root = optimized_precomputed2.get(sid).unwrap();
-        if !are_precompute2_trees_equivalent(original_root, optimized_root, trie2_god) {
+        if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
             // Detailed info is now printed inside are_precompute2_trees_equivalent
             panic!(
                 "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
