@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JSON data structure schema",
+  "description": "A schema for the provided two-element array containing a list of number pairs and a complex object with a counter and values.",
+  "type": "array",
+  "items": [
+    {
+      "$ref": "#/$defs/NumberPairArray"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "counter": {
+          "type": "integer",
+          "description": "A counter value."
+        },
+        "values": {
+          "type": "array",
+          "description": "An array of value entries, each identified by an integer key.",
+          "items": {
+            "type": "array",
+            "items": [
+              {
+                "type": "integer"
+              },
+              {
+                "$ref": "#/$defs/ValueObject"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      },
+      "required": [
+        "counter",
+        "values"
+      ]
+    }
+  ],
+  "minItems": 2,
+  "maxItems": 2,
+  "$defs": {
+    "NumberPair": {
+      "type": "array",
+      "items": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "integer"
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "NumberPairArray": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NumberPair"
+      }
+    },
+    "ValueDetails": {
+      "type": "object",
+      "properties": {
+        "clean_end": {
+          "type": "boolean"
+        },
+        "live_tokens": {
+          "$ref": "#/$defs/NumberPairArray"
+        }
+      },
+      "required": [
+        "clean_end",
+        "live_tokens"
+      ]
+    },
+    "ChildDetailArray": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": [
+          {
+            "type": "integer"
+          },
+          {
+            "$ref": "#/$defs/NumberPairArray"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "ChildrenArray": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": [
+          {
+            "type": "array",
+            "items": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          {
+            "$ref": "#/$defs/ChildDetailArray"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "ValueObject": {
+      "type": "object",
+      "properties": {
+        "children": {
+          "$ref": "#/$defs/ChildrenArray"
+        },
+        "max_depth": {
+          "type": "integer"
+        },
+        "value": {
+          "$ref": "#/$defs/ValueDetails"
+        }
+      },
+      "required": [
+        "children",
+        "max_depth",
+        "value"
+      ]
+    }
+  }
+}
