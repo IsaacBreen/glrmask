@@ -3,146 +3,213 @@ import collections
 import gzip
 import json
 import random
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Deque
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Deque
 
-# Type aliases for clarity, matching the Rust/JSON structure
+# ----------------------------
+# Type aliases for clarity
+# ----------------------------
+
 TrieNodeIndex = int
 TokenizerStateID = int
-LLMTokenBV = List[List[int]]  # List of [start, end] inclusive ranges
 StateID = int
 EdgeKey = Tuple[int, Optional[StateID]]  # (pop_count, state_id or None)
 TrieNode = Dict[str, Any]
 Arena = Dict[TrieNodeIndex, TrieNode]
 NormalizedPath = List[Tuple[int, StateID]]  # List of (k, state_id)
+# JSON encoding for BVs: List of [start, end] inclusive ranges
+LLMTokenBVJSON = List[List[int]]
 
 
 # ----------------------------
-# BitVector (Range List) Utils
+# Efficient RangeSet for token bitvectors
 # ----------------------------
 
-def _merge_ranges(ranges: LLMTokenBV) -> LLMTokenBV:
-    """Pure merge: returns a normalized (sorted, non-overlapping) copy of ranges."""
-    if not ranges:
-        return []
-
-    # Sort without mutating the input
-    sorted_ranges = sorted(ranges, key=lambda x: x[0])
-    merged: LLMTokenBV = []
-    cur_start, cur_end = sorted_ranges[0]
-
-    for nxt_start, nxt_end in sorted_ranges[1:]:
-        if nxt_start <= cur_end + 1:
-            cur_end = max(cur_end, nxt_end)
-        else:
-            merged.append([cur_start, cur_end])
-            cur_start, cur_end = nxt_start, nxt_end
-
-    merged.append([cur_start, cur_end])
-    return merged
-
-
-def bv_union(bv1: LLMTokenBV, bv2: LLMTokenBV) -> LLMTokenBV:
-    """Computes the union of two bitvectors. Returns a normalized BV."""
-    if not bv1:
-        return _merge_ranges(bv2)
-    if not bv2:
-        return _merge_ranges(bv1)
-    return _merge_ranges(bv1 + bv2)
-
-
-def bv_intersection(bv1: LLMTokenBV, bv2: LLMTokenBV) -> LLMTokenBV:
+@dataclass(frozen=True)
+class RangeSet:
     """
-    Computes the intersection of two bitvectors.
-    Assumes each input BV is already sorted & normalized (as in precompute2 data).
+    Efficient, normalized (sorted, disjoint, inclusive) intervals for large, sparse token sets.
+    Internally represented as a tuple of (start, end) pairs, both inclusive.
     """
-    if not bv1 or not bv2:
-        return []
+    intervals: Tuple[Tuple[int, int], ...]  # sorted, non-overlapping, inclusive
 
-    result: LLMTokenBV = []
-    i, j = 0, 0
-    while i < len(bv1) and j < len(bv2):
-        start1, end1 = bv1[i]
-        start2, end2 = bv2[j]
+    # ---------- Constructors ----------
 
-        overlap_start = max(start1, start2)
-        overlap_end = min(end1, end2)
+    @staticmethod
+    def empty() -> "RangeSet":
+        return RangeSet(())
 
-        if overlap_start <= overlap_end:
-            result.append([overlap_start, overlap_end])
+    @staticmethod
+    def from_ranges(ranges: Iterable[Sequence[int]]) -> "RangeSet":
+        """
+        Build from an iterable of [start, end] pairs (inclusive). Input may be unsorted and overlapping.
+        """
+        normalized = RangeSet._merge_unsorted(ranges)
+        return RangeSet(tuple(normalized))
 
-        if end1 < end2:
+    @staticmethod
+    def from_json(ranges_json: Optional[LLMTokenBVJSON]) -> "RangeSet":
+        """Convenience: build from JSON-encoded list of [start, end] pairs."""
+        if not ranges_json:
+            return RangeSet.empty()
+        return RangeSet.from_ranges(ranges_json)
+
+    # ---------- Basic predicates ----------
+
+    def is_empty(self) -> bool:
+        return not self.intervals
+
+    def __bool__(self) -> bool:
+        return not self.is_empty()
+
+    # ---------- Set operations (all return new RangeSet) ----------
+
+    def union(self, other: "RangeSet") -> "RangeSet":
+        if self.is_empty():
+            return other
+        if other.is_empty():
+            return self
+        # Merge two sorted lists of intervals
+        merged: List[Tuple[int, int]] = []
+        i, j = 0, 0
+        a, b = self.intervals, other.intervals
+
+        def append_or_merge(start: int, end: int) -> None:
+            if not merged:
+                merged.append((start, end))
+                return
+            ps, pe = merged[-1]
+            if start <= pe + 1:
+                merged[-1] = (ps, max(pe, end))
+            else:
+                merged.append((start, end))
+
+        while i < len(a) and j < len(b):
+            if a[i][0] <= b[j][0]:
+                append_or_merge(a[i][0], a[i][1])
+                i += 1
+            else:
+                append_or_merge(b[j][0], b[j][1])
+                j += 1
+
+        while i < len(a):
+            append_or_merge(a[i][0], a[i][1])
             i += 1
-        else:
+        while j < len(b):
+            append_or_merge(b[j][0], b[j][1])
             j += 1
-    return result
+
+        return RangeSet(tuple(merged))
+
+    def intersection(self, other: "RangeSet") -> "RangeSet":
+        if self.is_empty() or other.is_empty():
+            return RangeSet.empty()
+
+        i, j = 0, 0
+        a, b = self.intervals, other.intervals
+        out: List[Tuple[int, int]] = []
+
+        while i < len(a) and j < len(b):
+            s1, e1 = a[i]
+            s2, e2 = b[j]
+            start = max(s1, s2)
+            end = min(e1, e2)
+            if start <= end:
+                out.append((start, end))
+            if e1 < e2:
+                i += 1
+            else:
+                j += 1
+
+        if not out:
+            return RangeSet.empty()
+        return RangeSet(tuple(out))
+
+    def difference(self, other: "RangeSet") -> "RangeSet":
+        """
+        Returns self - other.
+        """
+        if self.is_empty():
+            return RangeSet.empty()
+        if other.is_empty():
+            return self
+
+        a, b = self.intervals, other.intervals
+        out: List[Tuple[int, int]] = []
+        j = 0
+
+        for s1, e1 in a:
+            # Advance b until its end >= s1 (possible overlap)
+            while j < len(b) and b[j][1] < s1:
+                j += 1
+
+            cur_start = s1
+            while j < len(b) and b[j][0] <= e1:
+                bs, be = b[j]
+                if bs > cur_start:
+                    out.append((cur_start, min(e1, bs - 1)))
+                if be >= e1:
+                    cur_start = e1 + 1
+                    break
+                else:
+                    cur_start = be + 1
+                    j += 1
+
+            if cur_start <= e1:
+                out.append((cur_start, e1))
+
+        if not out:
+            return RangeSet.empty()
+        return RangeSet(tuple(out))
+
+    def symmetric_difference(self, other: "RangeSet") -> "RangeSet":
+        # A ^ B = (A - B) ∪ (B - A)
+        return self.difference(other).union(other.difference(self))
+
+    # ---------- Utilities ----------
+
+    def to_json(self) -> LLMTokenBVJSON:
+        return [[s, e] for s, e in self.intervals]
+
+    def __str__(self) -> str:
+        if self.is_empty():
+            return "{}"
+        parts = []
+        for s, e in self.intervals:
+            if s == e:
+                parts.append(str(s))
+            else:
+                parts.append(f"{s}-{e}")
+        return "{" + ", ".join(parts) + "}"
+
+    @staticmethod
+    def _merge_unsorted(ranges: Iterable[Sequence[int]]) -> List[Tuple[int, int]]:
+        # Copy and sort by start
+        items = [(int(s), int(e)) for s, e in ranges if s is not None and e is not None]
+        if not items:
+            return []
+        items.sort(key=lambda x: x[0])
+        merged: List[Tuple[int, int]] = []
+        cs, ce = items[0]
+        for ns, ne in items[1:]:
+            if ns <= ce + 1:
+                ce = max(ce, ne)
+            else:
+                merged.append((cs, ce))
+                cs, ce = ns, ne
+        merged.append((cs, ce))
+        return merged
 
 
-def bv_difference(bv1: LLMTokenBV, bv2: LLMTokenBV) -> LLMTokenBV:
-    """
-    Computes the set difference of two bitvectors (bv1 - bv2).
-    Assumes each input BV is already sorted & normalized (as in precompute2 data).
-    """
-    if not bv1:
-        return []
-    if not bv2:
-        return _merge_ranges(bv1)  # ensure normalized
+# ----------------------------
+# Formatting helper
+# ----------------------------
 
-    out: LLMTokenBV = []
-    q: Deque[List[int]] = collections.deque(bv1)
-    j = 0
-
-    while q and j < len(bv2):
-        start1, end1 = q.popleft()
-        start2, end2 = bv2[j]
-
-        # No overlap: range1 completely before range2
-        if end1 < start2:
-            out.append([start1, end1])
-            continue
-
-        # No overlap: range2 completely before range1
-        if end2 < start1:
-            j += 1
-            q.appendleft([start1, end1])  # Re-evaluate range1 against next range2
-            continue
-
-        # Overlap exists
-        if start1 < start2:
-            out.append([start1, start2 - 1])
-
-        if end1 > end2:
-            # Residual of range1 after the overlap needs to be checked against next bv2 range
-            q.appendleft([end2 + 1, end1])
-            j += 1
-        # else: range1 fully consumed; continue
-
-    # Any remaining ranges from bv1 that were not processed
-    out.extend(list(q))
-    return _merge_ranges(out)
-
-
-def bv_symmetric_difference(bv1: LLMTokenBV, bv2: LLMTokenBV) -> LLMTokenBV:
-    """Symmetric difference of two bitvectors. Returns a normalized BV."""
-    return bv_union(bv_difference(bv1, bv2), bv_difference(bv2, bv1))
-
-
-def bv_is_empty(bv: LLMTokenBV) -> bool:
-    """True if the bitvector is empty."""
-    return not bv
-
-
-def format_bitvector(bv: LLMTokenBV) -> str:
-    """Formats a bitvector (list of ranges) into a readable string."""
+def format_bitvector(bv: Optional[RangeSet]) -> str:
     if not bv:
         return "{}"
-    parts = []
-    for start, end in bv:
-        if start == end:
-            parts.append(str(start))
-        else:
-            parts.append(f"{start}-{end}")
-    return f"{{{', '.join(parts)}}}"
+    return str(bv)
 
 
 # ----------------------------
@@ -174,8 +241,8 @@ def print_trie_recursive(
 
     node_value = node.get("value", {}) or {}
     end_str = "END" if node_value.get("end") else "internal"
-    live_tokens: LLMTokenBV = node_value.get("live_tokens", []) or []
-    print(f"{indent}Node {node_index} [{end_str}] (live_tokens: {format_bitvector(_merge_ranges(live_tokens))})")
+    live_tokens: RangeSet = node_value.get("live_tokens") or RangeSet.empty()
+    print(f"{indent}Node {node_index} [{end_str}] (live_tokens: {format_bitvector(live_tokens)})")
 
     children = node.get("children", []) or []
     if not children:
@@ -187,7 +254,8 @@ def print_trie_recursive(
         print(f"{indent}  - Edge({edge_key_str}):")
 
         for dest_index, edge_bv in dest_map_json:
-            print(f"{indent}    -> Dest: {dest_index} (tokens: {format_bitvector(_merge_ranges(edge_bv))})")
+            edge_bv_rs: RangeSet = edge_bv
+            print(f"{indent}    -> Dest: {dest_index} (tokens: {format_bitvector(edge_bv_rs)})")
             # Use a copy of visited to ensure full exploration in DAG-like graphs
             print_trie_recursive(dest_index, arena, indent + "       | ", visited.copy())
 
@@ -196,40 +264,40 @@ def print_trie_recursive(
 # Core Equivalence / Traversal Logic
 # ----------------------------------
 
-def _update_visited_bv(store: Dict[Any, LLMTokenBV], key: Any, incoming_bv: LLMTokenBV) -> Optional[LLMTokenBV]:
+def _update_visited_bv(store: Dict[Any, RangeSet], key: Any, incoming_bv: RangeSet) -> Optional[RangeSet]:
     """
     Maintains a map of key -> accumulated BV.
     Returns the 'new portion' (difference) to propagate if any; otherwise None.
     """
     if key in store:
         existing = store[key]
-        diff = bv_difference(incoming_bv, existing)
-        if bv_is_empty(diff):
+        diff = incoming_bv.difference(existing)
+        if diff.is_empty():
             return None
-        store[key] = bv_union(existing, diff)
+        store[key] = existing.union(diff)
         return diff
     else:
-        store[key] = _merge_ranges(incoming_bv)
-        return store[key]
+        store[key] = incoming_bv
+        return incoming_bv
 
 
 def find_end_bv_from_node_via_none_edges(
     start_node_index: TrieNodeIndex,
-    initial_bv: LLMTokenBV,
+    initial_bv: RangeSet,
     arena: Arena
-) -> LLMTokenBV:
+) -> RangeSet:
     """
     Finds the union of BVs for all paths from a start node to any `end` node
     that consist solely of `(k, None)` edges. Intersects edge BVs along the way.
     """
-    if bv_is_empty(initial_bv):
-        return []
+    if initial_bv.is_empty():
+        return RangeSet.empty()
 
-    total_end_bv: LLMTokenBV = []
-    q: Deque[Tuple[TrieNodeIndex, LLMTokenBV]] = collections.deque()
-    q.append((start_node_index, _merge_ranges(initial_bv)))
+    total_end_bv: RangeSet = RangeSet.empty()
+    q: Deque[Tuple[TrieNodeIndex, RangeSet]] = collections.deque()
+    q.append((start_node_index, initial_bv))
 
-    visited: Dict[TrieNodeIndex, LLMTokenBV] = {}
+    visited: Dict[TrieNodeIndex, RangeSet] = {}
 
     while q:
         node_idx, current_bv = q.popleft()
@@ -239,7 +307,7 @@ def find_end_bv_from_node_via_none_edges(
 
         node_val = node.get("value", {}) or {}
         if node_val.get("end"):
-            total_end_bv = bv_union(total_end_bv, current_bv)
+            total_end_bv = total_end_bv.union(current_bv)
 
         for edge_key_json, dest_map_json in node.get("children", []) or []:
             _pop_count, state_id_opt = edge_key_json
@@ -247,12 +315,13 @@ def find_end_bv_from_node_via_none_edges(
                 continue  # Only traverse (k, None) edges here
 
             for dest_idx, edge_bv in dest_map_json:
-                new_bv = bv_intersection(current_bv, edge_bv)
-                if bv_is_empty(new_bv):
+                edge_bv_rs: RangeSet = edge_bv
+                new_bv = current_bv.intersection(edge_bv_rs)
+                if new_bv.is_empty():
                     continue
 
                 diff = _update_visited_bv(visited, dest_idx, new_bv)
-                if diff is not None and not bv_is_empty(diff):
+                if diff is not None and not diff.is_empty():
                     q.append((dest_idx, diff))
 
     return total_end_bv
@@ -262,7 +331,7 @@ def get_bv_for_normalized_path(
     root_index: TrieNodeIndex,
     path: NormalizedPath,
     arena: Arena
-) -> LLMTokenBV:
+) -> RangeSet:
     """
     For a given normalized path, computes the union of LLM token bitvectors for all
     possible ways to traverse that path in the trie.
@@ -271,18 +340,18 @@ def get_bv_for_normalized_path(
     """
     root_node = arena.get(root_index)
     if not root_node:
-        return []
+        return RangeSet.empty()
 
-    initial_bv: LLMTokenBV = root_node.get("value", {}).get("live_tokens", []) or []
-    if bv_is_empty(initial_bv) and path:
-        return []
+    initial_bv: RangeSet = (root_node.get("value", {}) or {}).get("live_tokens") or RangeSet.empty()
+    if initial_bv.is_empty() and path:
+        return RangeSet.empty()
 
-    final_bv: LLMTokenBV = []
-    q: Deque[Tuple[TrieNodeIndex, int, int, LLMTokenBV]] = collections.deque()
-    q.append((root_index, 0, 0, _merge_ranges(initial_bv)))
+    final_bv: RangeSet = RangeSet.empty()
+    q: Deque[Tuple[TrieNodeIndex, int, int, RangeSet]] = collections.deque()
+    q.append((root_index, 0, 0, initial_bv))
 
     # Visited key: (node_idx, path_idx, accumulated_k)
-    visited: Dict[Tuple[TrieNodeIndex, int, int], LLMTokenBV] = { (root_index, 0, 0): _merge_ranges(initial_bv) }
+    visited: Dict[Tuple[TrieNodeIndex, int, int], RangeSet] = {(root_index, 0, 0): initial_bv}
 
     while q:
         node_idx, path_idx, k_so_far, current_bv = q.popleft()
@@ -290,7 +359,7 @@ def get_bv_for_normalized_path(
         # If we've matched the full path, gather end BVs along None edges
         if path_idx == len(path):
             end_bv = find_end_bv_from_node_via_none_edges(node_idx, current_bv, arena)
-            final_bv = bv_union(final_bv, end_bv)
+            final_bv = final_bv.union(end_bv)
             continue
 
         target_k, target_sid = path[path_idx]
@@ -303,8 +372,9 @@ def get_bv_for_normalized_path(
             new_k = k_so_far + pop_count
 
             for dest_idx, edge_bv in dest_map_json:
-                new_bv = bv_intersection(current_bv, edge_bv)
-                if bv_is_empty(new_bv):
+                edge_bv_rs: RangeSet = edge_bv
+                new_bv = current_bv.intersection(edge_bv_rs)
+                if new_bv.is_empty():
                     continue
 
                 if state_id_opt is not None:
@@ -312,14 +382,14 @@ def get_bv_for_normalized_path(
                     if new_k == target_k and state_id_opt == target_sid:
                         next_key = (dest_idx, path_idx + 1, 0)
                         diff = _update_visited_bv(visited, next_key, new_bv)
-                        if diff is not None and not bv_is_empty(diff):
+                        if diff is not None and not diff.is_empty():
                             q.append((dest_idx, path_idx + 1, 0, diff))
                 else:
                     # Accumulate k along None edges
                     if new_k <= target_k:
                         cont_key = (dest_idx, path_idx, new_k)
                         diff = _update_visited_bv(visited, cont_key, new_bv)
-                        if diff is not None and not bv_is_empty(diff):
+                        if diff is not None and not diff.is_empty():
                             q.append((dest_idx, path_idx, new_k, diff))
 
     return final_bv
@@ -346,15 +416,15 @@ def sample_normalized_path(
     if not root_node:
         return None
 
-    current_bv: LLMTokenBV = _merge_ranges(root_node.get("value", {}).get("live_tokens", []) or [])
+    current_bv: RangeSet = ((root_node.get("value", {}) or {}).get("live_tokens")) or RangeSet.empty()
 
     for _ in range(max_len):
         node = arena.get(current_node_idx)
         if not node:
             return None
 
-        can_terminate = bool(node.get("value", {}).get("end", False))
-        edges: List[Tuple[EdgeKey, TrieNodeIndex, LLMTokenBV]] = []
+        can_terminate = bool((node.get("value", {}) or {}).get("end", False))
+        edges: List[Tuple[EdgeKey, TrieNodeIndex, RangeSet]] = []
         for ek, d_map in node.get("children", []) or []:
             for d_idx, e_bv in d_map:
                 edges.append((ek, d_idx, e_bv))
@@ -370,8 +440,8 @@ def sample_normalized_path(
         edge_key_json, dest_idx, edge_bv = rng.choice(edges)
 
         # Intersect tokens; if empty, path is invalid
-        current_bv = bv_intersection(current_bv, edge_bv)
-        if bv_is_empty(current_bv):
+        current_bv = current_bv.intersection(edge_bv)
+        if current_bv.is_empty():
             return None
 
         pop_count, state_id_opt = edge_key_json
@@ -406,7 +476,7 @@ def are_precompute2_trees_equivalent(
         path = sample_normalized_path(root_a, MAX_PATH_LEN, arena_a)
         if path is not None:
             bv_a = get_bv_for_normalized_path(root_a, path, arena_a)
-            if bv_is_empty(bv_a) and i > 0:
+            if bv_a.is_empty() and i > 0:
                 continue
             bv_b = get_bv_for_normalized_path(root_b, path, arena_b)
             if bv_a != bv_b:
@@ -415,7 +485,7 @@ def are_precompute2_trees_equivalent(
                 print(f"  Path: {path}")
                 print(f"  BV from A: {format_bitvector(bv_a)}")
                 print(f"  BV from B: {format_bitvector(bv_b)}")
-                print(f"  Difference (A ^ B): {format_bitvector(bv_symmetric_difference(bv_a, bv_b))}")
+                print(f"  Difference (A ^ B): {format_bitvector(bv_a.symmetric_difference(bv_b))}")
                 return False
 
     # Sample from B, check in A
@@ -423,7 +493,7 @@ def are_precompute2_trees_equivalent(
         path = sample_normalized_path(root_b, MAX_PATH_LEN, arena_b)
         if path is not None:
             bv_b = get_bv_for_normalized_path(root_b, path, arena_b)
-            if bv_is_empty(bv_b) and i > 0:
+            if bv_b.is_empty() and i > 0:
                 continue
             bv_a = get_bv_for_normalized_path(root_a, path, arena_a)
             if bv_a != bv_b:
@@ -432,7 +502,7 @@ def are_precompute2_trees_equivalent(
                 print(f"  Path: {path}")
                 print(f"  BV from A: {format_bitvector(bv_a)}")
                 print(f"  BV from B: {format_bitvector(bv_b)}")
-                print(f"  Difference (A ^ B): {format_bitvector(bv_symmetric_difference(bv_a, bv_b))}")
+                print(f"  Difference (A ^ B): {format_bitvector(bv_a.symmetric_difference(bv_b))}")
                 return False
 
     return True
@@ -441,6 +511,30 @@ def are_precompute2_trees_equivalent(
 # ----------------------------
 # I/O and CLI
 # ----------------------------
+
+def _convert_node_bvs_inplace(arena: Arena) -> None:
+    """
+    Convert all BV lists in the arena into RangeSet instances, in-place.
+    Mutates each node's 'value.live_tokens' and each edge's BV.
+    """
+    for node_idx, node in arena.items():
+        val = node.get("value", {}) or {}
+        if "live_tokens" in val:
+            val["live_tokens"] = RangeSet.from_json(val.get("live_tokens"))
+        else:
+            val["live_tokens"] = RangeSet.empty()
+        node["value"] = val
+
+        children = node.get("children", []) or []
+        new_children = []
+        for edge_key_json, dest_map_json in children:
+            # edge_key_json: [pop_count, state_id or None]
+            new_dest_map = []
+            for dest_idx, edge_bv in dest_map_json:
+                new_dest_map.append((int(dest_idx), RangeSet.from_json(edge_bv)))
+            new_children.append((tuple(edge_key_json), new_dest_map))
+        node["children"] = new_children
+
 
 def load_precompute2(path: Path) -> Tuple[List[Tuple[TokenizerStateID, TrieNodeIndex]], Arena]:
     """
@@ -475,6 +569,9 @@ def load_precompute2(path: Path) -> Tuple[List[Tuple[TokenizerStateID, TrieNodeI
         ]
     except (ValueError, TypeError) as e:
         raise ValueError(f"Error parsing roots map: {e}") from e
+
+    # Convert all BVs to RangeSet for performance
+    _convert_node_bvs_inplace(arena)
 
     return roots_map, arena
 
