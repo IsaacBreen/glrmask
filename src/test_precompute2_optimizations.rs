@@ -194,6 +194,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Successfully compiled GrammarDefinition.");
+    println!("{}", compiled_grammar);
 
     // 2. Load a small, representative vocabulary.
     println!("\nLoading GPT-2 vocabulary...");
