@@ -1356,6 +1356,10 @@ where
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Index {
+    index: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct Arena<T> {
@@ -1386,5 +1390,40 @@ impl<T> Ord for Arena<T> where T: Ord {
 impl<T> Hash for Arena<T> where T: Hash {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(&Arc::as_ptr(&self.values), state);
+    }
+}
+
+impl<T> Arena<T> {
+    pub fn new() -> Self {
+        Arena {
+            values: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
+    pub fn insert(&self, value: T) -> Index {
+        let mut guard = self.values.write().unwrap();
+        let new_index = guard.len();
+        guard.insert(new_index, value);
+        Index { index: new_index }
+    }
+
+    pub fn get(&self, index: Index) -> Option<T>
+    where
+        T: Clone,
+    {
+        let guard = self.values.read().unwrap();
+        guard.get(&index.index).cloned()
+    }
+
+    pub fn get_mut(&self, index: Index) -> Option<std::sync::RwLockWriteGuard<'_, T>> {
+ 
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.read().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
