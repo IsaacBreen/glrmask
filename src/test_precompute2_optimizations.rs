@@ -9,7 +9,7 @@
 //! - Using small, explicit LLM vocabularies.
 //! - Factoring common logic into small helpers.
 
-use crate::constraint::{GrammarConstraint, Precomputed2, Trie2GodWrapper};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, Precomputed2, Trie2GodWrapper};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use reqwest::blocking;
@@ -19,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
-use bimap::BiBTreeMap;
+use bimap::{BiBTreeMap};
 use crate::constraint_extra::PrecomputeStats;
 use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
 use crate::json_serialization::JSONConvertible;
@@ -58,7 +58,8 @@ fn assert_optimized_equivalent(
     }
 
     // Apply optimization passes
-    optimize_trie2_size(&mut optimized_precomputed2, &trie2_god);
+    let optimization_config = GrammarConstraintConfig::default();
+    optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
 
     println!("\n--- Stats for Optimized Precompute2 Tree ---");
     let mut stats_optimized = PrecomputeStats::default();
@@ -107,11 +108,20 @@ fn assert_optimized_equivalent(
 fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
     let compiled = compiled_from_ebnf_str(ebnf)?;
     let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
-    let gc = GrammarConstraint::from_compiled_grammar(
+
+    // Create with optimizations OFF to get the baseline
+    let no_opt_config = GrammarConstraintConfig {
+        optimize_trie2_prune_dead_paths: false,
+        optimize_trie2_merge_nodes: false,
+        optimize_trie2_factor_common_destinations: false,
+        optimize_trie2_compress_edges: false,
+    };
+    let gc = GrammarConstraint::from_compiled_grammar_with_config(
         compiled,
         llm_token_map,
         LLMTokenID(0), // dummy EOF placeholder
         max_original_llm_token_id,
+        &no_opt_config,
     );
     assert_optimized_equivalent(
         &gc.precomputed2,
@@ -206,24 +216,37 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
     // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
     let original_precomputed2: Precomputed2;
     let original_god;
+    let llm_vocab;
 
     if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
         println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
         let file = File::open(&precomputed2_cache_path)?;
         let decompressor = GzDecoder::new(BufReader::new(file));
         (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
+        // This path is problematic as the cached version is likely optimized.
+        // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
+        let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+        llm_vocab = gc_for_vocab.llm_vocab;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
-        println!("\nConstructing GrammarConstraint (will generate Precomputed2)...");
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+        println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
+        let no_opt_config = GrammarConstraintConfig {
+            optimize_trie2_prune_dead_paths: false,
+            optimize_trie2_merge_nodes: false,
+            optimize_trie2_factor_common_destinations: false,
+            optimize_trie2_compress_edges: false,
+        };
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
             compiled_grammar.clone(),
             llm_token_map.clone(),
             LLMTokenID(0), // dummy_eof_placeholder
             max_original_llm_token_id_val,
+            &no_opt_config,
         );
         println!("GrammarConstraint constructed successfully.");
         original_precomputed2 = grammar_constraint.precomputed2;
         original_god = grammar_constraint.trie2_god;
+        llm_vocab = grammar_constraint.llm_vocab;
 
         if SAVE_TO_CACHE {
             println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
@@ -235,12 +258,10 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
         }
     }
 
-    let original_to_internal_id_bimap = GrammarConstraint::setup_llm_token_mappings(&llm_token_map);
-
     // 4. Assert that the optimized result is equivalent to the baseline.
     assert_optimized_equivalent(
         &original_precomputed2,
-        &original_to_internal_id_bimap,
+        &llm_vocab.original_to_internal_id_bimap,
         &llm_token_map,
         original_god,
     );

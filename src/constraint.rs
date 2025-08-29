@@ -74,6 +74,25 @@ pub struct LLMVocab {
 }
 
 #[derive(Debug, Clone)]
+pub struct GrammarConstraintConfig {
+    pub optimize_trie2_prune_dead_paths: bool,
+    pub optimize_trie2_merge_nodes: bool,
+    pub optimize_trie2_factor_common_destinations: bool,
+    pub optimize_trie2_compress_edges: bool,
+}
+
+impl Default for GrammarConstraintConfig {
+    fn default() -> Self {
+        Self {
+            optimize_trie2_prune_dead_paths: true,
+            optimize_trie2_merge_nodes: true,
+            optimize_trie2_factor_common_destinations: true,
+            optimize_trie2_compress_edges: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
@@ -179,14 +198,27 @@ impl GrammarConstraint {
         _eof_token_id: LLMTokenID,
         max_original_llm_token_id: usize,
     ) -> Self {
+        Self::from_compiled_grammar_with_config(
+            compiled_grammar,
+            llm_token_map,
+            _eof_token_id,
+            max_original_llm_token_id,
+            &GrammarConstraintConfig::default(),
+        )
+    }
+
+    pub fn from_compiled_grammar_with_config(
+        compiled_grammar: CompiledGrammar,
+        llm_token_map: LLMTokenMap,
+        _eof_token_id: LLMTokenID,
+        max_original_llm_token_id: usize,
+        config: &GrammarConstraintConfig,
+    ) -> Self {
         let token_name_map = compiled_grammar.definition.terminal_to_group_id().clone();
 
         Self::new(
-            compiled_grammar.tokenizer,
-            compiled_grammar.glr_parser,
-            llm_token_map,
-            token_name_map,
-            max_original_llm_token_id,
+            compiled_grammar.tokenizer, compiled_grammar.glr_parser, llm_token_map, token_name_map,
+            max_original_llm_token_id, config,
         )
     }
 
@@ -225,6 +257,7 @@ impl GrammarConstraint {
         llm_token_map:    LLMTokenMap,
         token_name_map:   BiBTreeMap<Terminal, usize>,
         max_original_llm_token_id: usize,
+        config: &GrammarConstraintConfig,
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
@@ -336,6 +369,7 @@ impl GrammarConstraint {
             &terminal_follow_map,
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
+            config,
         );
 
         let mut stats2 = PrecomputeStats::default();
@@ -421,6 +455,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+        config: &GrammarConstraintConfig,
     ) -> (Precomputed2, Trie2GodWrapper) {
         crate::debug!(2, "Precomputing Trie 2...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
@@ -659,7 +694,7 @@ impl GrammarConstraint {
         let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_before_cleanup);
 
         // Clean up after rewiring
-        optimize_trie2_size(&mut precomputed2, &trie2_god);
+        optimize_trie2_size(&mut precomputed2, &trie2_god, config);
 
         Trie::all_nodes(&trie2_god, &roots_before_cleanup); // Drop pinner, allow nodes to be freed if unreachable
 
