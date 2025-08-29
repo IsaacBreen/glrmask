@@ -1007,7 +1007,6 @@ where
     /// * `edge_value`: The value for the new edge.
     /// * `merge_edge_value`: A closure that merges the existing edge value with the new edge value.
     pub fn new(
-        god: &GodWrapper<EK, EV, T>,
         arena: &'a Arena<Trie<EK, EV, T>>,
         source_idx: Trie2Index,
         edge_key: EK,
@@ -1017,8 +1016,6 @@ where
         mut merge_edge_value_and_source_node_value: FMergeEV_T,
     ) -> Self {
         // Avoid unused-parameter warnings
-        let _ = god;
-
         let mut edge_value = edge_value;
         {
             let source_guard = source_idx
@@ -1254,7 +1251,6 @@ impl Trie2Index {
     pub fn insert_edge<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
-        god: &'a GodWrapper<EK, EV, T>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
@@ -1270,7 +1266,6 @@ impl Trie2Index {
         FMergeEV_T: FnMut(&mut EV, &T),
     {
         EdgeInserter::new(
-            god,
             arena,
             self,
             edge_key,
@@ -1287,7 +1282,6 @@ impl Trie2Index {
 /// Returns `Some(Trie2Index)` if merge or insert succeeded.
 pub fn try_destination<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
     arena: &'a Arena<Trie<EK, EV, T>>,
-    god: &GodWrapper<EK, EV, T>,
     source: Trie2Index,
     edge_key: EK,
     edge_value: EV,
@@ -1305,7 +1299,6 @@ where
     FMergeEV_T: FnMut(&mut EV, &T),
 {
     EdgeInserter::new(
-        god,
         arena,
         source,
         edge_key,
@@ -1322,7 +1315,6 @@ where
 /// returning the first successful one (merge or insert), or `None` if none matched.
 pub fn try_destination_with<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
     arena: &'a Arena<Trie<EK, EV, T>>,
-    god: &GodWrapper<EK, EV, T>,
     source: Trie2Index,
     edge_key: EK,
     edge_value: EV,
@@ -1340,7 +1332,6 @@ where
     FMergeEV_T: FnMut(&mut EV, &T),
 {
     EdgeInserter::new(
-        god,
         arena,
         source,
         edge_key,
