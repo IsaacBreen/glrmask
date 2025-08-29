@@ -517,20 +517,31 @@ where
     EV: PartialEq + Clone,
     T: PartialEq,
 {
+    pub fn are_graphs_equal(
+        arena_a: &Arena<Trie<EK, EV, T>>,
+        a_idx: Trie2Index,
+        arena_b: &Arena<Trie<EK, EV, T>>,
+        b_idx: Trie2Index,
+    ) -> bool {
+        let mut cache = HashMap::new();
+        Self::compare_indexes_recursive(arena_a, a_idx, arena_b, b_idx, &mut cache)
+    }
+
     /// Recursively compares two Trie nodes referenced by indices for equality across an Arena.
     ///
     /// - `a_idx`, `b_idx`: The indices pointing to the Trie nodes to compare.
     /// - `comparison_cache`: Tracks pairs of (a_usize, b_usize) and their comparison result (bool).
     fn compare_indexes_recursive(
-        arena: &Arena<Trie<EK, EV, T>>,
+        arena_a: &Arena<Trie<EK, EV, T>>,
         a_idx: Trie2Index,
+        arena_b: &Arena<Trie<EK, EV, T>>,
         b_idx: Trie2Index,
         comparison_cache: &mut HashMap<(usize, usize), bool>,
     ) -> bool {
         let a_u = a_idx.as_usize();
         let b_u = b_idx.as_usize();
 
-        if a_u == b_u {
+        if Arc::ptr_eq(&arena_a.values, &arena_b.values) && a_u == b_u {
             return true;
         }
 
@@ -543,14 +554,14 @@ where
         // Optimistically assume true; update to false on mismatch.
         comparison_cache.insert((k1, k2), true);
 
-        let a_guard = match a_idx.read(arena) {
+        let a_guard = match a_idx.read(arena_a) {
             Some(g) => g,
             None => {
                 comparison_cache.insert((k1, k2), false);
                 return false;
             }
         };
-        let b_guard = match b_idx.read(arena) {
+        let b_guard = match b_idx.read(arena_b) {
             Some(g) => g,
             None => {
                 comparison_cache.insert((k1, k2), false);
@@ -598,7 +609,7 @@ where
                         for i in 0..b_child_pairs.len() {
                             if &b_child_pairs[i].1 == a_ev {
                                 let b_child = b_child_pairs[i].0;
-                                if Trie::compare_indexes_recursive(arena, *a_child, b_child, comparison_cache) {
+                                if Trie::compare_indexes_recursive(arena_a, *a_child, arena_b, b_child, comparison_cache) {
                                     b_child_pairs.remove(i);
                                     found = true;
                                     break;
