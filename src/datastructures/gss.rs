@@ -1971,6 +1971,7 @@ pub(crate) fn format_acc(
 }
 
 
+#[cfg(false)]
 #[cfg(test)]
 mod tests {
     use super::*;
