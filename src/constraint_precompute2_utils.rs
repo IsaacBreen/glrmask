@@ -453,8 +453,10 @@ pub fn optimize_trie2_size(
     if config.optimize_trie2_merge_nodes {
         merge_nodes_trie2(roots, &trie2_god);
     }
-    let final_roots: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(&trie2_god, &final_roots);
+    if config.optimize_trie2_gc {
+        Trie::gc(&trie2_god, &roots.values().cloned().collect::<Vec<_>>());
+    }
+    Trie::recompute_all_max_depths(&trie2_god, &roots.values().cloned().collect::<Vec<_>>());
 }
 
 fn trie2_shape_hash(
