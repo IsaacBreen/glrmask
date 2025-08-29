@@ -1359,25 +1359,31 @@ where
 pub struct Arena<T> {
     values: Arc<RwLock<Vec<T>>>,
 }
-impl<T> PartialEq for Arena<T> {
+impl<T> PartialEq for Arena<T> where T: PartialEq {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.values, &other.values) || PartialEq::eq(&self.values.read().unwrap(), &other.values.read().unwrap())
+        Arc::ptr_eq(&self.values, &other.values) || PartialEq::eq(&*self.values.read().unwrap(), &*other.values.read().unwrap())
     }
 }
-impl<T> Eq for Arena<T> {}
-impl<T> PartialOrd for Arena<T> {
+impl<T> Eq for Arena<T> where T: Eq {}
+impl<T> PartialOrd for Arena<T> where T: PartialOrd {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        if Arc::ptr_eq(&self.values, &other.values) {
+            return Some(Ordering::Equal);
+        }
+        self.values.read().unwrap().partial_cmp(&other.values.read().unwrap())
     }
 }
-
-impl<T> Ord for Arena<T> {
+impl<T> Ord for Arena<T> where T: Ord {
     fn cmp(&self, other: &Self) -> Ordering {
+        if Arc::ptr_eq(&self.values, &other.values) {
+            return Ordering::Equal;
+        }
         self.values.read().unwrap().cmp(&other.values.read().unwrap())
     }
 }
-impl<T> Hash for Arena<T> {
+impl<T> Hash for Arena<T> where T: Hash {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.values.read().unwrap().hash(state);
+        let values_guard = self.values.read().unwrap();
+        values_guard.hash(state);
     }
 }
