@@ -111,20 +111,20 @@ pub struct GrammarConstraintConfig {
 
 impl Default for GrammarConstraintConfig {
     fn default() -> Self {
-        // Self {
-        //     optimize_trie2_prune_dead_paths: true,
-        //     optimize_trie2_merge_nodes: true,
-        //     optimize_trie2_factor_common_destinations: false,
-        //     optimize_trie2_compress_edges: true,
-        //     optimize_trie2_gc: true,
-        // }
         Self {
-            optimize_trie2_prune_dead_paths: false,
-            optimize_trie2_merge_nodes: false,
+            optimize_trie2_prune_dead_paths: true,
+            optimize_trie2_merge_nodes: true,
             optimize_trie2_factor_common_destinations: false,
-            optimize_trie2_compress_edges: false,
-            optimize_trie2_gc: false,
+            optimize_trie2_compress_edges: true,
+            optimize_trie2_gc: true,
         }
+        // Self {
+        //     optimize_trie2_prune_dead_paths: false,
+        //     optimize_trie2_merge_nodes: false,
+        //     optimize_trie2_factor_common_destinations: false,
+        //     optimize_trie2_compress_edges: false,
+        //     optimize_trie2_gc: false,
+        // }
     }
 }
 
