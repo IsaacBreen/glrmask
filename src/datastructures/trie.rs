@@ -413,6 +413,14 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         result
     }
 
+    /// Performs garbage collection on the arena, keeping only nodes reachable from `roots`.
+    pub fn gc(arena: &Arena<Self>, roots: &[Trie2Index]) {
+        let live_nodes_vec = Self::all_nodes(arena, roots);
+        let live_nodes_set: HashSet<usize> = live_nodes_vec.into_iter().map(|idx| idx.as_usize()).collect();
+        let mut values_guard = arena.values.write().expect("Arena write lock poisoned during GC");
+        values_guard.retain(|&k, _| live_nodes_set.contains(&k));
+    }
+
     /// Recomputes `max_depth` for all nodes reachable from the given roots.
     /// Call this once after you finish building the trie graph. Before calling,
     /// nodes may have max_depth == usize::MAX which is suboptimal for scheduling

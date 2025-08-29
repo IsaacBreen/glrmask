@@ -403,6 +403,7 @@ impl GrammarConstraint {
         helper.factor_common_destinations();
         helper.merge_nodes();
         // helper.merge_nodes_basic();
+        helper.gc();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
@@ -1442,6 +1443,12 @@ impl<'r> Precomputer<'r> {
         // Update with the final canonical arc.
         visited.insert(node_ptr, canonical_arc.clone());
         canonical_arc
+    }
+
+    pub fn gc(&mut self) {
+        crate::debug!(2, "Running garbage collection on precomputed trie.");
+        let roots: Vec<_> = self.roots.values().cloned().collect();
+        Trie::gc(&self.trie1_god, &roots);
     }
 
     fn finish(
