@@ -72,8 +72,8 @@ impl Trie2Index {
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
     ) -> Option<Trie2ReadGuard<'a, EK, EV, T>> {
-        let guard = arena.values.read().ok()?;
-        if !guard.contains_key(&self.index.as_usize()) {
+        let guard = arena.inner.read().ok()?;
+        if guard.values.get(self.index.as_usize())?.is_none() {
             return None;
         }
         Some(Trie2ReadGuard {
@@ -88,8 +88,8 @@ impl Trie2Index {
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
     ) -> Option<Trie2WriteGuard<'a, EK, EV, T>> {
-        let guard = arena.values.write().ok()?;
-        if !guard.contains_key(&self.index.as_usize()) {
+        let guard = arena.inner.write().ok()?;
+        if guard.values.get(self.index.as_usize())?.is_none() {
             return None;
         }
         Some(Trie2WriteGuard {
@@ -131,15 +131,15 @@ impl From<Trie2Index> for usize {
 /// A read guard that keeps the Arena's internal RwLockReadGuard alive and provides
 /// immutable access to a Trie node at a given index via Deref.
 pub struct Trie2ReadGuard<'a, EK: Ord, EV, T> {
-    guard: RwLockReadGuard<'a, BTreeMap<usize, Trie<EK, EV, T>>>,
+    guard: RwLockReadGuard<'a, ArenaInner<Trie<EK, EV, T>>>,
     index: usize,
 }
 
 impl<'a, EK: Ord, EV, T> Deref for Trie2ReadGuard<'a, EK, EV, T> {
     type Target = Trie<EK, EV, T>;
     fn deref(&self) -> &Self::Target {
-        self.guard
-            .get(&self.index)
+        self.guard.values[self.index]
+            .as_ref()
             .expect("Trie2ReadGuard: index not found in arena map")
     }
 }
@@ -147,23 +147,23 @@ impl<'a, EK: Ord, EV, T> Deref for Trie2ReadGuard<'a, EK, EV, T> {
 /// A write guard that keeps the Arena's internal RwLockWriteGuard alive and provides
 /// mutable access to a Trie node at a given index via Deref/DerefMut.
 pub struct Trie2WriteGuard<'a, EK: Ord, EV, T> {
-    guard: RwLockWriteGuard<'a, BTreeMap<usize, Trie<EK, EV, T>>>,
+    guard: RwLockWriteGuard<'a, ArenaInner<Trie<EK, EV, T>>>,
     index: usize,
 }
 
 impl<'a, EK: Ord, EV, T> Deref for Trie2WriteGuard<'a, EK, EV, T> {
     type Target = Trie<EK, EV, T>;
     fn deref(&self) -> &Self::Target {
-        self.guard
-            .get(&self.index)
+        self.guard.values[self.index]
+            .as_ref()
             .expect("Trie2WriteGuard: index not found in arena map")
     }
 }
 
 impl<'a, EK: Ord, EV, T> DerefMut for Trie2WriteGuard<'a, EK, EV, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard
-            .get_mut(&self.index)
+        self.guard.values[self.index]
+            .as_mut()
             .expect("Trie2WriteGuard: index not found in arena map")
     }
 }
@@ -417,8 +417,12 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn gc(arena: &Arena<Self>, roots: &[Trie2Index]) {
         let live_nodes_vec = Self::all_nodes(arena, roots);
         let live_nodes_set: HashSet<usize> = live_nodes_vec.into_iter().map(|idx| idx.as_usize()).collect();
-        let mut values_guard = arena.values.write().expect("Arena write lock poisoned during GC");
-        values_guard.retain(|&k, _| live_nodes_set.contains(&k));
+        let mut inner_guard = arena.inner.write().expect("Arena write lock poisoned during GC");
+        for i in 0..inner_guard.values.len() {
+            if !live_nodes_set.contains(&i) {
+                inner_guard.values[i] = None;
+            }
+        }
     }
 
     /// Recomputes `max_depth` for all nodes reachable from the given roots.
@@ -549,7 +553,7 @@ where
         let a_u = a_idx.as_usize();
         let b_u = b_idx.as_usize();
 
-        if Arc::ptr_eq(&arena_a.values, &arena_b.values) && a_u == b_u {
+        if Arc::ptr_eq(&arena_a.inner, &arena_b.inner) && a_u == b_u {
             return true;
         }
 
@@ -1408,19 +1412,47 @@ impl Index {
 }
 
 #[derive(Debug, Clone)]
-pub struct Arena<T> {
-    pub(crate) values: Arc<RwLock<BTreeMap<usize, T>>>,
+pub struct ArenaInner<T> {
+    values: Vec<Option<T>>,
+    counter: usize,
 }
 
+impl<T: PartialEq> PartialEq for ArenaInner<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.counter == other.counter && self.values == other.values
+    }
+}
+impl<T: Eq> Eq for ArenaInner<T> {}
+
+impl<T: PartialOrd> PartialOrd for ArenaInner<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.counter.partial_cmp(&other.counter) {
+            Some(Ordering::Equal) => self.values.partial_cmp(&other.values),
+            other => other,
+        }
+    }
+}
+
+impl<T: Ord> Ord for ArenaInner<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.counter.cmp(&other.counter)
+            .then_with(|| self.values.cmp(&other.values))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Arena<T> {
+    pub(crate) inner: Arc<RwLock<ArenaInner<T>>>,
+}
 impl<T> PartialEq for Arena<T>
 where
     T: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.values, &other.values)
+        Arc::ptr_eq(&self.inner, &other.inner)
             || PartialEq::eq(
-                &*self.values.read().unwrap(),
-                &*other.values.read().unwrap(),
+                &*self.inner.read().unwrap(),
+                &*other.inner.read().unwrap(),
             )
     }
 }
@@ -1431,12 +1463,12 @@ where
     T: PartialOrd,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if Arc::ptr_eq(&self.values, &other.values) {
+        if Arc::ptr_eq(&self.inner, &other.inner) {
             return Some(Ordering::Equal);
         }
         PartialOrd::partial_cmp(
-            &*self.values.read().unwrap(),
-            &*other.values.read().unwrap(),
+            &*self.inner.read().unwrap(),
+            &*other.inner.read().unwrap(),
         )
     }
 }
@@ -1446,12 +1478,12 @@ where
     T: Ord,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        if Arc::ptr_eq(&self.values, &other.values) {
+        if Arc::ptr_eq(&self.inner, &other.inner) {
             return Ordering::Equal;
         }
         Ord::cmp(
-            &*self.values.read().unwrap(),
-            &*other.values.read().unwrap(),
+            &*self.inner.read().unwrap(),
+            &*other.inner.read().unwrap(),
         )
     }
 }
@@ -1464,42 +1496,63 @@ where
     T: Hash,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Hash::hash(&Arc::as_ptr(&self.values), state);
+        Hash::hash(&Arc::as_ptr(&self.inner), state);
     }
 }
 
 impl<T> Arena<T> {
     pub fn new() -> Self {
         Arena {
-            values: Arc::new(RwLock::new(BTreeMap::new())),
+            inner: Arc::new(RwLock::new(ArenaInner {
+                values: Vec::new(),
+                counter: 0,
+            })),
         }
     }
 
-    // Inserts `value` at the next free index (max_index + 1) and returns the Index.
+    // Inserts `value` at the next free index and returns the Index.
     pub fn insert(&self, value: T) -> Index {
-        let mut map = self.values.write().unwrap();
-        let next = match map.keys().next_back().copied() {
-            Some(k) => k.checked_add(1).expect("Arena index overflow"),
-            None => 0,
-        };
-        let old = map.insert(next, value);
+        let mut inner = self.inner.write().unwrap();
+        let next = inner.counter;
+        inner.counter = inner.counter.checked_add(1).expect("Arena index overflow");
+
+        if next >= inner.values.len() {
+            inner.values.resize_with(next + 1, || None);
+        }
+
+        let old = inner.values[next].replace(value);
         debug_assert!(old.is_none());
         Index { index: next }
     }
 
     // Replace or set a value at a specific index. Returns the old value if any.
     pub fn insert_at(&self, index: Index, value: T) -> Option<T> {
-        self.values.write().unwrap().insert(index.index, value)
+        let mut inner = self.inner.write().unwrap();
+        let idx = index.index;
+        if idx >= inner.values.len() {
+            inner.values.resize_with(idx + 1, || None);
+        }
+        if idx >= inner.counter {
+            inner.counter = idx + 1;
+        }
+        inner.values[idx].replace(value)
     }
 
     // Remove a value at index, returning it if present.
     pub fn remove(&self, index: Index) -> Option<T> {
-        self.values.write().unwrap().remove(&index.index)
+        let mut inner = self.inner.write().unwrap();
+        let idx = index.index;
+        if idx < inner.values.len() {
+            inner.values[idx].take()
+        } else {
+            None
+        }
     }
 
     // Returns true if the index exists in the arena.
     pub fn contains(&self, index: Index) -> bool {
-        self.values.read().unwrap().contains_key(&index.index)
+        let inner = self.inner.read().unwrap();
+        inner.values.get(index.index).map_or(false, |v| v.is_some())
     }
 
     // Returns a clone of the value at index (requires T: Clone).
@@ -1507,41 +1560,44 @@ impl<T> Arena<T> {
     where
         T: Clone,
     {
-        self.values.read().unwrap().get(&index.index).cloned()
+        self.inner.read().unwrap().values.get(index.index).and_then(|v| v.as_ref()).cloned()
     }
 
     // Read access via a closure (no Clone bound required).
     pub fn with<R>(&self, index: Index, f: impl FnOnce(&T) -> R) -> Option<R> {
-        let guard = self.values.read().unwrap();
-        guard.get(&index.index).map(f)
+        let guard = self.inner.read().unwrap();
+        guard.values.get(index.index).and_then(|opt| opt.as_ref()).map(f)
     }
 
     // Mutable access via a closure (no Clone bound required).
     pub fn with_mut<R>(&self, index: Index, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        let mut guard = self.values.write().unwrap();
-        guard.get_mut(&index.index).map(f)
+        let mut guard = self.inner.write().unwrap();
+        guard.values.get_mut(index.index).and_then(|opt| opt.as_mut()).map(f)
     }
 
     pub fn len(&self) -> usize {
-        self.values.read().unwrap().len()
+        self.inner.read().unwrap().values.iter().filter(|v| v.is_some()).count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.values.read().unwrap().is_empty()
+        self.inner.read().unwrap().values.iter().all(|v| v.is_none())
     }
 
     pub fn clear(&self) {
-        self.values.write().unwrap().clear();
+        let mut inner = self.inner.write().unwrap();
+        inner.values.clear();
+        inner.counter = 0;
     }
 
     // Snapshot of all indices.
     pub fn indices(&self) -> Vec<Index> {
-        self.values
+        self.inner
             .read()
             .unwrap()
-            .keys()
-            .copied()
-            .map(Index::from)
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| if v.is_some() { Some(Index::from(i)) } else { None })
             .collect()
     }
 
@@ -1550,11 +1606,13 @@ impl<T> Arena<T> {
     where
         T: Clone,
     {
-        self.values
+        self.inner
             .read()
             .unwrap()
+            .values
             .iter()
-            .map(|(&k, v)| (Index::from(k), v.clone()))
+            .enumerate()
+            .filter_map(|(i, v)| v.as_ref().map(|val| (Index::from(i), val.clone())))
             .collect()
     }
 }
@@ -1564,23 +1622,31 @@ where
     T: JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
-        let guard = self.values.read().unwrap();
-        let items: Vec<JSONNode> = guard.iter().map(|(&k, v)| {
-            JSONNode::Array(vec![
-                k.to_json(),
-                v.to_json(),
-            ])
+        let guard = self.inner.read().unwrap();
+        let mut obj = BTreeMap::new();
+        obj.insert("counter".to_string(), guard.counter.to_json());
+        let items: Vec<JSONNode> = guard.values.iter().enumerate().filter_map(|(k, v)| {
+            v.as_ref().map(|val| {
+                JSONNode::Array(vec![
+                    k.to_json(),
+                    val.to_json(),
+                ])
+            })
         }).collect();
-        JSONNode::Array(items)
+        obj.insert("values".to_string(), JSONNode::Array(items));
+        JSONNode::Object(obj)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        let arr = match node {
+        let mut obj = node.into_object()?;
+        let counter = usize::from_json(obj.remove("counter").ok_or("Missing 'counter' field")?)?;
+        let values_node = obj.remove("values").ok_or("Missing 'values' field")?;
+        let arr = match values_node {
             JSONNode::Array(arr) => arr,
-            _ => return Err("Expected JSONNode::Array for Arena".to_string()),
+            _ => return Err("Expected JSONNode::Array for Arena values".to_string()),
         };
 
-        let mut map = BTreeMap::new();
+        let mut values = Vec::new();
         for item_node in arr {
             let mut pair = match item_node {
                 JSONNode::Array(pair) if pair.len() == 2 => pair,
@@ -1591,11 +1657,18 @@ where
 
             let key = usize::from_json(key_node)?;
             let value = T::from_json(value_node)?;
-            map.insert(key, value);
+
+            if key >= values.len() {
+                values.resize_with(key + 1, || None);
+            }
+            values[key] = Some(value);
         }
 
         Ok(Arena {
-            values: Arc::new(RwLock::new(map)),
+            inner: Arc::new(RwLock::new(ArenaInner {
+                values,
+                counter,
+            })),
         })
     }
 }
