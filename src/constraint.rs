@@ -465,7 +465,7 @@ impl GrammarConstraint {
 
         // Merge the base per-state initial nodes into one GSS and build a GLR state from it.
         let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
-        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(GodWrapper::new());
+        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(trie2_god.clone());
 
         // Optional: pre-warm once with default reductions (your idea)
         const PROCESS_DEFAULT_REDUCTIONS: bool = false;
@@ -821,10 +821,11 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Done building vocab prefix tree");
 
         let mut roots = BTreeMap::new();
+        let trie1_god = Trie1GodWrapper::new();
         for sid in tokenizer.iter_states() {
             roots.insert(
                 sid,
-                PrecomputeNodeIndex::new(Trie1GodWrapper::new().insert(PrecomputeNode::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
+                PrecomputeNodeIndex::new(trie1_god.insert(PrecomputeNode::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
             );
         }
 
@@ -840,7 +841,6 @@ impl<'r> Precomputer<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        let trie1_god = Trie1GodWrapper::new();
         let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode::new(PrecomputedNodeContents::leaf())));
 
         Self {
