@@ -44,6 +44,10 @@ pub struct Trie2Index {
 }
 
 impl Trie2Index {
+    pub(crate) fn as_arc(&self) -> &Self {
+        self
+    }
+
     pub fn new(index: Index) -> Self {
         Trie2Index { index }
     }
