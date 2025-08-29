@@ -50,6 +50,7 @@ use serde_json::Value as SerdeValue;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
+use crate::datastructures::trie2::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
 
@@ -1645,82 +1646,15 @@ pub struct GrammarConstraintState<'a> {
     pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct God<EK, EV, T> {
-    _phantom: std::marker::PhantomData<(EK, EV, T)>,
-}
-#[derive(Debug, Clone)]
-pub struct GodWrapper<EK, EV, T>(pub Arc<RwLock<God<EK, EV, T>>>);
-
 pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 
-impl<EK, EV, T> PartialEq for GodWrapper<EK, EV, T> where EK: PartialEq, EV: PartialEq, T: PartialEq {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0) || self.0.read().unwrap().eq(&other.0.read().unwrap())
-    }
-}
-impl<EK, EV, T> Eq for GodWrapper<EK, EV, T> where EK: Eq, EV: Eq, T: Eq {}
-impl<EK, EV, T> PartialOrd for GodWrapper<EK, EV, T> where EK: PartialOrd, EV: PartialOrd, T: PartialOrd {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if Arc::ptr_eq(&self.0, &other.0) {
-            return Some(Ordering::Equal);
-        }
-        self.0.read().unwrap().partial_cmp(&other.0.read().unwrap())
-    }
-}
-impl<EK, EV, T> Ord for GodWrapper<EK, EV, T> where EK: Ord, EV: Ord, T: Ord {
-    fn cmp(&self, other: &Self) -> Ordering {
-        if Arc::ptr_eq(&self.0, &other.0) {
-            return Ordering::Equal;
-        }
-        self.0.read().unwrap().cmp(&other.0.read().unwrap())
-    }
-}
-impl<EK, EV, T> Hash for GodWrapper<EK, EV, T> where EK: Hash, EV: Hash, T: Hash {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.read().unwrap().hash(state);
-    }
-}
-impl<EK, EV, T> GodWrapper<EK, EV, T> {
-    pub fn new() -> Self {
-        Self(Arc::new(RwLock::new(God {
-            _phantom: std::marker::PhantomData::<(EK, EV, T)>,
-        })))
-    }
-}
-
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
         // Compare parent by pointer to ensure they originate from the same constraint object.
         std::ptr::eq(self.parent, other.parent) && self.state == other.state
-    }
-}
-impl<EK, EV, T> JSONConvertible for GodWrapper<EK, EV, T> where EK: JSONConvertible, EV: JSONConvertible, T: JSONConvertible {
-    fn to_json(&self) -> JSONNode {
-        // The God object is stateless, so we just need a placeholder.
-        JSONNode::Null
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        // On deserialization, we just create a new GodWrapper.
-        match node {
-            JSONNode::Null => Ok(GodWrapper::new()),
-            _ => Err("Expected JSONNode::Null for GodWrapper".to_string()),
-        }
-    }
-}
-impl<EK, EV, T> JSONConvertible for God<EK, EV, T> where EK: JSONConvertible, EV: JSONConvertible, T: JSONConvertible {
-    fn to_json(&self) -> JSONNode {
-        // God is a stateless marker struct.
-        JSONNode::Null
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Null => Ok(God { _phantom: std::marker::PhantomData }),
-            _ => Err("Expected JSONNode::Null for God".to_string()),
-        }
     }
 }
 

@@ -55,9 +55,10 @@ impl PrecomputedNodeContents {
     }
 }
 
-use crate::constraint::{God, PrecomputeNode2, Trie2God, Trie2GodWrapper};
+use crate::constraint::{PrecomputeNode2, Trie2God, Trie2GodWrapper};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use crate::datastructures::trie2::God;
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {

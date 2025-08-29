@@ -1,4 +1,4 @@
-use crate::constraint::{God, GodWrapper, LLMVocab, PrecomputeNode2, Trie2God, Trie2GodWrapper};
+use crate::constraint::{LLMVocab, PrecomputeNode2, Trie2God, Trie2GodWrapper};
 use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, LLMTokenBV};
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use crate::datastructures::trie2::{God, GodWrapper};
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
