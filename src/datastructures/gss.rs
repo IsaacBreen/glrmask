@@ -1189,14 +1189,14 @@ pub(crate) fn merge_trie2_nodes_if_needed(
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         if !root.acc.trie2_nodes.iter().any(
             // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read().expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            |n| n.as_arc().read(god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
         ) {
             return Some(root.acc.clone());
         }
         let mut new_acc = (*root.acc).clone();
         // Create a single new destination for this merge operation.
         let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone()))
-            .or_insert_with(|| Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
+            .or_insert_with(|| PrecomputeNode2Index::new(god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
             .clone();
         let edge_key = (0, None);
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
@@ -1218,10 +1218,10 @@ pub(crate) fn merge_trie2_nodes_if_needed(
         }
 
         // Update the live tokens on the new destination node.
-        new_destination.write().expect("poison").value.live_tokens |= &tokens_for_edge;
+        new_destination.write(god).expect("poison").value.live_tokens |= &tokens_for_edge;
 
         // The acc now points only to this new merged destination.
-        new_acc.trie2_nodes = BTreeSet::from([ArcPtrWrapper::new(new_destination)]);
+        new_acc.trie2_nodes = BTreeSet::from([new_destination]);
         Some(Arc::new(new_acc))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -1306,11 +1306,11 @@ pub(crate) fn fuse_predecessors_recursive(
 
 pub(crate) fn deep_clone_gss_with_trie2_map(
     root: &Arc<GSSNode>,
-    trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
+    trie2_map: &HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
 ) -> Arc<GSSNode> {
     fn clone_one(
         node: &Arc<GSSNode>,
-        trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
+        trie2_map: &HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
         memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
     ) -> Arc<GSSNode> {
         let ptr = Arc::as_ptr(node);
@@ -1326,11 +1326,11 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
                     let mut new_set = BTreeSet::new();
                     for old_wr in &new_acc.trie2_nodes {
                         let old_arc = old_wr.as_arc().clone();
-                        let old_ptr = Arc::as_ptr(&old_arc);
+                        let old_ptr = old_arc;
                         if let Some(new_arc) = trie2_map.get(&old_ptr) {
-                            new_set.insert(ArcPtrWrapper::new(new_arc.clone()));
+                            new_set.insert(new_arc.clone());
                         } else {
-                            new_set.insert(ArcPtrWrapper::new(old_arc));
+                            new_set.insert(old_arc);
                         }
                     }
                     new_acc.trie2_nodes = new_set;
@@ -1943,7 +1943,7 @@ pub(crate) fn format_acc(
             let ptrs: Vec<String> = acc
                 .trie2_nodes
                 .iter()
-                .map(|wrapper| format!("{:p}", { let ptr = Arc::as_ptr(wrapper.as_arc()) as *const PrecomputeNode2; ptr}))
+                .map(|wrapper| format!("{}", wrapper.as_arc()))
                 .collect();
             Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
         } else {
@@ -1951,7 +1951,7 @@ pub(crate) fn format_acc(
                 .trie2_nodes
                 .iter()
                 .take(MAX_PTRS_TO_SHOW)
-                .map(|wrapper| format!("{:p}", Arc::as_ptr(wrapper.as_arc())))
+                .map(|wrapper| format!("{}", wrapper.as_arc()))
                 .collect();
             let remaining = n - MAX_PTRS_TO_SHOW;
             Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))

@@ -87,7 +87,7 @@ fn get_bv_for_normalized_path(
     q.push_back((root.clone(), 0, 0, initial_bv.clone()));
 
     // To handle cycles and redundant exploration
-    let mut visited: HashMap<(*const RwLock<PrecomputeNode2>, usize, usize), LLMTokenBV> = HashMap::new();
+    let mut visited: HashMap<(PrecomputeNode2Index, usize, usize), LLMTokenBV> = HashMap::new();
     visited.insert((Arc::as_ptr(root), 0, 0), initial_bv);
 
     while let Some((node, path_idx, k_so_far, bv)) = q.pop_front() {
@@ -159,7 +159,7 @@ fn find_end_bv_from_node_via_none_edges(
     let mut end_bv = LLMTokenBV::zeros();
     let mut q = VecDeque::new();
     q.push_back((start_node, initial_bv));
-    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+    let mut visited: HashMap<PrecomputeNode2Index, LLMTokenBV> = HashMap::new();
 
     while let Some((node, bv)) = q.pop_front() {
         let guard = node.read().unwrap();
@@ -258,9 +258,9 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
     // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
     // This correctly handles cycles, iterating until a fixed point is reached.
     let all_nodes = Trie::all_nodes(&roots.values().cloned().collect::<Vec<_>>());
-    let mut predecessors: HashMap<*const RwLock<PrecomputeNode2>, Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>> = HashMap::new();
+    let mut predecessors: HashMap<PrecomputeNode2Index, Vec<(PrecomputeNode2Index, LLMTokenBV)>> = HashMap::new();
     let mut worklist = VecDeque::new();
-    let mut live: HashMap<*const RwLock<PrecomputeNode2>, LLMTokenBV> = HashMap::new();
+    let mut live: HashMap<PrecomputeNode2Index, LLMTokenBV> = HashMap::new();
 
     // 1. Initialize live sets and build predecessor map.
     for node_arc in &all_nodes {
@@ -341,10 +341,10 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 
     type EdgeKey2 = (usize, Option<StateID>);
     let mut incoming_map: HashMap<
-        *const RwLock<PrecomputeNode2>,
+        PrecomputeNode2Index,
         HashMap<
             EdgeKey2,
-            Vec<(*const RwLock<PrecomputeNode2>, LLMTokenBV)>,
+            Vec<(PrecomputeNode2Index, LLMTokenBV)>,
         >,
     > = HashMap::new();
 
@@ -435,7 +435,7 @@ pub fn optimize_trie2_size(
 
 fn trie2_shape_hash(
     arc: &Trie2Index,
-    memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+    memo: &mut HashMap<PrecomputeNode2Index, u64>,
 ) -> u64 {
     let ptr = Arc::as_ptr(arc);
     if let Some(&h) = memo.get(&ptr) {
@@ -481,13 +481,13 @@ fn trie2_shape_hash(
 /// running exact structural equality. It never recurses indefinitely.
 fn trie2_skeleton_hash(
     arc: &Trie2Index,
-    memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
+    memo: &mut HashMap<PrecomputeNode2Index, u64>,
 ) -> u64 {
     const MAX_DEPTH: usize = 64; // generous, but bounded
     fn inner(
         node: &Trie2Index,
-        memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-        visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
+        memo: &mut HashMap<PrecomputeNode2Index, u64>,
+        visiting: &mut HashSet<PrecomputeNode2Index>,
         depth_left: usize,
     ) -> u64 {
         let ptr = Arc::as_ptr(node);
@@ -547,14 +547,14 @@ fn trie2_skeleton_hash(
         out
     }
 
-    let mut visiting: HashSet<*const RwLock<PrecomputeNode2>> = HashSet::new();
+    let mut visiting: HashSet<PrecomputeNode2Index> = HashSet::new();
     inner(arc, memo, &mut visiting, MAX_DEPTH)
 }
 
 fn trie2_shape_eq(
     a: &Trie2Index,
     b: &Trie2Index,
-    cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+    cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
 ) -> bool {
     if Arc::ptr_eq(a, b) {
         return true;
@@ -640,9 +640,9 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2I
     }
 
     let mut canonical_nodes: HashMap<u64, Vec<PrecomputeNode2Index>> = HashMap::new();
-    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index> = HashMap::new();
-    let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
-    let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
+    let mut visited: HashMap<PrecomputeNode2Index, PrecomputeNode2Index> = HashMap::new();
+    let mut shape_hash_memo: HashMap<PrecomputeNode2Index, u64> = HashMap::new();
+    let mut shape_eq_cache: HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool> = HashMap::new();
 
     let mut new_roots = BTreeMap::new();
     for (sid, root_arc) in roots.iter() {
@@ -669,9 +669,9 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2I
 fn deduplicate_recursive_trie2(
     node_arc: Trie2Index,
     canonical_nodes: &mut HashMap<u64, Vec<PrecomputeNode2Index>>,
-    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
-    shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
-    shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
+    visited: &mut HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
+    shape_hash_memo: &mut HashMap<PrecomputeNode2Index, u64>,
+    shape_eq_cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
     pb: &ProgressBar,
 ) -> Trie2Index {
     let node_ptr = Arc::as_ptr(&node_arc);
@@ -772,13 +772,13 @@ pub fn compress_trie2_edges(
         iterations += 1;
         changed = false;
         let all_nodes = Trie::all_nodes(&roots_vec);
-        let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index> = HashMap::new();
+        let mut arc_map: HashMap<PrecomputeNode2Index, PrecomputeNode2Index> = HashMap::new();
         for n in &all_nodes {
             arc_map.insert(Arc::as_ptr(n), n.clone());
         }
 
         // Build incoming counts
-        let mut incoming_count: HashMap<*const RwLock<PrecomputeNode2>, usize> = HashMap::new();
+        let mut incoming_count: HashMap<PrecomputeNode2Index, usize> = HashMap::new();
         for src_arc in &all_nodes {
             let guard = src_arc.read().expect("poison");
             for (_ek, dest_map) in guard.children() {
@@ -918,10 +918,10 @@ pub fn clone_trie2_graph(
     root: &Trie2Index,
 ) -> (
     Trie2Index,
-    HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
+    HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
 ) {
     // old_ptr -> new arc
-    let mut map: HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index> = HashMap::new();
+    let mut map: HashMap<PrecomputeNode2Index, PrecomputeNode2Index> = HashMap::new();
     let mut q: VecDeque<PrecomputeNode2Index> = VecDeque::new();
 
     let root_ptr = Arc::as_ptr(root);
