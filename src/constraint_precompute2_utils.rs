@@ -573,7 +573,7 @@ fn trie2_shape_eq(
     trie2_god_a: &Trie2GodWrapper,
     trie2_god_b: &Trie2GodWrapper,
 ) -> bool {
-    if a == b && Arc::ptr_eq(&trie2_god_a.values, &trie2_god_b.values) {
+    if a == b {
         return true;
     }
 
