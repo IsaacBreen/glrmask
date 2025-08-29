@@ -529,7 +529,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 2000;
+        let x = 2;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
