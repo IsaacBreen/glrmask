@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
-use crate::datastructures::trie::EdgeInserter;
+use crate::datastructures::trie1::EdgeInserter;
 use crate::debug;
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
