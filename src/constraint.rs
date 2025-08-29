@@ -709,8 +709,8 @@ impl GrammarConstraint {
         // To prevent dangling weak pointers, we collect strong references to all nodes
         // before performing modifications. These strong references are held until
         // weak edges have been promoted back to strong ones where possible.
-        let roots_before_cleanup: Vec<_> = precomputed2.values().cloned().collect();
-        let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_before_cleanup);
+        // let roots_before_cleanup: Vec<_> = precomputed2.values().cloned().collect();
+        // let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_before_cleanup);
 
         // Clean up after rewiring
         optimize_trie2_size(&mut precomputed2, &trie2_god, config);
