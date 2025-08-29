@@ -57,9 +57,32 @@ const MERGE_THRESHOLD: usize = 20;
 
 pub type StateIDBV = HybridBitset;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrecomputedNode3Contents {
+    pub end: bool,
+}
+impl JSONConvertible for PrecomputedNode3Contents {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("end".to_string(), self.end.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let end = obj.remove("end").ok_or_else(|| "Missing field end".to_string())
+                             .and_then(bool::from_json)?;
+                Ok(PrecomputedNode3Contents { end })
+            }
+            _ => Err("Expected JSONNode::Object for PrecomputedNode3Contents".to_string()),
+        }
+    }
+}
+
 pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
 
 pub type PrecomputeNodeIndex = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
@@ -801,7 +824,9 @@ impl GrammarConstraint {
         }
 
         let node2 = node2_idx.read(trie2_god).unwrap();
-        let node3 = PrecomputeNode3::new(node2.value.clone());
+        let node3 = PrecomputeNode3::new(PrecomputedNode3Contents {
+            end: node2.value.end,
+        });
         let node3_idx = Trie2Index::new(trie3_god.insert(node3));
         memo.insert(node2_idx, node3_idx);
 
@@ -1829,8 +1854,8 @@ pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, Precompu
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
+pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {

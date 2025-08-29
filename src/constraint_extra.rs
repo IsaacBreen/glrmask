@@ -273,8 +273,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             {
                 let root_node = root_node_trie.read(trie3_god).unwrap();
                 root_ptr = root_node_trie;
-                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
-                root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
+                root_info = format!("Root Node {} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
             }
             println!("{}", root_info);
 
@@ -374,8 +373,7 @@ pub fn dump_precompute_trie3_recursive(
         let (child_ptr, child_info, is_visited, is_end_node) = {
             let child_node = child_arc.read(trie3_god).unwrap();
             let ptr = child_arc;
-            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
-            (ptr, format!("Node {} (MaxDepth: {}){} [Live: {}]", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }, live_tokens_str), visited.contains(&ptr), child_node.value.end)
+            (ptr, format!("Node {} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
         };
 
         if is_visited && !is_end_node {
