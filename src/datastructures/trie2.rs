@@ -254,6 +254,17 @@ where
     }
 }
 
+impl JSONConvertible for Trie2Index {
+    fn to_json(&self) -> JSONNode {
+        self.as_usize().to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let u = usize::from_json(node)?;
+        Ok(Trie2Index::from_usize(u))
+    }
+}
+
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in insertion and others
 impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {

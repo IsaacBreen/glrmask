@@ -305,7 +305,7 @@ impl GrammarConstraint {
             internal_max_llm_token,
         });
 
-        let precomputed = Self::precompute(
+        let (precomputed, trie1_god) = Self::precompute(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -323,7 +323,7 @@ impl GrammarConstraint {
             &llm_vocab.llm_token_map,
         );
 
-        let precomputed2 = Self::precompute2(
+        let (precomputed2, trie2_god) = Self::precompute2(
             &precomputed,
             &tokenizer,
             Some(&parser),
@@ -354,8 +354,8 @@ impl GrammarConstraint {
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
-            trie1_god: Trie1GodWrapper::new(),
-            trie2_god: Trie2GodWrapper::new(),
+            trie1_god,
+            trie2_god,
         };
 
         gc
@@ -371,7 +371,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> BTreeMap<TokenizerStateID, PrecomputeNodeIndex> {
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
         let mut helper = Precomputer::new(
             tokenizer,
             parser,
@@ -390,7 +390,7 @@ impl GrammarConstraint {
 
         // Recompute all max_depth values after major graph surgery.
         let roots_for_recompute: Vec<_> = helper.roots.values().cloned().collect();
-        Trie::recompute_all_max_depths(&roots_for_recompute);
+        Trie::recompute_all_max_depths(&helper.trie1_god, &roots_for_recompute);
 
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
@@ -416,7 +416,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> Precomputed2 {
+    ) -> (Precomputed2, Trie2GodWrapper) {
         crate::debug!(2, "Precomputing Trie 2...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
         const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
@@ -426,6 +426,8 @@ impl GrammarConstraint {
         };
 
         let mut precomputed2 = BTreeMap::new();
+        let mut trie2_god = Trie2GodWrapper::new();
+
         // let mut memo: HashMap<PrecomputeNode2Index, Arc<RwLock<_>>> = HashMap::new(); // Old memo, removed
 
         let mut initial_values_for_map: Vec<(PrecomputeNodeIndex, GLRParserState)> =
@@ -433,10 +435,11 @@ impl GrammarConstraint {
         let parser = parser.unwrap();
 
         // 1) Build a single base Trie root.
-        let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
-            PrecomputedNodeContents::root(internal_max_llm_token),
-        )));
-        let base_trie2_root_wr = ArcPtrWrapper::new(base_trie2_root.clone());
+        // let base_trie2_root = Arc::new(RwLock::new(PrecomputeNode2::new(
+        //     PrecomputedNodeContents::root(internal_max_llm_token),
+        // )));
+        let base_trie2_root = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::root(internal_max_llm_token))));
+        let base_trie2_root_wr = base_trie2_root.clone();
 
         let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
 
@@ -567,7 +570,7 @@ impl GrammarConstraint {
                         false,
                     );
                     let mut end_dest_agg: BTreeMap<PrecomputeNode2Index, LLMTokenBV> = BTreeMap::new();
-                    let end_wr = ArcPtrWrapper::new(trie2_end.clone());
+                    let end_wr = trie2_end.clone();
 
                     let mut dest_agg: BTreeMap<PrecomputeNode2Index, LLMTokenBV> = BTreeMap::new();
 
@@ -607,7 +610,7 @@ impl GrammarConstraint {
                                 inserter = inserter.try_destination(trie2_end.clone());
 
                                 let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie node");
-                                let final_dest_wr = ArcPtrWrapper::new(final_dest_arc.clone());
+                                let final_dest_wr = final_dest_arc.clone();
                                 dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                             }
                         }
@@ -834,6 +837,9 @@ impl<'r> Precomputer<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
+        let trie1_god = Trie1GodWrapper::new();
+        let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::leaf())));
+
         Self {
             tokenizer,
             parser,
@@ -848,8 +854,8 @@ impl<'r> Precomputer<'r> {
             terminal_follow_map,
             ignore_terminal_id,
             // tags: RefCell::new(HashMap::new()), // Removed
-            end_node: ArcPtrWrapper::new(Arc::new(RwLock::new(PrecomputeNode::new(PrecomputedNodeContents::leaf())))),
-            trie1_god: Trie1GodWrapper::new(),
+            end_node,
+            trie1_god,
         }
     }
 
