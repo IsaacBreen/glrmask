@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputeNodeIndex, PrecomputeNode2Index};
 use crate::constraint::PrecomputeNode2;
 use crate::types::{TerminalID as GrammarTokenID};
-use crate::datastructures::trie1::Trie;
+use crate::datastructures::trie2::{Trie, Trie2Index};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -78,7 +78,7 @@ fn format_bv_with_tokens(
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
 pub fn dump_precompute_trie_recursive(
-    node_arc: &Arc<RwLock<PrecomputeNode>>,
+    node_arc: &PrecomputeNodeIndex,
     prefix: String,
     visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -169,7 +169,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     }
 
     pub fn _dump_precomputed(
-        precomputed: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
+        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
         original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
@@ -211,7 +211,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         );
     }
 
-    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
+    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
         println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
@@ -248,7 +248,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 }
 
 pub fn dump_precompute_trie2_recursive(
-    node_arc: &Arc<RwLock<PrecomputeNode2>>,
+    node_arc: &Trie2Index,
     prefix: String,
     visited: &mut HashSet<*const PrecomputeNode2>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -292,13 +292,13 @@ pub fn dump_precompute_trie2_recursive(
 }
 
 pub fn calculate_final_stats2(
-    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
     stats: &mut PrecomputeStats,
 ) {
     crate::debug!(2, "Calculating final precompute2 statistics...");
 
-    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode2, Arc<RwLock<PrecomputeNode2>>> = BTreeMap::new();
-    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode2>>> = precomputed_roots.values().cloned().collect();
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode2, PrecomputeNode2Index> = BTreeMap::new();
+    let mut queue: VecDeque<PrecomputeNode2Index> = precomputed_roots.values().cloned().collect();
     let mut visited_data_ptrs: HashSet<*const PrecomputeNode2> = HashSet::new();
 
     while let Some(node_arc) = queue.pop_front() {
@@ -508,14 +508,14 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
 }
 
 pub fn calculate_final_stats(
-    precomputed_roots: &BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode>>>,
+    precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
     stats: &mut PrecomputeStats,
 ) {
     crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
 
     // Custom implementation of all_nodes using *const PrecomputeNode for visited set
-    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, Arc<RwLock<PrecomputeNode>>> = BTreeMap::new();
-    let mut queue: VecDeque<Arc<RwLock<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+    let mut all_reachable_nodes: BTreeMap<*const PrecomputeNode, PrecomputeNodeIndex> = BTreeMap::new();
+    let mut queue: VecDeque<PrecomputeNodeIndex> = precomputed_roots.values().cloned().collect();
     let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
 
     while let Some(node_arc) = queue.pop_front() {

@@ -1,5 +1,5 @@
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::trie1::{EdgeInserter, Trie};
+use crate::datastructures::trie2::{EdgeInserter, Trie};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
@@ -55,7 +55,7 @@ impl PrecomputedNodeContents {
     }
 }
 
-use crate::constraint::{PrecomputeNode2, Trie2God, Trie2GodWrapper};
+use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, Trie2God, Trie2GodWrapper};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use crate::datastructures::trie2::God;
@@ -90,7 +90,7 @@ impl JSONConvertible for PrecomputedNodeContents {
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
     pub(crate) terminals_union: HybridL2Bitset,
-    pub(crate) trie2_nodes: BTreeSet<ArcPtrWrapper<RwLock<PrecomputeNode2>>>,
+    pub(crate) trie2_nodes: BTreeSet<PrecomputeNode2Index>,
 }
 
 impl Acc {
@@ -1306,11 +1306,11 @@ pub(crate) fn fuse_predecessors_recursive(
 
 pub(crate) fn deep_clone_gss_with_trie2_map(
     root: &Arc<GSSNode>,
-    trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+    trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
 ) -> Arc<GSSNode> {
     fn clone_one(
         node: &Arc<GSSNode>,
-        trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+        trie2_map: &HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
         memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
     ) -> Arc<GSSNode> {
         let ptr = Arc::as_ptr(node);

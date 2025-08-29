@@ -1,4 +1,4 @@
-use crate::constraint::{LLMVocab, PrecomputeNode2, Trie2God, Trie2GodWrapper};
+use crate::constraint::{LLMVocab, PrecomputeNode2, PrecomputeNode2Index, Trie2God, Trie2GodWrapper};
 use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, LLMTokenBV};
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
-use crate::datastructures::trie1::EdgeInserter;
+use crate::datastructures::trie2::EdgeInserter;
 use crate::debug;
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
@@ -752,7 +752,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     accepted: bool,                // <-- NEW
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, (ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode2Index, LLMTokenBV)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1128,7 +1128,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let edge_bv = LLMTokenBV::max_ones();
 
                 // For each existing trie2 node: just create the edge directly to a fresh destination
-                let mut dest_agg: BTreeMap<ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV> = BTreeMap::new();
+                let mut dest_agg: BTreeMap<PrecomputeNode2Index, LLMTokenBV> = BTreeMap::new();
                 let mut used = BTreeSet::new();
 
                 for existing in &acc.trie2_nodes {

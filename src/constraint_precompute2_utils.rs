@@ -1,7 +1,7 @@
-use crate::constraint::{PrecomputeNode2, Trie2GodWrapper};
+use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, Trie2GodWrapper};
 use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::trie1::{EdgeInserter, Trie};
+use crate::datastructures::trie2::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::table::StateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
@@ -20,7 +20,7 @@ type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
 
 /// Samples a single normalized path by performing a random walk from the root.
 fn sample_normalized_path(
-    root: &Arc<RwLock<PrecomputeNode2>>,
+    root: &Trie2Index,
     rng: &mut impl Rng,
     max_len: usize,
 ) -> Option<NormalizedPath> {
@@ -76,11 +76,11 @@ fn sample_normalized_path(
 /// For a given normalized path, computes the union of LLM token bitvectors for all
 /// possible ways to traverse that path in the trie.
 fn get_bv_for_normalized_path(
-    root: &Arc<RwLock<PrecomputeNode2>>,
+    root: &Trie2Index,
     path: &NormalizedPath,
 ) -> LLMTokenBV {
     // State: (current_node, path_segment_index, accumulated_k, current_bv)
-    let mut q: VecDeque<(Arc<RwLock<PrecomputeNode2>>, usize, usize, LLMTokenBV)> = VecDeque::new();
+    let mut q: VecDeque<(Trie2Index, usize, usize, LLMTokenBV)> = VecDeque::new();
     let mut final_bv = LLMTokenBV::zeros();
 
     let initial_bv = root.read().unwrap().value.live_tokens.clone();
@@ -153,7 +153,7 @@ fn get_bv_for_normalized_path(
 /// Helper to find the union of BVs for all paths from a start node to any `end` node
 /// that consist solely of `(k, None)` edges.
 fn find_end_bv_from_node_via_none_edges(
-    start_node: Arc<RwLock<PrecomputeNode2>>,
+    start_node: Trie2Index,
     initial_bv: LLMTokenBV,
 ) -> LLMTokenBV {
     let mut end_bv = LLMTokenBV::zeros();
@@ -205,7 +205,7 @@ fn find_end_bv_from_node_via_none_edges(
 ///
 /// # Returns
 /// `true` if the tries are semantically equivalent, `false` otherwise.
-pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Arc<RwLock<PrecomputeNode2>>) -> bool {
+pub fn are_precompute2_trees_equivalent(a: &Trie2Index, b: &Trie2Index) -> bool {
     // Stochastic version
     if Arc::ptr_eq(a, b) { return true; }
 
@@ -252,7 +252,7 @@ pub fn are_precompute2_trees_equivalent(a: &Arc<RwLock<PrecomputeNode2>>, b: &Ar
     true
 }
 
-pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>) {
     crate::debug!(2, "Pruning dead paths from precomputed trie 2.");
 
     // Use a worklist algorithm to propagate "liveness" backwards from end nodes.
@@ -330,7 +330,7 @@ pub fn prune_dead_paths_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<
     crate::debug!(2, "Finished pruning dead paths from trie 2.");
 }
 
-pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>) {
     crate::debug!(2, "Simplifying trie 2 by factoring common destinations.");
 
     const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
@@ -414,7 +414,7 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 }
 
 pub fn optimize_trie2_size(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
     god: Trie2GodWrapper,
 
 ) {
@@ -434,7 +434,7 @@ pub fn optimize_trie2_size(
 }
 
 fn trie2_shape_hash(
-    arc: &Arc<RwLock<PrecomputeNode2>>,
+    arc: &Trie2Index,
     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 ) -> u64 {
     let ptr = Arc::as_ptr(arc);
@@ -480,12 +480,12 @@ fn trie2_shape_hash(
 /// This "skeleton" hash is intended only for bucketing candidates before
 /// running exact structural equality. It never recurses indefinitely.
 fn trie2_skeleton_hash(
-    arc: &Arc<RwLock<PrecomputeNode2>>,
+    arc: &Trie2Index,
     memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
 ) -> u64 {
     const MAX_DEPTH: usize = 64; // generous, but bounded
     fn inner(
-        node: &Arc<RwLock<PrecomputeNode2>>,
+        node: &Trie2Index,
         memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
         visiting: &mut HashSet<*const RwLock<PrecomputeNode2>>,
         depth_left: usize,
@@ -552,8 +552,8 @@ fn trie2_skeleton_hash(
 }
 
 fn trie2_shape_eq(
-    a: &Arc<RwLock<PrecomputeNode2>>,
-    b: &Arc<RwLock<PrecomputeNode2>>,
+    a: &Trie2Index,
+    b: &Trie2Index,
     cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
 ) -> bool {
     if Arc::ptr_eq(a, b) {
@@ -623,7 +623,7 @@ fn trie2_shape_eq(
     true
 }
 
-pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>) {
+pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -639,8 +639,8 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Preco
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut canonical_nodes: HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>> = HashMap::new();
-    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+    let mut canonical_nodes: HashMap<u64, Vec<PrecomputeNode2Index>> = HashMap::new();
+    let mut visited: HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index> = HashMap::new();
     let mut shape_hash_memo: HashMap<*const RwLock<PrecomputeNode2>, u64> = HashMap::new();
     let mut shape_eq_cache: HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool> = HashMap::new();
 
@@ -667,13 +667,13 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<Preco
 }
 
 fn deduplicate_recursive_trie2(
-    node_arc: Arc<RwLock<PrecomputeNode2>>,
-    canonical_nodes: &mut HashMap<u64, Vec<Arc<RwLock<PrecomputeNode2>>>>,
-    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+    node_arc: Trie2Index,
+    canonical_nodes: &mut HashMap<u64, Vec<PrecomputeNode2Index>>,
+    visited: &mut HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
     shape_hash_memo: &mut HashMap<*const RwLock<PrecomputeNode2>, u64>,
     shape_eq_cache: &mut HashMap<(*const RwLock<PrecomputeNode2>, *const RwLock<PrecomputeNode2>), bool>,
     pb: &ProgressBar,
-) -> Arc<RwLock<PrecomputeNode2>> {
+) -> Trie2Index {
     let node_ptr = Arc::as_ptr(&node_arc);
     if let Some(cached_node) = visited.get(&node_ptr) {
         return cached_node.clone();
@@ -756,7 +756,7 @@ fn deduplicate_recursive_trie2(
 ///   - Not both s1 and s2 are Some(...) (i.e., at most one has a state ID).
 /// This reduces redundant intermediate nodes introduced during construction.
 pub fn compress_trie2_edges(
-    roots: &mut BTreeMap<TokenizerStateID, Arc<RwLock<PrecomputeNode2>>>,
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
     god: &Trie2GodWrapper,
 ) {
     crate::debug!(2, "Compressing Trie 2 by merging linear chains...");
@@ -772,7 +772,7 @@ pub fn compress_trie2_edges(
         iterations += 1;
         changed = false;
         let all_nodes = Trie::all_nodes(&roots_vec);
-        let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
+        let mut arc_map: HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index> = HashMap::new();
         for n in &all_nodes {
             arc_map.insert(Arc::as_ptr(n), n.clone());
         }
@@ -793,7 +793,7 @@ pub fn compress_trie2_edges(
         // Try to compress from each source node
         'src_loop: for src_arc in &all_nodes {
             // Snapshot children
-            let children_snapshot: Vec<(EdgeKey2, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>)> = {
+            let children_snapshot: Vec<(EdgeKey2, Vec<(PrecomputeNode2Index, LLMTokenBV)>)> = {
                 let g = src_arc.read().expect("poison");
                 g.children()
                     .iter()
@@ -816,7 +816,7 @@ pub fn compress_trie2_edges(
                     if incoming_count.get(&child_ptr_raw).cloned().unwrap_or(0) != 1 {
                         continue;
                     }
-                    let (is_end, child_outgoing): (bool, Vec<(EdgeKey2, Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)>)>) = {
+                    let (is_end, child_outgoing): (bool, Vec<(EdgeKey2, Vec<(PrecomputeNode2Index, LLMTokenBV)>)>) = {
                         let cg = child_arc.read().expect("poison");
                         let mut out = Vec::new();
                         for (ek, dest_map) in cg.children() {
@@ -915,14 +915,14 @@ pub fn compress_trie2_edges(
 }
 
 pub fn clone_trie2_graph(
-    root: &Arc<RwLock<PrecomputeNode2>>,
+    root: &Trie2Index,
 ) -> (
-    Arc<RwLock<PrecomputeNode2>>,
-    HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>>,
+    Trie2Index,
+    HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index>,
 ) {
     // old_ptr -> new arc
-    let mut map: HashMap<*const RwLock<PrecomputeNode2>, Arc<RwLock<PrecomputeNode2>>> = HashMap::new();
-    let mut q: VecDeque<Arc<RwLock<PrecomputeNode2>>> = VecDeque::new();
+    let mut map: HashMap<*const RwLock<PrecomputeNode2>, PrecomputeNode2Index> = HashMap::new();
+    let mut q: VecDeque<PrecomputeNode2Index> = VecDeque::new();
 
     let root_ptr = Arc::as_ptr(root);
     let root_value = { root.read().expect("poison").value.clone() };
@@ -935,7 +935,7 @@ pub fn clone_trie2_graph(
         let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
 
         // Snapshot children outside of lock to avoid recursive lock explosion.
-        let children_snapshot: Vec<( (usize, Option<StateID>), Vec<(ArcPtrWrapper<RwLock<PrecomputeNode2>>, LLMTokenBV)> )> = {
+        let children_snapshot: Vec<( (usize, Option<StateID>), Vec<(PrecomputeNode2Index, LLMTokenBV)> )> = {
             let g = old_arc.read().expect("poison");
             g.children()
                 .iter()
