@@ -55,8 +55,7 @@ use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
 
-pub type PrecomputeNode =
-    Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 pub type PrecomputeNodeIndex = Trie2Index;
