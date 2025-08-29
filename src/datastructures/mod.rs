@@ -9,7 +9,6 @@ pub mod arc_wrapper;
 pub mod ordered_hash_map;
 pub mod cache;
 pub mod entry_api;
-mod test_trie;
 pub mod trie2;
 pub mod trie1;
 
