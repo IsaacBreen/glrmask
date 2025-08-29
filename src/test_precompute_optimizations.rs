@@ -256,10 +256,8 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
             println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
             let file = File::create(&precomputed2_cache_path)?;
             let writer = BufWriter::new(file);
-            // let mut encoder = GzEncoder::new(writer, Compression::default());
-            // No gzip
-            let mut encoder = writer;
-            original_precomputed2.to_writer(&mut encoder)?;
+            let mut encoder = GzEncoder::new(writer, Compression::default());
+            (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
             println!("Successfully saved Precomputed2 to cache.");
         }
     }
