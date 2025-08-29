@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
-use crate::datastructures::trie2::EdgeInserter;
+use crate::datastructures::trie::EdgeInserter;
 use crate::debug;
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-use crate::datastructures::trie2::{God, GodWrapper};
+use crate::datastructures::trie::{God, GodWrapper};
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map

@@ -1,7 +1,7 @@
 use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, PrecomputeNodeIndex, Trie2GodWrapper};
 use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::trie2::{EdgeInserter, Trie, Trie2Index};
+use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::table::StateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;

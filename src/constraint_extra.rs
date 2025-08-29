@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputeNodeIndex, PrecomputeNode2Index, Trie1GodWrapper, Trie2GodWrapper};
 use crate::constraint::PrecomputeNode2;
 use crate::types::{TerminalID as GrammarTokenID};
-use crate::datastructures::trie2::{Trie, Trie2Index};
+use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};

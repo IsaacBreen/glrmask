@@ -1,5 +1,5 @@
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::trie2::{EdgeInserter, Trie};
+use crate::datastructures::trie::{EdgeInserter, Trie};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use rand::rngs::StdRng;
@@ -58,7 +58,7 @@ impl PrecomputedNodeContents {
 use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, Trie2God, Trie2GodWrapper};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::datastructures::trie2::God;
+use crate::datastructures::trie::God;
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
