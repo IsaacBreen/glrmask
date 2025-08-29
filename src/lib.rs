@@ -14,5 +14,5 @@ mod test_constraint_basic;
 // mod test_constraint_python;
 mod profiler;
 mod test_constraint_js;
-mod test_precompute2_optimizations;
+mod test_precompute_optimizations;
 mod constraint_precompute2_utils;

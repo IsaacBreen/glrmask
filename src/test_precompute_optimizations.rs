@@ -168,7 +168,7 @@ fn load_or_download_gpt2_vocab(
 }
 
 #[test]
-fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
+fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(rustrover) {
         println!("Skipping test_precompute2_optimizations_are_equivalent_for_js in rustrover mode.");
         return Ok(());
@@ -284,7 +284,7 @@ fn test_precompute2_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn 
 
 // Trivial: s -> A EOF; A -> 'a'; EOF -> '$'
 #[test]
-fn test_p2_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= A EOF;
         A ::= 'a';
@@ -296,7 +296,7 @@ fn test_p2_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
 
 // Simple choice: s -> x EOF; x -> A B_OR_C | AB
 #[test]
-fn test_p2_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= x EOF;
         x ::= A B_OR_C | AB;
@@ -311,7 +311,7 @@ fn test_p2_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
 
 // Expression grammar (e -> e + t | t; t -> t * f | f; f -> (e) | i)
 #[test]
-fn test_p2_opt_expression_full() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_full() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= e PLUS t | t;
@@ -331,7 +331,7 @@ fn test_p2_opt_expression_full() -> Result<(), Box<dyn Error>> {
 
 // Expression (no '*'): e -> e + t | t; t -> f; f -> (e) | i
 #[test]
-fn test_p2_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= e PLUS t | t;
@@ -350,7 +350,7 @@ fn test_p2_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
 
 // Expression (no parens): e -> e + t | t; t -> t * f | f; f -> i
 #[test]
-fn test_p2_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= e PLUS t | t;
@@ -368,7 +368,7 @@ fn test_p2_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
 
 // Expression (no '+' or '*'): e -> t; t -> f; f -> (e) | i
 #[test]
-fn test_p2_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= t;
@@ -386,7 +386,7 @@ fn test_p2_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
 
 // Direct recursion: e -> '(' e | 'i'; s -> e EOF
 #[test]
-fn test_p2_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= LPAREN e | I;
@@ -401,7 +401,7 @@ fn test_p2_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
 
 // Same as above, but limited vocab: only "(i" (to exercise multi-grammar-token LLM token)
 #[test]
-fn test_p2_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= LPAREN e | I;
@@ -416,7 +416,7 @@ fn test_p2_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn E
 
 // Unbalanced parens variant (f -> '(' e | 'i')
 #[test]
-fn test_p2_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= e EOF;
         e ::= t;
@@ -433,7 +433,7 @@ fn test_p2_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
 
 // Indirect recursion simplified: s -> 'a' e | 'b'; e -> s
 #[test]
-fn test_p2_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= A e | B;
         e ::= s;
@@ -447,7 +447,7 @@ fn test_p2_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
 
 // Repetition: s ::= A*, A ::= 'a'
 #[test]
-fn test_p2_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= A*;
         A ::= 'a';
@@ -458,7 +458,7 @@ fn test_p2_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
 
 // a+ token: s ::= A_PLUS; A_PLUS ::= 'a'+
 #[test]
-fn test_p2_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= A_PLUS;
         A_PLUS ::= 'a'+;
@@ -470,7 +470,7 @@ fn test_p2_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
 // Ignore whitespace: WS ignored between tokens. s ::= A B; A='a'; B='b'; WS=' '
 // LLM tokens include "a", " ", "b", "a b"
 #[test]
-fn test_p2_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         #![ignore(WS)]
         s ::= A B;
@@ -484,7 +484,7 @@ fn test_p2_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
 
 // 'x' SPACE+ '=' pattern (compact variant of x_eq)
 #[test]
-fn test_p2_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
+fn test_p_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
     let ebnf = r#"
         s ::= X SPACE EQUALS;
         X ::= 'x';
