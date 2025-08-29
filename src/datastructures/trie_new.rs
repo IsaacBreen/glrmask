@@ -173,27 +173,7 @@ where
     /// We do NOT expand into a "nodes" array (no BFS). This format is concise and avoids
     /// requiring access to the Arena during serialization.
     fn to_json(&self) -> JSONNode {
-        let mut children_json = Vec::new();
-        for (edge_key, destinations_map) in &self.children {
-            let ek_json = edge_key.to_json();
-            let mut dests_json = Vec::new();
-            for (child_idx, edge_val) in destinations_map {
-                let dest_entry = JSONNode::Array(vec![
-                    usize::from((*child_idx).into()).to_json(),
-                    edge_val.to_json(),
-                ]);
-                dests_json.push(dest_entry);
-            }
-            if !dests_json.is_empty() {
-                children_json.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dests_json)]));
-            }
-        }
-
-        JSONNode::Object(BTreeMap::from_iter(vec![
-            ("value".to_string(), self.value.to_json()),
-            ("max_depth".to_string(), self.max_depth.to_json()),
-            ("children".to_string(), JSONNode::Array(children_json)),
-        ]))
+        todo!()
     }
 
     /// Parses the local-node JSON format produced by to_json above.
@@ -201,65 +181,7 @@ where
     /// The Arena is not created/returned here; the caller is expected to manage
     /// nodes in an Arena externally.
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let value_json = obj
-                    .remove("value")
-                    .ok_or_else(|| "Missing 'value' field for Trie2 deserialization".to_string())?;
-                let max_depth_json = obj
-                    .remove("max_depth")
-                    .ok_or_else(|| "Missing 'max_depth' field for Trie2 deserialization".to_string())?;
-                let children_json = obj
-                    .remove("children")
-                    .ok_or_else(|| "Missing 'children' field for Trie2 deserialization".to_string())?;
-
-                let value = T::from_json(value_json)?;
-                let max_depth = usize::from_json(max_depth_json)?;
-
-                let mut children: BTreeMap<EK, OrderedHashMap<Trie2Index, EV>> = BTreeMap::new();
-                let children_array = match children_json {
-                    JSONNode::Array(a) => a,
-                    _ => return Err("'children' must be an array".to_string()),
-                };
-                for entry in children_array {
-                    match entry {
-                        JSONNode::Array(pair) if pair.len() == 2 => {
-                            let ek_json = &pair[0];
-                            let dests_json = &pair[1];
-                            let ek = EK::from_json(ek_json.clone())?;
-                            let mut map: OrderedHashMap<Trie2Index, EV> = OrderedHashMap::new();
-
-                            match dests_json {
-                                JSONNode::Array(dests) => {
-                                    for d in dests {
-                                        match d {
-                                            JSONNode::Array(child_ev) if child_ev.len() == 2 => {
-                                                let child_idx = usize::from_json(child_ev[0].clone())?;
-                                                let ev = EV::from_json(child_ev[1].clone())?;
-                                                map.insert(Trie2Index::from(child_idx), ev);
-                                            }
-                                            _ => {
-                                                return Err("Invalid [child_index, edge_value] pair".to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => return Err("children[*][1] must be an array of [child_index, edge_value]".to_string()),
-                            }
-                            children.insert(ek, map);
-                        }
-                        _ => return Err("Each children entry must be [edge_key, [[child_index, edge_value], ...]]".to_string()),
-                    }
-                }
-
-                Ok(Trie2 {
-                    value,
-                    children,
-                    max_depth,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for Trie2 node".to_string()),
-        }
+        todo!()
     }
 }
 
@@ -286,7 +208,7 @@ impl<EK: Ord + Clone, EV, T> Trie2<EK, EV, T> {
         edge_value: EV,
         value: T,
     ) -> Trie2Index {
-        let new_index = arena.insert(Trie2::new(value));
+        let new_index = Trie2Index::new(arena.insert(Trie2::new(value)));
         self.children
             .entry(edge_key)
             .or_default()
@@ -1125,7 +1047,7 @@ where
             return self;
         }
 
-        let new_node_idx = self.arena.insert(Trie2::new(value));
+        let new_node_idx = Trie2Index::new(self.arena.insert(Trie2::new(value)));
         let edge_val_clone = self.edge_value.as_ref().unwrap().clone();
 
         { // Scope for source_guard
@@ -1195,7 +1117,7 @@ where
 }
 
 // Optional: Add a convenience method to Trie2Index to create an EdgeInserter easily.
-impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie2Index {
+impl Trie2Index {
     /// Creates an `EdgeInserter` to help add an edge starting from this node index.
     ///
     /// # Example (after migration)
@@ -1215,17 +1137,20 @@ impl<EK: Ord + Clone + Debug, EV: Clone + Debug, T: Clone> Trie2Index {
     ///     .else_create_destination()
     ///     .unwrap();
     /// ```
-    pub fn insert_edge<FMergeEV, FUpdateT, FMergeEV_T>(
+    pub fn insert_edge<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>(
         self,
-        arena: &Arena<Trie2<EK, EV, T>>,
-        god: &GodWrapper<EK, EV, T>,
+        arena: &'a Arena<Trie2<EK, EV, T>>,
+        god: &'a GodWrapper<EK, EV, T>,
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
         update_node_value: FUpdateT,
         merge_edge_value_and_source_node_value: FMergeEV_T,
-    ) -> EdgeInserter<'_, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
+    ) -> EdgeInserter<'a, EK, EV, T, FMergeEV, FUpdateT, FMergeEV_T>
     where
+        EK: Ord + Clone + Debug,
+        EV: Clone + Debug,
+        T: Clone,
         FMergeEV: FnMut(&mut EV, EV),
         FUpdateT: FnMut(&mut T, &EV),
         FMergeEV_T: FnMut(&mut EV, &T),
