@@ -10,7 +10,6 @@ pub mod ordered_hash_map;
 pub mod cache;
 pub mod entry_api;
 pub mod trie2;
-pub mod trie1;
 
 pub use arc_wrapper::ArcPtrWrapper;
 pub use entry_api::{EntryApi, OrderedMapEntry};
