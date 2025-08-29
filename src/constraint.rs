@@ -79,6 +79,7 @@ pub struct GrammarConstraintConfig {
     pub optimize_trie2_merge_nodes: bool,
     pub optimize_trie2_factor_common_destinations: bool,
     pub optimize_trie2_compress_edges: bool,
+    pub optimize_trie2_gc: bool,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -88,6 +89,7 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_merge_nodes: true,
             optimize_trie2_factor_common_destinations: true,
             optimize_trie2_compress_edges: true,
+            optimize_trie2_gc: true,
         }
     }
 }

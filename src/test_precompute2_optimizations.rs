@@ -58,7 +58,8 @@ fn assert_optimized_equivalent(
     }
 
     // Apply optimization passes
-    let optimization_config = GrammarConstraintConfig::default();
+    let mut optimization_config = GrammarConstraintConfig::default();
+    optimization_config.optimize_trie2_gc = false;
     optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
 
     println!("\n--- Stats for Optimized Precompute2 Tree ---");
@@ -115,6 +116,7 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
         optimize_trie2_merge_nodes: false,
         optimize_trie2_factor_common_destinations: false,
         optimize_trie2_compress_edges: false,
+        optimize_trie2_gc: true,
     };
     let gc = GrammarConstraint::from_compiled_grammar_with_config(
         compiled,
