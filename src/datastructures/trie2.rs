@@ -172,7 +172,24 @@ where
     /// We do NOT expand into a "nodes" array (no BFS). This format is concise and avoids
     /// requiring access to the Arena during serialization.
     fn to_json(&self) -> JSONNode {
-        todo!()
+        let mut obj = BTreeMap::new();
+        obj.insert("value".to_string(), self.value.to_json());
+        obj.insert("max_depth".to_string(), self.max_depth.to_json());
+
+        let children_json: Vec<JSONNode> = self.children.iter().map(|(ek, dest_map)| {
+            let ek_json = ek.to_json();
+            let dests_json: Vec<JSONNode> = dest_map.iter().map(|(idx, ev)| {
+                JSONNode::Array(vec![
+                    (idx.as_usize()).to_json(),
+                    ev.to_json(),
+                ])
+            }).collect();
+            JSONNode::Array(vec![ek_json, JSONNode::Array(dests_json)])
+        }).collect();
+
+        obj.insert("children".to_string(), JSONNode::Array(children_json));
+
+        JSONNode::Object(obj)
     }
 
     /// Parses the local-node JSON format produced by to_json above.
@@ -180,7 +197,56 @@ where
     /// The Arena is not created/returned here; the caller is expected to manage
     /// nodes in an Arena externally.
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
+        let mut obj = node.into_object()?;
+
+        let value = T::from_json(obj.remove("value").ok_or("Missing 'value' field")?)?;
+        let max_depth = usize::from_json(obj.remove("max_depth").ok_or("Missing 'max_depth' field")?)?;
+
+        let children_node = obj.remove("children").ok_or("Missing 'children' field")?;
+        let children_arr = match children_node {
+            JSONNode::Array(arr) => arr,
+            _ => return Err("'children' field must be an array".to_string()),
+        };
+
+        let mut children = BTreeMap::new();
+        for child_entry_node in children_arr {
+            let mut child_entry_arr = match child_entry_node {
+                JSONNode::Array(arr) if arr.len() == 2 => arr,
+                _ => return Err("Child entry must be a 2-element array [ek, dests]".to_string()),
+            };
+            let dests_node = child_entry_arr.pop().unwrap();
+            let ek_node = child_entry_arr.pop().unwrap();
+
+            let ek = EK::from_json(ek_node)?;
+
+            let dests_arr = match dests_node {
+                JSONNode::Array(arr) => arr,
+                _ => return Err("Destinations list must be an array".to_string()),
+            };
+
+            let mut dest_map = OrderedHashMap::new();
+            for dest_pair_node in dests_arr {
+                let mut dest_pair_arr = match dest_pair_node {
+                    JSONNode::Array(arr) if arr.len() == 2 => arr,
+                    _ => return Err("Destination pair must be a 2-element array [idx, ev]".to_string()),
+                };
+                let ev_node = dest_pair_arr.pop().unwrap();
+                let idx_node = dest_pair_arr.pop().unwrap();
+
+                let idx_usize = usize::from_json(idx_node)?;
+                let idx = Trie2Index::from_usize(idx_usize);
+                let ev = EV::from_json(ev_node)?;
+
+                dest_map.insert(idx, ev);
+            }
+            children.insert(ek, dest_map);
+        }
+
+        Ok(Trie2 {
+            value,
+            children,
+            max_depth,
+        })
     }
 }
 
@@ -824,7 +890,7 @@ where
     T: PartialOrd,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        todo!()
+        Some(self.cmp(other))
     }
 }
 
@@ -836,7 +902,32 @@ where
     T: Ord,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        todo!()
+        self.value.cmp(&other.value)
+            .then_with(|| self.max_depth.cmp(&other.max_depth))
+            .then_with(|| self.children.len().cmp(&other.children.len()))
+            .then_with(|| {
+                for ((sk, sv), (ok, ov)) in self.children.iter().zip(other.children.iter()) {
+                    match sk.cmp(ok) {
+                        Ordering::Equal => (),
+                        non_eq => return non_eq,
+                    }
+                    match sv.len().cmp(&ov.len()) {
+                        Ordering::Equal => (),
+                        non_eq => return non_eq,
+                    }
+                    for ((s_idx, s_ev), (o_idx, o_ev)) in sv.iter().zip(ov.iter()) {
+                        match s_idx.cmp(o_idx) {
+                            Ordering::Equal => (),
+                            non_eq => return non_eq,
+                        }
+                        match s_ev.cmp(o_ev) {
+                            Ordering::Equal => (),
+                            non_eq => return non_eq,
+                        }
+                    }
+                }
+                Ordering::Equal
+            })
     }
 }
 
@@ -1442,11 +1533,39 @@ where
     T: JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
-        todo!()
+        let guard = self.values.read().unwrap();
+        let items: Vec<JSONNode> = guard.iter().map(|(&k, v)| {
+            JSONNode::Array(vec![
+                k.to_json(),
+                v.to_json(),
+            ])
+        }).collect();
+        JSONNode::Array(items)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
+        let arr = match node {
+            JSONNode::Array(arr) => arr,
+            _ => return Err("Expected JSONNode::Array for Arena".to_string()),
+        };
+
+        let mut map = BTreeMap::new();
+        for item_node in arr {
+            let mut pair = match item_node {
+                JSONNode::Array(pair) if pair.len() == 2 => pair,
+                _ => return Err("Expected 2-element array for Arena entry".to_string()),
+            };
+            let value_node = pair.pop().unwrap();
+            let key_node = pair.pop().unwrap();
+
+            let key = usize::from_json(key_node)?;
+            let value = T::from_json(value_node)?;
+            map.insert(key, value);
+        }
+
+        Ok(Arena {
+            values: Arc::new(RwLock::new(map)),
+        })
     }
 }
 
