@@ -55,14 +55,19 @@ use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
 
+pub type StateIDBV = HybridBitset;
+
 pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 pub type PrecomputeNodeIndex = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
+pub type PrecomputeNode3Index = Trie2Index;
 
 pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNodeIndex>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, PrecomputeNode2Index>;
+pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
@@ -99,11 +104,13 @@ pub struct GrammarConstraint {
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
     pub(crate) precomputed2:     Precomputed2,
+    pub(crate) precomputed3:     Precomputed3,
     pub(crate) llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     pub(crate) trie1_god: Trie1GodWrapper,
     pub(crate) trie2_god: Trie2GodWrapper,
+    pub(crate) trie3_god: Trie3GodWrapper,
 }
 
 impl GrammarConstraint {
@@ -119,6 +126,11 @@ impl GrammarConstraint {
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
             assert_eq!(sid1, sid2);
             assert!(PrecomputeNode2::are_graphs_equal(&self.trie2_god, *arc1, &other.trie2_god, *arc2));
+        }
+        assert_eq!(self.precomputed3.len(), other.precomputed3.len());
+        for ((sid1, arc1), (sid2, arc2)) in self.precomputed3.iter().zip(other.precomputed3.iter()) {
+            assert_eq!(sid1, sid2);
+            assert!(PrecomputeNode3::are_graphs_equal(&self.trie3_god, *arc1, &other.trie3_god, *arc2));
         }
         assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
@@ -136,6 +148,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("parser".to_string(), self.parser.to_json());
         obj.insert("precomputed".to_string(), self.precomputed.to_json());
         obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
+        obj.insert("precomputed3".to_string(), self.precomputed3.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
@@ -144,6 +157,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
+        obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
         JSONNode::Object(obj)
     }
 
@@ -158,6 +172,8 @@ impl JSONConvertible for GrammarConstraint {
                                      .and_then(|n| Precomputed::from_json(n))?;
                 let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
                                      .and_then(|n| Precomputed2::from_json(n))?;
+                let precomputed3 = obj.remove("precomputed3").ok_or_else(|| "Missing field precomputed3".to_string())
+                                     .and_then(|n| Precomputed3::from_json(n))?;
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -175,16 +191,20 @@ impl JSONConvertible for GrammarConstraint {
                                     .and_then(|n| Trie1GodWrapper::from_json(n))?;
                 let trie2_god = obj.remove("trie2_god").ok_or_else(|| "Missing field trie2_god".to_string())
                                     .and_then(|n| Trie2GodWrapper::from_json(n))?;
+                let trie3_god = obj.remove("trie3_god").ok_or_else(|| "Missing field trie3_god".to_string())
+                                    .and_then(|n| Trie3GodWrapper::from_json(n))?;
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed,
                     precomputed2,
+                    precomputed3,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
                     trie1_god,
                     trie2_god,
+                    trie3_god,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -401,16 +421,24 @@ impl GrammarConstraint {
             &trie2_god,
         );
 
+        let (precomputed3, trie3_god) = Self::precompute3(
+            &precomputed2,
+            &trie2_god,
+            config,
+        );
+
         let mut gc = Self {
             tokenizer,
             parser,
             precomputed,
             precomputed2,
+            precomputed3,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
             trie1_god,
             trie2_god,
+            trie3_god,
         };
 
         gc
@@ -722,6 +750,84 @@ impl GrammarConstraint {
         Trie::recompute_all_max_depths(&trie2_god, &roots2_final);
 
         (precomputed2, trie2_god)
+    }
+
+    pub fn precompute3(
+        precomputed2: &Precomputed2,
+        trie2_god: &Trie2GodWrapper,
+        _config: &GrammarConstraintConfig,
+    ) -> (Precomputed3, Trie3GodWrapper) {
+        crate::debug!(2, "Precomputing Trie 3...");
+        let mut precomputed3 = BTreeMap::new();
+        let trie3_god = Trie3GodWrapper::new();
+        let mut memo: HashMap<Trie2Index, Trie2Index> = HashMap::new();
+
+        for (sid, root2_idx) in precomputed2 {
+            let root3_idx = Self::transform_trie2_to_trie3_recursive(
+                *root2_idx,
+                trie2_god,
+                &trie3_god,
+                &mut memo,
+            );
+            precomputed3.insert(*sid, root3_idx);
+        }
+
+        let roots3: Vec<_> = precomputed3.values().cloned().collect();
+        Trie::recompute_all_max_depths(&trie3_god, &roots3);
+
+        crate::debug!(2, "Finished precomputing Trie 3.");
+        (precomputed3, trie3_god)
+    }
+
+    fn transform_trie2_to_trie3_recursive(
+        node2_idx: Trie2Index,
+        trie2_god: &Trie2GodWrapper,
+        trie3_god: &Trie3GodWrapper,
+        memo: &mut HashMap<Trie2Index, Trie2Index>,
+    ) -> Trie2Index {
+        if let Some(node3_idx) = memo.get(&node2_idx) {
+            return *node3_idx;
+        }
+
+        let node2 = node2_idx.read(trie2_god).unwrap();
+        let node3 = PrecomputeNode3::new(node2.value.clone());
+        let node3_idx = Trie2Index::new(trie3_god.insert(node3));
+        memo.insert(node2_idx, node3_idx);
+
+        // Intermediate map: (pop, llm_bv) -> (dest2_idx -> set of state_id_opt)
+        let mut grouped_children: BTreeMap<(usize, LLMTokenBV), BTreeMap<Trie2Index, BTreeSet<Option<StateID>>>> = BTreeMap::new();
+
+        for ((pop, state_id_opt), dest_map) in node2.children() {
+            for (dest2_idx, llm_bv) in dest_map {
+                grouped_children
+                    .entry((*pop, llm_bv.clone()))
+                    .or_default()
+                    .entry(*dest2_idx)
+                    .or_default()
+                    .insert(*state_id_opt);
+            }
+        }
+
+        for ((pop, llm_bv), dests_with_states) in grouped_children {
+            for (dest2_idx, state_id_opts) in dests_with_states {
+                let dest3_idx = Self::transform_trie2_to_trie3_recursive(dest2_idx, trie2_god, trie3_god, memo);
+
+                let mut state_id_bv = StateIDBV::zeros();
+                if state_id_opts.contains(&None) {
+                    state_id_bv = StateIDBV::max_ones();
+                } else {
+                    for state_id_opt in state_id_opts {
+                        if let Some(state_id) = state_id_opt {
+                            state_id_bv.insert(state_id.0);
+                        }
+                    }
+                }
+
+                let mut node3_w = node3_idx.write(trie3_god).unwrap();
+                node3_w.children_mut().entry((pop, llm_bv.clone())).or_default().insert(dest3_idx, state_id_bv);
+            }
+        }
+        node3_idx
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -1712,6 +1818,8 @@ pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, Precompu
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
@@ -1773,7 +1881,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         // self.get_mask1()
-        self.get_mask2()
+        self.get_mask3()
     }
 
     #[time_it]
@@ -2352,6 +2460,159 @@ impl<'a> GrammarConstraintState<'a> {
             };
             print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
         }
+
+        crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
+        let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
+
+        let t_end = std::time::Instant::now();
+        println!("get_mask took: {:>15?}", t_end.duration_since(t0));
+
+        final_mask_mapped
+    }
+
+    pub fn get_mask3(&self) -> LLMTokenBV {
+        let t0 = std::time::Instant::now();
+        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        if GSS_LOGGING_ENABLED {
+            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            println!("{}", s);
+            println!("\n\n--- GSS State Explanations ---\n");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
+
+            println!("\n\n--- Begin GSS Graphviz ---");
+            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                .map(|s| s.as_str())
+                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .collect();
+            println!("{}", self.parent.parser.gss_forest_to_dot(
+                &roots_with_labels,
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
+            ));
+            println!("\n\n--- End GSS Graphviz ---");
+        }
+
+        for (state_id, state) in self.state.iter() {
+            crate::debug!(3, "State {}:", state_id.0);
+        }
+
+        let final_mask_internal = RefCell::new(HybridBitset::zeros());
+
+        if self.state.is_empty() {
+            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        }
+
+        let mut initial_values_for_map: Vec<(PrecomputeNode3Index, GLRParserState<'a>)> = Vec::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(tokenizer_state_id) {
+                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
+
+                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+                    if disallowed_terminals_for_range.is_empty() {
+                        continue;
+                    }
+
+                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+
+                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
+                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                            if disallowed_terminals_for_range.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                            }
+                        }
+                    }
+                }
+                let mut glr_state = glr_state.clone();
+                if !forbidden_llm_tokens.is_empty() {
+                    disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
+                }
+                initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
+            } else {
+                panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
+            }
+        }
+
+        if initial_values_for_map.is_empty() {
+             crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
+             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        }
+
+        let t1 = std::time::Instant::now();
+        println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+
+        crate::profiler::reset();
+
+        Trie::special_map_grouped(
+            &self.parent.trie3_god,
+            initial_values_for_map,
+            // step_fn: (current_glr_state, (pop, llm_token_bv), destinations_map)
+            |glr_s, (pop, llm_token_bv), dest_map| {
+                let popped = glr_s.active_state.stack.popn(*pop);
+                let mut results = Vec::new();
+
+                for (dest_idx, state_id_bv) in dest_map.iter() {
+                    let mut valid_gss_nodes = Vec::new();
+                    for popper_item in popped.iter() {
+                        for peek in popper_item.peek_iter() {
+                            if state_id_bv.is_full() || state_id_bv.contains(peek.edge_value().state_id.0) {
+                                valid_gss_nodes.push(peek.isolated_parent());
+                            }
+                        }
+                    }
+
+                    if valid_gss_nodes.is_empty() {
+                        continue;
+                    }
+
+                    let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
+                    let mut new_glr_s = glr_s.clone();
+                    new_glr_s.active_state.stack = merged_gss;
+
+                    allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv, &mut HashMap::new());
+
+                    if new_glr_s.is_ok() {
+                        results.push((dest_idx.clone(), new_glr_s));
+                    }
+                }
+                results
+            },
+            // merge_fn
+            |glr_s1, glr_s2| {
+                glr_s1.merge_with(glr_s2);
+            },
+            // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
+            |precomputed_node_data, glr_s| {
+                let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                let keep_going = glr_s.is_ok();
+                if precomputed_node_data.value.end {
+                    *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                }
+                keep_going
+            },
+        );
+
+        let t_after_special_map = std::time::Instant::now();
+        println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+
+        crate::profiler::print_summary_flat();
+        crate::profiler::print_summary();
+        crate::profiler::reset();
 
         crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
