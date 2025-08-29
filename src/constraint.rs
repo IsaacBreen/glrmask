@@ -216,7 +216,7 @@ impl GrammarConstraint {
     ) -> Self {
         let token_name_map = compiled_grammar.definition.terminal_to_group_id().clone();
 
-        Self::new(
+        Self::new_with_config(
             compiled_grammar.tokenizer, compiled_grammar.glr_parser, llm_token_map, token_name_map,
             max_original_llm_token_id, config,
         )
@@ -252,6 +252,23 @@ impl GrammarConstraint {
     }
 
     pub fn new(
+        tokenizer:        Regex,
+        parser:           GLRParser,
+        llm_token_map:    LLMTokenMap,
+        token_name_map:   BiBTreeMap<Terminal, usize>,
+        max_original_llm_token_id: usize,
+    ) -> Self {
+        Self::new_with_config(
+            tokenizer,
+            parser,
+            llm_token_map,
+            token_name_map,
+            max_original_llm_token_id,
+            &GrammarConstraintConfig::default(),
+        )
+    }
+
+    pub fn new_with_config(
         tokenizer:        Regex,
         parser:           GLRParser,
         llm_token_map:    LLMTokenMap,
