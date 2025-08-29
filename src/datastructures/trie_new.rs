@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 // #![deny(clippy::iter_over_hash_type)]
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
@@ -1354,7 +1355,29 @@ where
         .into_option()
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct Arena<T> {
-    values: Vec<T>,
+    values: Arc<RwLock<Vec<T>>>,
+}
+impl<T> PartialEq for Arena<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.values, &other.values) || PartialEq::eq(&self.values.read().unwrap(), &other.values.read().unwrap())
+    }
+}
+impl<T> Eq for Arena<T> {}
+impl<T> PartialOrd for Arena<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for Arena<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.values.read().unwrap().cmp(&other.values.read().unwrap())
+    }
+}
+impl<T> Hash for Arena<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.values.read().unwrap().hash(state);
+    }
 }
