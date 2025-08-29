@@ -321,6 +321,7 @@ impl GrammarConstraint {
             &llm_vocab.original_to_internal_id_bimap,
             &token_name_map,
             &llm_vocab.llm_token_map,
+            &trie1_god,
         );
 
         let (precomputed2, trie2_god) = Self::precompute2(
@@ -338,13 +339,14 @@ impl GrammarConstraint {
         );
 
         let mut stats2 = PrecomputeStats::default();
-        crate::constraint_extra::calculate_final_stats2(&precomputed2, &mut stats2);
-        crate::constraint_extra::print_precompute_stats2(&stats2);
+        crate::constraint_extra::calculate_final_stats2(&precomputed2, &mut stats2, &trie2_god);
+        crate::constraint_extra::print_precompute_stats2(&stats2, &trie2_god);
 
         Self::_dump_precomputed2(
             &precomputed2,
             &llm_vocab.original_to_internal_id_bimap,
             &llm_vocab.llm_token_map,
+            &trie2_god,
         );
 
         let mut gc = Self {
@@ -1450,8 +1452,8 @@ impl<'r> Precomputer<'r> {
         internal_max_llm_token: usize,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
 
-        calculate_final_stats(&self.roots, &mut self.stats);
-        print_precompute_stats(&self.stats, token_name_map);
+        calculate_final_stats(&self.roots, &mut self.stats, &self.trie1_god);
+        print_precompute_stats(&self.stats, token_name_map, &self.trie1_god);
 
         (self.roots, self.trie1_god)
     }
