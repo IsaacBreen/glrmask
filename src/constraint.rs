@@ -92,16 +92,12 @@ impl GrammarConstraint {
         assert_eq!(self.precomputed.len(), other.precomputed.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
             assert_eq!(sid1, sid2);
-            let node1 = arc1.read().unwrap();
-            let node2 = arc2.read().unwrap();
-            assert_eq!(*node1, *node2);
+            todo!()
         }
         assert_eq!(self.precomputed2.len(), other.precomputed2.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
             assert_eq!(sid1, sid2);
-            let node1 = arc1.read().unwrap();
-            let node2 = arc2.read().unwrap();
-            assert_eq!(*node1, *node2);
+            todo!()
         }
         assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
@@ -109,8 +105,7 @@ impl GrammarConstraint {
         assert_eq!(self.llm_vocab.original_to_internal_id_bimap, other.llm_vocab.original_to_internal_id_bimap);
         assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
         assert_eq!(self.possible_matches, other.possible_matches);
-        assert_eq!(self.trie1_god, other.trie1_god);
-        assert_eq!(self.trie2_god, other.trie2_god);
+        todo!()
     }
 }
 

@@ -304,7 +304,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&dst))
     }
 
-    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: Trie2Index) -> Option<&mut EV> {
+    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Trie2Index) -> Option<&mut EV> {
         self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&dst))
     }
 

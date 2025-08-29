@@ -1153,7 +1153,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 // Update destination live tokens
                 for (dst_wr, added) in &dest_agg {
-                    let mut g = dst_wr.as_arc().write().expect("poison");
+                    let mut g = dst_wr.as_arc().write(self.active_state.god.as_ref().unwrap()).expect("poison");
                     g.value.live_tokens |= added.clone();
                 }
 
@@ -1194,7 +1194,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     (arc.as_arc().clone(), false)
                 } else {
                     let new_trie2_node = PrecomputeNode2Index::new(self.active_state.god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    self.below_bottom_cache.insert(accept_cache_key.clone(), (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
+                    self.below_bottom_cache.insert(accept_cache_key.clone(), (new_trie2_node.clone(), LLMTokenBV::max_ones()));
                     (new_trie2_node, true)
                 };
 
@@ -1222,11 +1222,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     } else {
                         // Replicate to_destination_weakly logic with strong edges
                         let source_arc = existing.as_arc();
-                        let mut source_guard = source_arc.write().unwrap();
+                        let mut source_guard = source_arc.write(self.active_state.god.as_ref().unwrap()).unwrap();
                         if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), &dst_arc) {
                             *existing_ev |= &edge_bv;
                         } else {
-                            source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), &dst_arc);
+                            source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), dst_arc);
                         }
                     }
                 }
@@ -1234,7 +1234,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // Create the GSS node for the accepted state.
                 // It should have the acc from the path, and a single predecessor edge for the source_state_id.
                 let mut acc_for_gss = acc.clone();
-                acc_for_gss.trie2_nodes.insert(ArcPtrWrapper::new(dst_arc.clone()));
+                acc_for_gss.trie2_nodes.insert(dst_arc.clone());
                 let gss0 = GSSNode::new(acc_for_gss);
                 let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                 accepted_stacks.push(Arc::new(gss1));
@@ -1282,11 +1282,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 for existing in trie2_nodes {
                     let source_arc = existing.as_arc();
-                    let mut source_guard = source_arc.write().unwrap();
+                    let mut source_guard = source_arc.write(self.active_state.god.as_ref().unwrap()).unwrap();
                     if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), arc.as_arc()) {
                         *existing_ev |= &edge_bv;
                     } else {
-                        source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), arc.as_arc());
+                        source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), *arc.as_arc());
                     }
                 }
             }
@@ -1311,7 +1311,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         } else {
             let new_trie2_node = PrecomputeNode2Index::new(self.active_state.god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-            self.below_bottom_cache.insert(cache_key, (ArcPtrWrapper::new(new_trie2_node.clone()), LLMTokenBV::max_ones()));
+            self.below_bottom_cache.insert(cache_key, (new_trie2_node.clone(), LLMTokenBV::max_ones()));
             let mut out = Vec::new();
             for (k, mut acc) in below {
                 let trie2_nodes = &acc.trie2_nodes;
@@ -1335,7 +1335,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     inserter.try_destination(new_trie2_node.clone());
                 }
             }
-            merged_acc.trie2_nodes.insert(ArcPtrWrapper::new(new_trie2_node.clone()));
+            merged_acc.trie2_nodes.insert(new_trie2_node.clone());
             for (goto_state_id, source_state_ids) in &gotos.gotos {
                 let mut edge_contents = Vec::new();
                 for source_state_id in source_state_ids {
