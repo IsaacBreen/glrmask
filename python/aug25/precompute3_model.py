@@ -43,12 +43,18 @@ class Model(GraphProvider):
         return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
 
     def iter_edges(self, node: int, token: int):
-        # For precompute3, llm BV filters at the edge label.
+        # For equivalence checking, we must "explode" the state_bv into individual
+        # state IDs to match the GraphProvider interface expected by the checker.
+        # This is not used by the performance-critical get_mask() method.
         for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
             if llm_rs.contains(token):
-                for dest_idx, _ in dests:
-                    # The common interface doesn't handle state_bv, so we yield None for state_id.
-                    yield (int(pop), None, int(dest_idx))
+                for dest_idx, state_bv_ranges in dests:
+                    if not state_bv_ranges: # Epsilon transition on GSS stack
+                        yield (int(pop), None, int(dest_idx))
+                    else:
+                        for start, end in state_bv_ranges:
+                            for sid in range(start, end + 1):
+                                yield (int(pop), sid, int(dest_idx))
 
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
         # Final mask to return
