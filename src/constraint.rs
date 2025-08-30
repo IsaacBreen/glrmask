@@ -2614,7 +2614,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut valid_gss_nodes = Vec::new();
                     for popper_item in popped.iter() {
                         for peek in popper_item.peek_iter() {
-                            if state_id_bv.is_full() || state_id_bv.contains(peek.edge_value().state_id.0) {
+                            if state_id_bv.contains(peek.edge_value().state_id.0) {
                                 valid_gss_nodes.push(peek.isolated_parent());
                             }
                         }
