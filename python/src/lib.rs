@@ -545,6 +545,12 @@ impl PyGSSNode {
         PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
     }
 
+    fn ptr(&self) -> usize {
+        // Stable identity for the inner Arc<GSSNode>; useful for change detection
+        let raw = std::sync::Arc::as_ptr(&self.inner);
+        raw as usize
+    }
+
     fn is_alive(&self) -> bool {
         self.inner.is_alive()
     }
