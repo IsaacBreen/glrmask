@@ -459,206 +459,140 @@ pub fn optimize_trie2_size(
     Trie::recompute_all_max_depths(&trie2_god, &roots.values().cloned().collect::<Vec<_>>());
 }
 
-fn trie2_shape_hash(
-    arc: &Trie2Index,
-    memo: &mut HashMap<PrecomputeNode2Index, u64>,
-    trie2_god: &Trie2GodWrapper
-) -> u64 {
-    let ptr = *arc;
-    if let Some(&h) = memo.get(&ptr) {
-        return h;
-    }
-
-    // Insert a placeholder to break cycles. A fixed value like 0 is fine.
-    memo.insert(ptr, 0);
-
-    let node_guard = arc.read(trie2_god).unwrap();
-    let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-
-    // Hash shape-defining value fields
-    node_guard.value.end.hash(&mut hasher);
-
-    // Hash children structure
-    let mut edge_hashes = Vec::new();
-    for (ek, dest_map) in node_guard.children() {
-        for (np, ev) in dest_map {
-            let child = np.as_arc().clone();
-            let child_h = trie2_shape_hash(&child, memo, trie2_god);
-            let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            ek.hash(&mut pair_hasher);
-            ev.hash(&mut pair_hasher);
-            child_h.hash(&mut pair_hasher);
-            edge_hashes.push(pair_hasher.finish());
-        }
-    }
-
-    edge_hashes.sort_unstable();
-    for h in edge_hashes {
-        h.hash(&mut hasher);
-    }
-
-    let final_hash = hasher.finish();
-    // Update the memo with the real hash.
-    memo.insert(ptr, final_hash);
-    final_hash
-}
-
-/// Cycle-safe, depth-bounded structural hash for Trie nodes.
-/// This "skeleton" hash is intended only for bucketing candidates before
-/// running exact structural equality. It never recurses indefinitely.
-fn trie2_skeleton_hash(
-    arc: &Trie2Index,
-    memo: &mut HashMap<PrecomputeNode2Index, u64>,
-    trie2_god: &Trie2GodWrapper,
-) -> u64 {
-    const MAX_DEPTH: usize = 64; // generous, but bounded
-    fn inner(
-        node: &Trie2Index,
-        memo: &mut HashMap<PrecomputeNode2Index, u64>,
-        visiting: &mut HashSet<PrecomputeNode2Index>,
-        depth_left: usize,
-        trie2_god: &Trie2GodWrapper,
-    ) -> u64 {
-        let ptr = *node;
-        if let Some(&h) = memo.get(&ptr) {
-            return h;
-        }
-        if depth_left == 0 {
-            // Depth cutoff: use stable mix of pointer and end flag (non-deterministic across runs is fine for bucketing).
-            let guard = node.read(trie2_god).expect("poison");
-            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            (ptr).hash(&mut h);
-            guard.value.end.hash(&mut h);
-            let out = h.finish();
-            memo.insert(ptr, out);
-            return out;
-        }
-        if !visiting.insert(ptr) {
-            // Cycle detected on current recursion path: fall back to pointer + end flag.
-            let guard = node.read(trie2_god).expect("poison");
-            let mut h = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-            (ptr).hash(&mut h);
-            guard.value.end.hash(&mut h);
-            let out = h.finish();
-            memo.insert(ptr, out);
-            return out;
-        }
-
-        let guard = node.read(trie2_god).expect("poison");
-        let mut edge_hashes = Vec::new();
-        for (ek, dest_map) in guard.children() {
-            for (np, _ev) in dest_map {
-                let child = np.as_arc().clone();
-                let child_h = inner(&child, memo, visiting, depth_left - 1, trie2_god);
-                let mut pair_hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-                // Only hash the "kind" of edge key: (k, sid_is_some) and whether strong/weak.
-                let (k, sid_opt) = ek;
-                k.hash(&mut pair_hasher);
-                sid_opt.is_some().hash(&mut pair_hasher);
-                child_h.hash(&mut pair_hasher);
-                edge_hashes.push(pair_hasher.finish());
-            }
-        }
-        drop(guard);
-
-        edge_hashes.sort_unstable();
-        let mut hasher = DeterministicHasher::new(std::collections::hash_map::DefaultHasher::new());
-        {
-            let guard2 = node.read(trie2_god).expect("poison");
-            guard2.value.end.hash(&mut hasher);
-        }
-        for h in edge_hashes {
-            h.hash(&mut hasher);
-        }
-        let out = hasher.finish();
-        visiting.remove(&ptr);
-        memo.insert(ptr, out);
-        out
-    }
-
-    let mut visiting: HashSet<PrecomputeNode2Index> = HashSet::new();
-    inner(arc, memo, &mut visiting, MAX_DEPTH, trie2_god)
-}
-
-fn trie2_shape_eq(
-    a: &Trie2Index,
-    b: &Trie2Index,
-    cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
-    trie2_god_a: &Trie2GodWrapper,
-    trie2_god_b: &Trie2GodWrapper,
-) -> bool {
-    if a == b {
-        return true;
-    }
-
-    let (p1, p2) = if *a < *b {
-        (*a, *b)
-    } else {
-        (*b, *a)
-    };
-
-    if let Some(&res) = cache.get(&(p1, p2)) {
-        return res;
-    }
-
-    cache.insert((p1, p2), true); // Optimistic insertion for cycles
-
-    let guard_a = a.read(trie2_god_a).unwrap();
-    let guard_b = b.read(trie2_god_b).unwrap();
-
-    // Compare shape-defining value fields
-    if guard_a.value.end != guard_b.value.end {
-        cache.insert((p1, p2), false);
-        return false;
-    }
-
-    // Compare children
-    if guard_a.children().len() != guard_b.children().len() {
-        cache.insert((p1, p2), false);
-        return false;
-    }
-
-    for (ek, dest_map_a) in guard_a.children() {
-        if let Some(dest_map_b) = guard_b.children().get(ek) {
-            if dest_map_a.len() != dest_map_b.len() {
-                cache.insert((p1, p2), false);
-                return false;
-            }
-
-            let mut pairs_b: Vec<_> = dest_map_b.iter().map(|(np, ev)| (ev, np.as_arc().clone())).collect();
-
-            for (np_a, ev_a) in dest_map_a.iter() {
-                let arc_a = np_a.as_arc().clone();
-                let mut found_match = false;
-                for i in 0..pairs_b.len() {
-                    let (ev_b, ref arc_b) = pairs_b[i];
-                    if ev_a == ev_b {
-                        if trie2_shape_eq(&arc_a, arc_b, cache, trie2_god_a, trie2_god_b) {
-                            pairs_b.remove(i);
-                            found_match = true;
-                            break;
-                        }
-                    }
-                }
-                if !found_match {
-                    cache.insert((p1, p2), false);
-                    return false;
-                }
-            }
-        } else {
-            cache.insert((p1, p2), false);
-            return false;
-        }
-    }
-
-    true
-}
-
 pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>, trie2_god: &Trie2GodWrapper) {
     crate::debug!(2, "Merging identical subtrees in precomputed trie 2.");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    // 1. Densify indices
+    let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
+    let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
+    for (i, node_idx) in all_nodes.iter().enumerate() {
+        dense_of.insert(*node_idx, i);
+        old_of.push(*node_idx);
+    }
+    let n = all_nodes.len();
+
+    // 2. Extract raw edges and end flags
+    let mut ends: Vec<bool> = vec![false; n];
+    type RawEdge = (usize, Option<StateID>, usize, LLMTokenBV);
+    let mut raw_edges: Vec<Vec<RawEdge>> = vec![Vec::new(); n];
+
+    for (u_dense, u_idx) in old_of.iter().enumerate() {
+        let guard = u_idx.read(trie2_god).unwrap();
+        ends[u_dense] = guard.value.end;
+        for (ek, dest_map) in guard.children() {
+            for (v_idx, bv) in dest_map {
+                if let Some(&v_dense) = dense_of.get(v_idx) {
+                    raw_edges[u_dense].push((ek.0, ek.1, v_dense, bv.clone()));
+                }
+            }
+        }
+    }
+
+    // 3. Initialize classes by end flag
+    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+
+    // 4. Refinement loop
+    const MAX_ITERS: usize = 40;
+    for it in 0..MAX_ITERS {
+        type AggregatedEdge = ((usize, Option<StateID>, usize), LLMTokenBV);
+        type Signature = (bool, Vec<AggregatedEdge>);
+
+        let mut sig_to_id: HashMap<Signature, usize> = HashMap::new();
+        let mut new_class = vec![0; n];
+        let mut next_id = 0;
+        let mut changes = 0;
+
+        for u in 0..n {
+            // Aggregate edges for node u
+            let mut aggr: BTreeMap<(usize, Option<StateID>, usize), LLMTokenBV> = BTreeMap::new();
+            for (p, s, v_dense, bv) in &raw_edges[u] {
+                let dest_class = prev_class[*v_dense];
+                let key = (*p, *s, dest_class);
+                aggr.entry(key).and_modify(|e| *e |= bv).or_insert_with(|| bv.clone());
+            }
+            let agg_edges: Vec<AggregatedEdge> = aggr.into_iter().collect();
+
+            let sig: Signature = (ends[u], agg_edges);
+
+            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+
+            new_class[u] = cid;
+            if new_class[u] != prev_class[u] {
+                changes += 1;
+            }
+        }
+
+        crate::debug!(3, "Trie2 merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
+        prev_class = new_class;
+        if changes == 0 {
+            break;
+        }
+    }
+
+    let final_partition = prev_class;
+    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+
+    // 5. Build quotient graph (in-place modification)
+    let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+        if representatives[class_id].is_none() {
+            representatives[class_id] = Some(old_of[u_dense]);
+        }
+    }
+
+    let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
+    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+    }
+
+    // Update representatives' children and live_tokens
+    for class_id in 0..num_classes {
+        if let Some(rep_idx) = representatives[class_id] {
+            // Find any node `u` in this class to compute aggregated edges
+            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
+
+            let mut aggr: BTreeMap<(usize, Option<StateID>, usize), LLMTokenBV> = BTreeMap::new();
+            for (p, s, v_dense, bv) in &raw_edges[u_dense] {
+                let dest_class = final_partition[*v_dense];
+                aggr.entry((*p, *s, dest_class)).and_modify(|e| *e |= bv).or_insert_with(|| bv.clone());
+            }
+
+            let mut new_children = BTreeMap::new();
+            let mut new_live_tokens = LLMTokenBV::zeros();
+            for ((p, s, dest_class), bv) in aggr {
+                if let Some(dest_rep_idx) = representatives[dest_class] {
+                    new_children.entry((p, s)).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, bv.clone());
+                    new_live_tokens |= &bv;
+                }
+            }
+
+            // Also union live_tokens from all nodes in the class
+            for (i, &c) in final_partition.iter().enumerate() {
+                if c == class_id {
+                    new_live_tokens |= &old_of[i].read(trie2_god).unwrap().value.live_tokens;
+                }
+            }
+
+            let mut guard = rep_idx.write(trie2_god).unwrap();
+            *guard.children_mut() = new_children;
+            guard.value.live_tokens = new_live_tokens;
+        }
+    }
+
+    // Update roots
+    for root_idx in roots.values_mut() {
+        *root_idx = *node_to_rep.get(root_idx).unwrap();
+    }
 
     let pb = ProgressBar::new(all_nodes.len() as u64);
     pb.set_style(
@@ -670,113 +604,11 @@ pub fn merge_nodes_trie2(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2I
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut canonical_nodes: HashMap<u64, Vec<PrecomputeNode2Index>> = HashMap::new();
-    let mut visited: HashMap<PrecomputeNode2Index, PrecomputeNode2Index> = HashMap::new();
-    let mut shape_hash_memo: HashMap<PrecomputeNode2Index, u64> = HashMap::new();
-    let mut shape_eq_cache: HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool> = HashMap::new();
-
-    let mut new_roots = BTreeMap::new();
-    for (sid, root_arc) in roots.iter() {
-        let canonical_root = deduplicate_recursive_trie2(
-            root_arc.clone(),
-            &mut canonical_nodes,
-            &mut visited,
-            &mut shape_hash_memo,
-            &mut shape_eq_cache,
-            &pb,
-            trie2_god
-        );
-        new_roots.insert(*sid, canonical_root);
-    }
-    *roots = new_roots;
-
     // Recompute depths after structural changes from merging
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
     Trie::recompute_all_max_depths(trie2_god, &final_roots_vec);
 
     pb.finish_with_message("Finished merging Trie 2 nodes");
-    crate::debug!(2, "Finished merging subtrees in trie 2. Canonical nodes: {}", canonical_nodes.values().map(|v| v.len()).sum::<usize>());
-}
-
-fn deduplicate_recursive_trie2(
-    node_arc: Trie2Index,
-    canonical_nodes: &mut HashMap<u64, Vec<PrecomputeNode2Index>>,
-    visited: &mut HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
-    shape_hash_memo: &mut HashMap<PrecomputeNode2Index, u64>,
-    shape_eq_cache: &mut HashMap<(PrecomputeNode2Index, PrecomputeNode2Index), bool>,
-    pb: &ProgressBar,
-    trie2_god: &Trie2GodWrapper,
-) -> Trie2Index {
-    let node_ptr = node_arc;
-    if let Some(cached_node) = visited.get(&node_ptr) {
-        return cached_node.clone();
-    }
-
-    // Pre-emptively insert to break cycles.
-    // We will update this later if we find a different canonical node.
-    visited.insert(node_ptr, node_arc.clone());
-
-    pb.inc(1);
-
-    // Post-order: canonicalize children first
-    let mut new_children_map = BTreeMap::new();
-    let mut children_changed = false;
-
-    {
-        let node_guard = node_arc.read(trie2_god).unwrap().clone();
-        for (edge_key, dest_map) in node_guard.children() {
-            let mut new_dest_map = OrderedHashMap::new();
-            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                let child_arc = node_ptr_wrapper.as_arc().clone();
-                let canonical_child_arc = deduplicate_recursive_trie2(
-                    child_arc.clone(),
-                    canonical_nodes,
-                    visited,
-                    shape_hash_memo,
-                    shape_eq_cache,
-                    pb,
-                    trie2_god,
-                );
-                if child_arc != canonical_child_arc {
-                    children_changed = true;
-                }
-                let new_node_ptr_wrapper = canonical_child_arc;
-                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-            }
-            if !new_dest_map.is_empty() {
-                new_children_map.insert(edge_key.clone(), new_dest_map);
-            }
-        }
-    }
-
-    if children_changed {
-        let mut node_guard = node_arc.write(trie2_god).unwrap();
-        *node_guard.children_mut() = new_children_map;
-        // max_depth will be recomputed globally at the end
-    }
-
-    // Now find a canonical representative for the current node using cycle-safe skeleton hash
-    let fp = trie2_skeleton_hash(&node_arc, shape_hash_memo, trie2_god);
-    let bucket = canonical_nodes.entry(fp).or_default();
-
-    for candidate_arc in bucket.iter() {
-        if trie2_shape_eq(&node_arc, candidate_arc, shape_eq_cache, trie2_god, trie2_god) {
-            // Found a match. Merge live_tokens and return the canonical version.
-            let node_live_tokens = { node_arc.read(trie2_god).unwrap().value.live_tokens.clone() };
-            if !node_live_tokens.is_empty() {
-                let mut candidate_guard = candidate_arc.write(trie2_god).unwrap();
-                candidate_guard.value.live_tokens |= node_live_tokens;
-            }
-            // Update visited map with the true canonical node.
-            visited.insert(node_ptr, candidate_arc.clone());
-            return candidate_arc.clone();
-        }
-    }
-
-    // No match found. This node becomes a new canonical representative.
-    bucket.push(node_arc.clone());
-    // The visited map already contains (node_ptr, node_arc), which is correct in this case.
-    node_arc
 }
 
 /// Compress linear chains in Trie by merging consecutive edges where safe.
