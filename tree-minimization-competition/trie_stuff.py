@@ -1003,6 +1003,7 @@ def score_competitor_on_file(
 
             # Reference
             ref_bv = get_bv_for_normalized_path(root_idx, path, arena)
+            print(f"Testing SID={sid} Path={path} => Ref BV: {format_bitvector(ref_bv)}")
             ref_member = not ref_bv.is_empty()
 
             # Competitor membership

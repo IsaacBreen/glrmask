@@ -198,7 +198,6 @@ def _get_bv_for_normalized_path_internal(
     if initial_bv.is_empty() and path: return RangeSet.empty()
 
     final_bv = RangeSet.empty()
-    return RangeSet.from_ranges([[0,100]])
     q: Deque[Tuple[TrieNodeIndex, int, int, RangeSet]] = collections.deque()
     q.append((root_index, 0, 0, initial_bv))
     visited: Dict[Tuple[TrieNodeIndex, int, int], RangeSet] = {(root_index, 0, 0): initial_bv}
