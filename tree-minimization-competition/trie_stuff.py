@@ -1127,7 +1127,7 @@ def main() -> None:
     score_p.add_argument("file", help="Path to a precompute2 gzipped JSON file.")
     score_p.add_argument("plugin", help="Path or module name for the contestant plugin.")
     score_p.add_argument("--samples", type=int, default=200, help="Base samples per root.")
-    score_p.add_argument("--mutations", type=int, default=3, help="Mutations per base sample.")
+    score_p.add_argument("--mutations", type=int, default=0, help="Mutations per base sample.")
     score_p.add_argument("--max-len", type=int, default=32, help="Maximum path length when sampling.")
     score_p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility.")
     score_p.add_argument("--state-id", type=int, default=None, help="If provided, score only this tokenizer state ID.")
